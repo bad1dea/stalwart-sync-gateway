@@ -4,7 +4,7 @@ Experimental JMAP-native synchronization gateway for Stalwart Mail Server.
 
 The canonical backend is Stalwart JMAP. Exchange ActiveSync is the first protocol frontend, not the internal architecture.
 
-Current status: M0 scaffold. Implemented endpoints:
+Current status: M1 foundation plus initial mail receive/sync. Implemented endpoints:
 
 - `GET /healthz`
 - `GET /readyz`
@@ -13,7 +13,7 @@ Current status: M0 scaffold. Implemented endpoints:
 - `POST /Microsoft-Server-ActiveSync`
 - `POST /Autodiscover/Autodiscover.xml`
 
-`POST /Microsoft-Server-ActiveSync` authenticates against Stalwart by fetching the JMAP Session resource, decodes bounded WBXML, logs capability flags, then returns `501` until command handlers are implemented.
+`POST /Microsoft-Server-ActiveSync` authenticates against Stalwart by fetching the JMAP Session resource, decodes bounded WBXML, supports `FolderSync`, and supports an initial mail `Sync` receive path through JMAP `Email/query` and `Email/get`.
 
 ## Run
 
@@ -25,7 +25,8 @@ Important environment:
 
 - `STALWART_JMAP_URL`: normally `http://stalwart:8080/.well-known/jmap`
 - `EAS_PUBLIC_URL`: public ActiveSync URL returned by Autodiscover
-- `STATE_BACKEND`: `memory`, `sqlite`, or `redis`; only memory is implemented in M0
+- `STATE_BACKEND`: `memory`, `sqlite`, or `redis`; SQLite is the single-instance default
+- `STATE_SQLITE_PATH`: SQLite database path, normally `/data/state.db`
 
 ## Local Test
 
@@ -43,8 +44,10 @@ docker run -d --name stalwart-sync-gateway-test \
   -p 18080:8080 \
   -e STALWART_JMAP_URL=http://host.docker.internal:8080/.well-known/jmap \
   -e EAS_PUBLIC_URL=http://localhost:18080/Microsoft-Server-ActiveSync \
-  -e STATE_BACKEND=memory \
+  -e STATE_BACKEND=sqlite \
+  -e STATE_SQLITE_PATH=/data/state.db \
   -e RUST_LOG=debug \
+  -v stalwart-sync-gateway-test-data:/data \
   stalwart-sync-gateway:m1-mail-sync
 ```
 
@@ -71,4 +74,4 @@ curl -i -u 'user@example.com:password' \
 xxd /tmp/foldersync-response.wbxml | head
 ```
 
-`FolderSync` currently returns the full current hierarchy from JMAP every time. Incremental hierarchy diffs are next.
+`FolderSync` currently returns the full current hierarchy from JMAP every time. Mail `Sync` tracks seen Email ids per user/device/collection in the state backend so repeat requests do not replay the same Adds. Incremental hierarchy diffs and JMAP `queryChanges` are next.

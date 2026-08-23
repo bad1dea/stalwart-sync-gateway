@@ -251,6 +251,12 @@ impl JmapClient {
     }
 }
 
+impl AuthenticatedSession {
+    pub fn username(&self) -> &str {
+        &self.authorization.username
+    }
+}
+
 pub fn basic_credentials(headers: &HeaderMap) -> anyhow::Result<(String, String)> {
     let Some(value) = headers.get(AUTHORIZATION.as_str()) else {
         anyhow::bail!("missing Authorization header");

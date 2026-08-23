@@ -5,8 +5,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
+use std::collections::BTreeSet;
 
-use crate::{http_server::AppState, jmap::client::basic_credentials, wbxml};
+use crate::{http_server::AppState, jmap::client::basic_credentials, state::SyncRecord, wbxml};
 
 const SUPPORTED_PROTOCOLS: &str = "12.1,14.0,14.1,16.0,16.1";
 const SUPPORTED_COMMANDS: &str = "Sync,SendMail,SmartForward,SmartReply,GetAttachment,FolderSync,FolderCreate,FolderDelete,FolderUpdate,MoveItems,GetItemEstimate,MeetingResponse,Search,Settings,Ping,ItemOperations,Provision,ResolveRecipients,ValidateCert,Find";
@@ -83,7 +84,7 @@ pub async fn post_handler(
                     return folder_sync(&state, &auth, &document, command).await;
                 }
                 if command.eq_ignore_ascii_case("Sync") {
-                    return sync_mail(&state, &auth, &document, command).await;
+                    return sync_mail(&state, &auth, &query, &document, command).await;
                 }
             }
             Err(error) => {
@@ -126,6 +127,7 @@ pub async fn post_handler(
 async fn sync_mail(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
+    query: &EasQuery,
     document: &wbxml::Document,
     command: &str,
 ) -> Response {
@@ -140,17 +142,43 @@ async fn sync_mail(
     }
 
     let mut builder = wbxml::eas::DocumentBuilder::new();
-    use wbxml::eas::{airsync as air, airsync_base as base, email as mail};
+    use wbxml::eas::airsync as air;
 
     builder.start(air::SYNC);
     builder.start(air::COLLECTIONS);
 
     for collection in collections {
-        let new_sync_key = next_sync_key(&collection.sync_key);
-        builder.start(air::COLLECTION);
-        builder.leaf(air::SYNC_KEY, new_sync_key);
-        builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
-        builder.leaf(air::STATUS, "1");
+        let user = query.user.as_deref().unwrap_or_else(|| auth.username());
+        let device_id = query.device_id.as_deref().unwrap_or("unknown");
+        let previous_record = match state
+            .state
+            .get(user, device_id, &collection.collection_id)
+            .await
+        {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    user,
+                    device_id,
+                    collection = collection.collection_id,
+                    "failed to load Sync state"
+                );
+                None
+            }
+        };
+        let sync_key_valid = collection.sync_key == "0"
+            || previous_record
+                .as_ref()
+                .is_some_and(|record| record.sync_key == collection.sync_key);
+        if !sync_key_valid {
+            builder.start(air::COLLECTION);
+            builder.leaf(air::SYNC_KEY, collection.sync_key);
+            builder.leaf(air::COLLECTION_ID, collection.collection_id);
+            builder.leaf(air::STATUS, "3");
+            builder.end();
+            continue;
+        }
 
         let is_mail_collection = !collection.collection_id.starts_with("ab_")
             && !collection.collection_id.starts_with("cal_");
@@ -168,49 +196,79 @@ async fn sync_mail(
                         collection = collection.collection_id,
                         "Sync mail discovery failed"
                     );
+                    builder.start(air::COLLECTION);
+                    builder.leaf(air::SYNC_KEY, collection.sync_key);
+                    builder.leaf(air::COLLECTION_ID, collection.collection_id);
                     builder.leaf(air::STATUS, "5");
                     builder.end();
                     continue;
                 }
             };
 
-            if !emails.is_empty() {
+            let previous_seen: BTreeSet<String> = previous_record
+                .as_ref()
+                .map(|record| record.seen_ids.iter().cloned().collect())
+                .unwrap_or_default();
+            let fetched_ids: BTreeSet<String> =
+                emails.iter().map(|email| email.id.clone()).collect();
+            let emails_to_send: Vec<_> = if collection.sync_key == "0" {
+                emails
+            } else {
+                emails
+                    .into_iter()
+                    .filter(|email| !previous_seen.contains(&email.id))
+                    .collect()
+            };
+            let new_sync_key = if collection.sync_key == "0" || !emails_to_send.is_empty() {
+                next_sync_key(&collection.sync_key)
+            } else {
+                collection.sync_key.clone()
+            };
+
+            if let Err(error) = state
+                .state
+                .put(SyncRecord {
+                    user: user.to_owned(),
+                    device_id: device_id.to_owned(),
+                    collection_id: collection.collection_id.clone(),
+                    sync_key: new_sync_key.clone(),
+                    jmap_state: String::new(),
+                    seen_ids: previous_seen.union(&fetched_ids).cloned().collect(),
+                })
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    user,
+                    device_id,
+                    collection = collection.collection_id,
+                    "failed to persist Sync state"
+                );
+                builder.start(air::COLLECTION);
+                builder.leaf(air::SYNC_KEY, collection.sync_key);
+                builder.leaf(air::COLLECTION_ID, collection.collection_id);
+                builder.leaf(air::STATUS, "5");
+                builder.end();
+                continue;
+            }
+
+            builder.start(air::COLLECTION);
+            builder.leaf(air::SYNC_KEY, new_sync_key);
+            builder.leaf(air::COLLECTION_ID, collection.collection_id);
+            builder.leaf(air::STATUS, "1");
+
+            if !emails_to_send.is_empty() {
                 builder.start(air::COMMANDS);
-                for email in emails {
-                    builder.start(air::ADD);
-                    builder.leaf(air::SERVER_ID, email.id);
-                    builder.start(air::APPLICATION_DATA);
-                    builder.leaf(mail::MESSAGE_CLASS, "IPM.Note");
-                    builder.leaf(mail::SUBJECT, email.subject);
-                    if let Some(received_at) = email.received_at {
-                        builder.leaf(mail::DATE_RECEIVED, received_at);
-                    }
-                    if !email.from.is_empty() {
-                        builder.leaf(mail::FROM, email.from);
-                    }
-                    if !email.to.is_empty() {
-                        builder.leaf(mail::TO, email.to.clone());
-                        builder.leaf(mail::DISPLAY_TO, email.to);
-                    }
-                    if !email.cc.is_empty() {
-                        builder.leaf(mail::CC, email.cc);
-                    }
-                    builder.leaf(mail::IMPORTANCE, "1");
-                    builder.leaf(mail::READ, if email.read { "1" } else { "0" });
-                    if let Some(body) = email.body {
-                        builder.start(base::BODY);
-                        builder.leaf(base::TYPE, body.body_type.eas_value());
-                        builder.leaf(base::ESTIMATED_DATA_SIZE, body.value.len().to_string());
-                        builder.leaf(base::TRUNCATED, "0");
-                        builder.leaf(base::DATA, body.value);
-                        builder.end();
-                        builder.leaf(base::NATIVE_BODY_TYPE, body.body_type.eas_value());
-                    }
-                    builder.end();
-                    builder.end();
+                for email in emails_to_send {
+                    write_email_add(&mut builder, email);
                 }
                 builder.end();
             }
+        } else {
+            builder.start(air::COLLECTION);
+            builder.leaf(air::SYNC_KEY, collection.sync_key);
+            builder.leaf(air::COLLECTION_ID, collection.collection_id);
+            builder.leaf(air::STATUS, "1");
         }
 
         builder.end();
@@ -231,6 +289,42 @@ async fn sync_mail(
         body,
     )
         .into_response()
+}
+
+fn write_email_add(builder: &mut wbxml::eas::DocumentBuilder, email: crate::model::Email) {
+    use wbxml::eas::{airsync as air, airsync_base as base, email as mail};
+
+    builder.start(air::ADD);
+    builder.leaf(air::SERVER_ID, email.id);
+    builder.start(air::APPLICATION_DATA);
+    builder.leaf(mail::MESSAGE_CLASS, "IPM.Note");
+    builder.leaf(mail::SUBJECT, email.subject);
+    if let Some(received_at) = email.received_at {
+        builder.leaf(mail::DATE_RECEIVED, received_at);
+    }
+    if !email.from.is_empty() {
+        builder.leaf(mail::FROM, email.from);
+    }
+    if !email.to.is_empty() {
+        builder.leaf(mail::TO, email.to.clone());
+        builder.leaf(mail::DISPLAY_TO, email.to);
+    }
+    if !email.cc.is_empty() {
+        builder.leaf(mail::CC, email.cc);
+    }
+    builder.leaf(mail::IMPORTANCE, "1");
+    builder.leaf(mail::READ, if email.read { "1" } else { "0" });
+    if let Some(body) = email.body {
+        builder.start(base::BODY);
+        builder.leaf(base::TYPE, body.body_type.eas_value());
+        builder.leaf(base::ESTIMATED_DATA_SIZE, body.value.len().to_string());
+        builder.leaf(base::TRUNCATED, "0");
+        builder.leaf(base::DATA, body.value);
+        builder.end();
+        builder.leaf(base::NATIVE_BODY_TYPE, body.body_type.eas_value());
+    }
+    builder.end();
+    builder.end();
 }
 
 async fn folder_sync(
