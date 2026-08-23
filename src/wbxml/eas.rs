@@ -31,6 +31,9 @@ pub mod airsync {
     pub const PAGE: u8 = 0;
     pub const SYNC: Token = tag(0x05, false);
     pub const ADD: Token = tag(0x07, false);
+    pub const CHANGE: Token = tag(0x08, false);
+    pub const DELETE: Token = tag(0x09, false);
+    pub const FETCH: Token = tag(0x0a, false);
     pub const SYNC_KEY: Token = tag(0x0b, false);
     pub const SERVER_ID: Token = tag(0x0d, false);
     pub const STATUS: Token = tag(0x0e, false);
@@ -103,6 +106,7 @@ pub struct SyncCollectionRequest {
     pub collection_id: String,
     pub window_size: usize,
     pub get_changes: bool,
+    pub commands: Vec<SyncClientCommand>,
 }
 
 impl Default for SyncCollectionRequest {
@@ -112,8 +116,24 @@ impl Default for SyncCollectionRequest {
             collection_id: String::new(),
             window_size: 25,
             get_changes: true,
+            commands: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncClientCommand {
+    pub kind: SyncClientCommandKind,
+    pub server_id: String,
+    pub read: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncClientCommandKind {
+    Add,
+    Change,
+    Delete,
+    Fetch,
 }
 
 pub fn find_text_after(document: &Document, token: Token) -> Option<&str> {
@@ -130,9 +150,10 @@ pub fn find_text_after(document: &Document, token: Token) -> Option<&str> {
 pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
     let mut collections = Vec::new();
     let mut current: Option<SyncCollectionRequest> = None;
-    let mut current_depth = 0usize;
+    let mut current_command: Option<SyncClientCommand> = None;
+    let mut commands_depth: Option<usize> = None;
     let mut pending_leaf: Option<Token> = None;
-    let mut depth = 0usize;
+    let mut stack: Vec<Token> = Vec::new();
 
     for node in &document.nodes {
         match node {
@@ -140,41 +161,81 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                 if token.code_page == airsync::PAGE && token.token == airsync::COLLECTION.token =>
             {
                 current = Some(SyncCollectionRequest::default());
-                current_depth = depth;
                 if token.has_content {
-                    depth += 1;
+                    stack.push(*token);
                 }
             }
             Node::Start(token) => {
                 if current.is_some() {
-                    pending_leaf = Some(*token);
+                    if token.code_page == airsync::PAGE && token.token == airsync::COMMANDS.token {
+                        commands_depth = Some(stack.len());
+                    } else if commands_depth.is_some()
+                        && current_command.is_none()
+                        && stack
+                            .last()
+                            .is_some_and(|parent| same_token(*parent, airsync::COMMANDS))
+                    {
+                        current_command = command_kind(*token).map(|kind| SyncClientCommand {
+                            kind,
+                            server_id: String::new(),
+                            read: None,
+                        });
+                    } else {
+                        pending_leaf = Some(*token);
+                    }
                 }
                 if token.has_content {
-                    depth += 1;
+                    stack.push(*token);
                 }
             }
             Node::Text(text) => {
-                if let (Some(collection), Some(token)) = (current.as_mut(), pending_leaf.take()) {
-                    if token.code_page == airsync::PAGE && token.token == airsync::SYNC_KEY.token {
-                        collection.sync_key = text.clone();
-                    } else if token.code_page == airsync::PAGE
-                        && token.token == airsync::COLLECTION_ID.token
-                    {
-                        collection.collection_id = text.clone();
-                    } else if token.code_page == airsync::PAGE
-                        && token.token == airsync::WINDOW_SIZE.token
-                    {
-                        collection.window_size = text.parse().unwrap_or(25);
-                    } else if token.code_page == airsync::PAGE
-                        && token.token == airsync::GET_CHANGES.token
-                    {
-                        collection.get_changes = text != "0";
+                if let Some(command) = current_command.as_mut() {
+                    if let Some(token) = pending_leaf.take() {
+                        if same_token(token, airsync::SERVER_ID) {
+                            command.server_id = text.clone();
+                        } else if same_token(token, email::READ) {
+                            command.read = Some(text == "1");
+                        }
+                    }
+                } else if let Some(collection) = current.as_mut() {
+                    if let Some(token) = pending_leaf.take() {
+                        if token.code_page == airsync::PAGE
+                            && token.token == airsync::SYNC_KEY.token
+                        {
+                            collection.sync_key = text.clone();
+                        } else if token.code_page == airsync::PAGE
+                            && token.token == airsync::COLLECTION_ID.token
+                        {
+                            collection.collection_id = text.clone();
+                        } else if token.code_page == airsync::PAGE
+                            && token.token == airsync::WINDOW_SIZE.token
+                        {
+                            collection.window_size = text.parse().unwrap_or(25);
+                        } else if token.code_page == airsync::PAGE
+                            && token.token == airsync::GET_CHANGES.token
+                        {
+                            collection.get_changes = text != "0";
+                        }
                     }
                 }
             }
             Node::End => {
-                depth = depth.saturating_sub(1);
-                if current.is_some() && depth == current_depth {
+                let ended = stack.pop();
+                if let Some(ended) = ended {
+                    if same_token(ended, airsync::COMMANDS) {
+                        commands_depth = None;
+                    }
+                }
+                if ended.and_then(command_kind).is_some() {
+                    if let (Some(collection), Some(command)) =
+                        (current.as_mut(), current_command.take())
+                    {
+                        if !command.server_id.is_empty() {
+                            collection.commands.push(command);
+                        }
+                    }
+                }
+                if ended.is_some_and(|token| same_token(token, airsync::COLLECTION)) {
                     if let Some(collection) = current.take() {
                         if !collection.collection_id.is_empty() {
                             collections.push(collection);
@@ -188,6 +249,24 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
     }
 
     collections
+}
+
+fn same_token(left: Token, right: Token) -> bool {
+    left.code_page == right.code_page && left.token == right.token
+}
+
+fn command_kind(token: Token) -> Option<SyncClientCommandKind> {
+    if same_token(token, airsync::ADD) {
+        Some(SyncClientCommandKind::Add)
+    } else if same_token(token, airsync::CHANGE) {
+        Some(SyncClientCommandKind::Change)
+    } else if same_token(token, airsync::DELETE) {
+        Some(SyncClientCommandKind::Delete)
+    } else if same_token(token, airsync::FETCH) {
+        Some(SyncClientCommandKind::Fetch)
+    } else {
+        None
+    }
 }
 
 pub struct DocumentBuilder {
@@ -225,5 +304,51 @@ impl DocumentBuilder {
 impl Default for DocumentBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_sync_client_change_and_delete_commands() {
+        let mut builder = DocumentBuilder::new();
+        builder.start(airsync::SYNC);
+        builder.start(airsync::COLLECTIONS);
+        builder.start(airsync::COLLECTION);
+        builder.leaf(airsync::SYNC_KEY, "1");
+        builder.leaf(airsync::COLLECTION_ID, "inbox");
+        builder.start(airsync::COMMANDS);
+        builder.start(airsync::CHANGE);
+        builder.leaf(airsync::SERVER_ID, "email-a");
+        builder.start(airsync::APPLICATION_DATA);
+        builder.leaf(email::READ, "1");
+        builder.end();
+        builder.end();
+        builder.start(airsync::DELETE);
+        builder.leaf(airsync::SERVER_ID, "email-b");
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+
+        let collections = sync_collections(&builder.finish());
+
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].collection_id, "inbox");
+        assert_eq!(collections[0].commands.len(), 2);
+        assert_eq!(
+            collections[0].commands[0].kind,
+            SyncClientCommandKind::Change
+        );
+        assert_eq!(collections[0].commands[0].server_id, "email-a");
+        assert_eq!(collections[0].commands[0].read, Some(true));
+        assert_eq!(
+            collections[0].commands[1].kind,
+            SyncClientCommandKind::Delete
+        );
+        assert_eq!(collections[0].commands[1].server_id, "email-b");
     }
 }

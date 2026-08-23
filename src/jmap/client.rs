@@ -223,6 +223,83 @@ impl JmapClient {
         Ok(Vec::new())
     }
 
+    pub async fn set_email_seen(
+        &self,
+        auth: &AuthenticatedSession,
+        email_id: &str,
+        seen: bool,
+    ) -> anyhow::Result<()> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            anyhow::bail!("JMAP Mail capability is not available");
+        };
+
+        let mut patch = serde_json::Map::new();
+        patch.insert(
+            "keywords/$seen".to_owned(),
+            if seen {
+                serde_json::Value::Bool(true)
+            } else {
+                serde_json::Value::Null
+            },
+        );
+        let mut update = serde_json::Map::new();
+        update.insert(email_id.to_owned(), serde_json::Value::Object(patch));
+
+        self.email_set(
+            auth,
+            serde_json::json!({
+                "accountId": account_id,
+                "update": update
+            }),
+        )
+        .await
+    }
+
+    pub async fn destroy_email(
+        &self,
+        auth: &AuthenticatedSession,
+        email_id: &str,
+    ) -> anyhow::Result<()> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            anyhow::bail!("JMAP Mail capability is not available");
+        };
+
+        self.email_set(
+            auth,
+            serde_json::json!({
+                "accountId": account_id,
+                "destroy": [email_id]
+            }),
+        )
+        .await
+    }
+
+    async fn email_set(
+        &self,
+        auth: &AuthenticatedSession,
+        arguments: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new("Email/set", arguments, "set")],
+            )
+            .await?;
+
+        for method in response.method_responses {
+            match method.0.as_str() {
+                "Email/set" => return Ok(()),
+                "error" => anyhow::bail!("JMAP method error in Email/set"),
+                other => {
+                    tracing::debug!(method = other, "ignoring unexpected JMAP method response")
+                }
+            }
+        }
+
+        anyhow::bail!("JMAP Email/set response was missing")
+    }
+
     async fn api_call<T: DeserializeOwned>(
         &self,
         auth: &AuthenticatedSession,

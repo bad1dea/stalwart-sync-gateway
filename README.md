@@ -13,7 +13,7 @@ Current status: M1 foundation plus initial mail receive/sync. Implemented endpoi
 - `POST /Microsoft-Server-ActiveSync`
 - `POST /Autodiscover/Autodiscover.xml`
 
-`POST /Microsoft-Server-ActiveSync` authenticates against Stalwart by fetching the JMAP Session resource, decodes bounded WBXML, supports `FolderSync`, and supports an initial mail `Sync` receive path through JMAP `Email/query` and `Email/get`.
+`POST /Microsoft-Server-ActiveSync` authenticates against Stalwart by fetching the JMAP Session resource, decodes bounded WBXML, supports `FolderSync`, and supports an initial mail `Sync` path through JMAP `Email/query`, `Email/get`, and `Email/set`.
 
 ## Run
 
@@ -74,4 +74,4 @@ curl -i -u 'user@example.com:password' \
 xxd /tmp/foldersync-response.wbxml | head
 ```
 
-`FolderSync` currently returns the full current hierarchy from JMAP every time. Mail `Sync` tracks seen Email ids per user/device/collection in the state backend so repeat requests do not replay the same Adds. Incremental hierarchy diffs and JMAP `queryChanges` are next.
+`FolderSync` currently returns the full current hierarchy from JMAP every time. Mail `Sync` tracks seen Email ids per user/device/collection in the state backend so repeat requests do not replay the same Adds. Client read/unread changes and deletes are applied through JMAP `Email/set`. Incremental hierarchy diffs, move, and JMAP `queryChanges` are next.

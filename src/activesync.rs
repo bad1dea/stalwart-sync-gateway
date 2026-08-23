@@ -182,6 +182,33 @@ async fn sync_mail(
 
         let is_mail_collection = !collection.collection_id.starts_with("ab_")
             && !collection.collection_id.starts_with("cal_");
+        let client_commands_applied = if is_mail_collection && !collection.commands.is_empty() {
+            match apply_mail_client_commands(
+                state,
+                auth,
+                &collection.collection_id,
+                &collection.commands,
+            )
+            .await
+            {
+                Ok(applied) => applied,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        collection = collection.collection_id,
+                        "failed to apply client Sync commands"
+                    );
+                    builder.start(air::COLLECTION);
+                    builder.leaf(air::SYNC_KEY, collection.sync_key);
+                    builder.leaf(air::COLLECTION_ID, collection.collection_id);
+                    builder.leaf(air::STATUS, "5");
+                    builder.end();
+                    continue;
+                }
+            }
+        } else {
+            false
+        };
 
         if collection.get_changes && is_mail_collection {
             let emails = match state
@@ -219,7 +246,10 @@ async fn sync_mail(
                     .filter(|email| !previous_seen.contains(&email.id))
                     .collect()
             };
-            let new_sync_key = if collection.sync_key == "0" || !emails_to_send.is_empty() {
+            let new_sync_key = if collection.sync_key == "0"
+                || !emails_to_send.is_empty()
+                || client_commands_applied
+            {
                 next_sync_key(&collection.sync_key)
             } else {
                 collection.sync_key.clone()
@@ -265,8 +295,47 @@ async fn sync_mail(
                 builder.end();
             }
         } else {
+            let new_sync_key = if client_commands_applied {
+                next_sync_key(&collection.sync_key)
+            } else {
+                collection.sync_key.clone()
+            };
+            if client_commands_applied {
+                if let Err(error) = state
+                    .state
+                    .put(SyncRecord {
+                        user: user.to_owned(),
+                        device_id: device_id.to_owned(),
+                        collection_id: collection.collection_id.clone(),
+                        sync_key: new_sync_key.clone(),
+                        jmap_state: previous_record
+                            .as_ref()
+                            .map(|record| record.jmap_state.clone())
+                            .unwrap_or_default(),
+                        seen_ids: previous_record
+                            .as_ref()
+                            .map(|record| record.seen_ids.clone())
+                            .unwrap_or_default(),
+                    })
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        user,
+                        device_id,
+                        collection = collection.collection_id,
+                        "failed to persist Sync state after client commands"
+                    );
+                    builder.start(air::COLLECTION);
+                    builder.leaf(air::SYNC_KEY, collection.sync_key);
+                    builder.leaf(air::COLLECTION_ID, collection.collection_id);
+                    builder.leaf(air::STATUS, "5");
+                    builder.end();
+                    continue;
+                }
+            }
             builder.start(air::COLLECTION);
-            builder.leaf(air::SYNC_KEY, collection.sync_key);
+            builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "1");
         }
@@ -289,6 +358,41 @@ async fn sync_mail(
         body,
     )
         .into_response()
+}
+
+async fn apply_mail_client_commands(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    collection_id: &str,
+    commands: &[wbxml::eas::SyncClientCommand],
+) -> anyhow::Result<bool> {
+    let mut applied = false;
+    for command in commands {
+        match command.kind {
+            wbxml::eas::SyncClientCommandKind::Change => {
+                if let Some(read) = command.read {
+                    state
+                        .jmap
+                        .set_email_seen(auth, &command.server_id, read)
+                        .await?;
+                    applied = true;
+                }
+            }
+            wbxml::eas::SyncClientCommandKind::Delete => {
+                state.jmap.destroy_email(auth, &command.server_id).await?;
+                applied = true;
+            }
+            wbxml::eas::SyncClientCommandKind::Add | wbxml::eas::SyncClientCommandKind::Fetch => {
+                tracing::debug!(
+                    collection = collection_id,
+                    server_id = command.server_id,
+                    kind = ?command.kind,
+                    "ignoring unsupported mail Sync client command"
+                );
+            }
+        }
+    }
+    Ok(applied)
 }
 
 fn write_email_add(builder: &mut wbxml::eas::DocumentBuilder, email: crate::model::Email) {
