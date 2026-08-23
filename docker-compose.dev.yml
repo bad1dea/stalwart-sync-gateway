@@ -1,0 +1,22 @@
+services:
+  sync-gateway:
+    build:
+      context: .
+      target: builder
+    command: cargo run
+    environment:
+      LISTEN_ADDR: 0.0.0.0:8080
+      STALWART_JMAP_URL: http://stalwart:8080/.well-known/jmap
+      STALWART_TLS_VERIFY: "false"
+      EAS_PUBLIC_URL: http://localhost:8080/Microsoft-Server-ActiveSync
+      STATE_BACKEND: memory
+      RUST_LOG: debug
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
+      - cargo-cache:/usr/local/cargo/registry
+
+volumes:
+  cargo-cache:
+

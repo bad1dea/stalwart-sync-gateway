@@ -1,0 +1,9 @@
+/target/
+/references/
+/.git/
+/.agents/
+/.codex/
+*.log
+*.db
+*.sqlite
+*.sqlite3

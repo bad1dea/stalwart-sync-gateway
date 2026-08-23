@@ -1,0 +1,7 @@
+/target
+/.git
+/references
+/.agents
+/.codex
+/**/*.log
+

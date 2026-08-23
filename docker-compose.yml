@@ -1,0 +1,31 @@
+services:
+  sync-gateway:
+    build: .
+    restart: unless-stopped
+    environment:
+      LISTEN_ADDR: 0.0.0.0:8080
+      STALWART_JMAP_URL: http://stalwart:8080/.well-known/jmap
+      STALWART_TLS_VERIFY: "true"
+      EAS_PUBLIC_URL: https://mail.example.com/Microsoft-Server-ActiveSync
+      STATE_BACKEND: sqlite
+      STATE_SQLITE_PATH: /data/state.db
+      RUST_LOG: info
+    ports:
+      - "8080:8080"
+    volumes:
+      - sync-data:/data
+    depends_on:
+      - stalwart
+
+  stalwart:
+    image: stalwartlabs/stalwart:latest
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    volumes:
+      - stalwart-data:/opt/stalwart
+
+volumes:
+  sync-data:
+  stalwart-data:
+
