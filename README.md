@@ -13,7 +13,7 @@ Current status: M1 foundation plus initial mail receive/sync. Implemented endpoi
 - `POST /Microsoft-Server-ActiveSync`
 - `POST /Autodiscover/Autodiscover.xml`
 
-`POST /Microsoft-Server-ActiveSync` authenticates against Stalwart by fetching the JMAP Session resource, decodes bounded WBXML, supports `FolderSync`, and supports an initial mail `Sync` path through JMAP `Email/query`, `Email/get`, and `Email/set`.
+`POST /Microsoft-Server-ActiveSync` authenticates against Stalwart by fetching the JMAP Session resource, decodes bounded WBXML, supports `FolderSync`, initial mail `Sync`, `MoveItems`, `GetItemEstimate`, `Settings`, and a minimal no-policy `Provision` response.
 
 ## Run
 

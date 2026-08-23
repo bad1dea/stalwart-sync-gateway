@@ -89,6 +89,15 @@ pub async fn post_handler(
                 if command.eq_ignore_ascii_case("MoveItems") {
                     return move_items(&state, &auth, &document, command).await;
                 }
+                if command.eq_ignore_ascii_case("Provision") {
+                    return provision(&state, &document, command).await;
+                }
+                if command.eq_ignore_ascii_case("GetItemEstimate") {
+                    return get_item_estimate(&state, &document, command).await;
+                }
+                if command.eq_ignore_ascii_case("Settings") {
+                    return settings(&state, &auth, &document, command).await;
+                }
             }
             Err(error) => {
                 state
@@ -123,6 +132,127 @@ pub async fn post_handler(
         StatusCode::NOT_IMPLEMENTED,
         [("Content-Type", "text/plain; charset=utf-8")],
         format!("ActiveSync command {command} is not implemented yet\n"),
+    )
+        .into_response()
+}
+
+async fn settings(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    document: &wbxml::Document,
+    command: &str,
+) -> Response {
+    let include_user = wbxml::eas::contains_token(document, wbxml::eas::settings::USER_INFORMATION);
+    let mut builder = wbxml::eas::DocumentBuilder::new();
+    use wbxml::eas::settings as set;
+
+    builder.start(set::SETTINGS);
+    builder.leaf(set::STATUS, "1");
+
+    if include_user {
+        builder.start(set::USER_INFORMATION);
+        builder.leaf(set::STATUS, "1");
+        builder.start(set::GET);
+        builder.start(set::EMAIL_ADDRESSES);
+        builder.leaf(set::SMTP_ADDRESS, auth.username());
+        builder.end();
+        builder.leaf(set::PRIMARY_SMTP_ADDRESS, auth.username());
+        builder.end();
+        builder.end();
+    }
+
+    builder.end();
+
+    let body = wbxml::encode_document(&builder.finish());
+    state
+        .metrics
+        .eas_requests_total
+        .with_label_values(&[command, "200"])
+        .inc();
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/vnd.ms-sync.wbxml")],
+        body,
+    )
+        .into_response()
+}
+
+async fn get_item_estimate(
+    state: &AppState,
+    document: &wbxml::Document,
+    command: &str,
+) -> Response {
+    let folder_ids =
+        wbxml::eas::find_all_text_after(document, wbxml::eas::get_item_estimate::FOLDER_ID);
+    if folder_ids.is_empty() {
+        state
+            .metrics
+            .eas_requests_total
+            .with_label_values(&[command, "400"])
+            .inc();
+        return (
+            StatusCode::BAD_REQUEST,
+            "GetItemEstimate missing FolderId\n",
+        )
+            .into_response();
+    }
+
+    let mut builder = wbxml::eas::DocumentBuilder::new();
+    use wbxml::eas::get_item_estimate as gie;
+
+    builder.start(gie::GET_ITEM_ESTIMATE);
+    for folder_id in folder_ids {
+        builder.start(gie::RESPONSE);
+        builder.leaf(gie::STATUS, "1");
+        builder.start(gie::FOLDER);
+        builder.leaf(gie::FOLDER_ID, folder_id);
+        builder.leaf(gie::ESTIMATE, "0");
+        builder.end();
+        builder.end();
+    }
+    builder.end();
+
+    let body = wbxml::encode_document(&builder.finish());
+    state
+        .metrics
+        .eas_requests_total
+        .with_label_values(&[command, "200"])
+        .inc();
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/vnd.ms-sync.wbxml")],
+        body,
+    )
+        .into_response()
+}
+
+async fn provision(state: &AppState, document: &wbxml::Document, command: &str) -> Response {
+    let policy_type = wbxml::eas::find_text_after(document, wbxml::eas::provision::POLICY_TYPE)
+        .unwrap_or("MS-EAS-Provisioning-WBXML");
+    let mut builder = wbxml::eas::DocumentBuilder::new();
+    use wbxml::eas::provision as prov;
+
+    builder.start(prov::PROVISION);
+    builder.leaf(prov::STATUS, "1");
+    builder.start(prov::POLICIES);
+    builder.start(prov::POLICY);
+    builder.leaf(prov::POLICY_TYPE, policy_type);
+    builder.leaf(prov::STATUS, "2");
+    builder.leaf(prov::POLICY_KEY, "1");
+    builder.end();
+    builder.end();
+    builder.end();
+
+    let body = wbxml::encode_document(&builder.finish());
+    state
+        .metrics
+        .eas_requests_total
+        .with_label_values(&[command, "200"])
+        .inc();
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/vnd.ms-sync.wbxml")],
+        body,
     )
         .into_response()
 }

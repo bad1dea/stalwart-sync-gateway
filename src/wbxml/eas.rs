@@ -123,6 +123,72 @@ pub mod move_items {
     }
 }
 
+pub mod get_item_estimate {
+    use super::Token;
+
+    pub const PAGE: u8 = 6;
+    pub const GET_ITEM_ESTIMATE: Token = tag(0x05, false);
+    pub const FOLDERS: Token = tag(0x07, false);
+    pub const FOLDER: Token = tag(0x08, false);
+    pub const FOLDER_TYPE: Token = tag(0x09, false);
+    pub const FOLDER_ID: Token = tag(0x0a, false);
+    pub const ESTIMATE: Token = tag(0x0c, false);
+    pub const RESPONSE: Token = tag(0x0d, false);
+    pub const STATUS: Token = tag(0x0e, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
+pub mod provision {
+    use super::Token;
+
+    pub const PAGE: u8 = 14;
+    pub const PROVISION: Token = tag(0x05, false);
+    pub const POLICIES: Token = tag(0x06, false);
+    pub const POLICY: Token = tag(0x07, false);
+    pub const POLICY_TYPE: Token = tag(0x08, false);
+    pub const POLICY_KEY: Token = tag(0x09, false);
+    pub const STATUS: Token = tag(0x0b, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
+pub mod settings {
+    use super::Token;
+
+    pub const PAGE: u8 = 18;
+    pub const SETTINGS: Token = tag(0x05, false);
+    pub const STATUS: Token = tag(0x06, false);
+    pub const GET: Token = tag(0x07, false);
+    pub const USER_INFORMATION: Token = tag(0x1d, false);
+    pub const EMAIL_ADDRESSES: Token = tag(0x1e, false);
+    pub const SMTP_ADDRESS: Token = tag(0x1f, false);
+    pub const PRIMARY_SMTP_ADDRESS: Token = tag(0x23, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncCollectionRequest {
     pub sync_key: String,
@@ -174,6 +240,28 @@ pub fn find_text_after(document: &Document, token: Token) -> Option<&str> {
             Some(text.as_str())
         }
         _ => None,
+    })
+}
+
+pub fn find_all_text_after(document: &Document, token: Token) -> Vec<String> {
+    document
+        .nodes
+        .windows(2)
+        .filter_map(|pair| match pair {
+            [Node::Start(start), Node::Text(text)]
+                if start.code_page == token.code_page && start.token == token.token =>
+            {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn contains_token(document: &Document, token: Token) -> bool {
+    document.nodes.iter().any(|node| match node {
+        Node::Start(start) => start.code_page == token.code_page && start.token == token.token,
+        Node::Text(_) | Node::End | Node::Opaque(_) => false,
     })
 }
 
