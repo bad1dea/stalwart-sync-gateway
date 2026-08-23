@@ -16,10 +16,10 @@ Implemented M1 coverage:
 - Repeat mail `Sync`: gateway state suppresses duplicate `Add` replay for already-seen Email ids.
 - Read/unread from client `Sync Change`: JMAP `Email/set` patch to `keywords/$seen`.
 - Delete from client `Sync Delete`: JMAP `Email/set destroy`.
+- Move between folders via `MoveItems`: JMAP `Email/set` patch to `mailboxIds`.
 
 Remaining M1 mail work:
 
-- move between folders
 - incremental JMAP `Email/queryChanges`/`Email/changes`
 - server-side deletions returned as ActiveSync deletes
 - richer body preference handling

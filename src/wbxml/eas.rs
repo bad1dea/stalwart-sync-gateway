@@ -100,6 +100,29 @@ pub mod airsync_base {
     }
 }
 
+pub mod move_items {
+    use super::Token;
+
+    pub const PAGE: u8 = 5;
+    pub const MOVES: Token = tag(0x05, false);
+    pub const MOVE: Token = tag(0x06, false);
+    pub const SRC_MSG_ID: Token = tag(0x07, false);
+    pub const SRC_FLD_ID: Token = tag(0x08, false);
+    pub const DST_FLD_ID: Token = tag(0x09, false);
+    pub const RESPONSE: Token = tag(0x0a, false);
+    pub const STATUS: Token = tag(0x0b, false);
+    pub const DST_MSG_ID: Token = tag(0x0c, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncCollectionRequest {
     pub sync_key: String,
@@ -134,6 +157,13 @@ pub enum SyncClientCommandKind {
     Change,
     Delete,
     Fetch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoveItemRequest {
+    pub src_msg_id: String,
+    pub src_fld_id: String,
+    pub dst_fld_id: String,
 }
 
 pub fn find_text_after(document: &Document, token: Token) -> Option<&str> {
@@ -251,6 +281,64 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
     collections
 }
 
+pub fn move_item_requests(document: &Document) -> Vec<MoveItemRequest> {
+    let mut moves = Vec::new();
+    let mut current: Option<MoveItemRequest> = None;
+    let mut pending_leaf: Option<Token> = None;
+    let mut stack: Vec<Token> = Vec::new();
+
+    for node in &document.nodes {
+        match node {
+            Node::Start(token) if same_token(*token, move_items::MOVE) => {
+                current = Some(MoveItemRequest {
+                    src_msg_id: String::new(),
+                    src_fld_id: String::new(),
+                    dst_fld_id: String::new(),
+                });
+                if token.has_content {
+                    stack.push(*token);
+                }
+            }
+            Node::Start(token) => {
+                if current.is_some() {
+                    pending_leaf = Some(*token);
+                }
+                if token.has_content {
+                    stack.push(*token);
+                }
+            }
+            Node::Text(text) => {
+                if let (Some(current), Some(token)) = (current.as_mut(), pending_leaf.take()) {
+                    if same_token(token, move_items::SRC_MSG_ID) {
+                        current.src_msg_id = text.clone();
+                    } else if same_token(token, move_items::SRC_FLD_ID) {
+                        current.src_fld_id = text.clone();
+                    } else if same_token(token, move_items::DST_FLD_ID) {
+                        current.dst_fld_id = text.clone();
+                    }
+                }
+            }
+            Node::End => {
+                let ended = stack.pop();
+                if ended.is_some_and(|token| same_token(token, move_items::MOVE)) {
+                    if let Some(move_request) = current.take() {
+                        if !move_request.src_msg_id.is_empty()
+                            && !move_request.src_fld_id.is_empty()
+                            && !move_request.dst_fld_id.is_empty()
+                        {
+                            moves.push(move_request);
+                        }
+                    }
+                }
+                pending_leaf = None;
+            }
+            Node::Opaque(_) => {}
+        }
+    }
+
+    moves
+}
+
 fn same_token(left: Token, right: Token) -> bool {
     left.code_page == right.code_page && left.token == right.token
 }
@@ -350,5 +438,28 @@ mod tests {
             SyncClientCommandKind::Delete
         );
         assert_eq!(collections[0].commands[1].server_id, "email-b");
+    }
+
+    #[test]
+    fn parses_move_items_request() {
+        let mut builder = DocumentBuilder::new();
+        builder.start(move_items::MOVES);
+        builder.start(move_items::MOVE);
+        builder.leaf(move_items::SRC_MSG_ID, "email-a");
+        builder.leaf(move_items::SRC_FLD_ID, "inbox");
+        builder.leaf(move_items::DST_FLD_ID, "archive");
+        builder.end();
+        builder.end();
+
+        let moves = move_item_requests(&builder.finish());
+
+        assert_eq!(
+            moves,
+            vec![MoveItemRequest {
+                src_msg_id: "email-a".to_owned(),
+                src_fld_id: "inbox".to_owned(),
+                dst_fld_id: "archive".to_owned(),
+            }]
+        );
     }
 }

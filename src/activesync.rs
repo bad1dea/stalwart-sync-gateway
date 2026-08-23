@@ -86,6 +86,9 @@ pub async fn post_handler(
                 if command.eq_ignore_ascii_case("Sync") {
                     return sync_mail(&state, &auth, &query, &document, command).await;
                 }
+                if command.eq_ignore_ascii_case("MoveItems") {
+                    return move_items(&state, &auth, &document, command).await;
+                }
             }
             Err(error) => {
                 state
@@ -120,6 +123,77 @@ pub async fn post_handler(
         StatusCode::NOT_IMPLEMENTED,
         [("Content-Type", "text/plain; charset=utf-8")],
         format!("ActiveSync command {command} is not implemented yet\n"),
+    )
+        .into_response()
+}
+
+async fn move_items(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    document: &wbxml::Document,
+    command: &str,
+) -> Response {
+    let moves = wbxml::eas::move_item_requests(document);
+    if moves.is_empty() {
+        state
+            .metrics
+            .eas_requests_total
+            .with_label_values(&[command, "400"])
+            .inc();
+        return (StatusCode::BAD_REQUEST, "MoveItems missing Move entries\n").into_response();
+    }
+
+    let mut builder = wbxml::eas::DocumentBuilder::new();
+    use wbxml::eas::move_items as mv;
+
+    builder.start(mv::MOVES);
+    for move_request in moves {
+        builder.start(mv::RESPONSE);
+        builder.leaf(mv::SRC_MSG_ID, move_request.src_msg_id.clone());
+
+        let status = if move_request.src_fld_id == move_request.dst_fld_id {
+            "4"
+        } else {
+            match state
+                .jmap
+                .move_email(
+                    auth,
+                    &move_request.src_msg_id,
+                    &move_request.src_fld_id,
+                    &move_request.dst_fld_id,
+                )
+                .await
+            {
+                Ok(()) => "3",
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        src_msg_id = move_request.src_msg_id,
+                        src_fld_id = move_request.src_fld_id,
+                        dst_fld_id = move_request.dst_fld_id,
+                        "MoveItems JMAP move failed"
+                    );
+                    "5"
+                }
+            }
+        };
+
+        builder.leaf(mv::STATUS, status);
+        builder.leaf(mv::DST_MSG_ID, move_request.src_msg_id);
+        builder.end();
+    }
+    builder.end();
+
+    let body = wbxml::encode_document(&builder.finish());
+    state
+        .metrics
+        .eas_requests_total
+        .with_label_values(&[command, "200"])
+        .inc();
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/vnd.ms-sync.wbxml")],
+        body,
     )
         .into_response()
 }

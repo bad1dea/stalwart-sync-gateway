@@ -274,6 +274,39 @@ impl JmapClient {
         .await
     }
 
+    pub async fn move_email(
+        &self,
+        auth: &AuthenticatedSession,
+        email_id: &str,
+        source_mailbox_id: &str,
+        destination_mailbox_id: &str,
+    ) -> anyhow::Result<()> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            anyhow::bail!("JMAP Mail capability is not available");
+        };
+
+        let mut patch = serde_json::Map::new();
+        patch.insert(
+            format!("mailboxIds/{source_mailbox_id}"),
+            serde_json::Value::Null,
+        );
+        patch.insert(
+            format!("mailboxIds/{destination_mailbox_id}"),
+            serde_json::Value::Bool(true),
+        );
+        let mut update = serde_json::Map::new();
+        update.insert(email_id.to_owned(), serde_json::Value::Object(patch));
+
+        self.email_set(
+            auth,
+            serde_json::json!({
+                "accountId": account_id,
+                "update": update
+            }),
+        )
+        .await
+    }
+
     async fn email_set(
         &self,
         auth: &AuthenticatedSession,

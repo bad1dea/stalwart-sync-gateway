@@ -74,4 +74,4 @@ curl -i -u 'user@example.com:password' \
 xxd /tmp/foldersync-response.wbxml | head
 ```
 
-`FolderSync` currently returns the full current hierarchy from JMAP every time. Mail `Sync` tracks seen Email ids per user/device/collection in the state backend so repeat requests do not replay the same Adds. Client read/unread changes and deletes are applied through JMAP `Email/set`. Incremental hierarchy diffs, move, and JMAP `queryChanges` are next.
+`FolderSync` currently returns the full current hierarchy from JMAP every time. Mail `Sync` tracks seen Email ids per user/device/collection in the state backend so repeat requests do not replay the same Adds. Client read/unread changes, deletes, and `MoveItems` are applied through JMAP `Email/set`. Incremental hierarchy diffs and JMAP `queryChanges` are next.
