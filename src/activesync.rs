@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
+use tokio::time::{sleep, Duration};
 
 use crate::{http_server::AppState, jmap::client::basic_credentials, state::SyncRecord, wbxml};
 
@@ -98,6 +99,9 @@ pub async fn post_handler(
                 if command.eq_ignore_ascii_case("Settings") {
                     return settings(&state, &auth, &document, command).await;
                 }
+                if command.eq_ignore_ascii_case("Ping") {
+                    return ping(&state, &document, command).await;
+                }
             }
             Err(error) => {
                 state
@@ -132,6 +136,35 @@ pub async fn post_handler(
         StatusCode::NOT_IMPLEMENTED,
         [("Content-Type", "text/plain; charset=utf-8")],
         format!("ActiveSync command {command} is not implemented yet\n"),
+    )
+        .into_response()
+}
+
+async fn ping(state: &AppState, document: &wbxml::Document, command: &str) -> Response {
+    let lifetime = wbxml::eas::find_text_after(document, wbxml::eas::ping::LIFETIME)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30)
+        .clamp(1, 60);
+
+    sleep(Duration::from_secs(lifetime)).await;
+
+    let mut builder = wbxml::eas::DocumentBuilder::new();
+    use wbxml::eas::ping;
+
+    builder.start(ping::PING);
+    builder.leaf(ping::STATUS, "1");
+    builder.end();
+
+    let body = wbxml::encode_document(&builder.finish());
+    state
+        .metrics
+        .eas_requests_total
+        .with_label_values(&[command, "200"])
+        .inc();
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/vnd.ms-sync.wbxml")],
+        body,
     )
         .into_response()
 }

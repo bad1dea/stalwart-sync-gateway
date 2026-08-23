@@ -11,3 +11,8 @@ Target design:
 
 Stalwart docs state EventSource is listed in the JMAP Session resource and available at `/jmap/eventsource/?types={types}&closeafter={closeafter}&ping={ping}`. This should replace Z-Push PR #187's five-second polling loop.
 
+Current implementation status:
+
+- `Ping` has a bounded long-poll compatibility response.
+- It returns heartbeat-expired status when no JMAP wakeup layer is available.
+- The next implementation step is a per-account JMAP EventSource/WebSocket subscriber that wakes matching pending Ping requests and returns changed collection ids.

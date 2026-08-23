@@ -167,6 +167,29 @@ pub mod provision {
     }
 }
 
+pub mod ping {
+    use super::Token;
+
+    pub const PAGE: u8 = 13;
+    pub const PING: Token = tag(0x05, false);
+    pub const STATUS: Token = tag(0x06, false);
+    pub const LIFETIME: Token = tag(0x07, false);
+    pub const FOLDERS: Token = tag(0x08, false);
+    pub const FOLDER: Token = tag(0x09, false);
+    pub const SERVER_ENTRY_ID: Token = tag(0x0a, false);
+    pub const FOLDER_TYPE: Token = tag(0x0b, false);
+    pub const MAX_FOLDERS: Token = tag(0x0c, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
 pub mod settings {
     use super::Token;
 
