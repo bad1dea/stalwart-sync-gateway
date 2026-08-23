@@ -31,6 +31,9 @@ pub mod eas_folder_type {
     pub const SENTMAIL: u8 = 5;
     pub const APPOINTMENT: u8 = 8;
     pub const CONTACT: u8 = 9;
+    /// Verified against Z-Push's own zpushdefs.php
+    /// (`SYNC_FOLDER_TYPE_NOTE`), not assumed.
+    pub const NOTE: u8 = 10;
     pub const USER_MAIL: u8 = 12;
     pub const USER_APPOINTMENT: u8 = 13;
     pub const USER_CONTACT: u8 = 14;
@@ -96,11 +99,16 @@ pub struct Task {
     pub due: Option<String>,
 }
 
+/// `id` is the note's permanent stable id (see jmap/notes.rs), never the
+/// underlying JMAP Email id -- MS-ASCMD requires a ServerId to stay
+/// constant across edits, which the JMAP object backing a note (an Email,
+/// immutable once imported) structurally cannot do on its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Note {
     pub id: String,
     pub title: String,
     pub body: String,
+    pub body_type: EmailBodyType,
     pub modified: Option<String>,
     pub categories: Vec<String>,
 }

@@ -23,6 +23,17 @@ pub struct SyncRecord {
     pub seen_ids: Vec<String>,
 }
 
+/// Per-item state for collections that need real add/change/delete
+/// diffing (Notes) rather than the simpler "have I ever sent this id"
+/// dedup `SyncRecord.seen_ids` provides for mail. `hash` is an opaque,
+/// caller-defined change-detection token (see jmap::notes::note_hash) --
+/// this store just persists and compares it, it doesn't interpret it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemState {
+    pub item_id: String,
+    pub hash: String,
+}
+
 #[async_trait]
 pub trait StateStore: Send + Sync {
     async fn get(
@@ -32,6 +43,28 @@ pub trait StateStore: Send + Sync {
         collection_id: &str,
     ) -> anyhow::Result<Option<SyncRecord>>;
     async fn put(&self, record: SyncRecord) -> anyhow::Result<()>;
+
+    /// Last-known per-item state for a collection, previous call to
+    /// `put_item_states` (empty if never synced before).
+    async fn item_states(
+        &self,
+        user: &str,
+        device_id: &str,
+        collection_id: &str,
+    ) -> anyhow::Result<Vec<ItemState>>;
+
+    /// Replaces the ENTIRE per-item state set for a collection. Callers
+    /// re-list the complete current set from JMAP each sync (no
+    /// incremental JMAP queryChanges/changes yet -- same simplification
+    /// the mail path's `seen_ids` makes), so a full replace is the correct
+    /// operation here, not a merge.
+    async fn put_item_states(
+        &self,
+        user: &str,
+        device_id: &str,
+        collection_id: &str,
+        items: Vec<ItemState>,
+    ) -> anyhow::Result<()>;
 }
 
 pub async fn new_store(config: &Config) -> anyhow::Result<SharedStateStore> {
@@ -59,6 +92,7 @@ pub async fn new_store(config: &Config) -> anyhow::Result<SharedStateStore> {
 #[derive(Default)]
 pub struct MemoryStateStore {
     records: RwLock<BTreeMap<String, SyncRecord>>,
+    item_states: RwLock<BTreeMap<String, Vec<ItemState>>>,
 }
 
 #[async_trait]
@@ -82,6 +116,35 @@ impl StateStore for MemoryStateStore {
             key(&record.user, &record.device_id, &record.collection_id),
             record,
         );
+        Ok(())
+    }
+
+    async fn item_states(
+        &self,
+        user: &str,
+        device_id: &str,
+        collection_id: &str,
+    ) -> anyhow::Result<Vec<ItemState>> {
+        Ok(self
+            .item_states
+            .read()
+            .await
+            .get(&key(user, device_id, collection_id))
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn put_item_states(
+        &self,
+        user: &str,
+        device_id: &str,
+        collection_id: &str,
+        items: Vec<ItemState>,
+    ) -> anyhow::Result<()> {
+        self.item_states
+            .write()
+            .await
+            .insert(key(user, device_id, collection_id), items);
         Ok(())
     }
 }
@@ -183,6 +246,63 @@ impl StateStore for SqliteStateStore {
             .context("failed to write Sync state")?;
         Ok(())
     }
+
+    async fn item_states(
+        &self,
+        user: &str,
+        device_id: &str,
+        collection_id: &str,
+    ) -> anyhow::Result<Vec<ItemState>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SQLite state lock poisoned"))?;
+        let mut statement = connection.prepare(
+            "SELECT item_id, item_hash FROM item_states
+             WHERE user = ?1 AND device_id = ?2 AND collection_id = ?3",
+        )?;
+        let rows = statement
+            .query_map(params![user, device_id, collection_id], |row| {
+                Ok(ItemState {
+                    item_id: row.get(0)?,
+                    hash: row.get(1)?,
+                })
+            })
+            .context("failed to read item state")?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to read item state rows")
+    }
+
+    async fn put_item_states(
+        &self,
+        user: &str,
+        device_id: &str,
+        collection_id: &str,
+        items: Vec<ItemState>,
+    ) -> anyhow::Result<()> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SQLite state lock poisoned"))?;
+        let tx = connection
+            .transaction()
+            .context("failed to start item state transaction")?;
+        tx.execute(
+            "DELETE FROM item_states WHERE user = ?1 AND device_id = ?2 AND collection_id = ?3",
+            params![user, device_id, collection_id],
+        )
+        .context("failed to clear previous item state")?;
+        for item in &items {
+            tx.execute(
+                "INSERT INTO item_states (user, device_id, collection_id, item_id, item_hash, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())",
+                params![user, device_id, collection_id, item.item_id, item.hash],
+            )
+            .context("failed to write item state")?;
+        }
+        tx.commit().context("failed to commit item state")?;
+        Ok(())
+    }
 }
 
 fn migrate(connection: &Connection) -> anyhow::Result<()> {
@@ -206,6 +326,19 @@ fn migrate(connection: &Connection) -> anyhow::Result<()> {
 
         INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (1, unixepoch());
+
+        CREATE TABLE IF NOT EXISTS item_states (
+            user TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            collection_id TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            item_hash TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (user, device_id, collection_id, item_id)
+        );
+
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (2, unixepoch());
         ",
     )?;
     Ok(())

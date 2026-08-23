@@ -5,10 +5,16 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use tokio::time::{sleep, Duration};
 
-use crate::{http_server::AppState, jmap::client::basic_credentials, state::SyncRecord, wbxml};
+use crate::{
+    http_server::AppState,
+    jmap::client::{basic_credentials, AuthenticatedSession},
+    model::{EmailBodyType, Note},
+    state::{ItemState, SyncRecord},
+    wbxml,
+};
 
 const SUPPORTED_PROTOCOLS: &str = "12.1,14.0,14.1,16.0,16.1";
 const SUPPORTED_COMMANDS: &str = "Sync,SendMail,SmartForward,SmartReply,GetAttachment,FolderSync,FolderCreate,FolderDelete,FolderUpdate,MoveItems,GetItemEstimate,MeetingResponse,Search,Settings,Ping,ItemOperations,Provision,ResolveRecipients,ValidateCert,Find";
@@ -417,8 +423,14 @@ async fn sync_mail(
             continue;
         }
 
+        if collection.collection_id.starts_with("note_") {
+            sync_notes_collection(state, auth, &mut builder, user, device_id, &collection).await;
+            continue;
+        }
+
         let is_mail_collection = !collection.collection_id.starts_with("ab_")
-            && !collection.collection_id.starts_with("cal_");
+            && !collection.collection_id.starts_with("cal_")
+            && !collection.collection_id.starts_with("note_");
         let client_commands_applied = if is_mail_collection && !collection.commands.is_empty() {
             match apply_mail_client_commands(
                 state,
@@ -666,6 +678,312 @@ fn write_email_add(builder: &mut wbxml::eas::DocumentBuilder, email: crate::mode
     }
     builder.end();
     builder.end();
+}
+
+/// Handles one Notes collection's Sync round-trip end to end: applies any
+/// client Add/Change/Delete commands (building `<Responses>` entries --
+/// see the module-level notes in jmap::notes for why Add specifically
+/// needs a real `<ServerId>` in that reply, not just Status), diffs the
+/// current JMAP state against last-known per-item state to find what to
+/// push back as `<Commands>`, and persists the new baseline. Writes one
+/// complete `<Collection>...</Collection>` block into `builder` itself
+/// (the caller has already validated the SyncKey and does not wrap this
+/// call in its own Collection tags).
+async fn sync_notes_collection(
+    state: &AppState,
+    auth: &AuthenticatedSession,
+    builder: &mut wbxml::eas::DocumentBuilder,
+    user: &str,
+    device_id: &str,
+    collection: &wbxml::eas::SyncCollectionRequest,
+) {
+    use wbxml::eas::airsync as air;
+
+    let mailbox_id = collection
+        .collection_id
+        .strip_prefix("note_")
+        .unwrap_or(&collection.collection_id)
+        .to_owned();
+
+    let previous_items = state
+        .state
+        .item_states(user, device_id, &collection.collection_id)
+        .await
+        .unwrap_or_default();
+    let mut previous_by_id: BTreeMap<String, String> = previous_items
+        .into_iter()
+        .map(|item| (item.item_id, item.hash))
+        .collect();
+
+    let mut add_responses: Vec<(String, Option<String>, &'static str)> = Vec::new();
+    let mut change_responses: Vec<(String, &'static str)> = Vec::new();
+
+    for command in &collection.commands {
+        match command.kind {
+            wbxml::eas::SyncClientCommandKind::Add => {
+                let content = crate::jmap::notes::NoteContent {
+                    subject: command.note.subject.as_deref().unwrap_or(""),
+                    body: command.note.body.as_deref().unwrap_or(""),
+                    body_type: note_body_type(command.note.body_type),
+                    categories: &command.note.categories,
+                };
+                match state.jmap.save_note(auth, &mailbox_id, None, content).await {
+                    Ok(new_id) => {
+                        add_responses.push((command.client_id.clone(), Some(new_id), "1"))
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            client_id = command.client_id,
+                            "failed to create note from client Add"
+                        );
+                        add_responses.push((command.client_id.clone(), None, "5"));
+                    }
+                }
+            }
+            wbxml::eas::SyncClientCommandKind::Change => {
+                let content = crate::jmap::notes::NoteContent {
+                    subject: command.note.subject.as_deref().unwrap_or(""),
+                    body: command.note.body.as_deref().unwrap_or(""),
+                    body_type: note_body_type(command.note.body_type),
+                    categories: &command.note.categories,
+                };
+                match state
+                    .jmap
+                    .save_note(auth, &mailbox_id, Some(&command.server_id), content)
+                    .await
+                {
+                    Ok(id) => change_responses.push((id, "1")),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            server_id = command.server_id,
+                            "failed to save note change"
+                        );
+                        change_responses.push((command.server_id.clone(), "5"));
+                    }
+                }
+            }
+            wbxml::eas::SyncClientCommandKind::Delete => {
+                match state.jmap.destroy_note(auth, &command.server_id).await {
+                    Ok(()) => {
+                        previous_by_id.remove(&command.server_id);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            server_id = command.server_id,
+                            "failed to delete note"
+                        );
+                    }
+                }
+                // A successful Delete gets no Responses entry -- the client
+                // already knows (it's the one that asked). Only Add/Change
+                // need to report back, since those are where the client
+                // needs information (a new ServerId, or confirmation) it
+                // doesn't already have.
+            }
+            wbxml::eas::SyncClientCommandKind::Fetch => {
+                tracing::debug!(
+                    server_id = command.server_id,
+                    "ignoring unsupported Notes Fetch command"
+                );
+            }
+        }
+    }
+
+    let current_summaries = match state.jmap.list_notes(auth, &mailbox_id, 500).await {
+        Ok(summaries) => summaries,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                collection = collection.collection_id,
+                "Notes sync discovery failed"
+            );
+            builder.start(air::COLLECTION);
+            builder.leaf(air::SYNC_KEY, collection.sync_key.clone());
+            builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+            builder.leaf(air::STATUS, "5");
+            builder.end();
+            return;
+        }
+    };
+
+    let current_by_id: BTreeMap<String, String> = current_summaries
+        .into_iter()
+        .map(|summary| (summary.id, summary.hash))
+        .collect();
+
+    // Ids the client itself just added/changed in THIS request are already
+    // confirmed via the Responses entries above -- do NOT also echo them
+    // back in Commands as if they were new-from-server. Naively diffing
+    // current-vs-previous would otherwise flag every fresh Add as "new"
+    // (it wasn't in the pre-request state either), telling the client
+    // about its own submission a second time in the same response. This
+    // exact class of self-echo confusion is what caused every duplicate
+    // seen while building the PHP reference implementation.
+    let just_written: BTreeSet<String> = add_responses
+        .iter()
+        .filter_map(|(_, server_id, _)| server_id.clone())
+        .chain(
+            change_responses
+                .iter()
+                .map(|(server_id, _)| server_id.clone()),
+        )
+        .collect();
+
+    let mut to_add = Vec::new();
+    let mut to_change = Vec::new();
+    for (id, hash) in &current_by_id {
+        if just_written.contains(id) {
+            continue;
+        }
+        match previous_by_id.get(id) {
+            None => to_add.push(id.clone()),
+            Some(previous_hash) if previous_hash != hash => to_change.push(id.clone()),
+            _ => {}
+        }
+    }
+    let to_remove: Vec<String> = previous_by_id
+        .keys()
+        .filter(|id| !current_by_id.contains_key(id.as_str()))
+        .cloned()
+        .collect();
+
+    let has_server_changes = !to_add.is_empty() || !to_change.is_empty() || !to_remove.is_empty();
+    let client_commands_applied = !add_responses.is_empty() || !change_responses.is_empty();
+    let new_sync_key =
+        if collection.sync_key == "0" || has_server_changes || client_commands_applied {
+            next_sync_key(&collection.sync_key)
+        } else {
+            collection.sync_key.clone()
+        };
+
+    if let Err(error) = state
+        .state
+        .put(SyncRecord {
+            user: user.to_owned(),
+            device_id: device_id.to_owned(),
+            collection_id: collection.collection_id.clone(),
+            sync_key: new_sync_key.clone(),
+            jmap_state: String::new(),
+            seen_ids: Vec::new(),
+        })
+        .await
+    {
+        tracing::warn!(%error, user, device_id, collection = collection.collection_id, "failed to persist Notes SyncRecord");
+    }
+    let item_states: Vec<ItemState> = current_by_id
+        .iter()
+        .map(|(id, hash)| ItemState {
+            item_id: id.clone(),
+            hash: hash.clone(),
+        })
+        .collect();
+    if let Err(error) = state
+        .state
+        .put_item_states(user, device_id, &collection.collection_id, item_states)
+        .await
+    {
+        tracing::warn!(%error, user, device_id, collection = collection.collection_id, "failed to persist Notes item state");
+    }
+
+    builder.start(air::COLLECTION);
+    builder.leaf(air::SYNC_KEY, new_sync_key);
+    builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+    builder.leaf(air::STATUS, "1");
+
+    if !add_responses.is_empty() || !change_responses.is_empty() {
+        builder.start(air::RESPONSES);
+        for (client_id, server_id, status) in &add_responses {
+            builder.start(air::ADD);
+            builder.leaf(air::CLIENT_ID, client_id.clone());
+            if let Some(server_id) = server_id {
+                builder.leaf(air::SERVER_ID, server_id.clone());
+            }
+            builder.leaf(air::STATUS, *status);
+            builder.end();
+        }
+        for (server_id, status) in &change_responses {
+            builder.start(air::CHANGE);
+            builder.leaf(air::SERVER_ID, server_id.clone());
+            builder.leaf(air::STATUS, *status);
+            builder.end();
+        }
+        builder.end();
+    }
+
+    if collection.get_changes && has_server_changes {
+        builder.start(air::COMMANDS);
+        for id in &to_add {
+            if let Ok(Some(note)) = state.jmap.get_note(auth, id).await {
+                write_note_command(builder, air::ADD, &note);
+            }
+        }
+        for id in &to_change {
+            if let Ok(Some(note)) = state.jmap.get_note(auth, id).await {
+                write_note_command(builder, air::CHANGE, &note);
+            }
+        }
+        for id in &to_remove {
+            builder.start(air::DELETE);
+            builder.leaf(air::SERVER_ID, id.clone());
+            builder.end();
+        }
+        builder.end();
+    }
+
+    builder.end();
+}
+
+fn note_body_type(raw: Option<u8>) -> EmailBodyType {
+    match raw {
+        Some(2) => EmailBodyType::Html,
+        _ => EmailBodyType::Plain,
+    }
+}
+
+fn write_note_command(
+    builder: &mut wbxml::eas::DocumentBuilder,
+    tag: wbxml::token::Token,
+    note: &Note,
+) {
+    use wbxml::eas::{airsync as air, airsync_base as base, notes};
+
+    builder.start(tag);
+    builder.leaf(air::SERVER_ID, note.id.clone());
+    builder.start(air::APPLICATION_DATA);
+    builder.leaf(notes::SUBJECT, note.title.clone());
+    builder.start(base::BODY);
+    builder.leaf(base::TYPE, note.body_type.eas_value());
+    builder.leaf(base::ESTIMATED_DATA_SIZE, note.body.len().to_string());
+    builder.leaf(base::TRUNCATED, "0");
+    builder.leaf(base::DATA, note.body.clone());
+    builder.end();
+    builder.leaf(notes::MESSAGE_CLASS, "IPM.StickyNote");
+    if let Some(modified) = &note.modified {
+        builder.leaf(notes::LAST_MODIFIED_DATE, eas_datetime(modified));
+    }
+    if !note.categories.is_empty() {
+        builder.start(notes::CATEGORIES);
+        for category in &note.categories {
+            builder.leaf(notes::CATEGORY, category.clone());
+        }
+        builder.end();
+    }
+    builder.end();
+    builder.end();
+}
+
+/// `Notes:LastModifiedDate` wants the compact EAS datetime format
+/// (`YYYYMMDDTHHMMSSZ`), not JMAP's ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`) --
+/// confirmed against a live device trace captured against this fork's PHP
+/// predecessor, not assumed.
+fn eas_datetime(jmap_datetime: &str) -> String {
+    jmap_datetime
+        .chars()
+        .filter(|ch| *ch != '-' && *ch != ':')
+        .collect()
 }
 
 async fn folder_sync(

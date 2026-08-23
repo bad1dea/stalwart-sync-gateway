@@ -11,6 +11,7 @@ async-trait = "0.1"
 axum = { version = "0.7", features = ["macros"] }
 base64 = "0.22"
 bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 http = "1"
 prometheus = "0.13"
 quick-xml = { version = "0.36", features = ["serialize"] }

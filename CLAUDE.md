@@ -34,11 +34,22 @@ Implemented:
 - Minimal `Settings` response with user email information.
 - Minimal `GetItemEstimate` response.
 - Bounded `Ping` compatibility response.
+- Notes two-way sync (Add/Change/Delete), stored as JMAP `Email` in a `Notes`
+  mailbox with a permanent random stable id carried as a `noteid-*` keyword
+  (independent of the underlying JMAP Email id, which changes on every edit
+  because Email is immutable). Resolved via `Email/query {hasKeyword}`. Folder
+  name is the literal `Notes` (not `EAS Notes` — unify with whatever real
+  Notes folder the account already has, matching the PHP z-push fix). Auto-
+  creates the `Notes` mailbox via `Mailbox/set` if the account doesn't have
+  one yet, so it's always advertised in `FolderSync`. See `src/jmap/notes.rs`.
 
 Not yet implemented:
 
-- Real JMAP `Email/queryChanges` / `Email/changes`.
-- Server-side deletions returned to clients as ActiveSync deletes.
+- Real JMAP `Email/queryChanges` / `Email/changes` for mail (Notes sync uses
+  full-list diffing against persisted per-item state — see `item_states` in
+  `src/state.rs` — which is fine at Notes' typical item counts but wouldn't
+  scale to mail).
+- Server-side deletions returned to clients as ActiveSync deletes (mail).
 - Send/reply/forward.
 - Attachment fetch/upload.
 - `ItemOperations`.
@@ -46,9 +57,27 @@ Not yet implemented:
 - Contacts two-way sync.
 - Calendar two-way sync.
 - Tasks.
-- Notes.
-- Folder create/update/delete.
+- Folder create/update/delete (other than the Notes mailbox auto-create above).
 - Integration fixture environment with Stalwart accounts.
+
+## Fixed Since Initial Handoff
+
+- **apiUrl not rebased to the reachable Traefik host.** The JMAP session
+  response advertises internal hostnames (e.g. `hermes.zt.khuo.ng`) that
+  aren't independently routable; `session_with_basic()` now calls
+  `rebase_session_urls()` to rewrite every session URL's authority onto the
+  authority actually used to reach the session endpoint (same class of bug
+  the PHP z-push/PR#187 fork's `rebaseSessionUrls()` fixed). See
+  `src/jmap/client.rs`.
+- **`rebase_one()` corrupting JMAP URI Template placeholders.** The first fix
+  attempt routed the rebase through `url::Url::parse(...).path()`, which
+  percent-encodes per RFC 3986 — silently turning literal `{accountId}` into
+  `%7BaccountId%7D` in the rebased URL, so a later plain-string
+  `.replace("{accountId}", ...)` never matched and blob upload 404'd. Fixed
+  by extracting path+query via raw string slicing (`path_and_query_raw()`)
+  instead of going through `Url`'s accessors, so template placeholders pass
+  through byte-for-byte. Caught live via the Notes blob-upload path; would
+  equally have broken `{blobId}`/`{types}` download-url substitution.
 
 ## Repository
 
@@ -151,6 +180,11 @@ curl -i -u 'user@example.com:password' \
 5. Implement JMAP EventSource/WebSocket push and wake pending `Ping` requests.
 6. Build a disposable integration environment with Stalwart test accounts.
 7. Start real client testing with iOS/Samsung before adding broad command surface.
+
+Notes sync (Add/Change/Delete + self-echo suppression via `just_written`,
+stable id stability across edits, folder auto-create) has been live-tested
+end-to-end against a real Stalwart instance with a raw WBXML client script
+and confirmed working. It has not yet been tested from a real iOS device.
 
 ## Important Constraints
 

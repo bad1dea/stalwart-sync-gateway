@@ -15,6 +15,77 @@ use crate::{
     model::{eas_folder_type, Collection, CollectionKind, Email, EmailBody, EmailBodyType},
 };
 
+/// Stalwart's JMAP session response returns ABSOLUTE apiUrl/uploadUrl/
+/// downloadUrl/eventSourceUrl fields built from its own configured
+/// `server.hostname` -- which is not necessarily reachable from wherever
+/// this gateway is actually calling in from (confirmed live against a real
+/// deployment: `server.hostname` is deliberately `hermes.zt.khuo.ng` for an
+/// unrelated Postfix-relay-identity reason documented in that deployment's
+/// own infra docs, and there is no route for that bare host; every real
+/// JMAP call after session discovery 502'd until this was added). Rewrite
+/// scheme+host+port on every session URL to match whatever
+/// `stalwart_jmap_url` (the URL actually used to reach Stalwart) resolves
+/// to, preserving path+query. Same fix as the reference PHP implementation
+/// applies (`jmap_client.php`'s `rebaseSessionUrls()`), done as part of the
+/// JMAP client here instead of a bolted-on patch.
+fn rebase_session_urls(session: &mut JmapSession, stalwart_jmap_url: &Url) {
+    let authority = match (
+        stalwart_jmap_url.host_str(),
+        stalwart_jmap_url.port_or_known_default(),
+    ) {
+        (Some(host), Some(port)) => format!("{}://{host}:{port}", stalwart_jmap_url.scheme()),
+        (Some(host), None) => format!("{}://{host}", stalwart_jmap_url.scheme()),
+        _ => return,
+    };
+
+    session.api_url = rebase_one(&session.api_url, &authority);
+    session.download_url = rebase_one(&session.download_url, &authority);
+    session.upload_url = rebase_one(&session.upload_url, &authority);
+    if let Some(event_source_url) = session.event_source_url.as_deref() {
+        session.event_source_url = Some(rebase_one(event_source_url, &authority));
+    }
+}
+
+/// Minimal percent-encoding for a single URL path segment substituted into
+/// a JMAP session URL template (`{accountId}`). JMAP account ids are
+/// typically short opaque tokens, but escape defensively rather than
+/// assume that always holds.
+pub(crate) fn percent_encode_path_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// Rebases the authority of `url` onto `authority`, preserving the path
+/// and query EXACTLY as written. Deliberately does NOT go through
+/// `url::Url`'s `.path()`/`.query()` accessors -- those percent-encode
+/// per RFC 3986, which silently mangles `{` and `}` into `%7B`/`%7D`.
+/// JMAP session URLs use literal `{accountId}`/`{blobId}`/etc. RFC 6570
+/// URI Template placeholders that later code matches via plain string
+/// substitution; going through `Url` first breaks that substitution with
+/// no error, just a 404 (confirmed live: blob upload silently hit
+/// `/jmap/upload/%7BaccountId%7D/` instead of a real account id until
+/// this was fixed to use raw string slicing).
+fn rebase_one(url: &str, authority: &str) -> String {
+    match path_and_query_raw(url) {
+        Some(path_and_query) => format!("{authority}{path_and_query}"),
+        None => url.to_owned(),
+    }
+}
+
+fn path_and_query_raw(url: &str) -> Option<&str> {
+    let scheme_end = url.find("://")? + 3;
+    let path_start = url[scheme_end..].find('/')?;
+    Some(&url[scheme_end + path_start..])
+}
+
 #[derive(Clone)]
 pub struct JmapClient {
     http: reqwest::Client,
@@ -77,7 +148,9 @@ impl JmapClient {
             anyhow::bail!("JMAP authentication failed");
         }
         let response = response.error_for_status().context("JMAP session failed")?;
-        let session: JmapSession = response.json().await.context("invalid JMAP session JSON")?;
+        let mut session: JmapSession =
+            response.json().await.context("invalid JMAP session JSON")?;
+        rebase_session_urls(&mut session, &self.config.stalwart_jmap_url);
         let capabilities = GatewayCapabilities::from_session(&session);
         Ok(AuthenticatedSession {
             session,
@@ -131,13 +204,35 @@ impl JmapClient {
 
         let response: JmapResponse<serde_json::Value> = self.api_call(auth, &using, calls).await?;
         let mut collections = Vec::new();
+        let mut found_notes_mailbox = false;
 
         for method in response.method_responses {
             match method.0.as_str() {
                 "Mailbox/get" => {
                     let get: GetResponse<MailboxObject> =
                         serde_json::from_value(method.1).context("invalid Mailbox/get response")?;
-                    collections.extend(get.list.into_iter().map(Collection::from));
+                    for mailbox in get.list {
+                        // The account's "Notes" mailbox (see jmap::notes
+                        // module docs for why it's this exact mailbox, not
+                        // a separate gateway-only folder) is advertised as
+                        // a Notes collection, not a generic mail folder --
+                        // never both.
+                        if mailbox.parent_id.is_none()
+                            && mailbox.name == crate::jmap::notes::NOTES_MAILBOX_NAME
+                        {
+                            found_notes_mailbox = true;
+                            collections.push(Collection {
+                                id: format!("note_{}", mailbox.id),
+                                parent_id: None,
+                                name: mailbox.name,
+                                kind: CollectionKind::Notes,
+                                role: None,
+                                folder_type: eas_folder_type::NOTE,
+                            });
+                        } else {
+                            collections.push(Collection::from(mailbox));
+                        }
+                    }
                 }
                 "AddressBook/get" => {
                     let get: GetResponse<AddressBookObject> = serde_json::from_value(method.1)
@@ -152,6 +247,28 @@ impl JmapClient {
                 "error" => anyhow::bail!("JMAP method error in collection discovery"),
                 other => {
                     tracing::debug!(method = other, "ignoring unexpected JMAP method response")
+                }
+            }
+        }
+
+        // An account with no "Notes" mailbox yet would otherwise never
+        // advertise a Notes collection at all -- and with no collection id
+        // to target, the client would have no way to ever create its
+        // first note (there's no FolderCreate support yet either). Create
+        // it lazily here so Notes always shows up, same as a real Exchange
+        // server's Notes folder always being there.
+        if !found_notes_mailbox {
+            match self.ensure_notes_mailbox_id(auth).await {
+                Ok(mailbox_id) => collections.push(Collection {
+                    id: format!("note_{mailbox_id}"),
+                    parent_id: None,
+                    name: crate::jmap::notes::NOTES_MAILBOX_NAME.to_owned(),
+                    kind: CollectionKind::Notes,
+                    role: None,
+                    folder_type: eas_folder_type::NOTE,
+                }),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to ensure Notes mailbox during FolderSync")
                 }
             }
         }
@@ -307,6 +424,55 @@ impl JmapClient {
         .await
     }
 
+    /// Uploads raw bytes as a JMAP blob and returns the assigned blobId.
+    /// Nothing needed this before Notes (create/save flows didn't exist
+    /// yet) -- general-purpose, will also be needed for SendMail/drafts/
+    /// attachments later.
+    pub(crate) async fn upload_blob(
+        &self,
+        auth: &AuthenticatedSession,
+        data: Vec<u8>,
+        content_type: &str,
+    ) -> anyhow::Result<String> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            anyhow::bail!("JMAP Mail capability is not available");
+        };
+        let url = auth
+            .session
+            .upload_url
+            .replace("{accountId}", &percent_encode_path_segment(account_id));
+        let response = self
+            .http
+            .post(&url)
+            .basic_auth(
+                &auth.authorization.username,
+                Some(&auth.authorization.password),
+            )
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(data)
+            .send()
+            .await
+            .context("failed to upload JMAP blob")?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable body>".to_owned());
+        if !status.is_success() {
+            anyhow::bail!("JMAP blob upload to {url} returned {status}: {body}");
+        }
+
+        #[derive(Deserialize)]
+        struct UploadResponse {
+            #[serde(rename = "blobId")]
+            blob_id: String,
+        }
+        let parsed: UploadResponse =
+            serde_json::from_str(&body).context("invalid blob upload JSON")?;
+        Ok(parsed.blob_id)
+    }
+
     async fn email_set(
         &self,
         auth: &AuthenticatedSession,
@@ -333,7 +499,7 @@ impl JmapClient {
         anyhow::bail!("JMAP Email/set response was missing")
     }
 
-    async fn api_call<T: DeserializeOwned>(
+    pub(crate) async fn api_call<T: DeserializeOwned>(
         &self,
         auth: &AuthenticatedSession,
         using: &[String],
@@ -393,27 +559,27 @@ struct JmapRequest<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct MethodCall(String, serde_json::Value, String);
+pub(crate) struct MethodCall(String, serde_json::Value, String);
 
 impl MethodCall {
-    fn new(name: &str, arguments: serde_json::Value, id: &str) -> Self {
+    pub(crate) fn new(name: &str, arguments: serde_json::Value, id: &str) -> Self {
         Self(name.to_owned(), arguments, id.to_owned())
     }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct JmapResponse<T> {
-    method_responses: Vec<MethodResponse<T>>,
+pub(crate) struct JmapResponse<T> {
+    pub(crate) method_responses: Vec<MethodResponse<T>>,
 }
 
 #[derive(Debug, Deserialize)]
-struct MethodResponse<T>(String, T, String);
+pub(crate) struct MethodResponse<T>(pub(crate) String, pub(crate) T, pub(crate) String);
 
 #[derive(Debug, Deserialize)]
-struct GetResponse<T> {
+pub(crate) struct GetResponse<T> {
     #[serde(default)]
-    list: Vec<T>,
+    pub(crate) list: Vec<T>,
 }
 
 #[derive(Debug, Default, Deserialize)]

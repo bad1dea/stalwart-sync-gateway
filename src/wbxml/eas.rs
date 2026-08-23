@@ -30,11 +30,18 @@ pub mod airsync {
 
     pub const PAGE: u8 = 0;
     pub const SYNC: Token = tag(0x05, false);
+    // Per Z-Push's own authoritative WBXML DTD table (lib/wbxml/wbxmldefs.php,
+    // codepage 0): 0x06 = "Replies" (aka Responses -- the section that
+    // confirms client-submitted Add/Change/Delete back to the client, as
+    // opposed to Commands, which pushes server-originated changes TO the
+    // client). Verified against that source directly, not assumed.
+    pub const RESPONSES: Token = tag(0x06, false);
     pub const ADD: Token = tag(0x07, false);
     pub const CHANGE: Token = tag(0x08, false);
     pub const DELETE: Token = tag(0x09, false);
     pub const FETCH: Token = tag(0x0a, false);
     pub const SYNC_KEY: Token = tag(0x0b, false);
+    pub const CLIENT_ID: Token = tag(0x0c, false);
     pub const SERVER_ID: Token = tag(0x0d, false);
     pub const STATUS: Token = tag(0x0e, false);
     pub const COLLECTION: Token = tag(0x0f, false);
@@ -44,6 +51,31 @@ pub mod airsync {
     pub const COMMANDS: Token = tag(0x16, false);
     pub const COLLECTIONS: Token = tag(0x1c, false);
     pub const APPLICATION_DATA: Token = tag(0x1d, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
+/// ActiveSync "Notes" class (MS-ASNOTE). Codepage 23 (0x17) -- verified
+/// against Z-Push's own WBXML DTD table, not assumed: an earlier guess of
+/// codepage 10 was wrong (that's POOMTASKS/ResolveRecipients). Field order
+/// and tag numbers below match a live device trace captured against this
+/// exact fork's PHP predecessor.
+pub mod notes {
+    use super::Token;
+
+    pub const PAGE: u8 = 23;
+    pub const SUBJECT: Token = tag(0x05, false);
+    pub const MESSAGE_CLASS: Token = tag(0x06, false);
+    pub const LAST_MODIFIED_DATE: Token = tag(0x07, false);
+    pub const CATEGORIES: Token = tag(0x08, false);
+    pub const CATEGORY: Token = tag(0x09, false);
 
     pub const fn tag(token: u8, has_content: bool) -> Token {
         Token {
@@ -236,8 +268,25 @@ impl Default for SyncCollectionRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncClientCommand {
     pub kind: SyncClientCommandKind,
+    /// Client-generated temp id, present on Add only (the item has no
+    /// ServerId yet -- that's what the gateway is about to assign).
+    pub client_id: String,
+    /// The item's ServerId. Present on Change/Delete/Fetch; empty on Add.
     pub server_id: String,
     pub read: Option<bool>,
+    pub note: NoteFields,
+}
+
+/// ActiveSync Notes class fields decoded from one Add/Change command's
+/// ApplicationData (MS-ASNOTE + shared AirSyncBase:Body). `body_type`
+/// mirrors AirSyncBase's Type element (1 = plain, 2 = html) verbatim --
+/// callers map it to `EmailBodyType`/local Note types.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NoteFields {
+    pub subject: Option<String>,
+    pub body_type: Option<u8>,
+    pub body: Option<String>,
+    pub categories: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,11 +341,12 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
     let mut collections = Vec::new();
     let mut current: Option<SyncCollectionRequest> = None;
     let mut current_command: Option<SyncClientCommand> = None;
+    let mut current_command_start: Option<usize> = None;
     let mut commands_depth: Option<usize> = None;
     let mut pending_leaf: Option<Token> = None;
     let mut stack: Vec<Token> = Vec::new();
 
-    for node in &document.nodes {
+    for (idx, node) in document.nodes.iter().enumerate() {
         match node {
             Node::Start(token)
                 if token.code_page == airsync::PAGE && token.token == airsync::COLLECTION.token =>
@@ -318,9 +368,12 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                     {
                         current_command = command_kind(*token).map(|kind| SyncClientCommand {
                             kind,
+                            client_id: String::new(),
                             server_id: String::new(),
                             read: None,
+                            note: NoteFields::default(),
                         });
+                        current_command_start = Some(idx);
                     } else {
                         pending_leaf = Some(*token);
                     }
@@ -334,6 +387,8 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                     if let Some(token) = pending_leaf.take() {
                         if same_token(token, airsync::SERVER_ID) {
                             command.server_id = text.clone();
+                        } else if same_token(token, airsync::CLIENT_ID) {
+                            command.client_id = text.clone();
                         } else if same_token(token, email::READ) {
                             command.read = Some(text == "1");
                         }
@@ -368,10 +423,19 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                     }
                 }
                 if ended.and_then(command_kind).is_some() {
-                    if let (Some(collection), Some(command)) =
-                        (current.as_mut(), current_command.take())
-                    {
-                        if !command.server_id.is_empty() {
+                    if let (Some(collection), Some(mut command), Some(start)) = (
+                        current.as_mut(),
+                        current_command.take(),
+                        current_command_start.take(),
+                    ) {
+                        // Everything strictly between the command's own
+                        // Start and this End is its ApplicationData subtree
+                        // -- extract Notes fields from it regardless of
+                        // command kind (Delete/Fetch simply won't have any).
+                        command.note = extract_note_fields(&document.nodes[start + 1..idx]);
+                        let has_identity =
+                            !command.server_id.is_empty() || !command.client_id.is_empty();
+                        if has_identity {
                             collection.commands.push(command);
                         }
                     }
@@ -390,6 +454,54 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
     }
 
     collections
+}
+
+/// Walks the nodes strictly inside one Add/Change command (i.e. inside its
+/// `<ApplicationData>`) and pulls out the ActiveSync Notes fields, if any
+/// are present. Tracks a full ancestor path (not just the immediate
+/// pending tag) so nested elements -- `AirSyncBase:Body > Type`/`Data`,
+/// `Notes:Categories > Notes:Category` (repeated) -- resolve unambiguously,
+/// unlike the single-level `pending_leaf` lookahead used for flat Email
+/// fields above.
+fn extract_note_fields(nodes: &[Node]) -> NoteFields {
+    let mut fields = NoteFields::default();
+    let mut path: Vec<Token> = Vec::new();
+    let mut category_buf: Option<String> = None;
+
+    for node in nodes {
+        match node {
+            Node::Start(token) => path.push(*token),
+            Node::Text(text) => {
+                let Some(&top) = path.last() else { continue };
+                let parent = path.len().checked_sub(2).map(|i| path[i]);
+                if same_token(top, notes::SUBJECT) {
+                    fields.subject = Some(text.clone());
+                } else if same_token(top, airsync_base::TYPE)
+                    && parent.is_some_and(|p| same_token(p, airsync_base::BODY))
+                {
+                    fields.body_type = text.parse::<u8>().ok();
+                } else if same_token(top, airsync_base::DATA)
+                    && parent.is_some_and(|p| same_token(p, airsync_base::BODY))
+                {
+                    fields.body = Some(text.clone());
+                } else if same_token(top, notes::CATEGORY) {
+                    category_buf = Some(text.clone());
+                }
+            }
+            Node::End => {
+                if let Some(top) = path.pop() {
+                    if same_token(top, notes::CATEGORY) {
+                        if let Some(category) = category_buf.take() {
+                            fields.categories.push(category);
+                        }
+                    }
+                }
+            }
+            Node::Opaque(_) => {}
+        }
+    }
+
+    fields
 }
 
 pub fn move_item_requests(document: &Document) -> Vec<MoveItemRequest> {
@@ -509,6 +621,58 @@ impl Default for DocumentBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_note_add_with_client_id_body_and_categories() {
+        // Mirrors a real device Add: ClientId (no ServerId yet -- the
+        // whole point), nested AirSyncBase:Body (Type + Data), and
+        // repeated Notes:Category inside Notes:Categories. This is the
+        // structure the flat pending_leaf lookahead alone can't resolve;
+        // extract_note_fields()'s ancestor-path walk is what this test is
+        // actually exercising.
+        let mut builder = DocumentBuilder::new();
+        builder.start(airsync::SYNC);
+        builder.start(airsync::COLLECTIONS);
+        builder.start(airsync::COLLECTION);
+        builder.leaf(airsync::SYNC_KEY, "1");
+        builder.leaf(airsync::COLLECTION_ID, "note_x");
+        builder.start(airsync::COMMANDS);
+        builder.start(airsync::ADD);
+        builder.leaf(airsync::CLIENT_ID, "tmp-1");
+        builder.start(airsync::APPLICATION_DATA);
+        builder.leaf(notes::SUBJECT, "Tag1");
+        builder.start(airsync_base::BODY);
+        builder.leaf(airsync_base::TYPE, "2");
+        builder.leaf(airsync_base::DATA, "<html>hi</html>");
+        builder.end();
+        builder.leaf(notes::MESSAGE_CLASS, "IPM.StickyNote");
+        builder.start(notes::CATEGORIES);
+        builder.leaf(notes::CATEGORY, "Work");
+        builder.leaf(notes::CATEGORY, "Personal");
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+
+        let collections = sync_collections(&builder.finish());
+
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].commands.len(), 1);
+        let command = &collections[0].commands[0];
+        assert_eq!(command.kind, SyncClientCommandKind::Add);
+        assert_eq!(command.client_id, "tmp-1");
+        assert_eq!(command.server_id, "");
+        assert_eq!(command.note.subject.as_deref(), Some("Tag1"));
+        assert_eq!(command.note.body_type, Some(2));
+        assert_eq!(command.note.body.as_deref(), Some("<html>hi</html>"));
+        assert_eq!(
+            command.note.categories,
+            vec!["Work".to_owned(), "Personal".to_owned()]
+        );
+    }
 
     #[test]
     fn parses_sync_client_change_and_delete_commands() {
