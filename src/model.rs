@@ -74,12 +74,19 @@ impl EmailBodyType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Contact {
     pub id: String,
     pub address_book_ids: Vec<String>,
-    pub full_name: Option<String>,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub file_as: Option<String>,
     pub emails: Vec<String>,
+    pub mobile_phone: Option<String>,
+    pub home_phone: Option<String>,
+    pub business_phone: Option<String>,
+    pub company_name: Option<String>,
+    pub job_title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

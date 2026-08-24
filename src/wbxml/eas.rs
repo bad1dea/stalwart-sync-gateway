@@ -25,6 +25,36 @@ pub mod folder_hierarchy {
     }
 }
 
+/// MS-ASWBXML codepage 1 (Contacts). Only the fields this gateway
+/// actually maps from JSContact are included, not the full ~50-field
+/// spec table -- numbering still per spec so adding more later is a
+/// drop-in, not a renumbering.
+pub mod contacts {
+    use super::Token;
+
+    pub const PAGE: u8 = 1;
+    pub const COMPANY_NAME: Token = tag(0x19, false);
+    pub const EMAIL1_ADDRESS: Token = tag(0x1b, false);
+    pub const EMAIL2_ADDRESS: Token = tag(0x1c, false);
+    pub const EMAIL3_ADDRESS: Token = tag(0x1d, false);
+    pub const FILE_AS: Token = tag(0x1e, false);
+    pub const FIRST_NAME: Token = tag(0x1f, false);
+    pub const HOME_PHONE_NUMBER: Token = tag(0x27, false);
+    pub const JOB_TITLE: Token = tag(0x28, false);
+    pub const LAST_NAME: Token = tag(0x29, false);
+    pub const MOBILE_PHONE_NUMBER: Token = tag(0x2b, false);
+    pub const BUSINESS_PHONE_NUMBER: Token = tag(0x13, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
 pub mod airsync {
     use super::Token;
 

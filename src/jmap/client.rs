@@ -12,7 +12,9 @@ use crate::{
         capabilities::{self, GatewayCapabilities},
         session::JmapSession,
     },
-    model::{eas_folder_type, Collection, CollectionKind, Email, EmailBody, EmailBodyType},
+    model::{
+        eas_folder_type, Collection, CollectionKind, Contact, Email, EmailBody, EmailBodyType,
+    },
 };
 
 /// Stalwart's JMAP session response returns ABSOLUTE apiUrl/uploadUrl/
@@ -345,6 +347,70 @@ impl JmapClient {
                     return Ok(get.list.into_iter().map(Email::from).collect());
                 }
                 "error" => anyhow::bail!("JMAP method error in email sync"),
+                _ => {}
+            }
+        }
+
+        Ok(Vec::new())
+    }
+
+    /// Lists contacts in a JSContact address book, newest-touched first.
+    /// Contacts have no real two-way sync yet (this is read-only, like
+    /// mail's own list-and-diff via seen_ids) -- see the
+    /// `sync_contacts_collection` caller for that state-diffing.
+    pub async fn contacts_in_address_book(
+        &self,
+        auth: &AuthenticatedSession,
+        address_book_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Contact>> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::CONTACTS) else {
+            return Ok(Vec::new());
+        };
+
+        let calls = vec![
+            MethodCall::new(
+                "ContactCard/query",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "filter": { "inAddressBook": address_book_id },
+                    "limit": limit.clamp(1, 200)
+                }),
+                "q",
+            ),
+            MethodCall::new(
+                "ContactCard/get",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "#ids": {
+                        "resultOf": "q",
+                        "name": "ContactCard/query",
+                        "path": "/ids"
+                    }
+                }),
+                "g",
+            ),
+        ];
+
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CONTACTS.to_owned(),
+                ],
+                calls,
+            )
+            .await?;
+
+        for method in response.method_responses {
+            match method.0.as_str() {
+                "ContactCard/get" => {
+                    let get: GetResponse<ContactCardObject> = serde_json::from_value(method.1)
+                        .context("invalid ContactCard/get response")?;
+                    return Ok(get.list.into_iter().map(Contact::from).collect());
+                }
+                "error" => anyhow::bail!("JMAP method error in contact sync"),
                 _ => {}
             }
         }
@@ -1038,6 +1104,129 @@ fn extract_email_address(value: &str) -> Option<String> {
                 .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && !"@.-_+".contains(ch))
                 .to_owned()
         })
+}
+
+/// JSContact (RFC 9553) card shape, as returned by Stalwart's
+/// `ContactCard/get` -- confirmed live against a real created card (see
+/// stalwart-sync-gateway-cutover memory / this session's own testing).
+/// Only the properties this gateway maps to EAS Contacts fields are
+/// modeled; everything else in a real card is ignored, not round-tripped.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContactCardObject {
+    id: String,
+    #[serde(default)]
+    address_book_ids: BTreeMap<String, bool>,
+    #[serde(default)]
+    name: Option<ContactCardName>,
+    #[serde(default)]
+    emails: BTreeMap<String, ContactCardEmail>,
+    #[serde(default)]
+    phones: BTreeMap<String, ContactCardPhone>,
+    #[serde(default)]
+    organizations: BTreeMap<String, ContactCardOrganization>,
+    #[serde(default)]
+    titles: BTreeMap<String, ContactCardTitle>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContactCardName {
+    full: Option<String>,
+    #[serde(default)]
+    components: Vec<ContactCardNameComponent>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContactCardNameComponent {
+    kind: String,
+    value: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContactCardEmail {
+    address: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContactCardPhone {
+    number: Option<String>,
+    #[serde(default)]
+    contexts: BTreeMap<String, bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContactCardOrganization {
+    name: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContactCardTitle {
+    name: Option<String>,
+    kind: Option<String>,
+}
+
+impl From<ContactCardObject> for Contact {
+    fn from(value: ContactCardObject) -> Self {
+        let mut first_name = None;
+        let mut last_name = None;
+        if let Some(name) = &value.name {
+            for component in &name.components {
+                match component.kind.as_str() {
+                    "given" => first_name = Some(component.value.clone()),
+                    "surname" => last_name = Some(component.value.clone()),
+                    _ => {}
+                }
+            }
+        }
+        let file_as = value.name.as_ref().and_then(|name| name.full.clone());
+        let emails = value
+            .emails
+            .into_values()
+            .filter_map(|email| email.address)
+            .collect();
+
+        let mut mobile_phone = None;
+        let mut home_phone = None;
+        let mut business_phone = None;
+        for phone in value.phones.into_values() {
+            let Some(number) = phone.number else {
+                continue;
+            };
+            let is = |ctx: &str| phone.contexts.get(ctx).copied().unwrap_or(false);
+            if is("mobile") && mobile_phone.is_none() {
+                mobile_phone = Some(number);
+            } else if is("home") && home_phone.is_none() {
+                home_phone = Some(number);
+            } else if (is("work") || phone.contexts.is_empty()) && business_phone.is_none() {
+                business_phone = Some(number);
+            }
+        }
+
+        let company_name = value.organizations.into_values().find_map(|org| org.name);
+        let job_title = value
+            .titles
+            .into_values()
+            .find(|title| title.kind.as_deref() == Some("title") || title.kind.is_none())
+            .and_then(|title| title.name);
+
+        Self {
+            id: value.id,
+            address_book_ids: value
+                .address_book_ids
+                .into_iter()
+                .filter_map(|(id, present)| present.then_some(id))
+                .collect(),
+            first_name,
+            last_name,
+            file_as,
+            emails,
+            mobile_phone,
+            home_phone,
+            business_phone,
+            company_name,
+            job_title,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -674,6 +674,20 @@ async fn sync_mail(
             continue;
         }
 
+        if collection.collection_id.starts_with("ab_") {
+            sync_contacts_collection(
+                state,
+                auth,
+                &mut builder,
+                user,
+                device_id,
+                &collection,
+                previous_record.as_ref(),
+            )
+            .await;
+            continue;
+        }
+
         let is_mail_collection = !collection.collection_id.starts_with("ab_")
             && !collection.collection_id.starts_with("cal_")
             && !collection.collection_id.starts_with("note_");
@@ -1093,6 +1107,202 @@ fn strip_html_tags(html: &str) -> String {
         }
     }
     out
+}
+
+/// Handles one Contacts collection's Sync round-trip: read-only list-and-
+/// diff against previously-seen JMAP ids (the same shape mail's own sync
+/// uses, `SyncRecord.seen_ids`), against a real JSContact address book.
+/// No client-side Add/Change/Delete support yet -- contacts have no real
+/// two-way sync (see CLAUDE.md's gap list) -- but this replaces the
+/// previous empty stub (which only ever handled the sync_key handshake
+/// and never surfaced any contact) with real content. Writes one
+/// complete `<Collection>...</Collection>` block into `builder` itself,
+/// matching sync_notes_collection's contract.
+async fn sync_contacts_collection(
+    state: &AppState,
+    auth: &AuthenticatedSession,
+    builder: &mut wbxml::eas::DocumentBuilder,
+    user: &str,
+    device_id: &str,
+    collection: &wbxml::eas::SyncCollectionRequest,
+    previous_record: Option<&SyncRecord>,
+) {
+    use wbxml::eas::airsync as air;
+
+    let address_book_id = collection
+        .collection_id
+        .strip_prefix("ab_")
+        .unwrap_or(&collection.collection_id);
+
+    if !collection.get_changes {
+        // First-sync handshake (or a poll with nothing to check) still
+        // has to advance sync_key 0->1 and persist, or the client retries
+        // in a tight loop forever -- the same class of bug the contacts/
+        // calendar stub had before it advanced on sync_key "0" alone.
+        let is_first_sync = collection.sync_key == "0";
+        let new_sync_key = if is_first_sync {
+            next_sync_key(&collection.sync_key)
+        } else {
+            collection.sync_key.clone()
+        };
+        if is_first_sync {
+            if let Err(error) = state
+                .state
+                .put(SyncRecord {
+                    user: user.to_owned(),
+                    device_id: device_id.to_owned(),
+                    collection_id: collection.collection_id.clone(),
+                    sync_key: new_sync_key.clone(),
+                    jmap_state: String::new(),
+                    seen_ids: Vec::new(),
+                })
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    user,
+                    device_id,
+                    collection = collection.collection_id,
+                    "failed to persist Sync state"
+                );
+                builder.start(air::COLLECTION);
+                builder.leaf(air::SYNC_KEY, collection.sync_key.clone());
+                builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+                builder.leaf(air::STATUS, "5");
+                builder.end();
+                return;
+            }
+        }
+        builder.start(air::COLLECTION);
+        builder.leaf(air::SYNC_KEY, new_sync_key);
+        builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+        builder.leaf(air::STATUS, "1");
+        builder.end();
+        return;
+    }
+
+    let contacts = match state
+        .jmap
+        .contacts_in_address_book(auth, address_book_id, collection.window_size)
+        .await
+    {
+        Ok(contacts) => contacts,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                collection = collection.collection_id,
+                "Sync contacts discovery failed"
+            );
+            builder.start(air::COLLECTION);
+            builder.leaf(air::SYNC_KEY, collection.sync_key.clone());
+            builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+            builder.leaf(air::STATUS, "5");
+            builder.end();
+            return;
+        }
+    };
+
+    let previous_seen: BTreeSet<String> = previous_record
+        .map(|record| record.seen_ids.iter().cloned().collect())
+        .unwrap_or_default();
+    let fetched_ids: BTreeSet<String> = contacts.iter().map(|contact| contact.id.clone()).collect();
+    let contacts_to_send: Vec<_> = if collection.sync_key == "0" {
+        contacts
+    } else {
+        contacts
+            .into_iter()
+            .filter(|contact| !previous_seen.contains(&contact.id))
+            .collect()
+    };
+    let new_sync_key = if collection.sync_key == "0" || !contacts_to_send.is_empty() {
+        next_sync_key(&collection.sync_key)
+    } else {
+        collection.sync_key.clone()
+    };
+
+    if let Err(error) = state
+        .state
+        .put(SyncRecord {
+            user: user.to_owned(),
+            device_id: device_id.to_owned(),
+            collection_id: collection.collection_id.clone(),
+            sync_key: new_sync_key.clone(),
+            jmap_state: String::new(),
+            seen_ids: previous_seen.union(&fetched_ids).cloned().collect(),
+        })
+        .await
+    {
+        tracing::warn!(
+            %error,
+            user,
+            device_id,
+            collection = collection.collection_id,
+            "failed to persist Sync state"
+        );
+        builder.start(air::COLLECTION);
+        builder.leaf(air::SYNC_KEY, collection.sync_key.clone());
+        builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+        builder.leaf(air::STATUS, "5");
+        builder.end();
+        return;
+    }
+
+    builder.start(air::COLLECTION);
+    builder.leaf(air::SYNC_KEY, new_sync_key);
+    builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+    builder.leaf(air::STATUS, "1");
+    if !contacts_to_send.is_empty() {
+        builder.start(air::COMMANDS);
+        for contact in contacts_to_send {
+            write_contact_add(builder, contact);
+        }
+        builder.end();
+    }
+    builder.end();
+}
+
+fn write_contact_add(builder: &mut wbxml::eas::DocumentBuilder, contact: crate::model::Contact) {
+    use wbxml::eas::{airsync as air, contacts as c};
+
+    builder.start(air::ADD);
+    builder.leaf(air::SERVER_ID, contact.id);
+    builder.start(air::APPLICATION_DATA);
+    if let Some(first) = contact.first_name {
+        builder.leaf(c::FIRST_NAME, first);
+    }
+    if let Some(last) = contact.last_name {
+        builder.leaf(c::LAST_NAME, last);
+    }
+    if let Some(file_as) = contact.file_as {
+        builder.leaf(c::FILE_AS, file_as);
+    }
+    let mut emails = contact.emails.into_iter();
+    if let Some(email1) = emails.next() {
+        builder.leaf(c::EMAIL1_ADDRESS, email1);
+    }
+    if let Some(email2) = emails.next() {
+        builder.leaf(c::EMAIL2_ADDRESS, email2);
+    }
+    if let Some(email3) = emails.next() {
+        builder.leaf(c::EMAIL3_ADDRESS, email3);
+    }
+    if let Some(mobile) = contact.mobile_phone {
+        builder.leaf(c::MOBILE_PHONE_NUMBER, mobile);
+    }
+    if let Some(home) = contact.home_phone {
+        builder.leaf(c::HOME_PHONE_NUMBER, home);
+    }
+    if let Some(business) = contact.business_phone {
+        builder.leaf(c::BUSINESS_PHONE_NUMBER, business);
+    }
+    if let Some(company) = contact.company_name {
+        builder.leaf(c::COMPANY_NAME, company);
+    }
+    if let Some(title) = contact.job_title {
+        builder.leaf(c::JOB_TITLE, title);
+    }
+    builder.end();
+    builder.end();
 }
 
 /// Handles one Notes collection's Sync round-trip end to end: applies any
