@@ -256,6 +256,29 @@ pub mod settings {
     }
 }
 
+/// MS-ASWBXML codepage 20 (ItemOperations). Numbering per spec, consistent
+/// with the Get/Set/Status pattern already scaffolded in `settings`.
+pub mod item_operations {
+    use super::Token;
+
+    pub const PAGE: u8 = 20;
+    pub const ITEM_OPERATIONS: Token = tag(0x05, false);
+    pub const FETCH: Token = tag(0x06, false);
+    pub const STORE: Token = tag(0x07, false);
+    pub const STATUS: Token = tag(0x0d, false);
+    pub const RESPONSE: Token = tag(0x0e, false);
+    pub const PROPERTIES: Token = tag(0x0b, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncCollectionRequest {
     pub sync_key: String,
@@ -314,6 +337,29 @@ pub struct MoveItemRequest {
     pub src_msg_id: String,
     pub src_fld_id: String,
     pub dst_fld_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemOperationsFetchRequest {
+    pub store: String,
+    pub collection_id: String,
+    pub server_id: String,
+}
+
+/// Parses an `ItemOperations > Fetch` request addressed the "Mailbox
+/// Store" way (Store/CollectionId/ServerId) -- the form iOS uses to fetch
+/// a message opened from a prior Sync result. Ignores `Options` (body
+/// preference/truncation) -- the gateway always returns the full body
+/// regardless, same as Sync does.
+pub fn item_operations_fetch(document: &Document) -> Option<ItemOperationsFetchRequest> {
+    let store = find_text_after(document, item_operations::STORE)?.to_owned();
+    let collection_id = find_text_after(document, airsync::COLLECTION_ID)?.to_owned();
+    let server_id = find_text_after(document, airsync::SERVER_ID)?.to_owned();
+    Some(ItemOperationsFetchRequest {
+        store,
+        collection_id,
+        server_id,
+    })
 }
 
 pub fn find_text_after(document: &Document, token: Token) -> Option<&str> {

@@ -340,6 +340,58 @@ impl JmapClient {
         Ok(Vec::new())
     }
 
+    /// Fetches a single Email by its JMAP id (mail ServerId is the raw
+    /// JMAP Email id, unlike Notes' separate stable-id scheme). Used by
+    /// ItemOperations/Fetch -- the request iOS sends when a user opens a
+    /// message from the Sync list, even though the full body was already
+    /// included inline in that Sync response.
+    pub async fn get_email_by_id(
+        &self,
+        auth: &AuthenticatedSession,
+        email_id: &str,
+    ) -> anyhow::Result<Option<Email>> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            return Ok(None);
+        };
+
+        let calls = vec![MethodCall::new(
+            "Email/get",
+            serde_json::json!({
+                "accountId": account_id,
+                "ids": [email_id],
+                "properties": [
+                    "id", "mailboxIds", "keywords", "receivedAt", "subject",
+                    "from", "to", "cc", "textBody", "htmlBody", "bodyValues"
+                ],
+                "fetchAllBodyValues": true,
+                "maxBodyValueBytes": 65536
+            }),
+            "g",
+        )];
+
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                calls,
+            )
+            .await?;
+
+        for method in response.method_responses {
+            match method.0.as_str() {
+                "Email/get" => {
+                    let get: GetResponse<EmailObject> =
+                        serde_json::from_value(method.1).context("invalid Email/get response")?;
+                    return Ok(get.list.into_iter().next().map(Email::from));
+                }
+                "error" => anyhow::bail!("JMAP method error in email fetch"),
+                _ => {}
+            }
+        }
+
+        Ok(None)
+    }
+
     pub async fn set_email_seen(
         &self,
         auth: &AuthenticatedSession,

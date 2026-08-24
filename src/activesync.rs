@@ -108,6 +108,9 @@ pub async fn post_handler(
                 if command.eq_ignore_ascii_case("Ping") {
                     return ping(&state, &document, command).await;
                 }
+                if command.eq_ignore_ascii_case("ItemOperations") {
+                    return item_operations(&state, &auth, &document, command).await;
+                }
             }
             Err(error) => {
                 state
@@ -160,6 +163,96 @@ async fn ping(state: &AppState, document: &wbxml::Document, command: &str) -> Re
     builder.start(ping::PING);
     builder.leaf(ping::STATUS, "1");
     builder.end();
+
+    let body = wbxml::encode_document(&builder.finish());
+    state
+        .metrics
+        .eas_requests_total
+        .with_label_values(&[command, "200"])
+        .inc();
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/vnd.ms-sync.wbxml")],
+        body,
+    )
+        .into_response()
+}
+
+/// Handles `ItemOperations > Fetch` addressed the "Mailbox Store" way
+/// (Store/CollectionId/ServerId) -- what iOS sends when a user opens a
+/// message from a prior Sync result. This command was entirely
+/// unimplemented (fell through to the generic 501 in `post_handler`)
+/// until now, which iOS reads as "keep waiting" rather than an error --
+/// confirmed live as an infinite spinner with no body shown when opening
+/// any message, even though the full body was already delivered inline
+/// in the original Sync response.
+async fn item_operations(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    document: &wbxml::Document,
+    command: &str,
+) -> Response {
+    use wbxml::eas::{airsync as air, item_operations as ops};
+
+    let Some(fetch) = wbxml::eas::item_operations_fetch(document) else {
+        state
+            .metrics
+            .eas_requests_total
+            .with_label_values(&[command, "400"])
+            .inc();
+        return (
+            StatusCode::BAD_REQUEST,
+            "ItemOperations Fetch missing Store/CollectionId/ServerId\n",
+        )
+            .into_response();
+    };
+
+    let mut builder = wbxml::eas::DocumentBuilder::new();
+    builder.start(ops::ITEM_OPERATIONS);
+    builder.leaf(ops::STATUS, "1");
+    builder.start(ops::RESPONSE);
+    builder.start(ops::FETCH);
+
+    if !fetch.store.eq_ignore_ascii_case("Mailbox") {
+        // Only mail items are fetchable this way today (no Notes/Contacts/
+        // Calendar item fetch, no DocumentLibrary store). Fail this one
+        // Fetch cleanly rather than hang or 400 the whole request.
+        builder.leaf(ops::STATUS, "2");
+        builder.end();
+        builder.end();
+        builder.end();
+    } else {
+        match state.jmap.get_email_by_id(auth, &fetch.server_id).await {
+            Ok(Some(email)) => {
+                builder.leaf(ops::STATUS, "1");
+                builder.leaf(air::COLLECTION_ID, fetch.collection_id);
+                builder.leaf(air::SERVER_ID, fetch.server_id.clone());
+                builder.start(ops::PROPERTIES);
+                write_email_fields(&mut builder, &fetch.server_id, email);
+                builder.end();
+                builder.end();
+                builder.end();
+                builder.end();
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    server_id = fetch.server_id.as_str(),
+                    "ItemOperations Fetch: email not found"
+                );
+                builder.leaf(ops::STATUS, "8");
+                builder.end();
+                builder.end();
+                builder.end();
+            }
+            Err(error) => {
+                tracing::warn!(%error, server_id = fetch.server_id.as_str(), "ItemOperations Fetch failed");
+                builder.leaf(ops::STATUS, "3");
+                builder.end();
+                builder.end();
+                builder.end();
+            }
+        }
+    }
 
     let body = wbxml::encode_document(&builder.finish());
     state
@@ -706,12 +799,29 @@ async fn apply_mail_client_commands(
 }
 
 fn write_email_add(builder: &mut wbxml::eas::DocumentBuilder, email: crate::model::Email) {
-    use wbxml::eas::{airsync as air, airsync_base as base, email as mail};
+    use wbxml::eas::airsync as air;
 
     let email_id = email.id.clone();
     builder.start(air::ADD);
-    builder.leaf(air::SERVER_ID, email.id);
+    builder.leaf(air::SERVER_ID, email.id.clone());
     builder.start(air::APPLICATION_DATA);
+    write_email_fields(builder, &email_id, email);
+    builder.end();
+    builder.end();
+}
+
+/// Writes the Email-class field set (Subject, DateReceived, From/To/Cc,
+/// Importance, Read, Body/NativeBodyType) into whatever container the
+/// caller already opened -- ApplicationData for a Sync Add, Properties for
+/// an ItemOperations Fetch response. Shared so the two response shapes
+/// can't drift out of sync with each other.
+fn write_email_fields(
+    builder: &mut wbxml::eas::DocumentBuilder,
+    email_id: &str,
+    email: crate::model::Email,
+) {
+    use wbxml::eas::{airsync_base as base, email as mail};
+
     builder.leaf(mail::MESSAGE_CLASS, "IPM.Note");
     builder.leaf(mail::SUBJECT, email.subject);
     if let Some(received_at) = email.received_at {
@@ -722,7 +832,7 @@ fn write_email_add(builder: &mut wbxml::eas::DocumentBuilder, email: crate::mode
         // "timestamps are off" on every synced message.
         let formatted = eas_datetime(&received_at);
         tracing::debug!(
-            server_id = email_id.as_str(),
+            server_id = email_id,
             raw_received_at = received_at.as_str(),
             formatted_date_received = formatted.as_str(),
             "email date summary"
@@ -730,7 +840,7 @@ fn write_email_add(builder: &mut wbxml::eas::DocumentBuilder, email: crate::mode
         builder.leaf(mail::DATE_RECEIVED, formatted);
     } else {
         tracing::debug!(
-            server_id = email_id.as_str(),
+            server_id = email_id,
             "email has no receivedAt -- DateReceived omitted entirely"
         );
     }
@@ -750,7 +860,7 @@ fn write_email_add(builder: &mut wbxml::eas::DocumentBuilder, email: crate::mode
     // mail bodies): lets a body-not-rendering report be diagnosed without
     // needing to inspect an account's real mail.
     tracing::debug!(
-        server_id = email_id.as_str(),
+        server_id = email_id,
         has_body = email.body.is_some(),
         body_type = email.body.as_ref().map(|b| b.body_type.eas_value()),
         body_len = email.body.as_ref().map(|b| b.value.len()),
@@ -765,8 +875,6 @@ fn write_email_add(builder: &mut wbxml::eas::DocumentBuilder, email: crate::mode
         builder.end();
         builder.leaf(base::NATIVE_BODY_TYPE, body.body_type.eas_value());
     }
-    builder.end();
-    builder.end();
 }
 
 /// Handles one Notes collection's Sync round-trip end to end: applies any
