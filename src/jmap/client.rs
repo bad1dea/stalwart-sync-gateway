@@ -13,7 +13,8 @@ use crate::{
         session::JmapSession,
     },
     model::{
-        eas_folder_type, Collection, CollectionKind, Contact, Email, EmailBody, EmailBodyType,
+        eas_folder_type, CalendarEvent, Collection, CollectionKind, Contact, Email, EmailBody,
+        EmailBodyType,
     },
 };
 
@@ -411,6 +412,75 @@ impl JmapClient {
                     return Ok(get.list.into_iter().map(Contact::from).collect());
                 }
                 "error" => anyhow::bail!("JMAP method error in contact sync"),
+                _ => {}
+            }
+        }
+
+        Ok(Vec::new())
+    }
+
+    /// Lists events in a JSCalendar (RFC 8984) calendar, mirroring the
+    /// list-and-diff read pattern mail/contacts use. `start`/`timeZone`/
+    /// `duration` are converted to UTC EAS DateTimes here (not left for
+    /// the WBXML writer) so the conversion has one call site to get
+    /// right -- see `local_to_utc_eas`/`parse_iso8601_duration_seconds`.
+    pub async fn calendar_events_in_calendar(
+        &self,
+        auth: &AuthenticatedSession,
+        calendar_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<CalendarEvent>> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::CALENDARS) else {
+            return Ok(Vec::new());
+        };
+
+        let calls = vec![
+            MethodCall::new(
+                "CalendarEvent/query",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "filter": { "inCalendar": calendar_id },
+                    "limit": limit.clamp(1, 200)
+                }),
+                "q",
+            ),
+            MethodCall::new(
+                "CalendarEvent/get",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "#ids": {
+                        "resultOf": "q",
+                        "name": "CalendarEvent/query",
+                        "path": "/ids"
+                    },
+                    "properties": [
+                        "id", "title", "start", "timeZone", "duration",
+                        "locations", "showWithoutTime"
+                    ]
+                }),
+                "g",
+            ),
+        ];
+
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CALENDARS.to_owned(),
+                ],
+                calls,
+            )
+            .await?;
+
+        for method in response.method_responses {
+            match method.0.as_str() {
+                "CalendarEvent/get" => {
+                    let get: GetResponse<CalendarEventObject> = serde_json::from_value(method.1)
+                        .context("invalid CalendarEvent/get response")?;
+                    return Ok(get.list.into_iter().map(CalendarEvent::from).collect());
+                }
+                "error" => anyhow::bail!("JMAP method error in calendar sync"),
                 _ => {}
             }
         }
@@ -1229,6 +1299,127 @@ impl From<ContactCardObject> for Contact {
     }
 }
 
+/// JSCalendar (RFC 8984) event shape, as returned by Stalwart's
+/// `CalendarEvent/get` -- confirmed live against a real created event.
+/// `start` is LOCAL (no offset); `timeZone` (an IANA name, or absent for
+/// a floating/already-UTC time) says what it's local TO. Converting that
+/// pair to a real UTC instant needs the IANA tz database, hence the
+/// `chrono-tz` dependency -- getting this wrong silently shows every
+/// event at the wrong time, the same class of bug the mail DateReceived
+/// fix this session spent a long time chasing down.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CalendarEventObject {
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    start: Option<String>,
+    #[serde(default)]
+    time_zone: Option<String>,
+    #[serde(default)]
+    duration: Option<String>,
+    #[serde(default)]
+    locations: BTreeMap<String, CalendarEventLocation>,
+    #[serde(default)]
+    show_without_time: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CalendarEventLocation {
+    name: Option<String>,
+}
+
+impl From<CalendarEventObject> for CalendarEvent {
+    fn from(value: CalendarEventObject) -> Self {
+        let start_utc = value
+            .start
+            .as_deref()
+            .and_then(|start| local_to_utc_eas(start, value.time_zone.as_deref()));
+        let end_utc = match (&start_utc, value.start.as_deref(), &value.duration) {
+            (Some(_), Some(start), Some(duration)) => parse_iso8601_duration_seconds(duration)
+                .and_then(|seconds| {
+                    let naive = chrono::NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S")
+                        .ok()?
+                        + chrono::Duration::seconds(seconds);
+                    local_to_utc_eas(
+                        &naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                        value.time_zone.as_deref(),
+                    )
+                }),
+            _ => None,
+        };
+        let location = value
+            .locations
+            .into_values()
+            .find_map(|location| location.name);
+        Self {
+            id: value.id,
+            calendar_ids: Vec::new(),
+            title: value.title,
+            location,
+            start_utc,
+            end_utc,
+            all_day: value.show_without_time,
+        }
+    }
+}
+
+/// Converts a JSCalendar LocalDateTime (`2026-08-25T14:00:00`, no offset)
+/// plus its IANA `timeZone` (`"America/Toronto"`) into a UTC instant,
+/// formatted as compact EAS DateTime. A missing/unparseable timeZone is
+/// treated as already-UTC (JSCalendar's own convention for a floating/
+/// UTC time), not silently dropped to a wrong instant.
+fn local_to_utc_eas(local_iso: &str, timezone: Option<&str>) -> Option<String> {
+    use chrono::TimeZone;
+
+    let naive = chrono::NaiveDateTime::parse_from_str(local_iso, "%Y-%m-%dT%H:%M:%S").ok()?;
+    let utc: chrono::DateTime<chrono::Utc> =
+        match timezone.and_then(|tz| tz.parse::<chrono_tz::Tz>().ok()) {
+            Some(tz) => {
+                let local = tz
+                    .from_local_datetime(&naive)
+                    .single()
+                    .or_else(|| tz.from_local_datetime(&naive).earliest())?;
+                local.with_timezone(&chrono::Utc)
+            }
+            None => chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc),
+        };
+    Some(utc.format("%Y%m%dT%H%M%SZ").to_string())
+}
+
+/// Minimal ISO 8601 duration parser covering the shapes JSCalendar event
+/// durations actually use (`PT1H`, `PT30M`, `P1D`, `PT1H30M`) -- days plus
+/// hours/minutes/seconds. Deliberately doesn't handle weeks/months/years
+/// (ambiguous without an anchor date, and not something a calendar event
+/// duration would realistically use).
+fn parse_iso8601_duration_seconds(duration: &str) -> Option<i64> {
+    let rest = duration.strip_prefix('P')?;
+    let (date_part, time_part) = match rest.split_once('T') {
+        Some((date, time)) => (date, Some(time)),
+        None => (rest, None),
+    };
+
+    let mut seconds: i64 = 0;
+    if !date_part.is_empty() {
+        seconds += date_part.strip_suffix('D')?.parse::<i64>().ok()? * 86400;
+    }
+    if let Some(mut time_part) = time_part {
+        if let Some(idx) = time_part.find('H') {
+            seconds += time_part[..idx].parse::<i64>().ok()? * 3600;
+            time_part = &time_part[idx + 1..];
+        }
+        if let Some(idx) = time_part.find('M') {
+            seconds += time_part[..idx].parse::<i64>().ok()? * 60;
+            time_part = &time_part[idx + 1..];
+        }
+        if let Some(idx) = time_part.find('S') {
+            seconds += time_part[..idx].parse::<i64>().ok()?;
+        }
+    }
+    Some(seconds)
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MailboxObject {
@@ -1307,5 +1498,73 @@ impl From<CalendarObject> for Collection {
                 eas_folder_type::USER_APPOINTMENT
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{local_to_utc_eas, parse_iso8601_duration_seconds};
+
+    #[test]
+    fn duration_parses_hours_only() {
+        assert_eq!(parse_iso8601_duration_seconds("PT1H"), Some(3600));
+    }
+
+    #[test]
+    fn duration_parses_hours_and_minutes() {
+        assert_eq!(parse_iso8601_duration_seconds("PT1H30M"), Some(5400));
+    }
+
+    #[test]
+    fn duration_parses_days_only() {
+        assert_eq!(parse_iso8601_duration_seconds("P1D"), Some(86400));
+    }
+
+    #[test]
+    fn duration_parses_minutes_only() {
+        assert_eq!(parse_iso8601_duration_seconds("PT30M"), Some(1800));
+    }
+
+    #[test]
+    fn duration_rejects_garbage() {
+        assert_eq!(parse_iso8601_duration_seconds("not a duration"), None);
+    }
+
+    #[test]
+    fn local_to_utc_converts_named_timezone() {
+        // 2026-08-25 is EDT (UTC-4), not EST -- 14:00 America/Toronto is
+        // 18:00 UTC. Picking a summer date deliberately, to catch a
+        // fixed-offset-instead-of-real-tz-database bug (which would give
+        // the same wrong answer year-round instead of only in winter).
+        assert_eq!(
+            local_to_utc_eas("2026-08-25T14:00:00", Some("America/Toronto")),
+            Some("20260825T180000Z".to_owned())
+        );
+    }
+
+    #[test]
+    fn local_to_utc_converts_winter_dst_correctly() {
+        // 2026-01-15 is EST (UTC-5) -- confirms this isn't just adding a
+        // fixed 4-hour offset year-round.
+        assert_eq!(
+            local_to_utc_eas("2026-01-15T09:00:00", Some("America/Toronto")),
+            Some("20260115T140000Z".to_owned())
+        );
+    }
+
+    #[test]
+    fn local_to_utc_treats_missing_timezone_as_already_utc() {
+        assert_eq!(
+            local_to_utc_eas("2026-08-25T14:00:00", None),
+            Some("20260825T140000Z".to_owned())
+        );
+    }
+
+    #[test]
+    fn local_to_utc_rejects_unparseable_timestamp() {
+        assert_eq!(
+            local_to_utc_eas("not a date", Some("America/Toronto")),
+            None
+        );
     }
 }

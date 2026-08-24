@@ -55,6 +55,36 @@ pub mod contacts {
     }
 }
 
+/// MS-ASWBXML codepage 4 (Calendar). Numbering reconstructed from memory
+/// at lower confidence than the other codepages added this session (no
+/// second source to cross-check against, unlike Notes/ItemOperations/
+/// Settings/ComposeMail which were verified against Z-Push's own
+/// wbxmldefs or a live device trace) -- flag this file first if a real
+/// calendar event doesn't render correctly on a real device.
+pub mod calendar {
+    use super::Token;
+
+    pub const PAGE: u8 = 4;
+    pub const ALL_DAY_EVENT: Token = tag(0x06, false);
+    pub const BUSY_STATUS: Token = tag(0x0d, false);
+    pub const DTSTAMP: Token = tag(0x11, false);
+    pub const END_TIME: Token = tag(0x12, false);
+    pub const LOCATION: Token = tag(0x17, false);
+    pub const SENSITIVITY: Token = tag(0x25, false);
+    pub const SUBJECT: Token = tag(0x26, false);
+    pub const START_TIME: Token = tag(0x27, false);
+    pub const UID: Token = tag(0x28, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
 pub mod airsync {
     use super::Token;
 

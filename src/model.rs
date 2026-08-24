@@ -89,13 +89,18 @@ pub struct Contact {
     pub job_title: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CalendarEvent {
     pub id: String,
     pub calendar_ids: Vec<String>,
     pub title: String,
-    pub start: Option<String>,
-    pub duration: Option<String>,
+    pub location: Option<String>,
+    /// UTC, compact EAS DateTime form (already converted from JSCalendar's
+    /// local `start` + `timeZone` -- see jmap::client's
+    /// `local_to_utc_eas`). None if `start` was missing or unparseable.
+    pub start_utc: Option<String>,
+    pub end_utc: Option<String>,
+    pub all_day: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

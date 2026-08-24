@@ -688,6 +688,20 @@ async fn sync_mail(
             continue;
         }
 
+        if collection.collection_id.starts_with("cal_") {
+            sync_calendar_collection(
+                state,
+                auth,
+                &mut builder,
+                user,
+                device_id,
+                &collection,
+                previous_record.as_ref(),
+            )
+            .await;
+            continue;
+        }
+
         let is_mail_collection = !collection.collection_id.starts_with("ab_")
             && !collection.collection_id.starts_with("cal_")
             && !collection.collection_id.starts_with("note_");
@@ -1301,6 +1315,182 @@ fn write_contact_add(builder: &mut wbxml::eas::DocumentBuilder, contact: crate::
     if let Some(title) = contact.job_title {
         builder.leaf(c::JOB_TITLE, title);
     }
+    builder.end();
+    builder.end();
+}
+
+/// Handles one Calendar collection's Sync round-trip: read-only list-and-
+/// diff against previously-seen JMAP ids, same shape as
+/// sync_contacts_collection. No recurrence, attendee, or reminder
+/// support -- single (non-recurring) events only, matching the fields
+/// the PHP z-push reference itself fetched (`id, title, start, duration,
+/// updated`). Start/end times are converted from JSCalendar local-time-
+/// plus-IANA-timezone to real UTC instants in the JMAP client
+/// (`local_to_utc_eas`) -- see that function's docs for why this needed
+/// a new dependency rather than a naive/wrong conversion.
+async fn sync_calendar_collection(
+    state: &AppState,
+    auth: &AuthenticatedSession,
+    builder: &mut wbxml::eas::DocumentBuilder,
+    user: &str,
+    device_id: &str,
+    collection: &wbxml::eas::SyncCollectionRequest,
+    previous_record: Option<&SyncRecord>,
+) {
+    use wbxml::eas::airsync as air;
+
+    let calendar_id = collection
+        .collection_id
+        .strip_prefix("cal_")
+        .unwrap_or(&collection.collection_id);
+
+    if !collection.get_changes {
+        let is_first_sync = collection.sync_key == "0";
+        let new_sync_key = if is_first_sync {
+            next_sync_key(&collection.sync_key)
+        } else {
+            collection.sync_key.clone()
+        };
+        if is_first_sync {
+            if let Err(error) = state
+                .state
+                .put(SyncRecord {
+                    user: user.to_owned(),
+                    device_id: device_id.to_owned(),
+                    collection_id: collection.collection_id.clone(),
+                    sync_key: new_sync_key.clone(),
+                    jmap_state: String::new(),
+                    seen_ids: Vec::new(),
+                })
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    user,
+                    device_id,
+                    collection = collection.collection_id,
+                    "failed to persist Sync state"
+                );
+                builder.start(air::COLLECTION);
+                builder.leaf(air::SYNC_KEY, collection.sync_key.clone());
+                builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+                builder.leaf(air::STATUS, "5");
+                builder.end();
+                return;
+            }
+        }
+        builder.start(air::COLLECTION);
+        builder.leaf(air::SYNC_KEY, new_sync_key);
+        builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+        builder.leaf(air::STATUS, "1");
+        builder.end();
+        return;
+    }
+
+    let events = match state
+        .jmap
+        .calendar_events_in_calendar(auth, calendar_id, collection.window_size)
+        .await
+    {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                collection = collection.collection_id,
+                "Sync calendar discovery failed"
+            );
+            builder.start(air::COLLECTION);
+            builder.leaf(air::SYNC_KEY, collection.sync_key.clone());
+            builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+            builder.leaf(air::STATUS, "5");
+            builder.end();
+            return;
+        }
+    };
+
+    let previous_seen: BTreeSet<String> = previous_record
+        .map(|record| record.seen_ids.iter().cloned().collect())
+        .unwrap_or_default();
+    let fetched_ids: BTreeSet<String> = events.iter().map(|event| event.id.clone()).collect();
+    let events_to_send: Vec<_> = if collection.sync_key == "0" {
+        events
+    } else {
+        events
+            .into_iter()
+            .filter(|event| !previous_seen.contains(&event.id))
+            .collect()
+    };
+    let new_sync_key = if collection.sync_key == "0" || !events_to_send.is_empty() {
+        next_sync_key(&collection.sync_key)
+    } else {
+        collection.sync_key.clone()
+    };
+
+    if let Err(error) = state
+        .state
+        .put(SyncRecord {
+            user: user.to_owned(),
+            device_id: device_id.to_owned(),
+            collection_id: collection.collection_id.clone(),
+            sync_key: new_sync_key.clone(),
+            jmap_state: String::new(),
+            seen_ids: previous_seen.union(&fetched_ids).cloned().collect(),
+        })
+        .await
+    {
+        tracing::warn!(
+            %error,
+            user,
+            device_id,
+            collection = collection.collection_id,
+            "failed to persist Sync state"
+        );
+        builder.start(air::COLLECTION);
+        builder.leaf(air::SYNC_KEY, collection.sync_key.clone());
+        builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+        builder.leaf(air::STATUS, "5");
+        builder.end();
+        return;
+    }
+
+    builder.start(air::COLLECTION);
+    builder.leaf(air::SYNC_KEY, new_sync_key);
+    builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+    builder.leaf(air::STATUS, "1");
+    if !events_to_send.is_empty() {
+        builder.start(air::COMMANDS);
+        for event in events_to_send {
+            write_calendar_add(builder, event);
+        }
+        builder.end();
+    }
+    builder.end();
+}
+
+fn write_calendar_add(
+    builder: &mut wbxml::eas::DocumentBuilder,
+    event: crate::model::CalendarEvent,
+) {
+    use wbxml::eas::{airsync as air, calendar as cal};
+
+    builder.start(air::ADD);
+    builder.leaf(air::SERVER_ID, event.id);
+    builder.start(air::APPLICATION_DATA);
+    builder.leaf(cal::SUBJECT, event.title);
+    if let Some(start) = event.start_utc {
+        builder.leaf(cal::START_TIME, start);
+    }
+    if let Some(end) = event.end_utc {
+        builder.leaf(cal::END_TIME, end);
+    }
+    if let Some(location) = event.location {
+        builder.leaf(cal::LOCATION, location);
+    }
+    builder.leaf(cal::ALL_DAY_EVENT, if event.all_day { "1" } else { "0" });
+    builder.leaf(
+        cal::DTSTAMP,
+        eas_datetime(&chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+    );
     builder.end();
     builder.end();
 }
