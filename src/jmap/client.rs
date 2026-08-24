@@ -323,7 +323,7 @@ impl JmapClient {
                     },
                     "properties": [
                         "id", "mailboxIds", "keywords", "receivedAt", "subject",
-                        "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments", "threadId"
+                        "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments"
                     ],
                     "fetchAllBodyValues": true,
                     "maxBodyValueBytes": 65536
@@ -509,7 +509,7 @@ impl JmapClient {
                 "ids": [email_id],
                 "properties": [
                     "id", "mailboxIds", "keywords", "receivedAt", "subject",
-                    "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments", "threadId"
+                    "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments"
                 ],
                 "fetchAllBodyValues": true,
                 "maxBodyValueBytes": 65536
@@ -1026,8 +1026,6 @@ pub(crate) struct GetResponse<T> {
 struct EmailObject {
     id: String,
     #[serde(default)]
-    thread_id: Option<String>,
-    #[serde(default)]
     mailbox_ids: BTreeMap<String, bool>,
     #[serde(default)]
     keywords: BTreeMap<String, bool>,
@@ -1105,7 +1103,6 @@ impl From<EmailObject> for Email {
             .collect();
         Self {
             id: value.id,
-            thread_id: value.thread_id,
             mailbox_ids: value
                 .mailbox_ids
                 .into_iter()

@@ -42,7 +42,6 @@ pub mod eas_folder_type {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Email {
     pub id: String,
-    pub thread_id: Option<String>,
     pub mailbox_ids: Vec<String>,
     pub subject: String,
     pub received_at: Option<String>,

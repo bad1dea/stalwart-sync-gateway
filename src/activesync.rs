@@ -1114,16 +1114,10 @@ fn write_email_fields(
     email_id: &str,
     email: crate::model::Email,
 ) {
-    use wbxml::eas::{airsync_base as base, email as mail, email2};
+    use wbxml::eas::{airsync_base as base, email as mail};
 
     builder.leaf(mail::MESSAGE_CLASS, "IPM.Note");
     builder.leaf(mail::SUBJECT, email.subject);
-    if let Some(thread_id) = &email.thread_id {
-        // Opaque per spec -- the client doesn't interpret the bytes, it
-        // just needs the same value across messages in the same
-        // conversation, which JMAP's own threadId already guarantees.
-        builder.opaque_leaf(email2::CONVERSATION_ID, thread_id.clone().into_bytes());
-    }
     if let Some(received_at) = email.received_at {
         // JMAP receivedAt is ISO 8601 ("2026-08-24T02:05:00Z"); MS-ASEMAIL
         // DateReceived requires the compact EAS form (no dashes/colons).

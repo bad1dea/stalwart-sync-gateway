@@ -171,31 +171,6 @@ pub mod email {
     }
 }
 
-/// MS-ASWBXML codepage 22 ("Email2") -- ConversationId lives here, not in
-/// the main Email codepage (2). iOS Mail's list view relies on this for
-/// its conversation/threading engine; never sending it at all is a
-/// plausible cause of list-row display glitches (wrong/uniform dates,
-/// specifically) independent of DateReceived itself being correct on the
-/// wire -- confirmed live that DateReceived IS correct, repeatedly, while
-/// the list view still showed every message at "now". Sourced from JMAP's
-/// native `Email/threadId`, which is exactly the right source of truth:
-/// same JMAP thread = should be the same EAS conversation.
-pub mod email2 {
-    use super::Token;
-
-    pub const PAGE: u8 = 22;
-    pub const CONVERSATION_ID: Token = tag(0x0a, false);
-
-    pub const fn tag(token: u8, has_content: bool) -> Token {
-        Token {
-            code_page: PAGE,
-            token,
-            has_content,
-            has_attributes: false,
-        }
-    }
-}
-
 pub mod airsync_base {
     use super::Token;
 
@@ -820,17 +795,6 @@ impl DocumentBuilder {
         token.has_content = true;
         self.nodes.push(Node::Start(token));
         self.nodes.push(Node::Text(text.into()));
-        self.nodes.push(Node::End);
-    }
-
-    /// A leaf whose content is raw binary (WBXML opaque data), not text --
-    /// e.g. `Email2:ConversationId`, which EAS spec defines as opaque
-    /// bytes, not a string.
-    pub fn opaque_leaf(&mut self, token: Token, data: impl Into<bytes::Bytes>) {
-        let mut token = token;
-        token.has_content = true;
-        self.nodes.push(Node::Start(token));
-        self.nodes.push(Node::Opaque(data.into()));
         self.nodes.push(Node::End);
     }
 
