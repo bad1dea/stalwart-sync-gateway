@@ -1222,13 +1222,48 @@ fn plain_text_preview(body: &crate::model::EmailBody) -> String {
 fn strip_html_tags(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
+    // <style>/<script> element CONTENT isn't tag markup, so the naive
+    // char-by-char stripper below left it completely intact -- for an
+    // HTML email whose <head> opens with a <style> block, that raw CSS
+    // was the first "text" in the document and became the preview
+    // (confirmed live: a message's list-row preview was literal
+    // "@import url(...) :root { color-scheme: ... }"). Skip both
+    // elements' content, not just their tags.
+    // Char-based (not byte-sliced) lookahead/match so a multi-byte char
+    // anywhere near a tag can never land a slice off a char boundary.
+    fn starts_with_ci(chars: &[char], needle: &str) -> bool {
+        chars.len() >= needle.chars().count()
+            && chars
+                .iter()
+                .zip(needle.chars())
+                .all(|(a, b)| a.eq_ignore_ascii_case(&b))
+    }
+
+    let chars: Vec<char> = html.chars().collect();
+    let mut skip_until: Option<&'static str> = None;
+    let mut i = 0usize;
+    while i < chars.len() {
+        if let Some(closer) = skip_until {
+            if starts_with_ci(&chars[i..], closer) {
+                skip_until = None;
+            }
+            i += 1;
+            continue;
         }
+        let ch = chars[i];
+        if ch == '<' {
+            if starts_with_ci(&chars[i + 1..], "style") {
+                skip_until = Some("</style>");
+            } else if starts_with_ci(&chars[i + 1..], "script") {
+                skip_until = Some("</script>");
+            }
+            in_tag = true;
+        } else if ch == '>' {
+            in_tag = false;
+        } else if !in_tag {
+            out.push(ch);
+        }
+        i += 1;
     }
     out
 }
@@ -2073,5 +2108,19 @@ mod tests {
             value: "Hello  world".to_owned(),
         };
         assert_eq!(plain_text_preview(&body), "Hello world");
+    }
+
+    #[test]
+    fn plain_text_preview_skips_style_and_script_content() {
+        // Real bug, confirmed live: a <head><style> block's CSS is not
+        // tag markup, so a naive "strip anything between < and >"
+        // stripper left it completely intact -- and since it's the
+        // first text in the document, it became the entire preview
+        // (e.g. "@import url(...) :root { color-scheme: ... }").
+        let body = EmailBody {
+            body_type: EmailBodyType::Html,
+            value: "<html><head><style>@import url(\"https://example.com/x.css\"); :root { color-scheme: light dark; }</style><script>track();</script></head><body><p>Invoice attached, thanks!</p></body></html>".to_owned(),
+        };
+        assert_eq!(plain_text_preview(&body), "Invoice attached, thanks!");
     }
 }
