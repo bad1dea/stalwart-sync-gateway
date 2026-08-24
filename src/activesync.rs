@@ -601,6 +601,11 @@ async fn sync_mail(
         } else {
             false
         };
+        let fetch_responses = if is_mail_collection && !collection.commands.is_empty() {
+            resolve_fetch_commands(state, auth, &collection.commands).await
+        } else {
+            Vec::new()
+        };
 
         if collection.get_changes && is_mail_collection {
             let emails = match state
@@ -678,6 +683,7 @@ async fn sync_mail(
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "1");
+            write_fetch_responses(&mut builder, fetch_responses);
 
             if !emails_to_send.is_empty() {
                 builder.start(air::COMMANDS);
@@ -741,6 +747,7 @@ async fn sync_mail(
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "1");
+            write_fetch_responses(&mut builder, fetch_responses);
         }
 
         builder.end();
@@ -785,7 +792,7 @@ async fn apply_mail_client_commands(
                 state.jmap.destroy_email(auth, &command.server_id).await?;
                 applied = true;
             }
-            wbxml::eas::SyncClientCommandKind::Add | wbxml::eas::SyncClientCommandKind::Fetch => {
+            wbxml::eas::SyncClientCommandKind::Add => {
                 tracing::debug!(
                     collection = collection_id,
                     server_id = command.server_id,
@@ -793,9 +800,78 @@ async fn apply_mail_client_commands(
                     "ignoring unsupported mail Sync client command"
                 );
             }
+            // Handled separately by resolve_fetch_commands/write_fetch_responses
+            // -- a Fetch is a request for item details, not a mutation, so it
+            // doesn't belong in "did anything change" bookkeeping.
+            wbxml::eas::SyncClientCommandKind::Fetch => {}
         }
     }
     Ok(applied)
+}
+
+/// Resolves each Sync-embedded `<Fetch>` command (inside `<Commands>`,
+/// distinct from the separate ItemOperations command) to its full email.
+/// This is the mechanism iOS actually uses to fetch a message's full body
+/// when a user opens it, at least on some protocol versions/iOS builds --
+/// confirmed live: it never calls ItemOperations at all, sends this
+/// instead, one per opened message. Previously entirely ignored (logged
+/// and dropped), so opening any email hung forever waiting for a
+/// `<Responses><Fetch>` that never came, even though ItemOperations
+/// (implemented earlier the same session, for the mechanism iOS turned
+/// out not to actually use here) worked fine in isolation.
+async fn resolve_fetch_commands(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    commands: &[wbxml::eas::SyncClientCommand],
+) -> Vec<(String, anyhow::Result<Option<crate::model::Email>>)> {
+    let mut results = Vec::new();
+    for command in commands {
+        if command.kind == wbxml::eas::SyncClientCommandKind::Fetch {
+            let result = state.jmap.get_email_by_id(auth, &command.server_id).await;
+            results.push((command.server_id.clone(), result));
+        }
+    }
+    results
+}
+
+/// Writes the `<Responses>` block answering any Sync-embedded Fetch
+/// commands, reusing the same field writer as a normal Add so the two
+/// can't drift.
+fn write_fetch_responses(
+    builder: &mut wbxml::eas::DocumentBuilder,
+    results: Vec<(String, anyhow::Result<Option<crate::model::Email>>)>,
+) {
+    use wbxml::eas::airsync as air;
+
+    if results.is_empty() {
+        return;
+    }
+    builder.start(air::RESPONSES);
+    for (server_id, result) in results {
+        builder.start(air::FETCH);
+        builder.leaf(air::SERVER_ID, server_id.clone());
+        match result {
+            Ok(Some(email)) => {
+                builder.leaf(air::STATUS, "1");
+                builder.start(air::APPLICATION_DATA);
+                write_email_fields(builder, &server_id, email);
+                builder.end();
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    server_id = server_id.as_str(),
+                    "Sync Fetch: email not found"
+                );
+                builder.leaf(air::STATUS, "8");
+            }
+            Err(error) => {
+                tracing::warn!(%error, server_id = server_id.as_str(), "Sync Fetch failed");
+                builder.leaf(air::STATUS, "3");
+            }
+        }
+        builder.end();
+    }
+    builder.end();
 }
 
 fn write_email_add(builder: &mut wbxml::eas::DocumentBuilder, email: crate::model::Email) {
