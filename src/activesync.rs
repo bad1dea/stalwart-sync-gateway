@@ -375,6 +375,16 @@ async fn sync_mail(
     command: &str,
 ) -> Response {
     let collections = wbxml::eas::sync_collections(document);
+    for c in &collections {
+        tracing::debug!(
+            collection_id = c.collection_id,
+            sync_key = c.sync_key,
+            commands = c.commands.len(),
+            window_size = c.window_size,
+            get_changes = c.get_changes,
+            "parsed Sync collection"
+        );
+    }
     if collections.is_empty() {
         state
             .metrics
@@ -414,6 +424,16 @@ async fn sync_mail(
             || previous_record
                 .as_ref()
                 .is_some_and(|record| record.sync_key == collection.sync_key);
+        tracing::debug!(
+            collection_id = collection.collection_id,
+            client_sync_key = collection.sync_key,
+            stored_sync_key = previous_record
+                .as_ref()
+                .map(|r| r.sync_key.as_str())
+                .unwrap_or("<none>"),
+            sync_key_valid,
+            "Sync key check"
+        );
         if !sync_key_valid {
             builder.start(air::COLLECTION);
             builder.leaf(air::SYNC_KEY, collection.sync_key);
@@ -544,12 +564,23 @@ async fn sync_mail(
                 builder.end();
             }
         } else {
-            let new_sync_key = if client_commands_applied {
+            // Contacts/calendar have no real two-way sync yet (see
+            // CLAUDE.md's Not-Yet-Implemented list) -- this branch is a
+            // stub. But the initial sync_key 0->1 handshake still has to
+            // happen and persist even with zero commands, or the server
+            // echoes sync_key=0 back forever: the client reads that as
+            // "never initialized" and retries immediately in a tight loop,
+            // never settling into its normal Ping cadence. Confirmed live:
+            // a real account's ab_*/cal_* collections hammered Sync every
+            // ~300ms indefinitely with stored_sync_key always "<none>".
+            let is_first_sync = collection.sync_key == "0";
+            let advance = is_first_sync || client_commands_applied;
+            let new_sync_key = if advance {
                 next_sync_key(&collection.sync_key)
             } else {
                 collection.sync_key.clone()
             };
-            if client_commands_applied {
+            if advance {
                 if let Err(error) = state
                     .state
                     .put(SyncRecord {
