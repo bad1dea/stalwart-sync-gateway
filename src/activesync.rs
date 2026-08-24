@@ -678,13 +678,19 @@ async fn apply_mail_client_commands(
 fn write_email_add(builder: &mut wbxml::eas::DocumentBuilder, email: crate::model::Email) {
     use wbxml::eas::{airsync as air, airsync_base as base, email as mail};
 
+    let email_id = email.id.clone();
     builder.start(air::ADD);
     builder.leaf(air::SERVER_ID, email.id);
     builder.start(air::APPLICATION_DATA);
     builder.leaf(mail::MESSAGE_CLASS, "IPM.Note");
     builder.leaf(mail::SUBJECT, email.subject);
     if let Some(received_at) = email.received_at {
-        builder.leaf(mail::DATE_RECEIVED, received_at);
+        // JMAP receivedAt is ISO 8601 ("2026-08-24T02:05:00Z"); MS-ASEMAIL
+        // DateReceived requires the compact EAS form (no dashes/colons).
+        // This was sent raw for a long time -- iOS silently mis-renders (or
+        // ignores) an ISO-formatted DateReceived, which showed up live as
+        // "timestamps are off" on every synced message.
+        builder.leaf(mail::DATE_RECEIVED, eas_datetime(&received_at));
     }
     if !email.from.is_empty() {
         builder.leaf(mail::FROM, email.from);
@@ -698,6 +704,16 @@ fn write_email_add(builder: &mut wbxml::eas::DocumentBuilder, email: crate::mode
     }
     builder.leaf(mail::IMPORTANCE, "1");
     builder.leaf(mail::READ, if email.read { "1" } else { "0" });
+    // Metadata only (no content -- see the project's logging constraint on
+    // mail bodies): lets a body-not-rendering report be diagnosed without
+    // needing to inspect an account's real mail.
+    tracing::debug!(
+        server_id = email_id.as_str(),
+        has_body = email.body.is_some(),
+        body_type = email.body.as_ref().map(|b| b.body_type.eas_value()),
+        body_len = email.body.as_ref().map(|b| b.value.len()),
+        "email body summary"
+    );
     if let Some(body) = email.body {
         builder.start(base::BODY);
         builder.leaf(base::TYPE, body.body_type.eas_value());
@@ -1011,7 +1027,17 @@ fn write_note_command(
 /// confirmed against a live device trace captured against this fork's PHP
 /// predecessor, not assumed.
 fn eas_datetime(jmap_datetime: &str) -> String {
-    jmap_datetime
+    // JMAP UTCDate allows fractional seconds ("...T02:05:00.123Z"); EAS
+    // DateTime has no room for them, so drop any ".NNN" before stripping
+    // the separators, keeping the trailing Z.
+    let trimmed = match jmap_datetime.split_once('.') {
+        Some((prefix, suffix)) if suffix.ends_with(['Z', 'z']) => {
+            format!("{prefix}Z")
+        }
+        Some((prefix, _)) => prefix.to_owned(),
+        None => jmap_datetime.to_owned(),
+    };
+    trimmed
         .chars()
         .filter(|ch| *ch != '-' && *ch != ':')
         .collect()
@@ -1133,4 +1159,19 @@ fn unauthorized() -> Response {
         HeaderValue::from_static("Basic realm=\"Stalwart Sync Gateway\""),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::eas_datetime;
+
+    #[test]
+    fn eas_datetime_strips_dashes_and_colons() {
+        assert_eq!(eas_datetime("2026-08-24T02:05:00Z"), "20260824T020500Z");
+    }
+
+    #[test]
+    fn eas_datetime_drops_fractional_seconds() {
+        assert_eq!(eas_datetime("2026-08-24T02:05:00.123Z"), "20260824T020500Z");
+    }
 }
