@@ -285,6 +285,34 @@ pub mod item_operations {
     }
 }
 
+/// MS-ASWBXML codepage 21 (ComposeMail) -- SendMail/SmartForward/
+/// SmartReply. Numbering per spec, consistent with the pattern already
+/// verified for Settings (18) and ItemOperations (20) in this file.
+pub mod compose_mail {
+    use super::Token;
+
+    pub const PAGE: u8 = 21;
+    pub const SEND_MAIL: Token = tag(0x05, false);
+    pub const SMART_FORWARD: Token = tag(0x06, false);
+    pub const SMART_REPLY: Token = tag(0x07, false);
+    pub const SAVE_IN_SENT_ITEMS: Token = tag(0x08, false);
+    pub const SOURCE: Token = tag(0x0b, false);
+    pub const FOLDER_ID: Token = tag(0x0c, false);
+    pub const ITEM_ID: Token = tag(0x0d, false);
+    pub const MIME: Token = tag(0x10, false);
+    pub const CLIENT_ID: Token = tag(0x11, false);
+    pub const STATUS: Token = tag(0x12, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncCollectionRequest {
     pub sync_key: String,
@@ -365,6 +393,43 @@ pub fn item_operations_fetch(document: &Document) -> Option<ItemOperationsFetchR
         store,
         collection_id,
         server_id,
+    })
+}
+
+/// Finds the raw bytes of an opaque (binary) node immediately following a
+/// Start token -- used for `ComposeMail:Mime`, which carries the raw
+/// RFC822 message as WBXML opaque data rather than a text string.
+pub fn find_opaque_after(document: &Document, token: Token) -> Option<&[u8]> {
+    document.nodes.windows(2).find_map(|pair| match pair {
+        [Node::Start(start), Node::Opaque(bytes)]
+            if start.code_page == token.code_page && start.token == token.token =>
+        {
+            Some(bytes.as_ref())
+        }
+        _ => None,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposeMailRequest {
+    pub mime: Vec<u8>,
+    pub save_in_sent_items: bool,
+    pub source_item_id: Option<String>,
+}
+
+/// Parses a WBXML-wrapped SendMail/SmartForward/SmartReply request. Real
+/// EAS 14.0+ clients more commonly send the MIME as the raw, un-wrapped
+/// POST body instead (see the query-string form handled in
+/// `activesync::send_mail`) -- this covers the WBXML-wrapped form for
+/// completeness/older clients.
+pub fn compose_mail_request(document: &Document) -> Option<ComposeMailRequest> {
+    let mime = find_opaque_after(document, compose_mail::MIME)?.to_vec();
+    let save_in_sent_items = contains_token(document, compose_mail::SAVE_IN_SENT_ITEMS);
+    let source_item_id = find_text_after(document, compose_mail::ITEM_ID).map(str::to_owned);
+    Some(ComposeMailRequest {
+        mime,
+        save_in_sent_items,
+        source_item_id,
     })
 }
 

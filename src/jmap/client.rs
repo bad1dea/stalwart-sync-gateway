@@ -537,6 +537,208 @@ impl JmapClient {
         Ok(parsed.blob_id)
     }
 
+    /// Submits a raw RFC822 MIME message for delivery. Ports the exact
+    /// sequence the PHP z-push fork (`jmap.php::SendMail()`) uses against
+    /// this same Stalwart instance -- confirmed working live there
+    /// (real send/receive test, per [[stalwart-relay-gotchas]]): upload the
+    /// MIME as a blob, `Email/import` it (into Sent Items unless the
+    /// client asked not to keep a copy), then `EmailSubmission/set` with
+    /// `envelope: null` so Stalwart derives the envelope from the message
+    /// headers itself. Also rewrites the `From:` header's display name to
+    /// the account's JMAP Identity name when one exists, same as the PHP
+    /// version -- some senders' MUAs don't set a friendly display name
+    /// themselves, and this account's Identity does have one configured.
+    pub async fn send_email(
+        &self,
+        auth: &AuthenticatedSession,
+        mime: Vec<u8>,
+        save_in_sent_items: bool,
+    ) -> anyhow::Result<()> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            anyhow::bail!("JMAP Mail capability is not available");
+        };
+
+        let (identity_id, identity_name) = self.fetch_primary_identity(auth).await?;
+        if identity_id.is_empty() {
+            anyhow::bail!("account has no JMAP Identity configured -- cannot submit mail");
+        }
+        let mime = if identity_name.is_empty() {
+            mime
+        } else {
+            rewrite_from_header(&mime, &identity_name)
+        };
+
+        let blob_id = self.upload_blob(auth, mime, "message/rfc822").await?;
+        let sent_mailbox_id = if save_in_sent_items {
+            self.find_mailbox_by_role(auth, "sent").await?
+        } else {
+            None
+        };
+        let mailbox_ids = match &sent_mailbox_id {
+            Some(id) => serde_json::json!({ id: true }),
+            None => serde_json::json!({}),
+        };
+
+        let import_response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Email/import",
+                    serde_json::json!({
+                        "accountId": account_id,
+                        "emails": {
+                            "i1": {
+                                "blobId": blob_id,
+                                "mailboxIds": mailbox_ids,
+                                "keywords": {"$seen": true},
+                                "receivedAt": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                            }
+                        }
+                    }),
+                    "im",
+                )],
+            )
+            .await?;
+
+        let mut imported_id = None;
+        for method in import_response.method_responses {
+            if method.0 == "Email/import" {
+                imported_id = method
+                    .1
+                    .get("created")
+                    .and_then(|c| c.get("i1"))
+                    .and_then(|v| v.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                if imported_id.is_none() {
+                    let not_created = method.1.get("notCreated").and_then(|v| v.get("i1"));
+                    anyhow::bail!("Email/import failed: {not_created:?}");
+                }
+            }
+        }
+        let Some(imported_id) = imported_id else {
+            anyhow::bail!("Email/import response was missing");
+        };
+
+        let submit_response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::MAIL.to_owned(),
+                    capabilities::SUBMISSION.to_owned(),
+                ],
+                vec![MethodCall::new(
+                    "EmailSubmission/set",
+                    serde_json::json!({
+                        "accountId": account_id,
+                        "create": {
+                            "s1": {
+                                "emailId": imported_id,
+                                "identityId": identity_id,
+                                "envelope": null,
+                            }
+                        }
+                    }),
+                    "sub",
+                )],
+            )
+            .await?;
+
+        for method in submit_response.method_responses {
+            if method.0 == "EmailSubmission/set" {
+                if let Some(not_created) = method.1.get("notCreated").and_then(|v| v.as_object()) {
+                    if !not_created.is_empty() {
+                        anyhow::bail!("EmailSubmission/set failed: {not_created:?}");
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn fetch_primary_identity(
+        &self,
+        auth: &AuthenticatedSession,
+    ) -> anyhow::Result<(String, String)> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            return Ok((String::new(), String::new()));
+        };
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::MAIL.to_owned(),
+                    capabilities::SUBMISSION.to_owned(),
+                ],
+                vec![MethodCall::new(
+                    "Identity/get",
+                    serde_json::json!({"accountId": account_id, "ids": null}),
+                    "0",
+                )],
+            )
+            .await?;
+        for method in response.method_responses {
+            if method.0 == "Identity/get" {
+                if let Some(first) = method
+                    .1
+                    .get("list")
+                    .and_then(|l| l.as_array())
+                    .and_then(|a| a.first())
+                {
+                    let id = first
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_owned();
+                    let name = first
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_owned();
+                    return Ok((id, name));
+                }
+            }
+        }
+        Ok((String::new(), String::new()))
+    }
+
+    async fn find_mailbox_by_role(
+        &self,
+        auth: &AuthenticatedSession,
+        role: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            return Ok(None);
+        };
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Mailbox/get",
+                    serde_json::json!({ "accountId": account_id }),
+                    "m",
+                )],
+            )
+            .await?;
+        for method in response.method_responses {
+            if method.0 == "Mailbox/get" {
+                let get: GetResponse<MailboxObject> = serde_json::from_value(method.1)
+                    .context("invalid Mailbox/get response while locating mailbox by role")?;
+                return Ok(get
+                    .list
+                    .into_iter()
+                    .find(|mailbox| mailbox.role.as_deref() == Some(role))
+                    .map(|mailbox| mailbox.id));
+            }
+        }
+        Ok(None)
+    }
+
     async fn email_set(
         &self,
         auth: &AuthenticatedSession,
@@ -759,6 +961,83 @@ fn format_addresses(addresses: &[EmailAddress]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Rewrites the `From:` header's display name to `name`, preserving the
+/// original email address. Port of the PHP z-push fork's
+/// `rewriteFromHeader()` -- same reasoning: some MUAs never set a friendly
+/// display name on outgoing mail, so the account's JMAP Identity name is
+/// used instead. Operates on logical (fold-joined) header lines rather
+/// than a single-shot regex; falls back to returning the MIME unchanged
+/// if it isn't valid UTF-8 or has no From header with a discoverable
+/// address, rather than risk corrupting an otherwise-sendable message.
+fn rewrite_from_header(mime: &[u8], name: &str) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(mime) else {
+        return mime.to_vec();
+    };
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let separator = format!("{eol}{eol}");
+    let Some(sep_idx) = text.find(&separator) else {
+        return mime.to_vec();
+    };
+    let headers = &text[..sep_idx];
+    let body = &text[sep_idx + separator.len()..];
+
+    let mut logical: Vec<String> = Vec::new();
+    for line in headers.split(eol) {
+        if (line.starts_with(' ') || line.starts_with('\t')) && !logical.is_empty() {
+            let last = logical.last_mut().expect("checked non-empty above");
+            last.push(' ');
+            last.push_str(line.trim_start());
+        } else {
+            logical.push(line.to_owned());
+        }
+    }
+
+    let mut rewrote = false;
+    for entry in logical.iter_mut() {
+        let Some(colon) = entry.find(':') else {
+            continue;
+        };
+        if !entry[..colon].eq_ignore_ascii_case("From") {
+            continue;
+        }
+        let value = entry[colon + 1..].trim();
+        if let Some(email) = extract_email_address(value) {
+            let quoted_name = name.replace('\\', "\\\\").replace('"', "\\\"");
+            *entry = format!("From: \"{quoted_name}\" <{email}>");
+            rewrote = true;
+        }
+        break;
+    }
+
+    if !rewrote {
+        return mime.to_vec();
+    }
+
+    let mut result = logical.join(eol);
+    result.push_str(&separator);
+    result.push_str(body);
+    result.into_bytes()
+}
+
+fn extract_email_address(value: &str) -> Option<String> {
+    if let Some(start) = value.find('<') {
+        if let Some(end) = value[start..].find('>') {
+            let addr = &value[start + 1..start + end];
+            if !addr.is_empty() {
+                return Some(addr.to_owned());
+            }
+        }
+    }
+    value
+        .split_whitespace()
+        .find(|token| token.contains('@'))
+        .map(|token| {
+            token
+                .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && !"@.-_+".contains(ch))
+                .to_owned()
+        })
 }
 
 #[derive(Debug, Default, Deserialize)]

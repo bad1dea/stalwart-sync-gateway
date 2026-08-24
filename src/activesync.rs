@@ -26,6 +26,12 @@ pub struct EasQuery {
     pub user: Option<String>,
     pub device_id: Option<String>,
     pub device_type: Option<String>,
+    /// SendMail's "simplified" transport (MS-ASCMD 2.2.2.19, EAS 14.0+):
+    /// the POST body is the raw RFC822 MIME message directly, not WBXML,
+    /// and SaveInSentItems/ClientId travel as query params instead of
+    /// WBXML elements. Presence (any value) means true, matching real
+    /// client behavior -- absence means the client didn't ask either way.
+    pub save_in_sent_items: Option<String>,
 }
 
 pub async fn options_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -78,6 +84,13 @@ pub async fn post_handler(
         event_source = auth.capabilities.event_source,
         "received ActiveSync command"
     );
+
+    if command.eq_ignore_ascii_case("SendMail")
+        || command.eq_ignore_ascii_case("SmartForward")
+        || command.eq_ignore_ascii_case("SmartReply")
+    {
+        return send_mail(&state, &auth, &query, &body, command).await;
+    }
 
     if !body.is_empty() {
         match wbxml::decode_document(&body) {
@@ -266,6 +279,96 @@ async fn item_operations(
         body,
     )
         .into_response()
+}
+
+/// Handles SendMail/SmartForward/SmartReply. Was advertised in
+/// SUPPORTED_COMMANDS but had no handler at all -- fell through to the
+/// generic 501 (or, for the raw-MIME transport most real clients use,
+/// would have hit the WBXML-decode error path first, since a raw RFC822
+/// message isn't valid WBXML). Real EAS 14.0+ clients typically use the
+/// "simplified" transport: the POST body IS the MIME message directly,
+/// no WBXML wrapper, with SaveInSentItems/ClientId as query params
+/// instead of WBXML elements (MS-ASCMD 2.2.2.19) -- detected here by
+/// checking whether the body parses as WBXML at all, falling back to
+/// treating it as raw MIME when it doesn't. The WBXML-wrapped form
+/// (older/other clients) is also handled via `compose_mail_request`.
+///
+/// SmartForward/SmartReply both submit a complete, client-composed MIME
+/// message exactly like SendMail -- the only EAS-level difference is the
+/// `Source` element referencing the original message (used by some
+/// servers to mark it Answered/Forwarded), which write_email_fields's
+/// caller for Change commands (`apply_mail_client_commands`) already
+/// handles via a plain flag update if the client separately sends one;
+/// this handler does not attempt to set that flag itself, matching the
+/// PHP reference's own scope (it links `replyflag`/`forwardflag` from
+/// the same request, which isn't parsed by compose_mail_request here --
+/// a reasonable gap given a subsequent Sync will independently mark the
+/// original as Answered/Forwarded when clients set those flags).
+async fn send_mail(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    query: &EasQuery,
+    body: &Bytes,
+    command: &str,
+) -> Response {
+    if body.is_empty() {
+        state
+            .metrics
+            .eas_requests_total
+            .with_label_values(&[command, "400"])
+            .inc();
+        return (StatusCode::BAD_REQUEST, "SendMail requires a body\n").into_response();
+    }
+
+    let (mime, save_in_sent_items) = match wbxml::decode_document(body) {
+        Ok(document) => match wbxml::eas::compose_mail_request(&document) {
+            Some(request) => (request.mime, request.save_in_sent_items),
+            None => {
+                state
+                    .metrics
+                    .eas_requests_total
+                    .with_label_values(&[command, "400"])
+                    .inc();
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "SendMail WBXML request missing Mime\n",
+                )
+                    .into_response();
+            }
+        },
+        // Not valid WBXML at all -- the simplified transport, where the
+        // whole body IS the MIME message. SaveInSentItems defaults to
+        // true when the client doesn't say either way (matches keeping a
+        // Sent Items copy, the behavior every real mail user expects).
+        Err(_) => (
+            body.to_vec(),
+            query.save_in_sent_items.is_none() || query.save_in_sent_items.as_deref() != Some("F"),
+        ),
+    };
+
+    match state.jmap.send_email(auth, mime, save_in_sent_items).await {
+        Ok(()) => {
+            state
+                .metrics
+                .eas_requests_total
+                .with_label_values(&[command, "200"])
+                .inc();
+            (StatusCode::OK, ()).into_response()
+        }
+        Err(error) => {
+            tracing::warn!(%error, eas_command = command, "SendMail failed");
+            state
+                .metrics
+                .eas_requests_total
+                .with_label_values(&[command, "500"])
+                .inc();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("SendMail failed: {error}\n"),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn settings(
