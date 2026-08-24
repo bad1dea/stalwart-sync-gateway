@@ -40,7 +40,9 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/metrics", get(metrics::handler))
         .route(
             "/Microsoft-Server-ActiveSync",
-            options(activesync::options_handler).post(activesync::post_handler),
+            options(activesync::options_handler)
+                .post(activesync::post_handler)
+                .get(activesync::get_handler),
         )
         .route(
             "/Autodiscover/Autodiscover.xml",

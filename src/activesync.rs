@@ -32,6 +32,93 @@ pub struct EasQuery {
     /// WBXML elements. Presence (any value) means true, matching real
     /// client behavior -- absence means the client didn't ask either way.
     pub save_in_sent_items: Option<String>,
+    /// GetAttachment (MS-ASCMD 2.2.2.8): a plain GET, no WBXML at all --
+    /// the reference this gateway itself handed out earlier in an
+    /// AirSyncBase:FileReference (see write_email_fields), "blobId||name".
+    pub attachment_name: Option<String>,
+}
+
+/// Handles the one command that's a plain GET, not the POST+Cmd= scheme
+/// every other command uses: GetAttachment (MS-ASCMD 2.2.2.8). Downloads
+/// the JMAP blob and returns it with the right Content-Type/filename --
+/// no WBXML involved at all, request or response.
+pub async fn get_handler(
+    State(state): State<AppState>,
+    Query(query): Query<EasQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let command = query.cmd.as_deref().unwrap_or("unknown");
+    let auth = match authenticate(&state, &headers).await {
+        Ok(auth) => auth,
+        Err(error) => {
+            tracing::warn!(%error, eas_command = command, "ActiveSync authentication failed");
+            state
+                .metrics
+                .eas_requests_total
+                .with_label_values(&[command, "401"])
+                .inc();
+            return unauthorized();
+        }
+    };
+
+    if !command.eq_ignore_ascii_case("GetAttachment") {
+        state
+            .metrics
+            .eas_requests_total
+            .with_label_values(&[command, "501"])
+            .inc();
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            format!("ActiveSync command {command} is not implemented yet\n"),
+        )
+            .into_response();
+    }
+
+    let Some(reference) = query.attachment_name.as_deref() else {
+        state
+            .metrics
+            .eas_requests_total
+            .with_label_values(&[command, "400"])
+            .inc();
+        return (
+            StatusCode::BAD_REQUEST,
+            "GetAttachment requires AttachmentName\n",
+        )
+            .into_response();
+    };
+    let Some((blob_id, name)) = reference.split_once("||") else {
+        state
+            .metrics
+            .eas_requests_total
+            .with_label_values(&[command, "400"])
+            .inc();
+        return (StatusCode::BAD_REQUEST, "malformed AttachmentName\n").into_response();
+    };
+
+    match state.jmap.download_blob(&auth, blob_id, name).await {
+        Ok(bytes) => {
+            state
+                .metrics
+                .eas_requests_total
+                .with_label_values(&[command, "200"])
+                .inc();
+            (
+                StatusCode::OK,
+                [("Content-Type", "application/octet-stream")],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(error) => {
+            tracing::warn!(%error, blob_id, "GetAttachment download failed");
+            state
+                .metrics
+                .eas_requests_total
+                .with_label_values(&[command, "404"])
+                .inc();
+            (StatusCode::NOT_FOUND, "attachment not found\n").into_response()
+        }
+    }
 }
 
 pub async fn options_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -1088,6 +1175,29 @@ fn write_email_fields(
         builder.leaf(base::DATA, body.value);
         builder.end();
         builder.leaf(base::NATIVE_BODY_TYPE, body.body_type.eas_value());
+    }
+    if !email.attachments.is_empty() {
+        builder.start(base::ATTACHMENTS);
+        for attachment in email.attachments {
+            builder.start(base::ATTACHMENT);
+            builder.leaf(base::DISPLAY_NAME, attachment.name.clone());
+            // GetAttachment addresses attachments by an opaque server-
+            // chosen reference string (MS-ASCMD `AttachmentName` query
+            // param) -- encoded here as "blobId||name" (mirrors the PHP
+            // reference's own `explode('||', ...)` scheme) so the
+            // GetAttachment handler can recover both the JMAP blob to
+            // fetch and a filename to send back, without needing any
+            // server-side state to remember what a reference pointed to.
+            builder.leaf(
+                base::FILE_REFERENCE,
+                format!("{}||{}", attachment.blob_id, attachment.name),
+            );
+            builder.leaf(base::CONTENT_TYPE, attachment.content_type);
+            builder.leaf(base::ESTIMATED_DATA_SIZE, attachment.size.to_string());
+            builder.leaf(base::IS_INLINE, "0");
+            builder.end();
+        }
+        builder.end();
     }
 }
 

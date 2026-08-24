@@ -323,7 +323,7 @@ impl JmapClient {
                     },
                     "properties": [
                         "id", "mailboxIds", "keywords", "receivedAt", "subject",
-                        "from", "to", "cc", "textBody", "htmlBody", "bodyValues"
+                        "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments"
                     ],
                     "fetchAllBodyValues": true,
                     "maxBodyValueBytes": 65536
@@ -509,7 +509,7 @@ impl JmapClient {
                 "ids": [email_id],
                 "properties": [
                     "id", "mailboxIds", "keywords", "receivedAt", "subject",
-                    "from", "to", "cc", "textBody", "htmlBody", "bodyValues"
+                    "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments"
                 ],
                 "fetchAllBodyValues": true,
                 "maxBodyValueBytes": 65536
@@ -628,6 +628,43 @@ impl JmapClient {
     /// Nothing needed this before Notes (create/save flows didn't exist
     /// yet) -- general-purpose, will also be needed for SendMail/drafts/
     /// attachments later.
+    pub async fn download_blob(
+        &self,
+        auth: &AuthenticatedSession,
+        blob_id: &str,
+        name: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            anyhow::bail!("JMAP Mail capability is not available");
+        };
+        let url = auth
+            .session
+            .download_url
+            .replace("{accountId}", &percent_encode_path_segment(account_id))
+            .replace("{blobId}", &percent_encode_path_segment(blob_id))
+            .replace("{name}", &percent_encode_path_segment(name))
+            .replace("{type}", "application%2Foctet-stream");
+        let response = self
+            .http
+            .get(&url)
+            .basic_auth(
+                &auth.authorization.username,
+                Some(&auth.authorization.password),
+            )
+            .send()
+            .await
+            .context("failed to download JMAP blob")?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("JMAP blob download from {url} returned {status}");
+        }
+        Ok(response
+            .bytes()
+            .await
+            .context("failed to read blob download body")?
+            .to_vec())
+    }
+
     pub(crate) async fn upload_blob(
         &self,
         auth: &AuthenticatedSession,
@@ -1015,6 +1052,20 @@ struct EmailObject {
     html_body: Vec<EmailBodyPart>,
     #[serde(default)]
     body_values: BTreeMap<String, EmailBodyValue>,
+    #[serde(default)]
+    attachments: Vec<EmailAttachmentObject>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EmailAttachmentObject {
+    blob_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "type")]
+    content_type: Option<String>,
+    #[serde(default)]
+    size: u64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1038,6 +1089,18 @@ struct EmailBodyValue {
 impl From<EmailObject> for Email {
     fn from(value: EmailObject) -> Self {
         let body = select_body(&value);
+        let attachments = value
+            .attachments
+            .into_iter()
+            .map(|attachment| crate::model::EmailAttachment {
+                blob_id: attachment.blob_id,
+                name: attachment.name.unwrap_or_else(|| "attachment".to_owned()),
+                content_type: attachment
+                    .content_type
+                    .unwrap_or_else(|| "application/octet-stream".to_owned()),
+                size: attachment.size,
+            })
+            .collect();
         Self {
             id: value.id,
             mailbox_ids: value
@@ -1057,6 +1120,7 @@ impl From<EmailObject> for Email {
             cc: format_addresses(value.cc.as_deref().unwrap_or_default()),
             read: value.keywords.get("$seen").copied().unwrap_or(false),
             body,
+            attachments,
         }
     }
 }

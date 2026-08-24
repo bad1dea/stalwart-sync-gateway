@@ -186,7 +186,13 @@ pub mod airsync_base {
     // the IsInline field, which is normally a 0/1 boolean used for inline-
     // attachment context, and NEVER sent the real NativeBodyType at all.
     pub const NATIVE_BODY_TYPE: Token = tag(0x16, false);
+    pub const CONTENT_TYPE: Token = tag(0x17, false);
     pub const PREVIEW: Token = tag(0x18, false);
+    pub const ATTACHMENTS: Token = tag(0x0e, false);
+    pub const ATTACHMENT: Token = tag(0x0f, false);
+    pub const DISPLAY_NAME: Token = tag(0x10, false);
+    pub const FILE_REFERENCE: Token = tag(0x11, false);
+    pub const IS_INLINE: Token = tag(0x15, false);
 
     pub const fn tag(token: u8, has_content: bool) -> Token {
         Token {

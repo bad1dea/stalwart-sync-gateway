@@ -51,6 +51,15 @@ pub struct Email {
     pub cc: String,
     pub read: bool,
     pub body: Option<EmailBody>,
+    pub attachments: Vec<EmailAttachment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmailAttachment {
+    pub blob_id: String,
+    pub name: String,
+    pub content_type: String,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
