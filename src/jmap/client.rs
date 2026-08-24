@@ -594,12 +594,19 @@ struct EmailObject {
     received_at: Option<String>,
     #[serde(default)]
     subject: String,
+    // `EmailAddress[]|null` per JMAP (RFC 8621 4.1.2.3): Stalwart sends a
+    // literal `null`, not a missing key, when a header (e.g. Cc on an
+    // ordinary 1:1 email) is absent. `#[serde(default)]` alone only covers
+    // a MISSING key -- a `null` value still fails to deserialize into a
+    // bare `Vec`. `Option<Vec<_>>` handles both. This broke Email/get for
+    // every real message with no Cc; never caught in testing because the
+    // test account's mail always happened to have all three headers set.
     #[serde(default)]
-    from: Vec<EmailAddress>,
+    from: Option<Vec<EmailAddress>>,
     #[serde(default)]
-    to: Vec<EmailAddress>,
+    to: Option<Vec<EmailAddress>>,
     #[serde(default)]
-    cc: Vec<EmailAddress>,
+    cc: Option<Vec<EmailAddress>>,
     #[serde(default)]
     text_body: Vec<EmailBodyPart>,
     #[serde(default)]
@@ -643,9 +650,9 @@ impl From<EmailObject> for Email {
                 .iter()
                 .filter_map(|(keyword, present)| present.then_some(keyword.clone()))
                 .collect(),
-            from: format_addresses(&value.from),
-            to: format_addresses(&value.to),
-            cc: format_addresses(&value.cc),
+            from: format_addresses(value.from.as_deref().unwrap_or_default()),
+            to: format_addresses(value.to.as_deref().unwrap_or_default()),
+            cc: format_addresses(value.cc.as_deref().unwrap_or_default()),
             read: value.keywords.get("$seen").copied().unwrap_or(false),
             body,
         }
