@@ -212,6 +212,18 @@ impl JmapClient {
                     let get: GetResponse<MailboxObject> =
                         serde_json::from_value(method.1).context("invalid Mailbox/get response")?;
                     for mailbox in get.list {
+                        // Metadata only -- folder names/ids, same as what
+                        // FolderSync itself hands to any authenticated
+                        // client. Diagnosing a live report that a real
+                        // pre-existing "Notes" folder isn't being found by
+                        // the exact-name match below (case/whitespace
+                        // mismatch is the leading suspect).
+                        tracing::debug!(
+                            mailbox_id = mailbox.id.as_str(),
+                            mailbox_name = mailbox.name.as_str(),
+                            is_top_level = mailbox.parent_id.is_none(),
+                            "mailbox discovered"
+                        );
                         // The account's "Notes" mailbox (see jmap::notes
                         // module docs for why it's this exact mailbox, not
                         // a separate gateway-only folder) is advertised as
