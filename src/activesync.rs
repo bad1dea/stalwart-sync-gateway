@@ -182,6 +182,8 @@ async fn settings(
     command: &str,
 ) -> Response {
     let include_user = wbxml::eas::contains_token(document, wbxml::eas::settings::USER_INFORMATION);
+    let has_oof = wbxml::eas::contains_token(document, wbxml::eas::settings::OOF);
+    let is_oof_set = wbxml::eas::contains_token(document, wbxml::eas::settings::SET);
     let mut builder = wbxml::eas::DocumentBuilder::new();
     use wbxml::eas::settings as set;
 
@@ -197,6 +199,34 @@ async fn settings(
         builder.end();
         builder.leaf(set::PRIMARY_SMTP_ADDRESS, auth.username());
         builder.end();
+        builder.end();
+    }
+
+    if has_oof {
+        // Automatic Replies (Out-of-Office). No Oof/Set handling here was
+        // ever implemented -- a Get with no <Oof> section in the response
+        // left iOS's Automatic Replies screen waiting on a shape it never
+        // got, spinning forever (confirmed live). Get now answers honestly
+        // (state always reports disabled, since nothing is wired to a real
+        // backend). Set is accepted (Status 1, no hang/error) rather than
+        // silently doing nothing AND erroring -- but it does not persist:
+        // toggling it on will read back as off on the next Get. Wiring
+        // this to Stalwart's ManageSieve vacation extension is the real
+        // fix; this stub only stops the client-side hang.
+        builder.start(set::OOF);
+        builder.leaf(set::STATUS, "1");
+        if !is_oof_set {
+            builder.start(set::GET);
+            builder.leaf(set::OOF_STATE, "0");
+            builder.start(set::OOF_MESSAGE);
+            builder.start(set::APPLIES_TO_INTERNAL);
+            builder.end();
+            builder.leaf(set::ENABLED, "0");
+            builder.leaf(set::REPLY_MESSAGE, "");
+            builder.leaf(set::BODY_TYPE, "Text");
+            builder.end();
+            builder.end();
+        }
         builder.end();
     }
 
@@ -690,7 +720,19 @@ fn write_email_add(builder: &mut wbxml::eas::DocumentBuilder, email: crate::mode
         // This was sent raw for a long time -- iOS silently mis-renders (or
         // ignores) an ISO-formatted DateReceived, which showed up live as
         // "timestamps are off" on every synced message.
-        builder.leaf(mail::DATE_RECEIVED, eas_datetime(&received_at));
+        let formatted = eas_datetime(&received_at);
+        tracing::debug!(
+            server_id = email_id.as_str(),
+            raw_received_at = received_at.as_str(),
+            formatted_date_received = formatted.as_str(),
+            "email date summary"
+        );
+        builder.leaf(mail::DATE_RECEIVED, formatted);
+    } else {
+        tracing::debug!(
+            server_id = email_id.as_str(),
+            "email has no receivedAt -- DateReceived omitted entirely"
+        );
     }
     if !email.from.is_empty() {
         builder.leaf(mail::FROM, email.from);
