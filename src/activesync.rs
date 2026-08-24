@@ -943,6 +943,13 @@ fn write_email_fields(
         "email body summary"
     );
     if let Some(body) = email.body {
+        // The list view's snippet line -- a real, dedicated field for this
+        // (AirSyncBase:Preview), separate from Body. Never sending one
+        // meant iOS had nothing to summarize with and fell back to
+        // showing raw markup from Body's Data verbatim as the preview
+        // line -- confirmed live (every message's preview was literal
+        // "<html xmlns:v=..." source, not rendered/extracted text).
+        builder.leaf(base::PREVIEW, plain_text_preview(&body));
         builder.start(base::BODY);
         builder.leaf(base::TYPE, body.body_type.eas_value());
         builder.leaf(base::ESTIMATED_DATA_SIZE, body.value.len().to_string());
@@ -951,6 +958,38 @@ fn write_email_fields(
         builder.end();
         builder.leaf(base::NATIVE_BODY_TYPE, body.body_type.eas_value());
     }
+}
+
+/// Plain-text snippet for AirSyncBase:Preview -- strips HTML tags (a real
+/// parser isn't warranted here, this only has to look reasonable as a list
+/// row, not round-trip) and collapses whitespace left behind by removed
+/// tags/newlines, truncated to a conventional preview length.
+fn plain_text_preview(body: &crate::model::EmailBody) -> String {
+    const PREVIEW_CHARS: usize = 255;
+    let text = match body.body_type {
+        crate::model::EmailBodyType::Html => strip_html_tags(&body.value),
+        crate::model::EmailBodyType::Plain => body.value.clone(),
+    };
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(PREVIEW_CHARS)
+        .collect()
+}
+
+fn strip_html_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Handles one Notes collection's Sync round-trip end to end: applies any
@@ -1389,7 +1428,8 @@ fn unauthorized() -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::eas_datetime;
+    use super::{eas_datetime, plain_text_preview};
+    use crate::model::{EmailBody, EmailBodyType};
 
     #[test]
     fn eas_datetime_strips_dashes_and_colons() {
@@ -1399,5 +1439,26 @@ mod tests {
     #[test]
     fn eas_datetime_drops_fractional_seconds() {
         assert_eq!(eas_datetime("2026-08-24T02:05:00.123Z"), "20260824T020500Z");
+    }
+
+    #[test]
+    fn plain_text_preview_strips_html_tags_and_collapses_whitespace() {
+        let body = EmailBody {
+            body_type: EmailBodyType::Html,
+            value: "<html>\n<body>\n<p>Hi   Raj,</p>\n<div><br>\n</div>\n<div>Please put below in the system.</div>\n</body>\n</html>".to_owned(),
+        };
+        assert_eq!(
+            plain_text_preview(&body),
+            "Hi Raj, Please put below in the system."
+        );
+    }
+
+    #[test]
+    fn plain_text_preview_passes_plain_text_through() {
+        let body = EmailBody {
+            body_type: EmailBodyType::Plain,
+            value: "Hello  world".to_owned(),
+        };
+        assert_eq!(plain_text_preview(&body), "Hello world");
     }
 }

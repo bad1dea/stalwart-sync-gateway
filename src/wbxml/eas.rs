@@ -120,7 +120,13 @@ pub mod airsync_base {
     pub const DATA: Token = tag(0x0b, false);
     pub const ESTIMATED_DATA_SIZE: Token = tag(0x0c, false);
     pub const TRUNCATED: Token = tag(0x0d, false);
-    pub const NATIVE_BODY_TYPE: Token = tag(0x15, false);
+    // Per MS-ASWBXML codepage 17: 0x15 is IsInline, NOT NativeBodyType --
+    // this constant was wrong (0x15) for a long time, meaning every synced
+    // message wrote a nonsensical value ("2", a body-type constant) into
+    // the IsInline field, which is normally a 0/1 boolean used for inline-
+    // attachment context, and NEVER sent the real NativeBodyType at all.
+    pub const NATIVE_BODY_TYPE: Token = tag(0x16, false);
+    pub const PREVIEW: Token = tag(0x18, false);
 
     pub const fn tag(token: u8, has_content: bool) -> Token {
         Token {
