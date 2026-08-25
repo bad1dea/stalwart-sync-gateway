@@ -437,6 +437,230 @@ impl JmapClient {
         Ok(Vec::new())
     }
 
+    /// Creates (`id: None`) or updates (`id: Some`) a contact from
+    /// ActiveSync `ContactFields`, mapped to the same JSContact shape
+    /// `ContactCardObject`/`Contact::from` reads back (name components,
+    /// up to 3 emails, phones by `contexts`, one organization, one
+    /// title). Returns the JMAP ContactCard id -- unlike Notes/Email,
+    /// `ContactCard/set` genuinely supports in-place `update` (confirmed
+    /// live: created a throwaway test card, updated `name/full` on the
+    /// SAME id, read it back changed, destroyed it) -- so the id IS a
+    /// stable ActiveSync ServerId across edits with no workaround needed,
+    /// unlike the permanent-keyword-id trick `jmap::notes` needs because
+    /// `Email/set` can't update subject/body at all.
+    pub async fn save_contact(
+        &self,
+        auth: &AuthenticatedSession,
+        address_book_id: &str,
+        id: Option<&str>,
+        fields: &crate::wbxml::eas::ContactFields,
+    ) -> anyhow::Result<String> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::CONTACTS) else {
+            anyhow::bail!("JMAP Contacts capability is not available");
+        };
+
+        let mut card = serde_json::Map::new();
+
+        let mut components = Vec::new();
+        if let Some(first) = &fields.first_name {
+            components.push(serde_json::json!({"kind": "given", "value": first}));
+        }
+        if let Some(last) = &fields.last_name {
+            components.push(serde_json::json!({"kind": "surname", "value": last}));
+        }
+        let mut name = serde_json::Map::new();
+        if let Some(file_as) = &fields.file_as {
+            name.insert("full".to_owned(), serde_json::Value::String(file_as.clone()));
+        }
+        if !components.is_empty() {
+            name.insert(
+                "components".to_owned(),
+                serde_json::Value::Array(components),
+            );
+        }
+        if !name.is_empty() {
+            card.insert("name".to_owned(), serde_json::Value::Object(name));
+        }
+
+        let mut emails = serde_json::Map::new();
+        for (key, email) in [
+            ("e1", &fields.email1_address),
+            ("e2", &fields.email2_address),
+            ("e3", &fields.email3_address),
+        ] {
+            if let Some(address) = email {
+                emails.insert(key.to_owned(), serde_json::json!({ "address": address }));
+            }
+        }
+        if !emails.is_empty() {
+            card.insert("emails".to_owned(), serde_json::Value::Object(emails));
+        }
+
+        let mut phones = serde_json::Map::new();
+        if let Some(mobile) = &fields.mobile_phone_number {
+            phones.insert(
+                "p_mobile".to_owned(),
+                serde_json::json!({ "number": mobile, "contexts": { "mobile": true } }),
+            );
+        }
+        if let Some(home) = &fields.home_phone_number {
+            phones.insert(
+                "p_home".to_owned(),
+                serde_json::json!({ "number": home, "contexts": { "home": true } }),
+            );
+        }
+        if let Some(business) = &fields.business_phone_number {
+            phones.insert(
+                "p_work".to_owned(),
+                serde_json::json!({ "number": business, "contexts": { "work": true } }),
+            );
+        }
+        if !phones.is_empty() {
+            card.insert("phones".to_owned(), serde_json::Value::Object(phones));
+        }
+
+        if let Some(company) = &fields.company_name {
+            card.insert(
+                "organizations".to_owned(),
+                serde_json::json!({ "o1": { "name": company } }),
+            );
+        }
+        if let Some(title) = &fields.job_title {
+            card.insert(
+                "titles".to_owned(),
+                serde_json::json!({ "t1": { "name": title, "kind": "title" } }),
+            );
+        }
+
+        let call = match id {
+            Some(existing_id) => {
+                card.insert("@type".to_owned(), serde_json::Value::String("Card".to_owned()));
+                card.insert("version".to_owned(), serde_json::Value::String("1.0".to_owned()));
+                MethodCall::new(
+                    "ContactCard/set",
+                    serde_json::json!({
+                        "accountId": account_id,
+                        "update": { existing_id: card }
+                    }),
+                    "0",
+                )
+            }
+            None => {
+                card.insert("@type".to_owned(), serde_json::Value::String("Card".to_owned()));
+                card.insert("version".to_owned(), serde_json::Value::String("1.0".to_owned()));
+                card.insert(
+                    "addressBookIds".to_owned(),
+                    serde_json::json!({ address_book_id: true }),
+                );
+                MethodCall::new(
+                    "ContactCard/set",
+                    serde_json::json!({
+                        "accountId": account_id,
+                        "create": { "c1": card }
+                    }),
+                    "0",
+                )
+            }
+        };
+
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CONTACTS.to_owned(),
+                ],
+                vec![call],
+            )
+            .await?;
+
+        for method in response.method_responses {
+            if method.0 == "error" {
+                anyhow::bail!("JMAP method error in ContactCard/set");
+            }
+            if method.0 == "ContactCard/set" {
+                if let Some(existing_id) = id {
+                    let updated = method
+                        .1
+                        .get("updated")
+                        .and_then(|value| value.get(existing_id));
+                    if updated.is_some() {
+                        return Ok(existing_id.to_owned());
+                    }
+                    anyhow::bail!(
+                        "ContactCard/set did not confirm update for {existing_id}: {:?}",
+                        method.1.get("notUpdated")
+                    );
+                }
+                if let Some(new_id) = method
+                    .1
+                    .get("created")
+                    .and_then(|c| c.get("c1"))
+                    .and_then(|card| card.get("id"))
+                    .and_then(|value| value.as_str())
+                {
+                    return Ok(new_id.to_owned());
+                }
+                anyhow::bail!(
+                    "ContactCard/set did not return a created id: {:?}",
+                    method.1.get("notCreated")
+                );
+            }
+        }
+        anyhow::bail!("ContactCard/set response was missing")
+    }
+
+    /// Idempotent, matching `destroy_note`/`destroy_email_by_id`'s own
+    /// convention: an id that's already gone reads as success.
+    pub async fn destroy_contact(
+        &self,
+        auth: &AuthenticatedSession,
+        id: &str,
+    ) -> anyhow::Result<()> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::CONTACTS) else {
+            anyhow::bail!("JMAP Contacts capability is not available");
+        };
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CONTACTS.to_owned(),
+                ],
+                vec![MethodCall::new(
+                    "ContactCard/set",
+                    serde_json::json!({ "accountId": account_id, "destroy": [id] }),
+                    "0",
+                )],
+            )
+            .await?;
+
+        for method in response.method_responses {
+            if method.0 == "ContactCard/set" {
+                let destroyed = method
+                    .1
+                    .get("destroyed")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|list| list.iter().any(|v| v.as_str() == Some(id)));
+                if destroyed {
+                    return Ok(());
+                }
+                let not_found = method
+                    .1
+                    .get("notDestroyed")
+                    .and_then(|value| value.get(id))
+                    .and_then(|entry| entry.get("type"))
+                    .and_then(|t| t.as_str())
+                    == Some("notFound");
+                if not_found {
+                    return Ok(());
+                }
+                anyhow::bail!("ContactCard/set destroy did not report success for {id}");
+            }
+        }
+        anyhow::bail!("ContactCard/set response was missing")
+    }
+
     /// Lists events in a JSCalendar (RFC 8984) calendar, mirroring the
     /// list-and-diff read pattern mail/contacts use. `start`/`timeZone`/
     /// `duration` are converted to UTC EAS DateTimes here (not left for

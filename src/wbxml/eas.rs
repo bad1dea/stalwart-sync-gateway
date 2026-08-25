@@ -1048,6 +1048,27 @@ pub struct SyncClientCommand {
     pub server_id: String,
     pub read: Option<bool>,
     pub note: NoteFields,
+    pub contact: ContactFields,
+}
+
+/// ActiveSync Contacts class fields decoded from one Add/Change command's
+/// ApplicationData, limited to the subset this gateway round-trips (see
+/// `write_contact_add` in activesync.rs) -- the same fields, same reason:
+/// no round-trip demand yet for the rest of MS-ASCNTC's much larger
+/// field set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContactFields {
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub file_as: Option<String>,
+    pub email1_address: Option<String>,
+    pub email2_address: Option<String>,
+    pub email3_address: Option<String>,
+    pub mobile_phone_number: Option<String>,
+    pub home_phone_number: Option<String>,
+    pub business_phone_number: Option<String>,
+    pub company_name: Option<String>,
+    pub job_title: Option<String>,
 }
 
 /// ActiveSync Notes class fields decoded from one Add/Change command's
@@ -1205,6 +1226,7 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             server_id: String::new(),
                             read: None,
                             note: NoteFields::default(),
+                            contact: ContactFields::default(),
                         });
                         current_command_start = Some(idx);
                     } else {
@@ -1274,6 +1296,8 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                         // -- extract Notes fields from it regardless of
                         // command kind (Delete/Fetch simply won't have any).
                         command.note = extract_note_fields(&document.nodes[start + 1..idx]);
+                        command.contact =
+                            extract_contact_fields(&document.nodes[start + 1..idx]);
                         let has_identity =
                             !command.server_id.is_empty() || !command.client_id.is_empty();
                         if has_identity {
@@ -1337,6 +1361,52 @@ fn extract_note_fields(nodes: &[Node]) -> NoteFields {
                         }
                     }
                 }
+            }
+            Node::Opaque(_) => {}
+        }
+    }
+
+    fields
+}
+
+/// Same shape as `extract_note_fields`, for the Contacts class instead --
+/// simpler since every field this gateway round-trips is a flat leaf, no
+/// nesting/repetition (unlike Notes:Categories) to track.
+fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
+    let mut fields = ContactFields::default();
+    let mut path: Vec<Token> = Vec::new();
+
+    for node in nodes {
+        match node {
+            Node::Start(token) => path.push(*token),
+            Node::Text(text) => {
+                let Some(&top) = path.last() else { continue };
+                if same_token(top, contacts::FIRST_NAME) {
+                    fields.first_name = Some(text.clone());
+                } else if same_token(top, contacts::LAST_NAME) {
+                    fields.last_name = Some(text.clone());
+                } else if same_token(top, contacts::FILE_AS) {
+                    fields.file_as = Some(text.clone());
+                } else if same_token(top, contacts::EMAIL1_ADDRESS) {
+                    fields.email1_address = Some(text.clone());
+                } else if same_token(top, contacts::EMAIL2_ADDRESS) {
+                    fields.email2_address = Some(text.clone());
+                } else if same_token(top, contacts::EMAIL3_ADDRESS) {
+                    fields.email3_address = Some(text.clone());
+                } else if same_token(top, contacts::MOBILE_PHONE_NUMBER) {
+                    fields.mobile_phone_number = Some(text.clone());
+                } else if same_token(top, contacts::HOME_PHONE_NUMBER) {
+                    fields.home_phone_number = Some(text.clone());
+                } else if same_token(top, contacts::BUSINESS_PHONE_NUMBER) {
+                    fields.business_phone_number = Some(text.clone());
+                } else if same_token(top, contacts::COMPANY_NAME) {
+                    fields.company_name = Some(text.clone());
+                } else if same_token(top, contacts::JOB_TITLE) {
+                    fields.job_title = Some(text.clone());
+                }
+            }
+            Node::End => {
+                path.pop();
             }
             Node::Opaque(_) => {}
         }
@@ -1513,6 +1583,60 @@ mod tests {
             command.note.categories,
             vec!["Work".to_owned(), "Personal".to_owned()]
         );
+    }
+
+    #[test]
+    fn parses_contact_change_with_flat_fields() {
+        // Mirrors a real device Change: ServerId already assigned (no
+        // ClientId), flat Contacts-codepage leaves -- no nesting to
+        // resolve here (unlike Notes:Categories), just confirming
+        // extract_contact_fields() picks the right tokens out of the
+        // same ApplicationData subtree extract_note_fields() also walks.
+        let mut builder = DocumentBuilder::new();
+        builder.start(airsync::SYNC);
+        builder.start(airsync::COLLECTIONS);
+        builder.start(airsync::COLLECTION);
+        builder.leaf(airsync::SYNC_KEY, "1");
+        builder.leaf(airsync::COLLECTION_ID, "ab_x");
+        builder.start(airsync::COMMANDS);
+        builder.start(airsync::CHANGE);
+        builder.leaf(airsync::SERVER_ID, "contact-1");
+        builder.start(airsync::APPLICATION_DATA);
+        builder.leaf(contacts::FIRST_NAME, "Ada");
+        builder.leaf(contacts::LAST_NAME, "Lovelace");
+        builder.leaf(contacts::EMAIL1_ADDRESS, "ada@example.com");
+        builder.leaf(contacts::MOBILE_PHONE_NUMBER, "555-0100");
+        builder.leaf(contacts::COMPANY_NAME, "Analytical Engines Ltd");
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+
+        let collections = sync_collections(&builder.finish());
+
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].commands.len(), 1);
+        let command = &collections[0].commands[0];
+        assert_eq!(command.kind, SyncClientCommandKind::Change);
+        assert_eq!(command.server_id, "contact-1");
+        assert_eq!(command.contact.first_name.as_deref(), Some("Ada"));
+        assert_eq!(command.contact.last_name.as_deref(), Some("Lovelace"));
+        assert_eq!(
+            command.contact.email1_address.as_deref(),
+            Some("ada@example.com")
+        );
+        assert_eq!(
+            command.contact.mobile_phone_number.as_deref(),
+            Some("555-0100")
+        );
+        assert_eq!(
+            command.contact.company_name.as_deref(),
+            Some("Analytical Engines Ltd")
+        );
+        assert_eq!(command.contact.email2_address, None);
     }
 
     #[test]
