@@ -365,7 +365,20 @@ impl JmapClient {
             None => None,
         };
 
-        let mime = build_note_mime(subject, body_type, body, auth.username());
+        // Real bug, confirmed live via a raw MIME diff against a note
+        // actually created by Apple's own IMAP Notes sync on this same
+        // account: a real EAS Notes edit produced a body with the outer
+        // <html> tag doubled (`<html><html>...</html></html>`) while
+        // <head>/<body> stayed singular -- the client's own wrap-on-save
+        // step doesn't check whether the content it's wrapping is already
+        // wrapped. Can't fix client behavior from here; collapse it
+        // before persisting so it can't compound across further edits.
+        let normalized_body = if body_type == EmailBodyType::Html {
+            collapse_duplicate_html_wrapper(body)
+        } else {
+            body.to_owned()
+        };
+        let mime = build_note_mime(subject, body_type, &normalized_body, auth.username());
         let blob_id = self
             .upload_blob(auth, mime.into_bytes(), "message/rfc822")
             .await?;
@@ -642,9 +655,36 @@ fn note_hash(email: &NoteEmailObject) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// Real bug, confirmed live: strips a doubled outer `<html>...</html>`
+/// wrapper (`<head>`/`<body>` stay singular -- only the outermost tag
+/// repeats) before persisting. See the call site in `save_note` for the
+/// full story.
+fn collapse_duplicate_html_wrapper(body: &str) -> String {
+    let mut inner = body;
+    let mut stripped_any = false;
+    while let Some(rest) = inner.strip_prefix("<html>") {
+        inner = rest;
+        stripped_any = true;
+    }
+    while let Some(rest) = inner.strip_suffix("</html>") {
+        inner = rest;
+    }
+    if stripped_any {
+        format!("<html>{inner}</html>")
+    } else {
+        body.to_owned()
+    }
+}
+
 /// Builds a minimal, parseable RFC822 message representing one note, for
-/// Email/import. From/To are both the account's own address -- notes don't
-/// have a "sender", but Email/import wants a plausible message.
+/// Email/import. Header shape (From display name, no To, the
+/// X-Uniform-Type-Identifier marker, a real Date and Message-Id) matches
+/// what Apple's own IMAP Notes sync (`dataaccessd`) writes for a note on
+/// this same account -- confirmed via a raw MIME diff against a real one
+/// (see docs/eas-jmap-gap-analysis.md), not guessed from the MS-ASNOTE
+/// spec text alone. Before this fix the gateway sent a bare `From:
+/// <address>` with no display name (clients showed the note's sender as
+/// "Unknown") and a `To:` header real notes never carry.
 fn build_note_mime(
     subject: &str,
     body_type: EmailBodyType,
@@ -655,8 +695,21 @@ fn build_note_mime(
         EmailBodyType::Html => "text/html; charset=utf-8",
         EmailBodyType::Plain => "text/plain; charset=utf-8",
     };
+    let display_name = account_address.split('@').next().unwrap_or(account_address);
+    let domain = account_address.split('@').nth(1).unwrap_or("localhost");
+    let message_id = format!(
+        "<{}@{domain}>",
+        uuid::Uuid::new_v4().simple().to_string().to_uppercase()
+    );
+    let date = chrono::Utc::now().to_rfc2822();
     format!(
-        "From: {account_address}\r\nTo: {account_address}\r\nSubject: {}\r\nContent-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n{body}",
+        "From: {display_name} <{account_address}>\r\n\
+         X-Uniform-Type-Identifier: com.apple.mail-note\r\n\
+         MIME-Version: 1.0\r\n\
+         Date: {date}\r\n\
+         Subject: {}\r\n\
+         Message-Id: {message_id}\r\n\
+         Content-Type: {content_type}\r\n\r\n{body}",
         encode_mime_header(subject)
     )
 }
@@ -707,5 +760,39 @@ mod tests {
         assert!(mime.contains("Content-Type: text/html"));
         assert!(mime.contains("Subject: hello"));
         assert!(mime.ends_with("<b>hi</b>"));
+    }
+
+    #[test]
+    fn mime_builder_matches_real_apple_notes_header_shape() {
+        // Confirmed live against a raw MIME diff of a real Apple IMAP
+        // Notes-created message on the same account: display-name From,
+        // no To, the UTI marker, and a real Message-Id.
+        let mime = build_note_mime("hello", EmailBodyType::Html, "<b>hi</b>", "khuong@khuo.ng");
+        assert!(mime.contains("From: khuong <khuong@khuo.ng>"));
+        assert!(!mime.contains("To:"));
+        assert!(mime.contains("X-Uniform-Type-Identifier: com.apple.mail-note"));
+        assert!(mime.contains("Message-Id: <"));
+        assert!(mime.contains("@khuo.ng>"));
+        assert!(mime.contains("Date: "));
+    }
+
+    #[test]
+    fn collapse_duplicate_html_wrapper_removes_only_the_repeated_outer_tag() {
+        let doubled = r#"<html><html><head></head><body>Notes<div>Test edit one</div></body></html></html>"#;
+        assert_eq!(
+            collapse_duplicate_html_wrapper(doubled),
+            "<html><head></head><body>Notes<div>Test edit one</div></body></html>"
+        );
+    }
+
+    #[test]
+    fn collapse_duplicate_html_wrapper_leaves_a_single_wrap_untouched() {
+        let single = "<html><head></head><body>Notes</body></html>";
+        assert_eq!(collapse_duplicate_html_wrapper(single), single);
+    }
+
+    #[test]
+    fn collapse_duplicate_html_wrapper_leaves_an_unwrapped_fragment_untouched() {
+        assert_eq!(collapse_duplicate_html_wrapper("just text"), "just text");
     }
 }
