@@ -522,18 +522,23 @@ fn write_oof_get_body(
     use wbxml::eas::settings as set;
 
     let is_enabled = vacation.as_ref().is_some_and(|v| v.is_enabled);
-    // Real fix: the previous OofState=1-unconditionally experiment
-    // (commit 71b632b) was tested WHILE StartTime was still present in
-    // the response -- that combination fixed the toggle but broke End
-    // Date display, which was wrongly attributed to the OofState value
-    // itself. The very next commit (591d5f0) separately found dropping
-    // StartTime fixes End Date display, tested only against OofState=2.
-    // The one combination never actually tried: OofState=1 WITH
-    // StartTime dropped. Testing it now -- if End Date display turns out
-    // to depend on EndTime's mere presence rather than OofState==2
-    // specifically, this combination gets a correct toggle AND a correct
-    // End Date simultaneously.
-    let oof_state_value = if is_enabled { "1" } else { "0" };
+    // PROVEN (not guessed) via a clean isolated A/B, everything else
+    // held constant across both runs: OofState=1 -> toggle shows ON,
+    // End Date shows None. OofState=2 -> toggle shows OFF, End Date
+    // shows correctly. The value flips these two UI elements in
+    // OPPOSITE directions -- back to 2-for-a-real-schedule since a
+    // correct End Date/message is more valuable than a correct toggle
+    // for the underlying feature (which works server-side regardless of
+    // what the toggle displays). See BODY_TYPE below for the next real
+    // variable being tested (device's own "TEXT" casing, never
+    // actually tried -- every previous test used "Text").
+    let oof_state_value = if !is_enabled {
+        "0"
+    } else if vacation.as_ref().is_some_and(|v| v.to_date.is_some()) {
+        "2"
+    } else {
+        "1"
+    };
     builder.start(set::GET);
     builder.leaf(set::OOF_STATE, oof_state_value);
     if is_enabled {
@@ -567,11 +572,18 @@ fn write_oof_get_body(
             // idevicesyslog that iOS's WBXML *decoder* rejects
             // OofMessage nested inside OofMessage even though its own
             // *encoder* produces exactly that shape when sending a Set.
+            // BODY_TYPE experiment: every previous test used "Text"
+            // (mixed case) regardless of which OofState value was being
+            // tested, so it was never independently isolated. The device
+            // itself always sends "TEXT" (all caps, confirmed in every
+            // captured Set). Matching that exactly here in case the
+            // client's toggle-state derivation is pickier than a bare
+            // OofState comparison.
             builder.start(set::OOF_MESSAGE);
             builder.empty_tag(set::APPLIES_TO_INTERNAL);
             builder.leaf(set::ENABLED, "1");
             builder.leaf(set::REPLY_MESSAGE, reply_message);
-            builder.leaf(set::BODY_TYPE, "Text");
+            builder.leaf(set::BODY_TYPE, "TEXT");
             builder.end();
             builder.start(set::OOF_MESSAGE);
             builder.empty_tag(set::APPLIES_TO_EXTERNAL_KNOWN);
