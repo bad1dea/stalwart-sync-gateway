@@ -1236,9 +1236,15 @@ fn write_email_fields(
     }
     builder.leaf(mail::SUBJECT, email.subject);
     if let Some(received_at) = email.received_at {
-        // JMAP receivedAt is ISO 8601 ("2026-08-24T02:05:00Z"); MS-ASEMAIL
-        // DateReceived requires the compact EAS form (no dashes/colons).
-        let formatted = eas_datetime(&received_at);
+        // Real bug, root-caused via a direct wire comparison against
+        // z-push for the same real message: DateReceived is the one EAS
+        // date field that wants the DASHES form (see
+        // eas_datetime_dashes's own docs), not the compact form every
+        // other date field uses. Sending the compact form here -- which
+        // an earlier session concluded was the fix -- was itself the
+        // bug, and very likely the actual explanation for the original
+        // "every message shows the same time" symptom.
+        let formatted = eas_datetime_dashes(&received_at);
         tracing::debug!(
             server_id = email_id,
             raw_received_at = received_at.as_str(),
@@ -2164,10 +2170,12 @@ fn write_note_command(
     builder.end();
 }
 
-/// `Notes:LastModifiedDate` wants the compact EAS datetime format
-/// (`YYYYMMDDTHHMMSSZ`), not JMAP's ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`) --
+/// `Notes:LastModifiedDate`, `Calendar:DtStamp/StartTime/EndTime` want the
+/// compact EAS datetime format (`YYYYMMDDTHHMMSSZ`, MS-ASWBXML
+/// `STREAMER_TYPE_DATE`), not JMAP's ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`) --
 /// confirmed against a live device trace captured against this fork's PHP
-/// predecessor, not assumed.
+/// predecessor, not assumed. `Email:DateReceived` is the one field that
+/// does NOT use this format -- see `eas_datetime_dashes` below.
 fn eas_datetime(jmap_datetime: &str) -> String {
     // JMAP UTCDate allows fractional seconds ("...T02:05:00.123Z"); EAS
     // DateTime has no room for them, so drop any ".NNN" before stripping
@@ -2183,6 +2191,43 @@ fn eas_datetime(jmap_datetime: &str) -> String {
         .chars()
         .filter(|ch| *ch != '-' && *ch != ':')
         .collect()
+}
+
+/// Real bug, root-caused via a direct side-by-side wire comparison against
+/// the working PHP z-push reference for the SAME real message (both
+/// gateways queried live, same account, same email): z-push sent
+/// `DateReceived` as `2026-08-24T19:37:00.000Z` -- full ISO shape, dashes
+/// and colons intact, plus a literal ".000" -- while this gateway sent the
+/// compact `20260824T193730Z` form. Confirmed against
+/// src/lib/core/streamer.php's own formatDate() (z-push-stalwart-jmap PR
+/// #187): `Email:DateReceived` is mapped with `STREAMER_TYPE_DATE_DASHES`,
+/// which formats as `yyyy-MM-dd'T'HH:mm:SS'.000Z'` -- a DIFFERENT format
+/// than every other EAS date field (which use plain `STREAMER_TYPE_DATE`,
+/// the compact form `eas_datetime` above produces). This was backwards
+/// from the start: an earlier session concluded DateReceived needed the
+/// compact form and "fixed" it that way, which was itself the bug -- the
+/// compact form is wrong specifically for this one field. Very likely
+/// THE actual explanation for the "every message shows the same time in
+/// the list view" symptom that kicked off this entire investigation: iOS
+/// couldn't parse an unexpected date shape for DateReceived and fell back
+/// to displaying something else (observed as "now", or a fixed collapsed
+/// time) instead of erroring outright.
+fn eas_datetime_dashes(jmap_datetime: &str) -> String {
+    // Same fractional-seconds handling as eas_datetime, but keep dashes
+    // and colons, and always append a literal ".000" before the Z --
+    // z-push's own format string is a fixed ".000Z" suffix regardless of
+    // the source's actual sub-second precision, not real milliseconds.
+    let trimmed = match jmap_datetime.split_once('.') {
+        Some((prefix, suffix)) if suffix.ends_with(['Z', 'z']) => {
+            format!("{prefix}Z")
+        }
+        Some((prefix, _)) => prefix.to_owned(),
+        None => jmap_datetime.to_owned(),
+    };
+    match trimmed.strip_suffix(['Z', 'z']) {
+        Some(prefix) => format!("{prefix}.000Z"),
+        None => format!("{trimmed}.000Z"),
+    }
 }
 
 async fn folder_sync(
@@ -2308,7 +2353,10 @@ fn unauthorized() -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_body_preference, eas_datetime, plain_text_preview, write_email_fields, BodyPreference};
+    use super::{
+        apply_body_preference, eas_datetime, eas_datetime_dashes, plain_text_preview,
+        write_email_fields, BodyPreference,
+    };
     use crate::model::{Email, EmailAttachment, EmailBody, EmailBodyType};
     use crate::wbxml::eas::{airsync_base as base, DocumentBuilder};
     use crate::wbxml::Node;
@@ -2321,6 +2369,32 @@ mod tests {
     #[test]
     fn eas_datetime_drops_fractional_seconds() {
         assert_eq!(eas_datetime("2026-08-24T02:05:00.123Z"), "20260824T020500Z");
+    }
+
+    #[test]
+    fn eas_datetime_dashes_matches_real_zpush_wire_format() {
+        // Real bug, found via a direct side-by-side wire comparison
+        // against z-push for the same real message: z-push sent
+        // DateReceived as "2026-08-24T19:37:00.000Z" for a message this
+        // gateway sent as "20260824T193730Z" for -- dashes/colons kept,
+        // literal ".000" appended, confirmed against
+        // src/lib/core/streamer.php's formatDate() for
+        // STREAMER_TYPE_DATE_DASHES: yyyy-MM-dd'T'HH:mm:SS'.000Z'.
+        assert_eq!(
+            eas_datetime_dashes("2026-08-24T19:37:00Z"),
+            "2026-08-24T19:37:00.000Z"
+        );
+    }
+
+    #[test]
+    fn eas_datetime_dashes_replaces_real_fractional_seconds_with_literal_000() {
+        // z-push's format string is a fixed ".000Z" suffix, not real
+        // milliseconds -- even if the source has real sub-second
+        // precision, the wire value is always ".000".
+        assert_eq!(
+            eas_datetime_dashes("2026-08-24T19:37:00.123Z"),
+            "2026-08-24T19:37:00.000Z"
+        );
     }
 
     #[test]
