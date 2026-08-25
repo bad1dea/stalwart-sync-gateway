@@ -592,6 +592,12 @@ async fn get_item_estimate(
         builder.start(gie::RESPONSE);
         builder.leaf(gie::STATUS, "1");
         builder.start(gie::FOLDER);
+        // Real gap, found via the full z-push-stalwart-jmap source (PR
+        // #187): src/lib/request/getitemestimate.php's Folder response
+        // writes FolderType before FolderId; this gateway never sent
+        // FolderType at all. The token was already defined
+        // (get_item_estimate::FOLDER_TYPE) but unused.
+        builder.leaf(gie::FOLDER_TYPE, "Email");
         builder.leaf(gie::FOLDER_ID, folder_id);
         builder.leaf(gie::ESTIMATE, "0");
         builder.end();
