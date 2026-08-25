@@ -1063,6 +1063,7 @@ pub struct SyncClientCommand {
     pub note: NoteFields,
     pub contact: ContactFields,
     pub calendar: CalendarFields,
+    pub task: TaskFields,
 }
 
 /// ActiveSync Calendar class fields decoded from one Add/Change command's
@@ -1082,6 +1083,19 @@ pub struct CalendarFields {
     pub start_time: Option<String>,
     pub end_time: Option<String>,
     pub all_day_event: Option<bool>,
+}
+
+/// ActiveSync Tasks class fields decoded from one Add/Change command's
+/// ApplicationData, limited to the subset this gateway round-trips (see
+/// `write_task_command` in activesync.rs) -- same minimal-non-recurring
+/// scoping as `CalendarFields`. `due_date` arrives already in EAS's
+/// compact UTC DateTime form (`YYYYMMDDTHHMMSSZ`), same convention as
+/// `CalendarFields::start_time`/`end_time`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskFields {
+    pub subject: Option<String>,
+    pub due_date: Option<String>,
+    pub complete: Option<bool>,
 }
 
 /// ActiveSync Contacts class fields decoded from one Add/Change command's
@@ -1261,6 +1275,7 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             note: NoteFields::default(),
                             contact: ContactFields::default(),
                             calendar: CalendarFields::default(),
+                            task: TaskFields::default(),
                         });
                         current_command_start = Some(idx);
                     } else {
@@ -1334,6 +1349,7 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             extract_contact_fields(&document.nodes[start + 1..idx]);
                         command.calendar =
                             extract_calendar_fields(&document.nodes[start + 1..idx]);
+                        command.task = extract_task_fields(&document.nodes[start + 1..idx]);
                         let has_identity =
                             !command.server_id.is_empty() || !command.client_id.is_empty();
                         if has_identity {
@@ -1472,6 +1488,35 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                     fields.end_time = Some(text.clone());
                 } else if same_token(top, calendar::ALL_DAY_EVENT) {
                     fields.all_day_event = Some(text != "0");
+                }
+            }
+            Node::End => {
+                path.pop();
+            }
+            Node::Opaque(_) => {}
+        }
+    }
+
+    fields
+}
+
+/// Same shape as `extract_calendar_fields` -- flat leaves, no nesting for
+/// the fields this gateway round-trips.
+fn extract_task_fields(nodes: &[Node]) -> TaskFields {
+    let mut fields = TaskFields::default();
+    let mut path: Vec<Token> = Vec::new();
+
+    for node in nodes {
+        match node {
+            Node::Start(token) => path.push(*token),
+            Node::Text(text) => {
+                let Some(&top) = path.last() else { continue };
+                if same_token(top, tasks::SUBJECT) {
+                    fields.subject = Some(text.clone());
+                } else if same_token(top, tasks::DUE_DATE) {
+                    fields.due_date = Some(text.clone());
+                } else if same_token(top, tasks::COMPLETE) {
+                    fields.complete = Some(text != "0");
                 }
             }
             Node::End => {
@@ -1778,6 +1823,44 @@ mod tests {
             Some("Analytical Engines Ltd")
         );
         assert_eq!(command.contact.email2_address, None);
+    }
+
+    #[test]
+    fn parses_task_add_with_subject_due_date_and_complete() {
+        // Same shape as parses_contact_change_with_flat_fields, but an Add
+        // (client_id, no server_id yet) against a `task_`-prefixed
+        // collection, exercising extract_task_fields().
+        let mut builder = DocumentBuilder::new();
+        builder.start(airsync::SYNC);
+        builder.start(airsync::COLLECTIONS);
+        builder.start(airsync::COLLECTION);
+        builder.leaf(airsync::SYNC_KEY, "1");
+        builder.leaf(airsync::COLLECTION_ID, "task_x");
+        builder.start(airsync::COMMANDS);
+        builder.start(airsync::ADD);
+        builder.leaf(airsync::CLIENT_ID, "client-task-1");
+        builder.start(airsync::APPLICATION_DATA);
+        builder.leaf(tasks::SUBJECT, "Renew passport");
+        builder.leaf(tasks::COMPLETE, "0");
+        builder.leaf(tasks::DUE_DATE, "20260905T090000Z");
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+
+        let collections = sync_collections(&builder.finish());
+
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].commands.len(), 1);
+        let command = &collections[0].commands[0];
+        assert_eq!(command.kind, SyncClientCommandKind::Add);
+        assert_eq!(command.client_id, "client-task-1");
+        assert_eq!(command.task.subject.as_deref(), Some("Renew passport"));
+        assert_eq!(command.task.complete, Some(false));
+        assert_eq!(command.task.due_date.as_deref(), Some("20260905T090000Z"));
     }
 
     #[test]

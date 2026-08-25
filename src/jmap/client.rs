@@ -14,7 +14,7 @@ use crate::{
     },
     model::{
         eas_folder_type, CalendarEvent, Collection, CollectionKind, Contact, Email, EmailBody,
-        EmailBodyType,
+        EmailBodyType, Task,
     },
 };
 
@@ -288,7 +288,31 @@ impl JmapClient {
                 "Calendar/get" => {
                     let get: GetResponse<CalendarObject> = serde_json::from_value(method.1)
                         .context("invalid Calendar/get response")?;
-                    collections.extend(get.list.into_iter().map(Collection::from));
+                    for calendar in get.list {
+                        // Stalwart has no separate Tasks-list object --
+                        // confirmed live (2026-08-25) that `CalendarEvent`
+                        // itself accepts `@type: "Task"` (title/due/start/
+                        // progress/percentComplete/priority/description all
+                        // round-trip correctly), so Tasks rides on the SAME
+                        // underlying Calendar storage as Events, distinguished
+                        // only by `@type` -- there's no per-calendar Tasks
+                        // capability to check. One synthetic Tasks collection
+                        // per real calendar (same multiplicity as Calendar
+                        // itself), `task_`-prefixed like `cal_`/`note_`/`ab_`.
+                        collections.push(Collection {
+                            id: format!("task_{}", calendar.id),
+                            parent_id: None,
+                            name: "Tasks".to_owned(),
+                            kind: CollectionKind::Tasks,
+                            role: None,
+                            folder_type: if calendar.is_default {
+                                eas_folder_type::TASK
+                            } else {
+                                eas_folder_type::USER_TASK
+                            },
+                        });
+                        collections.push(Collection::from(calendar));
+                    }
                 }
                 "error" => anyhow::bail!("JMAP method error in collection discovery"),
                 other => {
@@ -1000,6 +1024,194 @@ impl JmapClient {
                     return Ok(());
                 }
                 anyhow::bail!("CalendarEvent/set destroy did not report success for {id}");
+            }
+        }
+        anyhow::bail!("CalendarEvent/set response was missing")
+    }
+
+    /// Tasks live in the SAME `CalendarEvent` storage as Events on this
+    /// Stalwart instance -- confirmed live (2026-08-25) that `@type:
+    /// "Task"` objects are accepted and round-trip `title`/`due`/`start`/
+    /// `progress`/`percentComplete`/`priority`/`description` correctly.
+    /// `CalendarEvent/query` has no server-side filter for `@type`
+    /// (`{"type": "Task"}` and `{"@type": "Task"}` both come back
+    /// `unsupportedFilter` -- checked live, not assumed), so this fetches
+    /// every item in the calendar and filters to `@type == "Task"`
+    /// client-side, same as it would for a mixed Events+Tasks calendar in
+    /// any other JMAP client.
+    pub async fn tasks_in_calendar(
+        &self,
+        auth: &AuthenticatedSession,
+        calendar_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Task>> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::CALENDARS) else {
+            return Ok(Vec::new());
+        };
+
+        let calls = vec![
+            MethodCall::new(
+                "CalendarEvent/query",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "filter": { "inCalendar": calendar_id },
+                    "limit": limit.clamp(1, 200)
+                }),
+                "q",
+            ),
+            MethodCall::new(
+                "CalendarEvent/get",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "#ids": {
+                        "resultOf": "q",
+                        "name": "CalendarEvent/query",
+                        "path": "/ids"
+                    },
+                    "properties": ["id", "@type", "title", "due", "progress"]
+                }),
+                "g",
+            ),
+        ];
+
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CALENDARS.to_owned(),
+                ],
+                calls,
+            )
+            .await?;
+
+        for method in response.method_responses {
+            match method.0.as_str() {
+                "CalendarEvent/get" => {
+                    let get: GetResponse<TaskObject> = serde_json::from_value(method.1)
+                        .context("invalid CalendarEvent/get response (tasks)")?;
+                    return Ok(get
+                        .list
+                        .into_iter()
+                        .filter(|item| item.kind == "Task")
+                        .map(Task::from)
+                        .collect());
+                }
+                "error" => anyhow::bail!("JMAP method error in task sync"),
+                _ => {}
+            }
+        }
+
+        Ok(Vec::new())
+    }
+
+    /// Creates (`id: None`) or updates (`id: Some`) a Task-typed
+    /// `CalendarEvent`, mirroring `save_calendar_event`'s structure and
+    /// the same live-confirmed in-place `update` support (the JMAP id is
+    /// a stable ActiveSync ServerId across edits, no workaround needed).
+    /// `due` deliberately omits `timeZone`, same "absent == already UTC"
+    /// convention `save_calendar_event` uses for `start`.
+    pub async fn save_task(
+        &self,
+        auth: &AuthenticatedSession,
+        calendar_id: &str,
+        id: Option<&str>,
+        fields: &crate::wbxml::eas::TaskFields,
+    ) -> anyhow::Result<String> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::CALENDARS) else {
+            anyhow::bail!("JMAP Calendars capability is not available");
+        };
+
+        let mut task = serde_json::Map::new();
+        task.insert(
+            "@type".to_owned(),
+            serde_json::Value::String("Task".to_owned()),
+        );
+        if let Some(subject) = &fields.subject {
+            task.insert(
+                "title".to_owned(),
+                serde_json::Value::String(subject.clone()),
+            );
+        }
+        if let Some(due) = fields.due_date.as_deref().and_then(eas_compact_to_local_iso) {
+            task.insert("due".to_owned(), serde_json::Value::String(due));
+        }
+        if let Some(complete) = fields.complete {
+            task.insert(
+                "progress".to_owned(),
+                serde_json::Value::String(
+                    if complete { "completed" } else { "needs-action" }.to_owned(),
+                ),
+            );
+        }
+
+        let call = match id {
+            Some(existing_id) => MethodCall::new(
+                "CalendarEvent/set",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "update": { existing_id: task }
+                }),
+                "0",
+            ),
+            None => {
+                task.insert(
+                    "calendarIds".to_owned(),
+                    serde_json::json!({ calendar_id: true }),
+                );
+                MethodCall::new(
+                    "CalendarEvent/set",
+                    serde_json::json!({
+                        "accountId": account_id,
+                        "create": { "t1": task }
+                    }),
+                    "0",
+                )
+            }
+        };
+
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CALENDARS.to_owned(),
+                ],
+                vec![call],
+            )
+            .await?;
+
+        for method in response.method_responses {
+            if method.0 == "error" {
+                anyhow::bail!("JMAP method error in CalendarEvent/set (task)");
+            }
+            if method.0 == "CalendarEvent/set" {
+                if let Some(existing_id) = id {
+                    let updated = method
+                        .1
+                        .get("updated")
+                        .and_then(|value| value.get(existing_id));
+                    if updated.is_some() {
+                        return Ok(existing_id.to_owned());
+                    }
+                    anyhow::bail!(
+                        "CalendarEvent/set did not confirm task update for {existing_id}: {:?}",
+                        method.1.get("notUpdated")
+                    );
+                }
+                if let Some(new_id) = method
+                    .1
+                    .get("created")
+                    .and_then(|c| c.get("t1"))
+                    .and_then(|task| task.get("id"))
+                    .and_then(|value| value.as_str())
+                {
+                    return Ok(new_id.to_owned());
+                }
+                anyhow::bail!(
+                    "CalendarEvent/set did not return a created task id: {:?}",
+                    method.1.get("notCreated")
+                );
             }
         }
         anyhow::bail!("CalendarEvent/set response was missing")
@@ -2171,6 +2383,43 @@ impl From<CalendarEventObject> for CalendarEvent {
             all_day: value.show_without_time,
         }
     }
+}
+
+/// Same underlying JMAP object as `CalendarEventObject` (Task rides on
+/// `CalendarEvent`, see `tasks_in_calendar`'s module doc) but only the
+/// fields Tasks actually needs, plus `@type` so the caller can filter out
+/// plain Events -- there is no server-side query filter for this (checked
+/// live: `unsupportedFilter`).
+#[derive(Debug, Default, Deserialize)]
+struct TaskObject {
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    due: Option<String>,
+    #[serde(default)]
+    progress: Option<String>,
+    #[serde(rename = "@type", default)]
+    kind: String,
+}
+
+impl From<TaskObject> for Task {
+    fn from(value: TaskObject) -> Self {
+        Self {
+            id: value.id,
+            title: value.title,
+            completed: value.progress.as_deref() == Some("completed"),
+            due: value.due.as_deref().and_then(local_to_utc_eas_no_tz),
+        }
+    }
+}
+
+/// `due` on a JSCalendar Task is a LocalDateTime with no accompanying
+/// `timeZone` property fetched here (this gateway doesn't currently
+/// request/round-trip Task time zones) -- treated as already-UTC, the
+/// same "absent timeZone" convention `local_to_utc_eas` itself uses.
+fn local_to_utc_eas_no_tz(local_iso: &str) -> Option<String> {
+    local_to_utc_eas(local_iso, None)
 }
 
 /// Converts a JSCalendar LocalDateTime (`2026-08-25T14:00:00`, no offset)

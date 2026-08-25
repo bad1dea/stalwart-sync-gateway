@@ -1012,9 +1012,15 @@ async fn sync_mail(
             continue;
         }
 
+        if collection.collection_id.starts_with("task_") {
+            sync_tasks_collection(state, auth, &mut builder, user, device_id, &collection).await;
+            continue;
+        }
+
         let is_mail_collection = !collection.collection_id.starts_with("ab_")
             && !collection.collection_id.starts_with("cal_")
-            && !collection.collection_id.starts_with("note_");
+            && !collection.collection_id.starts_with("note_")
+            && !collection.collection_id.starts_with("task_");
         let client_commands_applied = if is_mail_collection && !collection.commands.is_empty() {
             match apply_mail_client_commands(
                 state,
@@ -2548,6 +2554,294 @@ fn write_calendar_command(
     builder.end();
 }
 
+/// Same Add/Change/Delete + hash-diff shape as `sync_calendar_collection`
+/// (see that function's own comments for the general pattern) -- Tasks
+/// rides on the SAME underlying `CalendarEvent` storage as Calendar,
+/// distinguished only by JMAP `@type` (confirmed live 2026-08-25: Stalwart
+/// accepts and round-trips `@type: "Task"` objects; see
+/// `jmap::client::tasks_in_calendar`'s module doc). `save_task` mirrors
+/// `save_calendar_event`'s confirmed in-place-`update` behavior, so the
+/// JMAP id is a stable ServerId across edits here too, same as
+/// Contacts/Calendar and unlike Notes.
+async fn sync_tasks_collection(
+    state: &AppState,
+    auth: &AuthenticatedSession,
+    builder: &mut wbxml::eas::DocumentBuilder,
+    user: &str,
+    device_id: &str,
+    collection: &wbxml::eas::SyncCollectionRequest,
+) {
+    use wbxml::eas::airsync as air;
+
+    let calendar_id = collection
+        .collection_id
+        .strip_prefix("task_")
+        .unwrap_or(&collection.collection_id)
+        .to_owned();
+
+    let previous_items = state
+        .state
+        .item_states(user, device_id, &collection.collection_id)
+        .await
+        .unwrap_or_default();
+    let mut previous_by_id: BTreeMap<String, String> = previous_items
+        .into_iter()
+        .map(|item| (item.item_id, item.hash))
+        .collect();
+
+    let mut add_responses: Vec<(String, Option<String>, &'static str)> = Vec::new();
+    let mut change_responses: Vec<(String, &'static str)> = Vec::new();
+
+    for command in &collection.commands {
+        match command.kind {
+            wbxml::eas::SyncClientCommandKind::Add => {
+                match state
+                    .jmap
+                    .save_task(auth, &calendar_id, None, &command.task)
+                    .await
+                {
+                    Ok(new_id) => {
+                        add_responses.push((command.client_id.clone(), Some(new_id), "1"))
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            client_id = command.client_id,
+                            "failed to create task from client Add"
+                        );
+                        add_responses.push((command.client_id.clone(), None, "5"));
+                    }
+                }
+            }
+            wbxml::eas::SyncClientCommandKind::Change => {
+                match state
+                    .jmap
+                    .save_task(
+                        auth,
+                        &calendar_id,
+                        Some(&command.server_id),
+                        &command.task,
+                    )
+                    .await
+                {
+                    Ok(id) => change_responses.push((id, "1")),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            server_id = command.server_id,
+                            "failed to save task change"
+                        );
+                        change_responses.push((command.server_id.clone(), "5"));
+                    }
+                }
+            }
+            wbxml::eas::SyncClientCommandKind::Delete => {
+                match state
+                    .jmap
+                    .destroy_calendar_event(auth, &command.server_id)
+                    .await
+                {
+                    Ok(()) => {
+                        previous_by_id.remove(&command.server_id);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            server_id = command.server_id,
+                            "failed to delete task"
+                        );
+                    }
+                }
+            }
+            wbxml::eas::SyncClientCommandKind::Fetch => {
+                tracing::debug!(
+                    server_id = command.server_id,
+                    "ignoring unsupported Tasks Fetch command"
+                );
+            }
+        }
+    }
+
+    let tasks = match state
+        .jmap
+        .tasks_in_calendar(auth, &calendar_id, collection.window_size)
+        .await
+    {
+        Ok(tasks) => tasks,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                collection = collection.collection_id,
+                "Sync tasks discovery failed"
+            );
+            builder.start(air::COLLECTION);
+            builder.leaf(air::SYNC_KEY, collection.sync_key.clone());
+            builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+            builder.leaf(air::STATUS, "5");
+            builder.end();
+            return;
+        }
+    };
+
+    let current_by_id: BTreeMap<String, (String, crate::model::Task)> = tasks
+        .into_iter()
+        .map(|task| (task.id.clone(), (task_hash(&task), task)))
+        .collect();
+
+    let just_written: BTreeSet<String> = add_responses
+        .iter()
+        .filter_map(|(_, server_id, _)| server_id.clone())
+        .chain(
+            change_responses
+                .iter()
+                .map(|(server_id, _)| server_id.clone()),
+        )
+        .collect();
+
+    let mut to_add = Vec::new();
+    let mut to_change = Vec::new();
+    for (id, (hash, _)) in &current_by_id {
+        if just_written.contains(id) {
+            continue;
+        }
+        match previous_by_id.get(id) {
+            None => to_add.push(id.clone()),
+            Some(previous_hash) if previous_hash != hash => to_change.push(id.clone()),
+            _ => {}
+        }
+    }
+    let to_remove: Vec<String> = previous_by_id
+        .keys()
+        .filter(|id| !current_by_id.contains_key(id.as_str()))
+        .cloned()
+        .collect();
+
+    let has_server_changes = !to_add.is_empty() || !to_change.is_empty() || !to_remove.is_empty();
+    let client_commands_applied = !add_responses.is_empty() || !change_responses.is_empty();
+    let new_sync_key =
+        if collection.sync_key == "0" || has_server_changes || client_commands_applied {
+            next_sync_key(&collection.sync_key)
+        } else {
+            collection.sync_key.clone()
+        };
+
+    if let Err(error) = state
+        .state
+        .put(SyncRecord {
+            user: user.to_owned(),
+            device_id: device_id.to_owned(),
+            collection_id: collection.collection_id.clone(),
+            sync_key: new_sync_key.clone(),
+            jmap_state: String::new(),
+            seen_ids: Vec::new(),
+        })
+        .await
+    {
+        tracing::warn!(%error, user, device_id, collection = collection.collection_id, "failed to persist Tasks SyncRecord");
+    }
+    let item_states: Vec<ItemState> = current_by_id
+        .iter()
+        .map(|(id, (hash, _))| ItemState {
+            item_id: id.clone(),
+            hash: hash.clone(),
+        })
+        .collect();
+    if let Err(error) = state
+        .state
+        .put_item_states(user, device_id, &collection.collection_id, item_states)
+        .await
+    {
+        tracing::warn!(%error, user, device_id, collection = collection.collection_id, "failed to persist Tasks item state");
+    }
+
+    builder.start(air::COLLECTION);
+    builder.leaf(air::SYNC_KEY, new_sync_key);
+    builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+    builder.leaf(air::STATUS, "1");
+
+    if !add_responses.is_empty() || !change_responses.is_empty() {
+        builder.start(air::RESPONSES);
+        for (client_id, server_id, status) in &add_responses {
+            builder.start(air::ADD);
+            builder.leaf(air::CLIENT_ID, client_id.clone());
+            if let Some(server_id) = server_id {
+                builder.leaf(air::SERVER_ID, server_id.clone());
+            }
+            builder.leaf(air::STATUS, *status);
+            builder.end();
+        }
+        for (server_id, status) in &change_responses {
+            builder.start(air::CHANGE);
+            builder.leaf(air::SERVER_ID, server_id.clone());
+            builder.leaf(air::STATUS, *status);
+            builder.end();
+        }
+        builder.end();
+    }
+
+    if collection.get_changes && has_server_changes {
+        builder.start(air::COMMANDS);
+        for id in &to_add {
+            if let Some((_, task)) = current_by_id.get(id) {
+                write_task_command(builder, air::ADD, task);
+            }
+        }
+        for id in &to_change {
+            if let Some((_, task)) = current_by_id.get(id) {
+                write_task_command(builder, air::CHANGE, task);
+            }
+        }
+        for id in &to_remove {
+            builder.start(air::DELETE);
+            builder.leaf(air::SERVER_ID, id.clone());
+            builder.end();
+        }
+        builder.end();
+    }
+
+    builder.end();
+}
+
+/// Same purpose as `calendar_event_hash`.
+fn task_hash(task: &crate::model::Task) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    task.title.hash(&mut hasher);
+    task.completed.hash(&mut hasher);
+    task.due.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Field order (Subject, Complete, DueDate, UtcDueDate) is a reasonable
+/// choice, NOT a verified one -- unlike Calendar/Contacts/Email, there is
+/// no real reference implementation to check it against: this codebase's
+/// own z-push-derived porting notes (`docs/PR187_ANALYSIS.md`) explicitly
+/// say Tasks was never attempted there, and MS-ASCMD's own `ItemProperties`
+/// group (which `tasks:*` elements belong to) is an `xs:choice`, not an
+/// `xs:sequence` -- checked directly against the primary schema on
+/// learn.microsoft.com, so the wire spec itself doesn't mandate an order
+/// the way it would inside a `sequence`. Needs a real device Tasks sync to
+/// confirm iOS accepts this shape, same as the ConversationId redo -- do
+/// not treat as trusted until that happens.
+fn write_task_command(
+    builder: &mut wbxml::eas::DocumentBuilder,
+    tag: wbxml::token::Token,
+    task: &crate::model::Task,
+) {
+    use wbxml::eas::{airsync as air, tasks};
+
+    builder.start(tag);
+    builder.leaf(air::SERVER_ID, task.id.clone());
+    builder.start(air::APPLICATION_DATA);
+    builder.leaf(tasks::SUBJECT, task.title.clone());
+    builder.leaf(tasks::COMPLETE, if task.completed { "1" } else { "0" });
+    if let Some(due) = &task.due {
+        builder.leaf(tasks::DUE_DATE, due.clone());
+        builder.leaf(tasks::UTC_DUE_DATE, due.clone());
+    }
+    builder.end();
+    builder.end();
+}
+
 /// Handles one Notes collection's Sync round-trip end to end: applies any
 /// client Add/Change/Delete commands (building `<Responses>` entries --
 /// see the module-level notes in jmap::notes for why Add specifically
@@ -2984,8 +3278,8 @@ async fn folder_sync(
         .into_response()
 }
 
-/// A `note_`/`ab_`/`cal_`-prefixed collection id is a synthetic id this
-/// gateway itself invents for Notes/Contacts/Calendar (see
+/// A `note_`/`ab_`/`cal_`/`task_`-prefixed collection id is a synthetic id
+/// this gateway itself invents for Notes/Contacts/Calendar/Tasks (see
 /// `jmap::client::collections()`) -- never a real JMAP `Mailbox` id.
 /// FolderCreate/FolderUpdate/FolderDelete are mail-only (per the command
 /// matrix: no create/rename/delete primitive exists for the
@@ -2993,7 +3287,10 @@ async fn folder_sync(
 /// these prefixes on a ParentId/ServerId is rejected before ever calling
 /// JMAP, rather than relying on it to fail incidentally.
 fn is_non_mail_collection_id(id: &str) -> bool {
-    id.starts_with("note_") || id.starts_with("ab_") || id.starts_with("cal_")
+    id.starts_with("note_")
+        || id.starts_with("ab_")
+        || id.starts_with("cal_")
+        || id.starts_with("task_")
 }
 
 /// [MS-ASCMD] section 2.2.1.3. Request: SyncKey, ParentId, DisplayName,
@@ -3271,6 +3568,7 @@ mod tests {
         assert!(is_non_mail_collection_id("note_q"));
         assert!(is_non_mail_collection_id("ab_b"));
         assert!(is_non_mail_collection_id("cal_b"));
+        assert!(is_non_mail_collection_id("task_b"));
         assert!(!is_non_mail_collection_id("a"));
         assert!(!is_non_mail_collection_id("0"));
     }

@@ -37,6 +37,10 @@ pub mod eas_folder_type {
     pub const USER_MAIL: u8 = 12;
     pub const USER_APPOINTMENT: u8 = 13;
     pub const USER_CONTACT: u8 = 14;
+    /// Verified against Z-Push's own zpushdefs.php
+    /// (`SYNC_FOLDER_TYPE_TASK`/`SYNC_FOLDER_TYPE_USER_TASK`), same as NOTE.
+    pub const TASK: u8 = 7;
+    pub const USER_TASK: u8 = 15;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
