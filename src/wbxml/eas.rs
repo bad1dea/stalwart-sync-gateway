@@ -203,6 +203,7 @@ pub mod airsync_base {
     pub const ATTACHMENT: Token = tag(0x0f, false);
     pub const DISPLAY_NAME: Token = tag(0x10, false);
     pub const FILE_REFERENCE: Token = tag(0x11, false);
+    pub const METHOD: Token = tag(0x12, false);
     pub const IS_INLINE: Token = tag(0x15, false);
 
     pub const fn tag(token: u8, has_content: bool) -> Token {

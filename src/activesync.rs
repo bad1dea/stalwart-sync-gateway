@@ -1221,6 +1221,23 @@ fn write_email_fields(
     if !email.attachments.is_empty() {
         builder.start(base::ATTACHMENTS);
         for attachment in email.attachments {
+            // Real bug, confirmed live via idevicesyslog on the zoidberg
+            // A/B test: iOS's WBXML parser is a strict per-position
+            // grammar, not a flat tag lookup -- sending ContentType
+            // right after FileReference (skipping the required Method
+            // field, per MS-ASAIRS's Attachment element sequence:
+            // DisplayName, FileReference, Method, EstimatedDataSize,
+            // IsInline, [NativeBodyType], [ContentType]) desynced its
+            // parser state entirely: `No parse rule from object <private>
+            // for codePage 0x11 token 0x17 (CPT = 69911)` -- 0x11=17 is
+            // AirSyncBase, 0x17 is ContentType -- and the WHOLE Sync task
+            // failed (`ASFolderItemsSyncTask ... failed with status: 1`),
+            // discarding every field in the response, mail included, not
+            // just the broken attachment. This is why SyncKey never
+            // durably advanced even after the BodyPreference/
+            // MoreAvailable fixes landed correctly in isolation: any
+            // batch containing an attachment (this mailbox has several)
+            // tripped this on every attempt.
             builder.start(base::ATTACHMENT);
             builder.leaf(base::DISPLAY_NAME, attachment.name.clone());
             // GetAttachment addresses attachments by an opaque server-
@@ -1234,9 +1251,13 @@ fn write_email_fields(
                 base::FILE_REFERENCE,
                 format!("{}||{}", attachment.blob_id, attachment.name),
             );
-            builder.leaf(base::CONTENT_TYPE, attachment.content_type);
+            // AttMethod 1 = "Normal" attachment (a plain file, not an
+            // embedded message/OLE object) -- the only kind this gateway
+            // ever produces.
+            builder.leaf(base::METHOD, "1");
             builder.leaf(base::ESTIMATED_DATA_SIZE, attachment.size.to_string());
             builder.leaf(base::IS_INLINE, "0");
+            builder.leaf(base::CONTENT_TYPE, attachment.content_type);
             builder.end();
         }
         builder.end();
@@ -2175,8 +2196,10 @@ fn unauthorized() -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_body_preference, eas_datetime, plain_text_preview, BodyPreference};
-    use crate::model::{EmailBody, EmailBodyType};
+    use super::{apply_body_preference, eas_datetime, plain_text_preview, write_email_fields, BodyPreference};
+    use crate::model::{Email, EmailAttachment, EmailBody, EmailBodyType};
+    use crate::wbxml::eas::{airsync_base as base, DocumentBuilder};
+    use crate::wbxml::Node;
 
     #[test]
     fn eas_datetime_strips_dashes_and_colons() {
@@ -2300,6 +2323,68 @@ mod tests {
         assert_eq!(out_value, "short");
         assert_eq!(full_len, 5);
         assert!(!truncated);
+    }
+
+    #[test]
+    fn write_email_fields_attachment_field_order_matches_ms_asairs() {
+        // Real bug, confirmed live via idevicesyslog on the zoidberg A/B
+        // test: iOS's WBXML parser is a strict per-position grammar, not
+        // a flat tag lookup. The old field order (DisplayName,
+        // FileReference, ContentType, EstimatedDataSize, IsInline --
+        // ContentType right after FileReference, Method never sent at
+        // all) desynced iOS's parser mid-Attachment: "No parse rule from
+        // object <private> for codePage 0x11 token 0x17 (CPT = 69911)"
+        // (0x11=17 is AirSyncBase, 0x17 is ContentType) -- and the WHOLE
+        // Sync task failed, discarding every field in the response, not
+        // just the attachment. MS-ASAIRS's real Attachment sequence is
+        // DisplayName, FileReference, Method, EstimatedDataSize,
+        // IsInline, ContentType.
+        let email = Email {
+            id: "email-1".to_owned(),
+            mailbox_ids: vec![],
+            subject: "Has an attachment".to_owned(),
+            received_at: None,
+            keywords: vec![],
+            from: String::new(),
+            to: String::new(),
+            cc: String::new(),
+            read: false,
+            body: None,
+            attachments: vec![EmailAttachment {
+                blob_id: "blob-1".to_owned(),
+                name: "invoice.pdf".to_owned(),
+                content_type: "application/pdf".to_owned(),
+                size: 1234,
+            }],
+        };
+        let mut builder = DocumentBuilder::new();
+        write_email_fields(&mut builder, "email-1", email, None);
+        let doc = builder.finish();
+
+        // Compare by (code_page, token) only -- Token's derived equality
+        // also includes has_content, which DocumentBuilder::start()/leaf()
+        // always force to true regardless of how the constant itself was
+        // declared, so a direct Token == Token comparison against the
+        // eas.rs constants would never match.
+        let expected_order = [
+            base::DISPLAY_NAME.token,
+            base::FILE_REFERENCE.token,
+            base::METHOD.token,
+            base::ESTIMATED_DATA_SIZE.token,
+            base::IS_INLINE.token,
+            base::CONTENT_TYPE.token,
+        ];
+        let actual_order: Vec<_> = doc
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                Node::Start(t) if t.code_page == base::PAGE && expected_order.contains(&t.token) => {
+                    Some(t.token)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(actual_order, expected_order);
     }
 
     #[test]
