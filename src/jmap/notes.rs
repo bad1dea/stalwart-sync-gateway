@@ -259,21 +259,105 @@ impl JmapClient {
             if method.0 == "Email/get" {
                 let get: GetResponse<NoteEmailObject> = serde_json::from_value(method.1)
                     .context("invalid Email/get response while listing notes")?;
-                return Ok(get
-                    .list
-                    .into_iter()
-                    .filter_map(|email| {
-                        let stable_id = extract_stable_id(&email.keywords)?;
-                        let hash = note_hash(&email);
-                        Some(NoteSummary {
-                            id: stable_id,
-                            hash,
-                        })
-                    })
-                    .collect());
+
+                let mut summaries = Vec::with_capacity(get.list.len());
+                let mut adoptions: Vec<(String, String)> = Vec::new();
+                for email in &get.list {
+                    let stable_id = match extract_stable_id(&email.keywords) {
+                        Some(id) => id,
+                        None => {
+                            // Real bug, found live: a note created by
+                            // anything other than this gateway (Apple's
+                            // own IMAP Notes sync writing directly to the
+                            // same "Notes" mailbox, or anything that
+                            // predates this gateway) has no noteid-*
+                            // keyword -- the ONLY thing this function used
+                            // to recognize a note at all. The old
+                            // filter_map silently dropped it, so it was
+                            // invisible to EAS sync with no trace at all.
+                            // Adopt it instead: patch a freshly generated
+                            // stable id onto the existing Email in place
+                            // (keywords are mutable post-import, unlike
+                            // subject/body -- see module docs), so it
+                            // starts showing up without disturbing
+                            // whatever other client is also using this
+                            // mailbox.
+                            let new_id = generate_stable_id();
+                            adoptions.push((email.id.clone(), new_id.clone()));
+                            new_id
+                        }
+                    };
+                    summaries.push(NoteSummary {
+                        id: stable_id,
+                        hash: note_hash(email),
+                    });
+                }
+
+                if !adoptions.is_empty() {
+                    if let Err(error) = self.adopt_notes(auth, &adoptions).await {
+                        tracing::warn!(
+                            %error,
+                            count = adoptions.len(),
+                            "failed to adopt pre-existing notes with a stable id"
+                        );
+                    }
+                }
+
+                return Ok(summaries);
             }
         }
         Ok(Vec::new())
+    }
+
+    /// Patches a freshly generated `noteid-*` keyword (plus the internal
+    /// `$note` marker) onto each already-existing Email in place, via
+    /// JMAP's patch-object syntax (`"keywords/<name>": true` merges a
+    /// single keyword without clobbering whatever else is already set,
+    /// unlike replacing the whole `keywords` map). See `list_notes`'s own
+    /// doc comment for why this exists. Best-effort by design -- called
+    /// from a read path (Sync), so a failure here shouldn't fail the
+    /// whole sync, just leave those notes unadopted for the caller to
+    /// retry next time.
+    async fn adopt_notes(
+        &self,
+        auth: &AuthenticatedSession,
+        adoptions: &[(String, String)],
+    ) -> anyhow::Result<()> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            anyhow::bail!("JMAP Mail capability is not available");
+        };
+        let mut update = serde_json::Map::new();
+        for (email_id, stable_id) in adoptions {
+            let mut patch = serde_json::Map::new();
+            patch.insert(
+                format!("keywords/{stable_id}"),
+                serde_json::Value::Bool(true),
+            );
+            patch.insert(
+                format!("keywords/{NOTE_MARKER_KEYWORD}"),
+                serde_json::Value::Bool(true),
+            );
+            update.insert(email_id.clone(), serde_json::Value::Object(patch));
+        }
+
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Email/set",
+                    serde_json::json!({ "accountId": account_id, "update": update }),
+                    "0",
+                )],
+            )
+            .await?;
+
+        for method in response.method_responses {
+            if method.0 == "error" {
+                anyhow::bail!("JMAP method error in Email/set while adopting notes");
+            }
+        }
+        Ok(())
     }
 
     pub async fn get_note(
@@ -532,6 +616,8 @@ struct MailboxIdentity {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NoteEmailObject {
+    #[serde(default)]
+    id: String,
     #[serde(default)]
     subject: String,
     #[serde(default)]

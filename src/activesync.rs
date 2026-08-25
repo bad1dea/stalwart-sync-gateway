@@ -1582,12 +1582,76 @@ fn strip_html_tags(html: &str) -> String {
                 skip_until = Some("</script>");
             }
             in_tag = true;
+        } else if ch == '&' {
+            // Real bug: entity references (`&nbsp;`, `&amp;`, ...) are
+            // text content, not markup -- this loop only ever stripped
+            // tags, so they passed straight through undecoded and showed
+            // up as literal "&nbsp;" text in list-row previews (confirmed
+            // live). Decode the common ones; anything unrecognized (or
+            // any bare '&' in ordinary unencoded text, which is common)
+            // is left exactly as-is rather than guessed at.
+            if let Some((decoded, consumed)) = decode_entity_at(&chars[i..]) {
+                out.push(decoded);
+                i += consumed;
+                continue;
+            }
+            out.push(ch);
         } else {
             out.push(ch);
         }
         i += 1;
     }
     out
+}
+
+/// `chars[0]` is the `&`. Returns the decoded character and how many
+/// input chars it consumed (including the `&` and the terminating `;`),
+/// or `None` if this isn't a recognized entity (leaves it untouched).
+fn decode_entity_at(chars: &[char]) -> Option<(char, usize)> {
+    // Real entities are short; a ';' further out than this is almost
+    // certainly an unrelated bare '&' in ordinary text, not markup.
+    let semi_index = chars.iter().take(32).position(|c| *c == ';')?;
+    if semi_index == 0 {
+        return None;
+    }
+    let entity: String = chars[1..semi_index].iter().collect();
+    let decoded = decode_named_or_numeric_entity(&entity)?;
+    Some((decoded, semi_index + 1))
+}
+
+fn decode_named_or_numeric_entity(entity: &str) -> Option<char> {
+    if let Some(digits) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
+        return u32::from_str_radix(digits, 16).ok().and_then(char::from_u32);
+    }
+    if let Some(digits) = entity.strip_prefix('#') {
+        return digits.parse::<u32>().ok().and_then(char::from_u32);
+    }
+    Some(match entity {
+        // Collapses to a plain space rather than U+00A0 -- this feeds a
+        // list-row preview / plain-text body, and a literal non-breaking
+        // space has no Unicode White_Space property, so
+        // collapse_whitespace()'s split_whitespace() wouldn't collapse
+        // it, defeating the point of decoding it at all.
+        "nbsp" => ' ',
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        "mdash" => '\u{2014}',
+        "ndash" => '\u{2013}',
+        "hellip" => '\u{2026}',
+        "copy" => '\u{00A9}',
+        "reg" => '\u{00AE}',
+        "trade" => '\u{2122}',
+        "rsquo" => '\u{2019}',
+        "lsquo" => '\u{2018}',
+        "rdquo" => '\u{201D}',
+        "ldquo" => '\u{201C}',
+        "bull" => '\u{2022}',
+        "middot" => '\u{00B7}',
+        _ => return None,
+    })
 }
 
 /// Handles one Contacts collection's Sync round-trip: read-only list-and-
@@ -2463,8 +2527,8 @@ fn unauthorized() -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_body_preference, eas_datetime, eas_datetime_dashes, plain_text_preview,
-        write_email_fields, BodyPreference,
+        apply_body_preference, decode_entity_at, eas_datetime, eas_datetime_dashes,
+        plain_text_preview, write_email_fields, BodyPreference,
     };
     use crate::model::{Email, EmailAttachment, EmailBody, EmailBodyType};
     use crate::wbxml::eas::{airsync_base as base, DocumentBuilder};
@@ -2555,6 +2619,45 @@ mod tests {
             value: r#"<div style="width:5px>2px?10px:0" data-x="a>b" onclick="if(x>1)y()">Real text</div>"#.to_owned(),
         };
         assert_eq!(plain_text_preview(&body), "Real text");
+    }
+
+    #[test]
+    fn plain_text_preview_decodes_html_entities() {
+        // Real bug, reported live against a real VoIP.ms email: the list
+        // preview showed literal "&nbsp;" text instead of a space --
+        // strip_html_tags only ever removed markup, entity references
+        // (text content, not tags) passed straight through undecoded.
+        let body = EmailBody {
+            body_type: EmailBodyType::Html,
+            value: "Raj Singh&nbsp; Director of Sales &amp; Support".to_owned(),
+        };
+        assert_eq!(
+            plain_text_preview(&body),
+            "Raj Singh Director of Sales & Support"
+        );
+    }
+
+    #[test]
+    fn decode_entity_at_handles_named_decimal_and_hex_forms() {
+        assert_eq!(
+            decode_entity_at(&"&nbsp; rest".chars().collect::<Vec<_>>()),
+            Some((' ', 6))
+        );
+        assert_eq!(
+            decode_entity_at(&"&#39;s".chars().collect::<Vec<_>>()),
+            Some(('\'', 5))
+        );
+        assert_eq!(
+            decode_entity_at(&"&#x27;s".chars().collect::<Vec<_>>()),
+            Some(('\'', 6))
+        );
+        // An unrecognized/malformed entity, or a bare '&' in ordinary
+        // unencoded text, is left untouched rather than guessed at.
+        assert_eq!(
+            decode_entity_at(&"&whatever;".chars().collect::<Vec<_>>()),
+            None
+        );
+        assert_eq!(decode_entity_at(&"& rest".chars().collect::<Vec<_>>()), None);
     }
 
     #[test]
