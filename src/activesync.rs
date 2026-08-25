@@ -615,11 +615,24 @@ async fn settings(
             builder.leaf(set::OOF_STATE, if is_enabled { "1" } else { "0" });
             if is_enabled {
                 if let Some(vacation) = &vacation {
+                    // Real bug, found live: pulled the zoidberg pcap again
+                    // after the user reported Automatic Replies STILL
+                    // stuck on "Loading..." even with the nested
+                    // OofMessage fix deployed and structurally correct.
+                    // The device's own Set request sends StartTime/EndTime
+                    // in DASHED ISO form ("2026-08-25T16:14:32.000Z"), but
+                    // this Get response was echoing the COMPACT form
+                    // ("20260825T161432Z") -- the exact same "wrong date
+                    // format on one specific field" failure class as the
+                    // original DateReceived bug (commit 1bac5ae). Fixed by
+                    // mirroring what the device itself sent, same
+                    // reasoning as that fix: eas_datetime_dashes(), not
+                    // eas_datetime().
                     if let Some(from) = &vacation.from_date {
-                        builder.leaf(set::START_TIME, eas_datetime(from));
+                        builder.leaf(set::START_TIME, eas_datetime_dashes(from));
                     }
                     if let Some(to) = &vacation.to_date {
-                        builder.leaf(set::END_TIME, eas_datetime(to));
+                        builder.leaf(set::END_TIME, eas_datetime_dashes(to));
                     }
                     let reply_message = vacation
                         .text_body
