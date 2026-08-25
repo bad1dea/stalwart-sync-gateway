@@ -1624,17 +1624,23 @@ async fn sync_contacts_collection(
 fn write_contact_add(builder: &mut wbxml::eas::DocumentBuilder, contact: crate::model::Contact) {
     use wbxml::eas::{airsync as air, contacts as c};
 
+    // Field order matches the real z-push-stalwart-jmap source (PR #187,
+    // pinned in config/z-push/Dockerfile: src/lib/syncobjects/
+    // synccontact.php's own $mapping, filtered down to the fields this
+    // gateway actually sets): BusinessPhoneNumber, CompanyName,
+    // Email1/2/3Address, FileAs, FirstName, HomePhoneNumber, JobTitle,
+    // LastName, MobilePhoneNumber. This gateway had FirstName/LastName
+    // first and Business/Company/JobTitle last -- completely reversed
+    // from the real schema, the same failure class already confirmed
+    // for Email/Attachment/Preview/Notes.
     builder.start(air::ADD);
     builder.leaf(air::SERVER_ID, contact.id);
     builder.start(air::APPLICATION_DATA);
-    if let Some(first) = contact.first_name {
-        builder.leaf(c::FIRST_NAME, first);
+    if let Some(business) = contact.business_phone {
+        builder.leaf(c::BUSINESS_PHONE_NUMBER, business);
     }
-    if let Some(last) = contact.last_name {
-        builder.leaf(c::LAST_NAME, last);
-    }
-    if let Some(file_as) = contact.file_as {
-        builder.leaf(c::FILE_AS, file_as);
+    if let Some(company) = contact.company_name {
+        builder.leaf(c::COMPANY_NAME, company);
     }
     let mut emails = contact.emails.into_iter();
     if let Some(email1) = emails.next() {
@@ -1646,20 +1652,23 @@ fn write_contact_add(builder: &mut wbxml::eas::DocumentBuilder, contact: crate::
     if let Some(email3) = emails.next() {
         builder.leaf(c::EMAIL3_ADDRESS, email3);
     }
-    if let Some(mobile) = contact.mobile_phone {
-        builder.leaf(c::MOBILE_PHONE_NUMBER, mobile);
+    if let Some(file_as) = contact.file_as {
+        builder.leaf(c::FILE_AS, file_as);
+    }
+    if let Some(first) = contact.first_name {
+        builder.leaf(c::FIRST_NAME, first);
     }
     if let Some(home) = contact.home_phone {
         builder.leaf(c::HOME_PHONE_NUMBER, home);
     }
-    if let Some(business) = contact.business_phone {
-        builder.leaf(c::BUSINESS_PHONE_NUMBER, business);
-    }
-    if let Some(company) = contact.company_name {
-        builder.leaf(c::COMPANY_NAME, company);
-    }
     if let Some(title) = contact.job_title {
         builder.leaf(c::JOB_TITLE, title);
+    }
+    if let Some(last) = contact.last_name {
+        builder.leaf(c::LAST_NAME, last);
+    }
+    if let Some(mobile) = contact.mobile_phone {
+        builder.leaf(c::MOBILE_PHONE_NUMBER, mobile);
     }
     builder.end();
     builder.end();
@@ -1819,24 +1828,31 @@ fn write_calendar_add(
 ) {
     use wbxml::eas::{airsync as air, calendar as cal};
 
+    // Field order matches the real z-push-stalwart-jmap source (PR #187,
+    // pinned in config/z-push/Dockerfile: src/lib/syncobjects/
+    // syncappointment.php's own $mapping, filtered to the fields this
+    // gateway actually sets): DtStamp, StartTime, Subject, Location,
+    // EndTime, AllDayEvent. This gateway had Subject first and DtStamp
+    // last -- reversed -- same failure class as every other object
+    // checked against this source.
     builder.start(air::ADD);
     builder.leaf(air::SERVER_ID, event.id);
     builder.start(air::APPLICATION_DATA);
-    builder.leaf(cal::SUBJECT, event.title);
-    if let Some(start) = event.start_utc {
-        builder.leaf(cal::START_TIME, start);
-    }
-    if let Some(end) = event.end_utc {
-        builder.leaf(cal::END_TIME, end);
-    }
-    if let Some(location) = event.location {
-        builder.leaf(cal::LOCATION, location);
-    }
-    builder.leaf(cal::ALL_DAY_EVENT, if event.all_day { "1" } else { "0" });
     builder.leaf(
         cal::DTSTAMP,
         eas_datetime(&chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
     );
+    if let Some(start) = event.start_utc {
+        builder.leaf(cal::START_TIME, start);
+    }
+    builder.leaf(cal::SUBJECT, event.title);
+    if let Some(location) = event.location {
+        builder.leaf(cal::LOCATION, location);
+    }
+    if let Some(end) = event.end_utc {
+        builder.leaf(cal::END_TIME, end);
+    }
+    builder.leaf(cal::ALL_DAY_EVENT, if event.all_day { "1" } else { "0" });
     builder.end();
     builder.end();
 }
