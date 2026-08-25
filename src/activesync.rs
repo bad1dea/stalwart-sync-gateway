@@ -878,16 +878,8 @@ async fn sync_mail(
         }
 
         if collection.collection_id.starts_with("cal_") {
-            sync_calendar_collection(
-                state,
-                auth,
-                &mut builder,
-                user,
-                device_id,
-                &collection,
-                previous_record.as_ref(),
-            )
-            .await;
+            sync_calendar_collection(state, auth, &mut builder, user, device_id, &collection)
+                .await;
             continue;
         }
 
@@ -2026,15 +2018,14 @@ fn write_contact_command(
     builder.end();
 }
 
-/// Handles one Calendar collection's Sync round-trip: read-only list-and-
-/// diff against previously-seen JMAP ids, same shape as
-/// sync_contacts_collection. No recurrence, attendee, or reminder
-/// support -- single (non-recurring) events only, matching the fields
-/// the PHP z-push reference itself fetched (`id, title, start, duration,
-/// updated`). Start/end times are converted from JSCalendar local-time-
-/// plus-IANA-timezone to real UTC instants in the JMAP client
-/// (`local_to_utc_eas`) -- see that function's docs for why this needed
-/// a new dependency rather than a naive/wrong conversion.
+/// Handles one Calendar collection's Sync round-trip end to end, same
+/// contract and hash-diff shape as `sync_contacts_collection` (see that
+/// function's own doc for the full pattern description -- this is a
+/// direct copy of it onto Calendar). No recurrence, attendee, or
+/// reminder support -- single (non-recurring) events only, matching the
+/// read path's existing field set. `CalendarEvent/set` supports
+/// in-place `update` (confirmed live -- see `save_calendar_event`'s doc),
+/// so like Contacts, the JMAP id is a stable ServerId across edits.
 async fn sync_calendar_collection(
     state: &AppState,
     auth: &AuthenticatedSession,
@@ -2042,61 +2033,101 @@ async fn sync_calendar_collection(
     user: &str,
     device_id: &str,
     collection: &wbxml::eas::SyncCollectionRequest,
-    previous_record: Option<&SyncRecord>,
 ) {
     use wbxml::eas::airsync as air;
 
     let calendar_id = collection
         .collection_id
         .strip_prefix("cal_")
-        .unwrap_or(&collection.collection_id);
+        .unwrap_or(&collection.collection_id)
+        .to_owned();
 
-    if !collection.get_changes {
-        let is_first_sync = collection.sync_key == "0";
-        let new_sync_key = if is_first_sync {
-            next_sync_key(&collection.sync_key)
-        } else {
-            collection.sync_key.clone()
-        };
-        if is_first_sync {
-            if let Err(error) = state
-                .state
-                .put(SyncRecord {
-                    user: user.to_owned(),
-                    device_id: device_id.to_owned(),
-                    collection_id: collection.collection_id.clone(),
-                    sync_key: new_sync_key.clone(),
-                    jmap_state: String::new(),
-                    seen_ids: Vec::new(),
-                })
-                .await
-            {
-                tracing::warn!(
-                    %error,
-                    user,
-                    device_id,
-                    collection = collection.collection_id,
-                    "failed to persist Sync state"
+    let previous_items = state
+        .state
+        .item_states(user, device_id, &collection.collection_id)
+        .await
+        .unwrap_or_default();
+    let mut previous_by_id: BTreeMap<String, String> = previous_items
+        .into_iter()
+        .map(|item| (item.item_id, item.hash))
+        .collect();
+
+    let mut add_responses: Vec<(String, Option<String>, &'static str)> = Vec::new();
+    let mut change_responses: Vec<(String, &'static str)> = Vec::new();
+
+    for command in &collection.commands {
+        match command.kind {
+            wbxml::eas::SyncClientCommandKind::Add => {
+                match state
+                    .jmap
+                    .save_calendar_event(auth, &calendar_id, None, &command.calendar)
+                    .await
+                {
+                    Ok(new_id) => {
+                        add_responses.push((command.client_id.clone(), Some(new_id), "1"))
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            client_id = command.client_id,
+                            "failed to create calendar event from client Add"
+                        );
+                        add_responses.push((command.client_id.clone(), None, "5"));
+                    }
+                }
+            }
+            wbxml::eas::SyncClientCommandKind::Change => {
+                match state
+                    .jmap
+                    .save_calendar_event(
+                        auth,
+                        &calendar_id,
+                        Some(&command.server_id),
+                        &command.calendar,
+                    )
+                    .await
+                {
+                    Ok(id) => change_responses.push((id, "1")),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            server_id = command.server_id,
+                            "failed to save calendar event change"
+                        );
+                        change_responses.push((command.server_id.clone(), "5"));
+                    }
+                }
+            }
+            wbxml::eas::SyncClientCommandKind::Delete => {
+                match state
+                    .jmap
+                    .destroy_calendar_event(auth, &command.server_id)
+                    .await
+                {
+                    Ok(()) => {
+                        previous_by_id.remove(&command.server_id);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            server_id = command.server_id,
+                            "failed to delete calendar event"
+                        );
+                    }
+                }
+            }
+            wbxml::eas::SyncClientCommandKind::Fetch => {
+                tracing::debug!(
+                    server_id = command.server_id,
+                    "ignoring unsupported Calendar Fetch command"
                 );
-                builder.start(air::COLLECTION);
-                builder.leaf(air::SYNC_KEY, collection.sync_key.clone());
-                builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
-                builder.leaf(air::STATUS, "5");
-                builder.end();
-                return;
             }
         }
-        builder.start(air::COLLECTION);
-        builder.leaf(air::SYNC_KEY, new_sync_key);
-        builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
-        builder.leaf(air::STATUS, "1");
-        builder.end();
-        return;
     }
 
     let events = match state
         .jmap
-        .calendar_events_in_calendar(auth, calendar_id, collection.window_size)
+        .calendar_events_in_calendar(auth, &calendar_id, collection.window_size)
         .await
     {
         Ok(events) => events,
@@ -2115,23 +2146,47 @@ async fn sync_calendar_collection(
         }
     };
 
-    let previous_seen: BTreeSet<String> = previous_record
-        .map(|record| record.seen_ids.iter().cloned().collect())
-        .unwrap_or_default();
-    let fetched_ids: BTreeSet<String> = events.iter().map(|event| event.id.clone()).collect();
-    let events_to_send: Vec<_> = if collection.sync_key == "0" {
-        events
-    } else {
-        events
-            .into_iter()
-            .filter(|event| !previous_seen.contains(&event.id))
-            .collect()
-    };
-    let new_sync_key = if collection.sync_key == "0" || !events_to_send.is_empty() {
-        next_sync_key(&collection.sync_key)
-    } else {
-        collection.sync_key.clone()
-    };
+    let current_by_id: BTreeMap<String, (String, crate::model::CalendarEvent)> = events
+        .into_iter()
+        .map(|event| (event.id.clone(), (calendar_event_hash(&event), event)))
+        .collect();
+
+    let just_written: BTreeSet<String> = add_responses
+        .iter()
+        .filter_map(|(_, server_id, _)| server_id.clone())
+        .chain(
+            change_responses
+                .iter()
+                .map(|(server_id, _)| server_id.clone()),
+        )
+        .collect();
+
+    let mut to_add = Vec::new();
+    let mut to_change = Vec::new();
+    for (id, (hash, _)) in &current_by_id {
+        if just_written.contains(id) {
+            continue;
+        }
+        match previous_by_id.get(id) {
+            None => to_add.push(id.clone()),
+            Some(previous_hash) if previous_hash != hash => to_change.push(id.clone()),
+            _ => {}
+        }
+    }
+    let to_remove: Vec<String> = previous_by_id
+        .keys()
+        .filter(|id| !current_by_id.contains_key(id.as_str()))
+        .cloned()
+        .collect();
+
+    let has_server_changes = !to_add.is_empty() || !to_change.is_empty() || !to_remove.is_empty();
+    let client_commands_applied = !add_responses.is_empty() || !change_responses.is_empty();
+    let new_sync_key =
+        if collection.sync_key == "0" || has_server_changes || client_commands_applied {
+            next_sync_key(&collection.sync_key)
+        } else {
+            collection.sync_key.clone()
+        };
 
     if let Err(error) = state
         .state
@@ -2141,42 +2196,90 @@ async fn sync_calendar_collection(
             collection_id: collection.collection_id.clone(),
             sync_key: new_sync_key.clone(),
             jmap_state: String::new(),
-            seen_ids: previous_seen.union(&fetched_ids).cloned().collect(),
+            seen_ids: Vec::new(),
         })
         .await
     {
-        tracing::warn!(
-            %error,
-            user,
-            device_id,
-            collection = collection.collection_id,
-            "failed to persist Sync state"
-        );
-        builder.start(air::COLLECTION);
-        builder.leaf(air::SYNC_KEY, collection.sync_key.clone());
-        builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
-        builder.leaf(air::STATUS, "5");
-        builder.end();
-        return;
+        tracing::warn!(%error, user, device_id, collection = collection.collection_id, "failed to persist Calendar SyncRecord");
+    }
+    let item_states: Vec<ItemState> = current_by_id
+        .iter()
+        .map(|(id, (hash, _))| ItemState {
+            item_id: id.clone(),
+            hash: hash.clone(),
+        })
+        .collect();
+    if let Err(error) = state
+        .state
+        .put_item_states(user, device_id, &collection.collection_id, item_states)
+        .await
+    {
+        tracing::warn!(%error, user, device_id, collection = collection.collection_id, "failed to persist Calendar item state");
     }
 
     builder.start(air::COLLECTION);
     builder.leaf(air::SYNC_KEY, new_sync_key);
     builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
     builder.leaf(air::STATUS, "1");
-    if !events_to_send.is_empty() {
-        builder.start(air::COMMANDS);
-        for event in events_to_send {
-            write_calendar_add(builder, event);
+
+    if !add_responses.is_empty() || !change_responses.is_empty() {
+        builder.start(air::RESPONSES);
+        for (client_id, server_id, status) in &add_responses {
+            builder.start(air::ADD);
+            builder.leaf(air::CLIENT_ID, client_id.clone());
+            if let Some(server_id) = server_id {
+                builder.leaf(air::SERVER_ID, server_id.clone());
+            }
+            builder.leaf(air::STATUS, *status);
+            builder.end();
+        }
+        for (server_id, status) in &change_responses {
+            builder.start(air::CHANGE);
+            builder.leaf(air::SERVER_ID, server_id.clone());
+            builder.leaf(air::STATUS, *status);
+            builder.end();
         }
         builder.end();
     }
+
+    if collection.get_changes && has_server_changes {
+        builder.start(air::COMMANDS);
+        for id in &to_add {
+            if let Some((_, event)) = current_by_id.get(id) {
+                write_calendar_command(builder, air::ADD, event);
+            }
+        }
+        for id in &to_change {
+            if let Some((_, event)) = current_by_id.get(id) {
+                write_calendar_command(builder, air::CHANGE, event);
+            }
+        }
+        for id in &to_remove {
+            builder.start(air::DELETE);
+            builder.leaf(air::SERVER_ID, id.clone());
+            builder.end();
+        }
+        builder.end();
+    }
+
     builder.end();
 }
 
-fn write_calendar_add(
+/// Same purpose as `contact_hash`/`jmap::notes::note_hash`.
+fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    event.title.hash(&mut hasher);
+    event.location.hash(&mut hasher);
+    event.start_utc.hash(&mut hasher);
+    event.end_utc.hash(&mut hasher);
+    event.all_day.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn write_calendar_command(
     builder: &mut wbxml::eas::DocumentBuilder,
-    event: crate::model::CalendarEvent,
+    tag: wbxml::token::Token,
+    event: &crate::model::CalendarEvent,
 ) {
     use wbxml::eas::{airsync as air, calendar as cal};
 
@@ -2187,22 +2290,22 @@ fn write_calendar_add(
     // EndTime, AllDayEvent. This gateway had Subject first and DtStamp
     // last -- reversed -- same failure class as every other object
     // checked against this source.
-    builder.start(air::ADD);
-    builder.leaf(air::SERVER_ID, event.id);
+    builder.start(tag);
+    builder.leaf(air::SERVER_ID, event.id.clone());
     builder.start(air::APPLICATION_DATA);
     builder.leaf(
         cal::DTSTAMP,
         eas_datetime(&chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
     );
-    if let Some(start) = event.start_utc {
-        builder.leaf(cal::START_TIME, start);
+    if let Some(start) = &event.start_utc {
+        builder.leaf(cal::START_TIME, start.clone());
     }
-    builder.leaf(cal::SUBJECT, event.title);
-    if let Some(location) = event.location {
-        builder.leaf(cal::LOCATION, location);
+    builder.leaf(cal::SUBJECT, event.title.clone());
+    if let Some(location) = &event.location {
+        builder.leaf(cal::LOCATION, location.clone());
     }
-    if let Some(end) = event.end_utc {
-        builder.leaf(cal::END_TIME, end);
+    if let Some(end) = &event.end_utc {
+        builder.leaf(cal::END_TIME, end.clone());
     }
     builder.leaf(cal::ALL_DAY_EVENT, if event.all_day { "1" } else { "0" });
     builder.end();

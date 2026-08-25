@@ -730,6 +730,187 @@ impl JmapClient {
         Ok(Vec::new())
     }
 
+    /// Creates (`id: None`) or updates (`id: Some`) a non-recurring
+    /// calendar event from ActiveSync `CalendarFields`. Recurrence,
+    /// attendees, and reminders are explicitly out of scope, matching
+    /// the read path (`calendar_events_in_calendar`). `start`/`duration`
+    /// deliberately omit `timeZone` and treat the EAS UTC DateTime as a
+    /// naive local-looking string -- the SAME convention this codebase's
+    /// own read path (`local_to_utc_eas`) already uses for an absent
+    /// timeZone (treated as already-UTC, not "floating" per a strict
+    /// reading of JSCalendar/RFC 8984), so this isn't a new assumption,
+    /// just the write-side mirror of an existing one. `CalendarEvent/set`
+    /// genuinely supports in-place `update` (confirmed live the same way
+    /// as `save_contact`: created a throwaway event, updated `title` on
+    /// the SAME id, read it back changed, destroyed it) -- so, like
+    /// Contacts and unlike Notes, the JMAP id itself is a stable
+    /// ActiveSync ServerId across edits.
+    pub async fn save_calendar_event(
+        &self,
+        auth: &AuthenticatedSession,
+        calendar_id: &str,
+        id: Option<&str>,
+        fields: &crate::wbxml::eas::CalendarFields,
+    ) -> anyhow::Result<String> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::CALENDARS) else {
+            anyhow::bail!("JMAP Calendars capability is not available");
+        };
+
+        let mut event = serde_json::Map::new();
+        event.insert(
+            "@type".to_owned(),
+            serde_json::Value::String("Event".to_owned()),
+        );
+        if let Some(subject) = &fields.subject {
+            event.insert(
+                "title".to_owned(),
+                serde_json::Value::String(subject.clone()),
+            );
+        }
+        if let Some(location) = &fields.location {
+            event.insert(
+                "locations".to_owned(),
+                serde_json::json!({ "loc1": { "name": location } }),
+            );
+        }
+        if let Some(start) = fields.start_time.as_deref().and_then(eas_compact_to_local_iso) {
+            event.insert("start".to_owned(), serde_json::Value::String(start));
+        }
+        if let (Some(start), Some(end)) = (&fields.start_time, &fields.end_time) {
+            if let Some(duration) = eas_compact_duration(start, end) {
+                event.insert("duration".to_owned(), serde_json::Value::String(duration));
+            }
+        }
+        if let Some(all_day) = fields.all_day_event {
+            event.insert(
+                "showWithoutTime".to_owned(),
+                serde_json::Value::Bool(all_day),
+            );
+        }
+
+        let call = match id {
+            Some(existing_id) => MethodCall::new(
+                "CalendarEvent/set",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "update": { existing_id: event }
+                }),
+                "0",
+            ),
+            None => {
+                event.insert(
+                    "calendarIds".to_owned(),
+                    serde_json::json!({ calendar_id: true }),
+                );
+                MethodCall::new(
+                    "CalendarEvent/set",
+                    serde_json::json!({
+                        "accountId": account_id,
+                        "create": { "e1": event }
+                    }),
+                    "0",
+                )
+            }
+        };
+
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CALENDARS.to_owned(),
+                ],
+                vec![call],
+            )
+            .await?;
+
+        for method in response.method_responses {
+            if method.0 == "error" {
+                anyhow::bail!("JMAP method error in CalendarEvent/set");
+            }
+            if method.0 == "CalendarEvent/set" {
+                if let Some(existing_id) = id {
+                    let updated = method
+                        .1
+                        .get("updated")
+                        .and_then(|value| value.get(existing_id));
+                    if updated.is_some() {
+                        return Ok(existing_id.to_owned());
+                    }
+                    anyhow::bail!(
+                        "CalendarEvent/set did not confirm update for {existing_id}: {:?}",
+                        method.1.get("notUpdated")
+                    );
+                }
+                if let Some(new_id) = method
+                    .1
+                    .get("created")
+                    .and_then(|c| c.get("e1"))
+                    .and_then(|event| event.get("id"))
+                    .and_then(|value| value.as_str())
+                {
+                    return Ok(new_id.to_owned());
+                }
+                anyhow::bail!(
+                    "CalendarEvent/set did not return a created id: {:?}",
+                    method.1.get("notCreated")
+                );
+            }
+        }
+        anyhow::bail!("CalendarEvent/set response was missing")
+    }
+
+    /// Idempotent, matching `destroy_note`/`destroy_contact`'s own
+    /// convention.
+    pub async fn destroy_calendar_event(
+        &self,
+        auth: &AuthenticatedSession,
+        id: &str,
+    ) -> anyhow::Result<()> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::CALENDARS) else {
+            anyhow::bail!("JMAP Calendars capability is not available");
+        };
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CALENDARS.to_owned(),
+                ],
+                vec![MethodCall::new(
+                    "CalendarEvent/set",
+                    serde_json::json!({ "accountId": account_id, "destroy": [id] }),
+                    "0",
+                )],
+            )
+            .await?;
+
+        for method in response.method_responses {
+            if method.0 == "CalendarEvent/set" {
+                let destroyed = method
+                    .1
+                    .get("destroyed")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|list| list.iter().any(|v| v.as_str() == Some(id)));
+                if destroyed {
+                    return Ok(());
+                }
+                let not_found = method
+                    .1
+                    .get("notDestroyed")
+                    .and_then(|value| value.get(id))
+                    .and_then(|entry| entry.get("type"))
+                    .and_then(|t| t.as_str())
+                    == Some("notFound");
+                if not_found {
+                    return Ok(());
+                }
+                anyhow::bail!("CalendarEvent/set destroy did not report success for {id}");
+            }
+        }
+        anyhow::bail!("CalendarEvent/set response was missing")
+    }
+
     /// Fetches a single Email by its JMAP id (mail ServerId is the raw
     /// JMAP Email id, unlike Notes' separate stable-id scheme). Used by
     /// ItemOperations/Fetch -- the request iOS sends when a user opens a
@@ -1706,6 +1887,32 @@ fn local_to_utc_eas(local_iso: &str, timezone: Option<&str>) -> Option<String> {
     Some(utc.format("%Y%m%dT%H%M%SZ").to_string())
 }
 
+/// Write-side mirror of `local_to_utc_eas`'s "absent timeZone == already
+/// UTC" convention: parses EAS's compact UTC DateTime
+/// (`YYYYMMDDTHHMMSSZ`) and reformats it as the naive (no offset, no
+/// trailing `Z`) ISO 8601 shape JSCalendar's `start` wants when no
+/// `timeZone` property is sent alongside it.
+fn eas_compact_to_local_iso(compact: &str) -> Option<String> {
+    let parsed =
+        chrono::NaiveDateTime::parse_from_str(compact, "%Y%m%dT%H%M%SZ").ok()?;
+    Some(parsed.format("%Y-%m-%dT%H:%M:%S").to_string())
+}
+
+/// `end - start`, both in EAS's compact UTC DateTime form, as an ISO 8601
+/// duration for JSCalendar's `duration` property. Deliberately the
+/// simplest valid encoding (`PT<seconds>S`) rather than breaking into
+/// days/hours/minutes -- `PT5400S` is exactly as spec-valid as `PT1H30M`
+/// and has no ambiguity to get wrong.
+fn eas_compact_duration(start: &str, end: &str) -> Option<String> {
+    let start = chrono::NaiveDateTime::parse_from_str(start, "%Y%m%dT%H%M%SZ").ok()?;
+    let end = chrono::NaiveDateTime::parse_from_str(end, "%Y%m%dT%H%M%SZ").ok()?;
+    let seconds = (end - start).num_seconds();
+    if seconds < 0 {
+        return None;
+    }
+    Some(format!("PT{seconds}S"))
+}
+
 /// Minimal ISO 8601 duration parser covering the shapes JSCalendar event
 /// durations actually use (`PT1H`, `PT30M`, `P1D`, `PT1H30M`) -- days plus
 /// hours/minutes/seconds. Deliberately doesn't handle weeks/months/years
@@ -1821,7 +2028,34 @@ impl From<CalendarObject> for Collection {
 
 #[cfg(test)]
 mod tests {
-    use super::{local_to_utc_eas, parse_iso8601_duration_seconds};
+    use super::{
+        eas_compact_duration, eas_compact_to_local_iso, local_to_utc_eas,
+        parse_iso8601_duration_seconds,
+    };
+
+    #[test]
+    fn eas_compact_to_local_iso_reformats_without_offset() {
+        assert_eq!(
+            eas_compact_to_local_iso("20260901T140000Z"),
+            Some("2026-09-01T14:00:00".to_owned())
+        );
+    }
+
+    #[test]
+    fn eas_compact_duration_computes_seconds_between() {
+        assert_eq!(
+            eas_compact_duration("20260901T140000Z", "20260901T153000Z"),
+            Some("PT5400S".to_owned())
+        );
+    }
+
+    #[test]
+    fn eas_compact_duration_rejects_end_before_start() {
+        assert_eq!(
+            eas_compact_duration("20260901T153000Z", "20260901T140000Z"),
+            None
+        );
+    }
 
     #[test]
     fn duration_parses_hours_only() {

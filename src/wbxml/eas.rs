@@ -1049,6 +1049,26 @@ pub struct SyncClientCommand {
     pub read: Option<bool>,
     pub note: NoteFields,
     pub contact: ContactFields,
+    pub calendar: CalendarFields,
+}
+
+/// ActiveSync Calendar class fields decoded from one Add/Change command's
+/// ApplicationData, limited to the non-recurring subset this gateway
+/// round-trips on read (see `write_calendar_add`) -- recurrence,
+/// attendees, and reminders are explicitly out of scope, same as the
+/// read path. `start_time`/`end_time` arrive already in EAS's compact
+/// UTC DateTime form (`YYYYMMDDTHHMMSSZ`) -- the client sends this
+/// natively, no timezone conversion needed on the way in (unlike the
+/// read path's `local_to_utc_eas`, which exists because JSCalendar's
+/// `start` is LOCAL + a separate `timeZone`, not because EAS itself
+/// needs one).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CalendarFields {
+    pub subject: Option<String>,
+    pub location: Option<String>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+    pub all_day_event: Option<bool>,
 }
 
 /// ActiveSync Contacts class fields decoded from one Add/Change command's
@@ -1227,6 +1247,7 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             read: None,
                             note: NoteFields::default(),
                             contact: ContactFields::default(),
+                            calendar: CalendarFields::default(),
                         });
                         current_command_start = Some(idx);
                     } else {
@@ -1298,6 +1319,8 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                         command.note = extract_note_fields(&document.nodes[start + 1..idx]);
                         command.contact =
                             extract_contact_fields(&document.nodes[start + 1..idx]);
+                        command.calendar =
+                            extract_calendar_fields(&document.nodes[start + 1..idx]);
                         let has_identity =
                             !command.server_id.is_empty() || !command.client_id.is_empty();
                         if has_identity {
@@ -1403,6 +1426,39 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                     fields.company_name = Some(text.clone());
                 } else if same_token(top, contacts::JOB_TITLE) {
                     fields.job_title = Some(text.clone());
+                }
+            }
+            Node::End => {
+                path.pop();
+            }
+            Node::Opaque(_) => {}
+        }
+    }
+
+    fields
+}
+
+/// Same shape as `extract_contact_fields` -- flat leaves, no nesting for
+/// the fields this gateway round-trips.
+fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
+    let mut fields = CalendarFields::default();
+    let mut path: Vec<Token> = Vec::new();
+
+    for node in nodes {
+        match node {
+            Node::Start(token) => path.push(*token),
+            Node::Text(text) => {
+                let Some(&top) = path.last() else { continue };
+                if same_token(top, calendar::SUBJECT) {
+                    fields.subject = Some(text.clone());
+                } else if same_token(top, calendar::LOCATION) {
+                    fields.location = Some(text.clone());
+                } else if same_token(top, calendar::START_TIME) {
+                    fields.start_time = Some(text.clone());
+                } else if same_token(top, calendar::END_TIME) {
+                    fields.end_time = Some(text.clone());
+                } else if same_token(top, calendar::ALL_DAY_EVENT) {
+                    fields.all_day_event = Some(text != "0");
                 }
             }
             Node::End => {
