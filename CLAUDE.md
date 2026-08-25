@@ -77,9 +77,11 @@ Not yet implemented:
 
 - Real JMAP `Email/queryChanges` / `Email/changes` for mail (full-list diffing
   against persisted seen-ids/item-states is fine at typical item counts but
-  wouldn't scale to a huge mailbox).
-- Server-side deletions returned to clients as ActiveSync deletes (mail).
-- Contacts/Calendar client-side Add/Change/Delete (currently read-only).
+  wouldn't scale to a huge mailbox). Confirmed live this session that Stalwart
+  genuinely supports both methods -- this is now a scoped, well-understood
+  follow-up, not an open question about feasibility.
+- Server-side mail deletions ARE now surfaced as ActiveSync deletes
+  (`emails_still_in_mailbox` in `src/jmap/client.rs`) -- done this session.
 - Calendar recurrence, attendees, reminders, timezone-aware all-day handling
   beyond the boolean flag.
 - Attachment upload (composing a NEW message with an attachment from the

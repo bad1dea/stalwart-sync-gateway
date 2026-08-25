@@ -957,6 +957,54 @@ async fn sync_mail(
                 .unwrap_or_default();
             let fetched_ids: BTreeSet<String> =
                 emails.iter().map(|email| email.id.clone()).collect();
+
+            // Real bug, found live: `emails` above is sorted newest-first
+            // and capped at the window size, so a previously-seen id
+            // that's simply absent from THIS fetch could mean either
+            // "genuinely deleted" or "still on the server, just pushed
+            // out of the window by newer mail" -- those look identical
+            // under a plain set diff. Confirm each candidate directly
+            // via emails_still_in_mailbox (its own doc comment has the
+            // full story) rather than assuming absence-from-window means
+            // deleted; see the else-branch below for the empty-window
+            // shortcut that skips this call entirely.
+            let candidate_missing: Vec<String> = if collection.sync_key == "0" {
+                Vec::new()
+            } else {
+                previous_seen
+                    .difference(&fetched_ids)
+                    .cloned()
+                    .collect()
+            };
+            let to_remove: BTreeSet<String> = if candidate_missing.is_empty() {
+                BTreeSet::new()
+            } else {
+                match state
+                    .jmap
+                    .emails_still_in_mailbox(auth, &candidate_missing, &collection.collection_id)
+                    .await
+                {
+                    Ok(still_present) => candidate_missing
+                        .iter()
+                        .filter(|id| !still_present.contains(id.as_str()))
+                        .cloned()
+                        .collect(),
+                    Err(error) => {
+                        // Best-effort: if we can't confirm which
+                        // candidates are real deletions, don't guess --
+                        // send none this round rather than risk a false
+                        // positive that deletes real mail off the
+                        // device. They'll be re-evaluated next Sync.
+                        tracing::warn!(
+                            %error,
+                            collection = collection.collection_id,
+                            "failed to confirm mail deletion candidates, skipping this round"
+                        );
+                        BTreeSet::new()
+                    }
+                }
+            };
+
             let emails_to_send: Vec<_> = if collection.sync_key == "0" {
                 emails
             } else {
@@ -967,6 +1015,7 @@ async fn sync_mail(
             };
             let new_sync_key = if collection.sync_key == "0"
                 || !emails_to_send.is_empty()
+                || !to_remove.is_empty()
                 || client_commands_applied
             {
                 next_sync_key(&collection.sync_key)
@@ -982,7 +1031,11 @@ async fn sync_mail(
                     collection_id: collection.collection_id.clone(),
                     sync_key: new_sync_key.clone(),
                     jmap_state: String::new(),
-                    seen_ids: previous_seen.union(&fetched_ids).cloned().collect(),
+                    seen_ids: previous_seen
+                        .union(&fetched_ids)
+                        .filter(|id| !to_remove.contains(id.as_str()))
+                        .cloned()
+                        .collect(),
                 })
                 .await
             {
@@ -1024,7 +1077,7 @@ async fn sync_mail(
                 builder.end();
             }
 
-            if !emails_to_send.is_empty() {
+            if !emails_to_send.is_empty() || !to_remove.is_empty() {
                 let body_pref = BodyPreference {
                     body_type: collection.body_pref_type,
                     truncation_size: collection.body_pref_truncation_size,
@@ -1037,6 +1090,11 @@ async fn sync_mail(
                 builder.start(air::COMMANDS);
                 for email in emails_to_send {
                     write_email_add(&mut builder, email, Some(body_pref.clone()));
+                }
+                for id in &to_remove {
+                    builder.start(air::DELETE);
+                    builder.leaf(air::SERVER_ID, id.clone());
+                    builder.end();
                 }
                 builder.end();
             }

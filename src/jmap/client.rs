@@ -3,7 +3,7 @@ use axum::http::HeaderMap;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use reqwest::header::{ACCEPT, AUTHORIZATION};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use url::Url;
 
 use crate::{
@@ -402,6 +402,69 @@ impl JmapClient {
         }
 
         Ok((Vec::new(), false))
+    }
+
+    /// Real bug, found live while implementing mail deletion detection:
+    /// `emails_in_mailbox` is sorted newest-first and capped at `limit`,
+    /// so an OLD message that's still on the server but has simply been
+    /// pushed out of the window by newer mail arriving looks IDENTICAL
+    /// to a genuinely deleted one under a naive "not in this fetch"
+    /// diff -- the same diff-against-last-seen approach that's safe for
+    /// Contacts/Calendar/Notes (their queries aren't meaningfully
+    /// windowed at real-world item counts) would be actively wrong here
+    /// and delete mail from the device that's still sitting on the
+    /// server, just further back than the window. This checks each
+    /// candidate id directly instead: one that comes back in Email/get's
+    /// `notFound`, or whose `mailboxIds` no longer includes this
+    /// collection's mailbox (moved elsewhere -- e.g. to Trash via
+    /// another client), is a real removal from THIS collection. Returns
+    /// the subset of `candidate_ids` that are CONFIRMED STILL present
+    /// (i.e. NOT a real removal) -- the caller computes real removals as
+    /// `candidate_ids - this result`.
+    pub async fn emails_still_in_mailbox(
+        &self,
+        auth: &AuthenticatedSession,
+        candidate_ids: &[String],
+        mailbox_id: &str,
+    ) -> anyhow::Result<BTreeSet<String>> {
+        if candidate_ids.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            return Ok(BTreeSet::new());
+        };
+
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Email/get",
+                    serde_json::json!({
+                        "accountId": account_id,
+                        "ids": candidate_ids,
+                        "properties": ["id", "mailboxIds"]
+                    }),
+                    "0",
+                )],
+            )
+            .await?;
+
+        for method in response.method_responses {
+            if method.0 == "Email/get" {
+                let get: GetResponse<EmailMembership> = serde_json::from_value(method.1)
+                    .context("invalid Email/get response while checking mail deletion candidates")?;
+                return Ok(get
+                    .list
+                    .into_iter()
+                    .filter(|email| email.mailbox_ids.get(mailbox_id).copied().unwrap_or(false))
+                    .map(|email| email.id)
+                    .collect());
+            } else if method.0 == "error" {
+                anyhow::bail!("JMAP method error while checking mail deletion candidates");
+            }
+        }
+        anyhow::bail!("JMAP Email/get response was missing while checking mail deletion candidates")
     }
 
     /// Lists contacts in a JSContact address book, newest-touched first.
@@ -1683,6 +1746,17 @@ pub(crate) struct GetResponse<T> {
 pub(crate) struct QueryResponse {
     #[serde(default)]
     total: Option<u64>,
+}
+
+/// Minimal shape for `emails_still_in_mailbox`'s deletion-candidate
+/// check -- deliberately lighter than `EmailObject`, only the two
+/// properties that call actually requests.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EmailMembership {
+    id: String,
+    #[serde(default)]
+    mailbox_ids: BTreeMap<String, bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
