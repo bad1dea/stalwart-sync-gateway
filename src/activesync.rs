@@ -609,27 +609,42 @@ async fn settings(
             let vacation = state.jmap.get_vacation_response(auth).await.ok().flatten();
             let is_enabled = vacation.as_ref().is_some_and(|v| v.is_enabled);
 
-            // EXPERIMENTAL, not yet confirmed: the device's own Set uses
-            // OofState=2 when it includes a StartTime/EndTime schedule,
-            // and this gateway mirrored that back on Get (2 when a
-            // schedule exists, matching the device's own convention: see
-            // commit 56527b0). That mirrored response is now confirmed
-            // byte-for-byte correct on every dimension checkable against
-            // a primary source (schema, date format, device's own wire
-            // encoding, z-push's actual encoder) -- yet the user reports
-            // Automatic Replies still shows OFF specifically and only
-            // when a schedule is set (the no-schedule/OofState=1 case
-            // reportedly displays correctly). With every other avenue
-            // exhausted, testing the simplest explanation for a
-            // value-specific display bug: a client-side check written as
-            // `oofState == 1` instead of `oofState != 0`, which would
-            // fail silently for the scheduled case specifically. Reports
-            // OofState=1 unconditionally whenever enabled (dropping the
-            // 2-for-scheduled distinction) while still including the
-            // real StartTime/EndTime so the schedule itself isn't lost.
-            // If this doesn't fix the display, revert to mirroring 2 --
-            // that version was schema-correct, this one is a guess.
-            let oof_state_value = if is_enabled { "1" } else { "0" };
+            // Real fix, found by reading THREE independent, currently-
+            // production, real-device-tested EAS server implementations
+            // (SOGo's SOGoActiveSyncDispatcher.m, grommunio-sync's
+            // grommunio.php, and z-push's own reference) rather than
+            // guessing further -- the OofState=1-unconditionally
+            // "experiment" that preceded this commit fixed the toggle but
+            // broke End Date display, proving OofState=2 for a real
+            // schedule is correct after all (matches the device's own
+            // Set convention and every schema check already done).
+            //
+            // The actual divergence, confirmed against SOGo's real,
+            // working Oof Get response: this gateway sent Enabled=1 with
+            // full ReplyMessage/BodyType on ALL THREE OofMessage blocks,
+            // because JMAP's VacationResponse only has one unified
+            // message with no internal/external distinction. SOGo (and
+            // presumably real Exchange, which SOGo's implementation is
+            // reverse-engineered against) sends Enabled=1 with real
+            // content ONLY for AppliesToInternal -- AppliesToExternalKnown
+            // and AppliesToExternalUnknown get Enabled=0 (hardcoded), an
+            // EMPTY self-closing ReplyMessage (no text content at all,
+            // not even an empty string), and NO BodyType element at all.
+            // A real device apparently never expects to see all three
+            // audiences simultaneously "enabled" with identical content
+            // this way, which fits everything observed: the SAME
+            // structurally-valid, schema-correct bytes producing
+            // different symptoms depending on values sent.
+            let oof_state_value = if !is_enabled {
+                "0"
+            } else if vacation
+                .as_ref()
+                .is_some_and(|v| v.from_date.is_some() && v.to_date.is_some())
+            {
+                "2"
+            } else {
+                "1"
+            };
             builder.start(set::OOF);
             builder.leaf(set::STATUS, "1");
             builder.start(set::GET);
@@ -684,20 +699,18 @@ async fn settings(
                     builder.start(set::OOF_MESSAGE);
                     builder.empty_tag(set::APPLIES_TO_INTERNAL);
                     builder.leaf(set::ENABLED, "1");
-                    builder.leaf(set::REPLY_MESSAGE, reply_message.clone());
+                    builder.leaf(set::REPLY_MESSAGE, reply_message);
                     builder.leaf(set::BODY_TYPE, "Text");
                     builder.end();
                     builder.start(set::OOF_MESSAGE);
                     builder.empty_tag(set::APPLIES_TO_EXTERNAL_KNOWN);
-                    builder.leaf(set::ENABLED, "1");
-                    builder.leaf(set::REPLY_MESSAGE, reply_message.clone());
-                    builder.leaf(set::BODY_TYPE, "Text");
+                    builder.leaf(set::ENABLED, "0");
+                    builder.empty_tag(set::REPLY_MESSAGE);
                     builder.end();
                     builder.start(set::OOF_MESSAGE);
                     builder.empty_tag(set::APPLIES_TO_EXTERNAL_UNKNOWN);
-                    builder.leaf(set::ENABLED, "1");
-                    builder.leaf(set::REPLY_MESSAGE, reply_message);
-                    builder.leaf(set::BODY_TYPE, "Text");
+                    builder.leaf(set::ENABLED, "0");
+                    builder.empty_tag(set::REPLY_MESSAGE);
                     builder.end();
                 }
             }
