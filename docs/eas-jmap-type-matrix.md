@@ -99,9 +99,12 @@ current known-good subset (`DATE_RECEIVED`, `DISPLAY_TO`, `IMPORTANCE`,
 codepage 17) is considered materially complete for the fields this gateway actually
 uses, verified against real device behavior rather than spec-reading alone — a
 different, stronger kind of confidence than the Calendar/Contacts fields above ever
-had before this pass. Codepage 22 (Email2 — `ConversationId`/`ConversationIndex` for
-threading, `IsDraft`, `Bcc`) is scaffolded fresh in `eas.rs` and covered in the
-command matrix's Sync row / the gap-analysis doc's reverted-threading item.
+had before this pass. Codepage 22 (Email2) has one field actually wired up now:
+`CONVERSATION_ID` (0x09) is sent for every message with a JMAP `threadId`, as a
+deterministic fixed-16-byte value (see the gap-analysis doc's conversation-threading
+row for the full story, including why a redo was needed and what's still unverified
+device-side). The rest of the codepage (`ConversationIndex`, `IsDraft`, `Bcc`, etc.)
+remains scaffolded token constants only, unused.
 
 ## Tasks (MS-ASTASK, WBXML codepage 9)
 
