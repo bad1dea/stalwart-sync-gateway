@@ -59,6 +59,13 @@ pub struct Email {
     /// actually opening a message, as opposed to the plain/HTML type the
     /// list-sync view asks for.
     pub blob_id: Option<String>,
+    /// JMAP's own `Email/threadId` -- same JMAP thread = same EAS
+    /// conversation, exactly the right semantics for `Email2:
+    /// ConversationId`. See `eas_conversation_id` in `activesync.rs` for
+    /// why the raw thread id string is never sent directly (a previous
+    /// attempt tried that -- commit `d199d37` -- and caused a real,
+    /// device-visible sync error).
+    pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

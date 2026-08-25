@@ -1376,7 +1376,7 @@ fn write_email_fields(
     email: crate::model::Email,
     body_pref: Option<BodyPreference>,
 ) {
-    use wbxml::eas::{airsync_base as base, email as mail};
+    use wbxml::eas::{airsync_base as base, email as mail, email2};
 
     // Field order matches the real z-push-stalwart-jmap source (PR #187,
     // pinned in config/z-push/Dockerfile: src/lib/syncobjects/
@@ -1549,6 +1549,55 @@ fn write_email_fields(
     if let Some(native_type) = native_body_type {
         builder.leaf(base::NATIVE_BODY_TYPE, native_type.eas_value());
     }
+    // Email2:ConversationId, per z-push's own syncmail.php $mapping
+    // (config/z-push, PR #187): its >=14.0 block appends UmCallerId,
+    // UmUserNotes, ConversationId, ConversationIndex, ... strictly AFTER
+    // the >=12.0 block (Body/Attachments/NativeBodyType, already this
+    // function's ordering above) -- this gateway doesn't implement
+    // UmCallerId/UmUserNotes, so ConversationId is the first 14.0-block
+    // field actually sent, and belongs right here, after NativeBodyType.
+    //
+    // REDO of a previously-reverted attempt (commit d199d37): the
+    // original sent the raw JMAP thread id string directly and caused a
+    // real, device-visible sync error. Two likely bugs stacked: (1) it
+    // used WBXML token 0x0a for CONVERSATION_ID, which is actually
+    // CONVERSATION_INDEX (a different field) -- confirmed against the
+    // primary MS-ASWBXML source this session, see email2::CONVERSATION_ID's
+    // own doc comment; (2) real Exchange servers send a fixed 16-byte
+    // GUID-shaped value here, not a short variable-length string (JMAP
+    // thread ids observed as short as a single ASCII byte), and iOS may
+    // validate the shape more strictly than the spec text alone implies.
+    // This attempt fixes both: the correct token, and a deterministic
+    // fixed-16-byte value (UUID v5, namespace + thread id) so the same
+    // JMAP thread always produces the identical ConversationId (the
+    // actual point of the field) while always being GUID-shaped.
+    //
+    // NOT YET CONFIRMED against a real device -- deployed to the
+    // isolated zoidberg test instance only. Structural verification
+    // (WBXML decode, doesn't corrupt anything downstream) is not the
+    // same as device-level trust, per this exact feature's own history.
+    if let Some(thread_id) = email.thread_id {
+        if !thread_id.is_empty() {
+            builder.opaque_leaf(
+                email2::CONVERSATION_ID,
+                eas_conversation_id(&thread_id).to_vec(),
+            );
+        }
+    }
+}
+
+/// See the call site's doc comment in `write_email_fields` for the full
+/// story of why this exists and what it replaces.
+fn eas_conversation_id(thread_id: &str) -> [u8; 16] {
+    // Fixed, arbitrary application-specific namespace (generated once --
+    // must stay constant so the same JMAP thread always hashes to the
+    // same ConversationId across restarts/deploys). Not a real DNS/URL/
+    // OID namespace, just a stable 16-byte seed for UUID v5's algorithm.
+    const NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
+        0x8f, 0x1c, 0x2e, 0x77, 0x4a, 0x9b, 0x4d, 0x21, 0x9e, 0x6a, 0x3b, 0x5d, 0x1f, 0x0c, 0x77,
+        0xe2,
+    ]);
+    *uuid::Uuid::new_v5(&NAMESPACE, thread_id.as_bytes()).as_bytes()
 }
 
 /// Shapes a body per the client's BodyPreference (list-sync Add only --
@@ -3081,8 +3130,9 @@ fn unauthorized() -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_body_preference, decode_entity_at, eas_datetime, eas_datetime_dashes,
-        is_non_mail_collection_id, plain_text_preview, write_email_fields, BodyPreference,
+        apply_body_preference, decode_entity_at, eas_conversation_id, eas_datetime,
+        eas_datetime_dashes, is_non_mail_collection_id, plain_text_preview, write_email_fields,
+        BodyPreference,
     };
     use crate::model::{Email, EmailAttachment, EmailBody, EmailBodyType};
     use crate::wbxml::eas::{airsync_base as base, DocumentBuilder};
@@ -3347,6 +3397,7 @@ mod tests {
                 size: 10,
             }],
             blob_id: None,
+            thread_id: None,
         };
         let mut builder = DocumentBuilder::new();
         write_email_fields(&mut builder, "email-1", email, None);
@@ -3381,6 +3432,94 @@ mod tests {
     }
 
     #[test]
+    fn eas_conversation_id_is_a_deterministic_fixed_16_bytes() {
+        // Redo of a previously-reverted attempt (commit d199d37): the
+        // original sent the raw JMAP thread id directly (observed as
+        // short as a single ASCII byte) and caused a real device sync
+        // error, most likely because real Exchange servers -- and
+        // apparently iOS's own validation -- expect a fixed 16-byte
+        // GUID-shaped value here, not an arbitrary-length string.
+        let id_a = eas_conversation_id("p");
+        let id_a_again = eas_conversation_id("p");
+        let id_b = eas_conversation_id("q");
+        assert_eq!(id_a.len(), 16);
+        assert_eq!(id_a, id_a_again, "same thread id must hash identically every time");
+        assert_ne!(id_a, id_b, "different thread ids must not collide");
+    }
+
+    #[test]
+    fn write_email_fields_emits_conversation_id_after_native_body_type_only_when_thread_id_present() {
+        use crate::wbxml::eas::email2;
+
+        let email_with_thread = Email {
+            id: "email-1".to_owned(),
+            mailbox_ids: vec![],
+            subject: "Subject".to_owned(),
+            received_at: None,
+            keywords: vec![],
+            from: String::new(),
+            to: String::new(),
+            cc: String::new(),
+            read: false,
+            body: Some(EmailBody {
+                body_type: EmailBodyType::Plain,
+                value: "Hello".to_owned(),
+            }),
+            attachments: vec![],
+            blob_id: None,
+            thread_id: Some("thread-abc".to_owned()),
+        };
+        let mut builder = DocumentBuilder::new();
+        write_email_fields(&mut builder, "email-1", email_with_thread, None);
+        let doc = builder.finish();
+
+        let native_body_type_pos = doc.nodes.iter().position(|n| matches!(
+            n,
+            Node::Start(t) if t.code_page == base::PAGE && t.token == base::NATIVE_BODY_TYPE.token
+        )).expect("NativeBodyType should be present");
+        let conversation_id_pos = doc.nodes.iter().position(|n| matches!(
+            n,
+            Node::Start(t) if t.code_page == email2::PAGE && t.token == email2::CONVERSATION_ID.token
+        )).expect("ConversationId should be present when thread_id is set");
+        assert!(
+            conversation_id_pos > native_body_type_pos,
+            "ConversationId (>=14.0 block) must come after NativeBodyType (>=12.0 block), per z-push's own field-order oracle"
+        );
+        // Immediately followed by the opaque 16-byte payload, not text --
+        // ConversationId is opaque binary per spec, not a string.
+        match &doc.nodes[conversation_id_pos + 1] {
+            Node::Opaque(bytes) => assert_eq!(bytes.len(), 16),
+            other => panic!("expected opaque ConversationId payload, got {other:?}"),
+        }
+
+        let email_without_thread = Email {
+            id: "email-2".to_owned(),
+            mailbox_ids: vec![],
+            subject: "Subject".to_owned(),
+            received_at: None,
+            keywords: vec![],
+            from: String::new(),
+            to: String::new(),
+            cc: String::new(),
+            read: false,
+            body: None,
+            attachments: vec![],
+            blob_id: None,
+            thread_id: None,
+        };
+        let mut builder2 = DocumentBuilder::new();
+        write_email_fields(&mut builder2, "email-2", email_without_thread, None);
+        let doc2 = builder2.finish();
+        assert!(
+            !doc2.nodes.iter().any(|n| matches!(
+                n,
+                Node::Start(t) if t.code_page == email2::PAGE && t.token == email2::CONVERSATION_ID.token
+            )),
+            "ConversationId must be omitted entirely when there's no JMAP threadId, not sent empty"
+        );
+    }
+
+    #[test]
     fn write_email_fields_preview_is_nested_inside_body_after_data() {
         // Real structural bug, found via the full z-push-stalwart-jmap
         // source (PR #187): AirSyncBase:Preview is a child of Body (in
@@ -3405,6 +3544,7 @@ mod tests {
             }),
             attachments: vec![],
             blob_id: None,
+            thread_id: None,
         };
         let mut builder = DocumentBuilder::new();
         write_email_fields(&mut builder, "email-1", email, None);
@@ -3483,6 +3623,7 @@ mod tests {
                 size: 1234,
             }],
             blob_id: None,
+            thread_id: None,
         };
         let mut builder = DocumentBuilder::new();
         write_email_fields(&mut builder, "email-1", email, None);

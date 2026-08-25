@@ -364,7 +364,7 @@ impl JmapClient {
                     },
                     "properties": [
                         "id", "blobId", "mailboxIds", "keywords", "receivedAt", "subject",
-                        "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments"
+                        "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments", "threadId"
                     ],
                     "fetchAllBodyValues": true,
                     "maxBodyValueBytes": 65536
@@ -1026,7 +1026,7 @@ impl JmapClient {
                 "ids": [email_id],
                 "properties": [
                     "id", "blobId", "mailboxIds", "keywords", "receivedAt", "subject",
-                    "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments"
+                    "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments", "threadId"
                 ],
                 "fetchAllBodyValues": true,
                 "maxBodyValueBytes": 65536
@@ -1766,6 +1766,8 @@ struct EmailObject {
     #[serde(default)]
     blob_id: Option<String>,
     #[serde(default)]
+    thread_id: Option<String>,
+    #[serde(default)]
     mailbox_ids: BTreeMap<String, bool>,
     #[serde(default)]
     keywords: BTreeMap<String, bool>,
@@ -1862,6 +1864,7 @@ impl From<EmailObject> for Email {
             body,
             attachments,
             blob_id: value.blob_id,
+            thread_id: value.thread_id,
         }
     }
 }

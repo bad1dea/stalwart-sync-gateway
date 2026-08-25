@@ -26,7 +26,7 @@ tower-http = { version = "0.5", features = ["compression-gzip", "request-id", "t
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 
 [dev-dependencies]
 pretty_assertions = "1"

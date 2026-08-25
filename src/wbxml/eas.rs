@@ -1583,6 +1583,17 @@ impl DocumentBuilder {
         self.nodes.push(Node::End);
     }
 
+    /// A leaf whose content is raw binary (WBXML opaque data), not text --
+    /// e.g. `Email2:ConversationId`, which EAS spec defines as opaque
+    /// bytes, not a string.
+    pub fn opaque_leaf(&mut self, token: Token, data: impl Into<bytes::Bytes>) {
+        let mut token = token;
+        token.has_content = true;
+        self.nodes.push(Node::Start(token));
+        self.nodes.push(Node::Opaque(data.into()));
+        self.nodes.push(Node::End);
+    }
+
     pub fn end(&mut self) {
         self.nodes.push(Node::End);
     }
