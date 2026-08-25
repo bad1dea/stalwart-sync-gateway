@@ -901,6 +901,15 @@ async fn sync_mail(
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "1");
+            write_fetch_responses(&mut builder, fetch_responses);
+            // Element order matters to a strict WBXML parser (iOS's
+            // included) -- MoreAvailable must come AFTER Responses and
+            // BEFORE Commands, confirmed against the working PHP z-push
+            // reference's own encoder (config/z-push/sync.php: its Fetch-
+            // responses loop runs, THEN MoreAvailable, THEN SYNC_PERFORM/
+            // Commands). This was wrong (emitted before Responses) from
+            // when the tag was first added.
+            //
             // Only meaningful on the first-sync full-window fetch -- a
             // non-first Sync's emails_to_send is already the small
             // unseen-since-last-time diff, not itself windowed by
@@ -910,7 +919,6 @@ async fn sync_mail(
                 builder.start(air::MORE_AVAILABLE);
                 builder.end();
             }
-            write_fetch_responses(&mut builder, fetch_responses);
 
             if !emails_to_send.is_empty() {
                 let body_pref = BodyPreference {
