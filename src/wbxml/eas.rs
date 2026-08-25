@@ -1598,6 +1598,28 @@ impl DocumentBuilder {
         self.nodes.push(Node::End);
     }
 
+    /// A genuinely content-less, attribute-less marker tag -- just the
+    /// bare tag byte, no matching End. Distinct from `start()`
+    /// immediately followed by `end()`, which forces has_content=true and
+    /// DOES emit an End byte. Real bug, found live: Oof's
+    /// AppliesToInternal/AppliesToExternalKnown/AppliesToExternalUnknown
+    /// are pure presence-flag elements (mutually exclusive, no content of
+    /// their own -- see [MS-ASCMD]'s OofMessage reference: "The presence
+    /// of one of the following elements... indicates the audience").
+    /// Encoding them as start+end (content bit set, immediately closed)
+    /// produced a real device-side WBXML parse error, confirmed via
+    /// idevicesyslog: "We have an int in our WBXML, but Exchange never
+    /// gives us this. Parse error." -- "Object is <private>, codePage
+    /// 0x12 token 0xe" (0x12=18=Settings, 0xe=AppliesToInternal).
+    /// exchangesyncd's parser apparently falls through to a generic/
+    /// int-guessing content handler when it sees the content bit set on a
+    /// tag it expects to be a bare marker with no content at all.
+    pub fn empty_tag(&mut self, token: Token) {
+        let mut token = token;
+        token.has_content = false;
+        self.nodes.push(Node::Start(token));
+    }
+
     pub fn finish(self) -> Document {
         Document { nodes: self.nodes }
     }
@@ -1612,6 +1634,45 @@ impl Default for DocumentBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wbxml::encode_document;
+
+    #[test]
+    fn empty_tag_encodes_a_bare_content_less_byte_with_no_matching_end() {
+        // Real bug, confirmed live via idevicesyslog: encoding Oof's
+        // AppliesToInternal as start()+end() (content bit set, closed
+        // immediately) produced a real device-side WBXML parse error --
+        // "We have an int in our WBXML, but Exchange never gives us
+        // this." at exactly codePage 0x12 (Settings) token 0xe
+        // (AppliesToInternal). empty_tag() must produce a single bare
+        // byte with the content bit UNSET and no corresponding End node
+        // at all -- that's the whole fix.
+        let mut builder = DocumentBuilder::new();
+        builder.start(settings::OOF_MESSAGE);
+        builder.empty_tag(settings::APPLIES_TO_INTERNAL);
+        builder.leaf(settings::ENABLED, "1");
+        builder.end();
+        let doc = builder.finish();
+
+        assert_eq!(
+            doc.nodes[1],
+            Node::Start(Token {
+                code_page: settings::PAGE,
+                token: settings::APPLIES_TO_INTERNAL.token,
+                has_content: false,
+                has_attributes: false,
+            })
+        );
+        // The very next node must be ENABLED's own Start, not an End --
+        // proof no matching End was emitted for the empty tag.
+        assert!(matches!(doc.nodes[2], Node::Start(_)));
+
+        let encoded = encode_document(&doc);
+        // AppliesToInternal's byte must NOT have the content bit (0x40)
+        // set: bare tag 0x0e, not 0x4e.
+        let applies_to_internal_byte = 0x0eu8;
+        assert!(encoded.contains(&applies_to_internal_byte));
+        assert!(!encoded.contains(&0x4eu8));
+    }
 
     #[test]
     fn parses_note_add_with_client_id_body_and_categories() {

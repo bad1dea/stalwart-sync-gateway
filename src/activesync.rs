@@ -678,22 +678,19 @@ async fn settings(
                     // comparison; nobody had tried siblings-only-when-
                     // enabled until now.
                     builder.start(set::OOF_MESSAGE);
-                    builder.start(set::APPLIES_TO_INTERNAL);
-                    builder.end();
+                    builder.empty_tag(set::APPLIES_TO_INTERNAL);
                     builder.leaf(set::ENABLED, "1");
                     builder.leaf(set::REPLY_MESSAGE, reply_message.clone());
                     builder.leaf(set::BODY_TYPE, "Text");
                     builder.end();
                     builder.start(set::OOF_MESSAGE);
-                    builder.start(set::APPLIES_TO_EXTERNAL_KNOWN);
-                    builder.end();
+                    builder.empty_tag(set::APPLIES_TO_EXTERNAL_KNOWN);
                     builder.leaf(set::ENABLED, "1");
                     builder.leaf(set::REPLY_MESSAGE, reply_message.clone());
                     builder.leaf(set::BODY_TYPE, "Text");
                     builder.end();
                     builder.start(set::OOF_MESSAGE);
-                    builder.start(set::APPLIES_TO_EXTERNAL_UNKNOWN);
-                    builder.end();
+                    builder.empty_tag(set::APPLIES_TO_EXTERNAL_UNKNOWN);
                     builder.leaf(set::ENABLED, "1");
                     builder.leaf(set::REPLY_MESSAGE, reply_message);
                     builder.leaf(set::BODY_TYPE, "Text");
