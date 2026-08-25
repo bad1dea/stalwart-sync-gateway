@@ -521,37 +521,89 @@ async fn settings(
     }
 
     if has_oof {
-        // Automatic Replies (Out-of-Office). No Oof/Set handling here was
-        // ever implemented -- a Get with no <Oof> section in the response
-        // left iOS's Automatic Replies screen waiting on a shape it never
-        // got, spinning forever (confirmed live). Get now answers honestly
-        // (state always reports disabled, since nothing is wired to a real
-        // backend). Set is accepted (Status 1, no hang/error) rather than
-        // silently doing nothing AND erroring -- but it does not persist:
-        // toggling it on will read back as off on the next Get. Wiring
-        // this to Stalwart's ManageSieve vacation extension is the real
-        // fix; this stub only stops the client-side hang.
+        // Automatic Replies (Out-of-Office), now backed by Stalwart's real
+        // VacationResponse object (RFC 8621 -- see jmap::vacation module
+        // docs for the full story, including exactly what was and wasn't
+        // live-verified and why). Get reads the real account state instead
+        // of always reporting disabled; Set actually persists instead of
+        // silently discarding.
         //
-        // Real bug, found via a direct live wire comparison against
-        // z-push for the identical Get request (Options>BodyType=TEXT,
-        // matching what the real device actually sends): z-push's real
-        // response for OofState=0 is JUST Status/Get/OofState -- no
-        // OofMessage blocks at all. An earlier fix this session added 3
-        // repeated OofMessage blocks unconditionally, reasoning from
-        // syncoof.php's $mapping alone without confirming against a live
-        // response -- wrong: OofMessage only appears when Out-of-Office
-        // is actually enabled (nothing to describe per-recipient-type
-        // when it's off). Sending them anyway is the same "unrecognized
-        // extra content" failure class as ContentType/PrimarySmtpAddress
-        // -- match z-push's real minimal shape instead.
-        builder.start(set::OOF);
-        builder.leaf(set::STATUS, "1");
-        if !is_oof_set {
+        // The OofState=0 (disabled) shape below is unchanged from the
+        // fix earlier this session, confirmed via a direct live wire
+        // comparison against z-push for the identical Get request: JUST
+        // Status/Get/OofState, no OofMessage blocks. The OofState=1
+        // (enabled) shape's OofMessage/AppliesToInternal/Enabled/
+        // ReplyMessage/BodyType structure is spec-derived (MS-ASSETTINGS'
+        // own schema) rather than live-toggled and confirmed the same
+        // way -- toggling VacationResponse.isEnabled=true on the real
+        // account, even briefly, risks a genuine auto-reply going out to
+        // a real sender, so that specific path needs a real device
+        // verification pass before being fully trusted.
+        if is_oof_set {
+            let oof_state = wbxml::eas::find_text_after(document, set::OOF_STATE);
+            let is_enabled = oof_state.is_some_and(|state| state != "0");
+            let subject = wbxml::eas::find_text_after(document, set::REPLY_MESSAGE)
+                .map(|s| s.lines().next().unwrap_or(s).to_owned());
+            let text_body = wbxml::eas::find_text_after(document, set::REPLY_MESSAGE)
+                .map(str::to_owned);
+            let from_date = wbxml::eas::find_text_after(document, set::START_TIME)
+                .map(str::to_owned);
+            let to_date =
+                wbxml::eas::find_text_after(document, set::END_TIME).map(str::to_owned);
+
+            let update = crate::jmap::vacation::VacationResponseUpdate {
+                is_enabled,
+                subject,
+                text_body,
+                from_date,
+                to_date,
+            };
+            match state.jmap.set_vacation_response(auth, update).await {
+                Ok(()) => {
+                    builder.start(set::OOF);
+                    builder.leaf(set::STATUS, "1");
+                    builder.end();
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to persist Oof Set via VacationResponse/set");
+                    builder.start(set::OOF);
+                    builder.leaf(set::STATUS, "1");
+                    builder.end();
+                }
+            }
+        } else {
+            let vacation = state.jmap.get_vacation_response(auth).await.ok().flatten();
+            let is_enabled = vacation.as_ref().is_some_and(|v| v.is_enabled);
+
+            builder.start(set::OOF);
+            builder.leaf(set::STATUS, "1");
             builder.start(set::GET);
-            builder.leaf(set::OOF_STATE, "0");
+            builder.leaf(set::OOF_STATE, if is_enabled { "1" } else { "0" });
+            if is_enabled {
+                if let Some(vacation) = &vacation {
+                    if let Some(from) = &vacation.from_date {
+                        builder.leaf(set::START_TIME, eas_datetime(from));
+                    }
+                    if let Some(to) = &vacation.to_date {
+                        builder.leaf(set::END_TIME, eas_datetime(to));
+                    }
+                    let reply_message = vacation
+                        .text_body
+                        .clone()
+                        .or_else(|| vacation.subject.clone())
+                        .unwrap_or_default();
+                    builder.start(set::OOF_MESSAGE);
+                    builder.start(set::APPLIES_TO_INTERNAL);
+                    builder.end();
+                    builder.leaf(set::ENABLED, "1");
+                    builder.leaf(set::REPLY_MESSAGE, reply_message);
+                    builder.leaf(set::BODY_TYPE, "Text");
+                    builder.end();
+                }
+            }
+            builder.end();
             builder.end();
         }
-        builder.end();
     }
 
     builder.end();
