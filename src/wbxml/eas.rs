@@ -108,6 +108,7 @@ pub mod airsync {
     pub const COLLECTION_ID: Token = tag(0x12, false);
     pub const GET_CHANGES: Token = tag(0x13, false);
     pub const WINDOW_SIZE: Token = tag(0x15, false);
+    pub const OPTIONS: Token = tag(0x17, true);
     pub const COMMANDS: Token = tag(0x16, false);
     pub const COLLECTIONS: Token = tag(0x1c, false);
     pub const APPLICATION_DATA: Token = tag(0x1d, false);
@@ -175,7 +176,13 @@ pub mod airsync_base {
     use super::Token;
 
     pub const PAGE: u8 = 17;
+    // BodyPreference itself is a container (Sync request Options only) --
+    // its Type/TruncationSize children reuse the SAME tag bytes as the
+    // response-side Body's own Type (0x06); WBXML disambiguates by parent
+    // context, not the tag byte, so one TYPE constant serves both.
+    pub const BODY_PREFERENCE: Token = tag(0x05, true);
     pub const TYPE: Token = tag(0x06, false);
+    pub const TRUNCATION_SIZE: Token = tag(0x07, false);
     pub const BODY: Token = tag(0x0a, false);
     pub const DATA: Token = tag(0x0b, false);
     pub const ESTIMATED_DATA_SIZE: Token = tag(0x0c, false);
@@ -386,6 +393,12 @@ pub struct SyncCollectionRequest {
     pub window_size: usize,
     pub get_changes: bool,
     pub commands: Vec<SyncClientCommand>,
+    /// AirSyncBase:BodyPreference > Type, if the client sent one (real
+    /// EAS clients always do on the list-sync Options; a bare
+    /// scripted/test client typically doesn't). 1 = plain text, 2 = HTML.
+    pub body_pref_type: Option<u8>,
+    /// AirSyncBase:BodyPreference > TruncationSize, in characters.
+    pub body_pref_truncation_size: Option<usize>,
 }
 
 impl Default for SyncCollectionRequest {
@@ -396,6 +409,8 @@ impl Default for SyncCollectionRequest {
             window_size: 25,
             get_changes: true,
             commands: Vec::new(),
+            body_pref_type: None,
+            body_pref_truncation_size: None,
         }
     }
 }
@@ -606,6 +621,14 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             && token.token == airsync::GET_CHANGES.token
                         {
                             collection.get_changes = text != "0";
+                        } else if token.code_page == airsync_base::PAGE
+                            && token.token == airsync_base::TYPE.token
+                        {
+                            collection.body_pref_type = text.parse().ok();
+                        } else if token.code_page == airsync_base::PAGE
+                            && token.token == airsync_base::TRUNCATION_SIZE.token
+                        {
+                            collection.body_pref_truncation_size = text.parse().ok();
                         }
                     }
                 }
@@ -908,6 +931,56 @@ mod tests {
             SyncClientCommandKind::Delete
         );
         assert_eq!(collections[0].commands[1].server_id, "email-b");
+    }
+
+    #[test]
+    fn parses_body_preference_from_a_real_ipad_sync_request() {
+        // Real bug, confirmed live via the zoidberg A/B test: a real
+        // iPad's Sync request carried exactly this shape (Options >
+        // BodyPreference { Type: 1, TruncationSize: 500 }), and it was
+        // silently ignored entirely -- the gateway always sent the full
+        // untruncated HTML body regardless, which the client rejected
+        // every time, so it never advanced SyncKey off "0".
+        let mut builder = DocumentBuilder::new();
+        builder.start(airsync::SYNC);
+        builder.start(airsync::COLLECTIONS);
+        builder.start(airsync::COLLECTION);
+        builder.leaf(airsync::SYNC_KEY, "0");
+        builder.leaf(airsync::COLLECTION_ID, "a");
+        builder.start(airsync::OPTIONS);
+        builder.start(airsync_base::BODY_PREFERENCE);
+        builder.leaf(airsync_base::TYPE, "1");
+        builder.leaf(airsync_base::TRUNCATION_SIZE, "500");
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+
+        let collections = sync_collections(&builder.finish());
+
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].body_pref_type, Some(1));
+        assert_eq!(collections[0].body_pref_truncation_size, Some(500));
+    }
+
+    #[test]
+    fn sync_request_with_no_body_preference_leaves_it_unset() {
+        let mut builder = DocumentBuilder::new();
+        builder.start(airsync::SYNC);
+        builder.start(airsync::COLLECTIONS);
+        builder.start(airsync::COLLECTION);
+        builder.leaf(airsync::SYNC_KEY, "0");
+        builder.leaf(airsync::COLLECTION_ID, "a");
+        builder.end();
+        builder.end();
+        builder.end();
+
+        let collections = sync_collections(&builder.finish());
+
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].body_pref_type, None);
+        assert_eq!(collections[0].body_pref_truncation_size, None);
     }
 
     #[test]

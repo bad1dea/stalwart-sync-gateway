@@ -328,7 +328,7 @@ async fn item_operations(
                 builder.leaf(air::COLLECTION_ID, fetch.collection_id);
                 builder.leaf(air::SERVER_ID, fetch.server_id.clone());
                 builder.start(ops::PROPERTIES);
-                write_email_fields(&mut builder, &fetch.server_id, email);
+                write_email_fields(&mut builder, &fetch.server_id, email, None);
                 builder.end();
                 builder.end();
                 builder.end();
@@ -904,9 +904,13 @@ async fn sync_mail(
             write_fetch_responses(&mut builder, fetch_responses);
 
             if !emails_to_send.is_empty() {
+                let body_pref = BodyPreference {
+                    body_type: collection.body_pref_type,
+                    truncation_size: collection.body_pref_truncation_size,
+                };
                 builder.start(air::COMMANDS);
                 for email in emails_to_send {
-                    write_email_add(&mut builder, email);
+                    write_email_add(&mut builder, email, Some(body_pref));
                 }
                 builder.end();
             }
@@ -1072,7 +1076,7 @@ fn write_fetch_responses(
             Ok(Some(email)) => {
                 builder.leaf(air::STATUS, "1");
                 builder.start(air::APPLICATION_DATA);
-                write_email_fields(builder, &server_id, email);
+                write_email_fields(builder, &server_id, email, None);
                 builder.end();
             }
             Ok(None) => {
@@ -1092,14 +1096,30 @@ fn write_fetch_responses(
     builder.end();
 }
 
-fn write_email_add(builder: &mut wbxml::eas::DocumentBuilder, email: crate::model::Email) {
+/// The client's requested body shape for a list-sync Add, from
+/// AirSyncBase:BodyPreference on the Sync request's Collection > Options.
+/// `None` at the write_email_fields call site (ItemOperations Fetch, and
+/// Sync-embedded Fetch) means "always full body" -- correct there, since
+/// those are the explicit "user opened this message" fetches, not the
+/// list sync.
+#[derive(Debug, Clone, Copy)]
+struct BodyPreference {
+    body_type: Option<u8>,
+    truncation_size: Option<usize>,
+}
+
+fn write_email_add(
+    builder: &mut wbxml::eas::DocumentBuilder,
+    email: crate::model::Email,
+    body_pref: Option<BodyPreference>,
+) {
     use wbxml::eas::airsync as air;
 
     let email_id = email.id.clone();
     builder.start(air::ADD);
     builder.leaf(air::SERVER_ID, email.id.clone());
     builder.start(air::APPLICATION_DATA);
-    write_email_fields(builder, &email_id, email);
+    write_email_fields(builder, &email_id, email, body_pref);
     builder.end();
     builder.end();
 }
@@ -1113,6 +1133,7 @@ fn write_email_fields(
     builder: &mut wbxml::eas::DocumentBuilder,
     email_id: &str,
     email: crate::model::Email,
+    body_pref: Option<BodyPreference>,
 ) {
     use wbxml::eas::{airsync_base as base, email as mail};
 
@@ -1168,13 +1189,17 @@ fn write_email_fields(
         // line -- confirmed live (every message's preview was literal
         // "<html xmlns:v=..." source, not rendered/extracted text).
         builder.leaf(base::PREVIEW, plain_text_preview(&body));
+        let native_type = body.body_type;
+        let (out_type, out_value, full_len, truncated) = apply_body_preference(body, body_pref);
         builder.start(base::BODY);
-        builder.leaf(base::TYPE, body.body_type.eas_value());
-        builder.leaf(base::ESTIMATED_DATA_SIZE, body.value.len().to_string());
-        builder.leaf(base::TRUNCATED, "0");
-        builder.leaf(base::DATA, body.value);
+        builder.leaf(base::TYPE, out_type.eas_value());
+        // Full untruncated size, even when Data below is cut short -- this
+        // is how the client knows there's more to fetch via ItemOperations.
+        builder.leaf(base::ESTIMATED_DATA_SIZE, full_len.to_string());
+        builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
+        builder.leaf(base::DATA, out_value);
         builder.end();
-        builder.leaf(base::NATIVE_BODY_TYPE, body.body_type.eas_value());
+        builder.leaf(base::NATIVE_BODY_TYPE, native_type.eas_value());
     }
     if !email.attachments.is_empty() {
         builder.start(base::ATTACHMENTS);
@@ -1198,6 +1223,57 @@ fn write_email_fields(
             builder.end();
         }
         builder.end();
+    }
+}
+
+/// Shapes a body per the client's BodyPreference (list-sync Add only --
+/// see `BodyPreference`'s docs for why Fetch responses always pass
+/// `None`/full body instead of calling this).
+///
+/// Real bug, confirmed live via the zoidberg A/B test: a real iPad's Sync
+/// request carried `BodyPreference { Type: 1 (plain), TruncationSize: 500
+/// }`, but every build up to this fix ignored it completely and always
+/// sent the full HTML body (11KB+, `Truncated: 0`) regardless -- the
+/// client silently discarded every such response without ever advancing
+/// its SyncKey off "0", so it kept re-fetching the exact same batch from
+/// scratch forever (visible in Traefik's access log: the identical
+/// response byte-count recurring every few seconds, never converging to
+/// the empty steady-state response a settled sync produces).
+///
+/// Returns (type actually sent, body text actually sent, true full
+/// length, whether truncation happened) -- EstimatedDataSize must report
+/// the true full length even when Data is cut short, so the client knows
+/// there's more to fetch via ItemOperations.
+fn apply_body_preference(
+    body: crate::model::EmailBody,
+    pref: Option<BodyPreference>,
+) -> (crate::model::EmailBodyType, String, usize, bool) {
+    use crate::model::EmailBodyType;
+
+    let Some(pref) = pref else {
+        let full_len = body.value.len();
+        return (body.body_type, body.value, full_len, false);
+    };
+
+    let (out_type, full_text) = match pref.body_type {
+        Some(1) if body.body_type == EmailBodyType::Html => {
+            (EmailBodyType::Plain, strip_html_tags(&body.value))
+        }
+        _ => (body.body_type, body.value),
+    };
+    let full_len = full_text.len();
+
+    match pref.truncation_size {
+        Some(limit) if limit < full_len => {
+            // Truncate on a char boundary, not a raw byte offset -- real
+            // message bodies routinely carry multi-byte UTF-8.
+            let mut end = limit;
+            while end > 0 && !full_text.is_char_boundary(end) {
+                end -= 1;
+            }
+            (out_type, full_text[..end].to_owned(), full_len, true)
+        }
+        _ => (out_type, full_text, full_len, false),
     }
 }
 
@@ -2076,7 +2152,7 @@ fn unauthorized() -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{eas_datetime, plain_text_preview};
+    use super::{apply_body_preference, eas_datetime, plain_text_preview, BodyPreference};
     use crate::model::{EmailBody, EmailBodyType};
 
     #[test]
@@ -2122,5 +2198,77 @@ mod tests {
             value: "<html><head><style>@import url(\"https://example.com/x.css\"); :root { color-scheme: light dark; }</style><script>track();</script></head><body><p>Invoice attached, thanks!</p></body></html>".to_owned(),
         };
         assert_eq!(plain_text_preview(&body), "Invoice attached, thanks!");
+    }
+
+    #[test]
+    fn apply_body_preference_none_sends_full_body_untouched() {
+        let body = EmailBody {
+            body_type: EmailBodyType::Html,
+            value: "<p>Hello there</p>".to_owned(),
+        };
+        let (out_type, out_value, full_len, truncated) = apply_body_preference(body, None);
+        assert_eq!(out_type, EmailBodyType::Html);
+        assert_eq!(out_value, "<p>Hello there</p>");
+        assert_eq!(full_len, "<p>Hello there</p>".len());
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn apply_body_preference_real_bug_ipad_plain_500_truncates_html_to_plain_text() {
+        // The exact request shape confirmed live: a real iPad's Sync
+        // Options carried BodyPreference{Type: 1, TruncationSize: 500}.
+        // Sending the full untruncated HTML back (what every build before
+        // this fix did) is what caused the device to never advance its
+        // SyncKey off "0".
+        let long_text = "word ".repeat(200); // 1000 chars, well over 500
+        let body = EmailBody {
+            body_type: EmailBodyType::Html,
+            value: format!("<p>{long_text}</p>"),
+        };
+        let pref = BodyPreference {
+            body_type: Some(1),
+            truncation_size: Some(500),
+        };
+        let (out_type, out_value, full_len, truncated) = apply_body_preference(body, Some(pref));
+        assert_eq!(out_type, EmailBodyType::Plain);
+        assert_eq!(out_value.len(), 500);
+        assert!(!out_value.contains('<'));
+        // full_len reflects the converted (HTML-stripped) plain text's true
+        // length, not the original HTML source's -- EstimatedDataSize
+        // describes what Type/Data now claim to be (plain text).
+        assert_eq!(full_len, long_text.len());
+        assert!(truncated);
+    }
+
+    #[test]
+    fn apply_body_preference_short_body_under_truncation_size_is_not_truncated() {
+        let body = EmailBody {
+            body_type: EmailBodyType::Plain,
+            value: "short".to_owned(),
+        };
+        let pref = BodyPreference {
+            body_type: Some(1),
+            truncation_size: Some(500),
+        };
+        let (_, out_value, full_len, truncated) = apply_body_preference(body, Some(pref));
+        assert_eq!(out_value, "short");
+        assert_eq!(full_len, 5);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn apply_body_preference_html_requested_keeps_html_but_still_truncates() {
+        let body = EmailBody {
+            body_type: EmailBodyType::Html,
+            value: "<p>".to_owned() + &"x".repeat(1000) + "</p>",
+        };
+        let pref = BodyPreference {
+            body_type: Some(2),
+            truncation_size: Some(10),
+        };
+        let (out_type, out_value, _, truncated) = apply_body_preference(body, Some(pref));
+        assert_eq!(out_type, EmailBodyType::Html);
+        assert_eq!(out_value.len(), 10);
+        assert!(truncated);
     }
 }
