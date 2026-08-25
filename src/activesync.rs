@@ -522,12 +522,11 @@ fn write_oof_get_body(
     use wbxml::eas::settings as set;
 
     let is_enabled = vacation.as_ref().is_some_and(|v| v.is_enabled);
+    // Only End Date drives "scheduled" now -- see the StartTime-omission
+    // comment below for why from_date is no longer part of this check.
     let oof_state_value = if !is_enabled {
         "0"
-    } else if vacation
-        .as_ref()
-        .is_some_and(|v| v.from_date.is_some() && v.to_date.is_some())
-    {
+    } else if vacation.as_ref().is_some_and(|v| v.to_date.is_some()) {
         "2"
     } else {
         "1"
@@ -540,9 +539,18 @@ fn write_oof_get_body(
             // device's own StartTime/EndTime encoding exactly (same
             // failure class as the original DateReceived bug, commit
             // 1bac5ae) -- see eas_datetime_dashes's own doc comment.
-            if let Some(from) = &vacation.from_date {
-                builder.leaf(set::START_TIME, eas_datetime_dashes(from));
-            }
+            // Real fix: the iOS Automatic Reply UI has no Start Date
+            // concept at all -- only an End Date toggle+field. Every
+            // previous attempt at the scheduled-Oof display bug changed
+            // OofMessage content or the round-trip shape and left
+            // StartTime in the response untouched; never actually tried
+            // dropping it. StartTime is minOccurs=0 in the real
+            // [MS-ASWBXML] SettingsResponse.xsd (independently optional
+            // of EndTime), so omitting it while keeping EndTime is
+            // schema-valid. If the device's own "is this schedule
+            // currently active" check for the toggle compares against
+            // StartTime and something about that comparison is what's
+            // failing, this removes it from the equation entirely.
             if let Some(to) = &vacation.to_date {
                 builder.leaf(set::END_TIME, eas_datetime_dashes(to));
             }
