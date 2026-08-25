@@ -609,10 +609,27 @@ async fn settings(
             let vacation = state.jmap.get_vacation_response(auth).await.ok().flatten();
             let is_enabled = vacation.as_ref().is_some_and(|v| v.is_enabled);
 
+            // Real bug, found live via pcap: a real device's own Set used
+            // OofState=2 when it included a StartTime/EndTime schedule,
+            // and OofState=1 when it didn't (no dates at all) -- this
+            // gateway's Get response always hardcoded "1" whenever
+            // enabled, regardless of whether a schedule exists. Mirror
+            // the device's own convention: 2 = enabled+scheduled, 1 =
+            // enabled+indefinite, 0 = disabled.
+            let has_schedule = vacation
+                .as_ref()
+                .is_some_and(|v| v.from_date.is_some() && v.to_date.is_some());
+            let oof_state_value = if !is_enabled {
+                "0"
+            } else if has_schedule {
+                "2"
+            } else {
+                "1"
+            };
             builder.start(set::OOF);
             builder.leaf(set::STATUS, "1");
             builder.start(set::GET);
-            builder.leaf(set::OOF_STATE, if is_enabled { "1" } else { "0" });
+            builder.leaf(set::OOF_STATE, oof_state_value);
             if is_enabled {
                 if let Some(vacation) = &vacation {
                     // Real bug, found live: pulled the zoidberg pcap again
