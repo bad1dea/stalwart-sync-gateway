@@ -42,7 +42,8 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Settings: Oof (Set) | **Done, persists** | `VacationResponse/set` (`src/jmap/vacation.rs`) | Live-verified end to end with `isEnabled=false` (safe -- confirmed via direct JMAP query that `subject`/`textBody` actually persisted to the real `VacationResponse.singleton` object, then cleaned back up). `isEnabled=true` was deliberately never live-toggled for the same reason as the Get path above. |
 | Settings: RightsManagementInformation (IRM) | **Missing, out of scope** | N/A | Enterprise feature, not relevant to this account. |
 | Provision | **Done** | N/A (gateway-local, accept-everything policy) | PolicyStatus bug fixed this session. |
-| MeetingResponse | **Missing** | Candidate: `CalendarEvent/set` (participant status update) or a dedicated JMAP scheduling reply mechanism — **not surveyed this session**, needs its own research pass | High-value gap for the calendar use case — see roadmap. |
+| MeetingResponse | **Blocked at the JMAP layer** | `CalendarEvent/set` participant status update — **confirmed unsupported**, not just untested | Live-tested directly: a throwaway event created with a fully self-contained `participants` map (same account only, no `sendTo`, `expectReply: false` -- safe by construction) had `participants` silently dropped by Stalwart's `create` entirely; `CalendarEvent/get` never returns the property even when explicitly requested, and a follow-up `update` on `participants/p1/participationStatus` failed with `invalidProperties`. This corrects the previous session's read of `Calendar/get`'s `myRights.mayRSVP: true` as evidence of a working mechanism -- that's a generic ACL flag, unrelated to whether `participants` is actually implemented. Blocked on Stalwart, not a gateway-side task. See `docs/eas-jmap-command-matrix.md`'s MeetingResponse row for the full test trail. |
+| Sync: Calendar (attendees, read path) | **Blocked at the JMAP layer, same root cause as MeetingResponse** | `participants` on `CalendarEvent` -- confirmed absent | Since Stalwart doesn't store `participants` at all (see MeetingResponse row above), there is currently nothing for a read-only attendees field to display for ANY event on this account -- adding an `attendees` field to the `CalendarEvent` model right now would be dead code with nothing to populate it. Re-check if/when Stalwart adds `participants` support. |
 | Conversation threading (Email2:ConversationId) | **Reverted, not active** | JMAP `Thread` object / `Email.threadId` | Tried once (commit `d199d37`), caused a real client-side error, rolled back without a live-diff root-cause the way other bugs got. Worth redoing properly with the pcap-comparison method now well-established in this project, rather than leaving it reverted indefinitely. |
 | Attachment fetch on send (composing with an attachment) | **Unverified** | `upload_blob()` exists; whether `send_mail()`'s request-parsing path actually extracts and re-attaches client-supplied attachment blobs from a SmartReply/SmartForward's original message is unconfirmed | Needs a direct code read + live test with a real attached-file reply before claiming support either way. |
 
@@ -87,34 +88,38 @@ read/reply/send, plus calendar/contacts/notes sync.
 
 ### (b) High-value for the actual daily-driver use case
 
-3. **MeetingResponse (accept/decline/tentative).** Calendar sync is
-   currently read-only in every sense, including the single most common
-   calendar *interaction* on a phone — responding to an invite. This is
-   probably the most user-visible gap once Contacts/Calendar sync (item 2)
-   makes editing feel viable.
+3. **MeetingResponse (accept/decline/tentative) — now confirmed BLOCKED,
+   not just deferred.** Calendar sync is currently read-only in every
+   sense, including the single most common calendar *interaction* on a
+   phone — responding to an invite.
 
-   **Research done this session, implementation deliberately deferred.**
-   Live-checked `Calendar/get`'s `myRights` on the real account: it
-   includes `"mayRSVP": true` — real confirmation that Stalwart's JMAP
-   Calendars implementation has a concept of RSVP/scheduling-reply, not
-   just plain event CRUD. The mechanism is almost certainly: update the
-   user's OWN `participationStatus` entry within a `CalendarEvent`'s
-   `participants` map via `CalendarEvent/set`, per the JSCalendar/
-   JMAP-Calendars draft's scheduling model — and per that same spec, a
-   server is expected to AUTOMATICALLY send the real iTIP REPLY email to
-   the organizer's address when this happens. That send-side behavior
-   was deliberately never live-tested: the only way to confirm it would
-   be to actually update `participationStatus` on a real invite, which
-   risks emailing a real third-party organizer's inbox unsupervised —
-   the same class of risk `Settings>Oof`'s `isEnabled=true` path was
-   held back from for the exact same reason. No event with real
-   `participants` even exists on this test account currently (the one
-   real calendar event here has none — self-created, `isOrigin: true`).
-   Next concrete step: construct a test event with `participants` where
-   the organizer's `sendTo` address is something that can't reach a real
-   person (or do this live with the user present so an unexpected send
-   is immediately visible), then confirm the actual send behavior before
-   writing the EAS-side handler.
+   **Correction to this session's earlier research.** The previous pass
+   read `Calendar/get`'s `myRights.mayRSVP: true` as evidence Stalwart
+   has a working scheduling-reply mechanism, and deliberately held off
+   implementing on the theory that flipping `participationStatus` might
+   auto-send a real iTIP reply to a third party. A follow-up live test
+   (safe by construction: a throwaway event with a fully self-contained
+   `participants` map — same account as the only participant, no
+   `sendTo`, `expectReply: false`, so nothing could be emailed to anyone
+   either way) found something more fundamental: Stalwart's
+   `CalendarEvent/set create` silently DROPS `participants` entirely —
+   `CalendarEvent/get` never returns it, even when explicitly requested
+   via `properties`, and a follow-up `update` targeting
+   `participants/p1/participationStatus` failed outright with
+   `invalidProperties` because nothing was ever stored. `mayRSVP: true`
+   is a generic per-calendar ACL right that exists independent of
+   whether individual events actually carry participant data — it was
+   never real evidence of a working RSVP path.
+
+   This means BOTH MeetingResponse and attendee data on Calendar events
+   (even read-only) are blocked on Stalwart adding `participants` support
+   to `CalendarEvent`, not on any gateway-side risk-avoidance decision.
+   Nothing to build here right now. Re-check Stalwart's JMAP Calendars
+   support periodically; when `participants` starts round-tripping
+   through `CalendarEvent/get`, this whole item becomes tractable again
+   and the original plan (attendees read path, then MeetingResponse via
+   `participationStatus`, tested live with the user present given the
+   real third-party-email risk once it's real) still applies.
 4. **SmartReply/SmartForward threading-fidelity verification.** Mail send
    already works, but "does it actually thread correctly in the
    recipient's client" hasn't been checked with the same rigor as every
