@@ -17,6 +17,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Sync: Mail (delete) | **Done** | `Email/set` destroy / `Email/destroy`-equivalent | Delete command, `destroy_email()`. |
 | Sync: Mail (move) | **Done** | `Email/set` (`mailboxIds`) | Separate `MoveItems` command, not a Sync-embedded move. |
 | Sync: Mail (client Add, e.g. append-to-Sent) | **Missing** | `Email/set` create + blob | Explicitly ignored (`apply_mail_client_commands`, logged debug, no-op). Real EAS clients rarely Add mail directly (SendMail covers the compose path) — low priority. |
+| Sync: Mail (server-side delete surfaced to client) | **Done** (`deploy-2026-08-25v`) | Targeted `Email/get` (id + mailboxIds) per previously-seen-but-absent-from-window candidate | `emails_still_in_mailbox()` in `src/jmap/client.rs` — deliberately NOT a naive "absent from this fetch = deleted" diff, since `emails_in_mailbox`'s query is sorted newest-first and capped at the window size, so an old message pushed out of the window by newer mail looks identical to a real deletion under a plain diff. Live-verified both directions: a real destroyed message correctly surfaced as a Delete on the next Sync, and a real non-deleted message correctly confirmed present (not flagged) via the same JMAP call shape. |
 | Sync: Contacts (read) | **Done** | `ContactCard/query`+`/get` (JSContact, RFC 9553) | Confirmed live against a real card. |
 | Sync: Contacts (write: add/edit/delete) | **Done** (`deploy-2026-08-25s`) | `ContactCard/set` | `sync_contacts_collection` now handles Add/Change/Delete + a real hash-diff (same shape as Notes), backed by `save_contact`/`destroy_contact`. `ContactCard/set` confirmed live to support real in-place update, so the JMAP id is a stable ServerId with no workaround. Full lifecycle live-verified with a throwaway contact. |
 | Sync: Calendar (read) | **Done** | `CalendarEvent/query`+`/get` (JSCalendar, draft-ietf-calext-jscalendarbis superseding RFC 8984) | Confirmed live against a real event. No recurrence handling confirmed — see below. |
@@ -25,7 +26,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Sync: Tasks | **Missing, structurally unclear** | No JMAP Tasks capability exists at all (confirmed: Stalwart's advertised capability list has no tasks-shaped URN). `GatewayCapabilities::tasks` is currently just aliased to `has(CALENDARS)` — a placeholder, not a real signal. | Likely needs a JSCalendar `Task`-type-in-Calendar approach (unverified) or an Email-backed workaround like Notes. Needs its own live-verification pass before design. |
 | Sync: Notes | **Done, two-way** | Email-backed synthetic-message workaround (`src/jmap/notes.rs`) | The most structurally interesting piece of this whole gateway — see that file's module doc. Full Add/Change/Delete supported. |
 | FolderSync | **Done (simplified)** | `Mailbox/get`, `ContactCard`-AddressBook listing, `CalendarEvent`-Calendar listing | Always full-resync-as-Adds on key "0", fixed key "1" after — not a real incremental folder diff, but functionally fine for a folder set that rarely changes. |
-| FolderCreate/Update/Delete | **Missing** | `Mailbox/set` (mail only — no create/rename primitive obviously exists for the address-book/calendar-listing paths, which are heuristic-derived, not stored objects) | Low priority — no observed daily-driver need for on-device folder management. |
+| FolderCreate/Update/Delete | **Done** (`deploy-2026-08-25u`, mail only) | `Mailbox/set` create/update/destroy | `folder_create`/`folder_update`/`folder_delete` in `src/activesync.rs`. Mail-only per the original scoping note — a `note_`/`ab_`/`cal_`-prefixed id is rejected before calling JMAP. Error mapping (`alreadyExists`/`invalidProperties`/`forbidden`/`notFound`) confirmed live against the real account, including an actual rejected destroy-Inbox attempt. Full create→rename/reparent→delete lifecycle live-verified, including duplicate-name and bad-parent rejection paths. |
 | Ping | **Done** | N/A (gateway-local long-poll + JMAP poll underneath, implementation detail not deeply re-read this pass) | Empirically rock-solid over the entire multi-day A/B test; deliberately not touched further this session even where a codepage table read once looked mismatched. |
 | ItemOperations (Fetch) | **Done (legacy/secondary path)** | `Email/get` + `download_blob()` | Real device confirmed to use the *Sync-embedded* Fetch instead for opening messages; this command path exists for other-client compatibility. |
 | ItemOperations (attachment fetch via ItemOperations, not GetAttachment) | **Unverified** | `download_blob()` | `item_operations()` exists and presumably handles this — not independently re-verified in this pass which of GetAttachment vs ItemOperations the real device actually uses for attachments specifically (only messages were confirmed live this session). |
@@ -75,14 +76,45 @@ read/reply/send, plus calendar/contacts/notes sync.
    explicitly out of scope (see the type-matrix doc for the real
    field-by-field recurrence mapping when that becomes the target).
 
+2b. ✅ **DONE (`deploy-2026-08-25u`) — FolderCreate/FolderUpdate/FolderDelete,
+    mail only.** Also shipped and live-verified this session, backed by
+    `Mailbox/set`. See the status table row for the full story.
+2c. ✅ **DONE (`deploy-2026-08-25v`) — server-side mail deletions surfaced
+    as ActiveSync deletes.** Also shipped and live-verified this session.
+    See the status table row — this one had a real correctness trap
+    (window-vs-deletion ambiguity) that a naive port of the
+    Contacts/Calendar/Notes pattern would have walked straight into.
+
 ### (b) High-value for the actual daily-driver use case
 
 3. **MeetingResponse (accept/decline/tentative).** Calendar sync is
    currently read-only in every sense, including the single most common
    calendar *interaction* on a phone — responding to an invite. This is
    probably the most user-visible gap once Contacts/Calendar sync (item 2)
-   makes editing feel viable, and it needs its own research pass (JMAP
-   side unsurveyed this session) before scoping.
+   makes editing feel viable.
+
+   **Research done this session, implementation deliberately deferred.**
+   Live-checked `Calendar/get`'s `myRights` on the real account: it
+   includes `"mayRSVP": true` — real confirmation that Stalwart's JMAP
+   Calendars implementation has a concept of RSVP/scheduling-reply, not
+   just plain event CRUD. The mechanism is almost certainly: update the
+   user's OWN `participationStatus` entry within a `CalendarEvent`'s
+   `participants` map via `CalendarEvent/set`, per the JSCalendar/
+   JMAP-Calendars draft's scheduling model — and per that same spec, a
+   server is expected to AUTOMATICALLY send the real iTIP REPLY email to
+   the organizer's address when this happens. That send-side behavior
+   was deliberately never live-tested: the only way to confirm it would
+   be to actually update `participationStatus` on a real invite, which
+   risks emailing a real third-party organizer's inbox unsupervised —
+   the same class of risk `Settings>Oof`'s `isEnabled=true` path was
+   held back from for the exact same reason. No event with real
+   `participants` even exists on this test account currently (the one
+   real calendar event here has none — self-created, `isOrigin: true`).
+   Next concrete step: construct a test event with `participants` where
+   the organizer's `sendTo` address is something that can't reach a real
+   person (or do this live with the user present so an unexpected send
+   is immediately visible), then confirm the actual send behavior before
+   writing the EAS-side handler.
 4. **SmartReply/SmartForward threading-fidelity verification.** Mail send
    already works, but "does it actually thread correctly in the
    recipient's client" hasn't been checked with the same rigor as every
