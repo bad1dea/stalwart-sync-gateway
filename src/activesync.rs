@@ -531,18 +531,37 @@ async fn settings(
         // toggling it on will read back as off on the next Get. Wiring
         // this to Stalwart's ManageSieve vacation extension is the real
         // fix; this stub only stops the client-side hang.
+        //
+        // Real structural bug, found via the full z-push-stalwart-jmap
+        // source (PR #187): src/lib/syncobjects/syncoof.php's own
+        // $mapping repeats OofMessage once per AppliesTo* variant
+        // (Internal, ExternalKnown, ExternalUnknown -- see
+        // syncoofmessage.php's own mapping for the fields each one
+        // carries), NOT a single OofMessage with only
+        // AppliesToInternal. iOS's Automatic Replies screen still
+        // spinning forever with only the token-number/order fixes
+        // applied elsewhere this session is very likely because it was
+        // waiting for the two OofMessage blocks (ExternalKnown,
+        // ExternalUnknown) this gateway never sent at all, not just a
+        // position bug within the one block it did send.
         builder.start(set::OOF);
         builder.leaf(set::STATUS, "1");
         if !is_oof_set {
             builder.start(set::GET);
             builder.leaf(set::OOF_STATE, "0");
-            builder.start(set::OOF_MESSAGE);
-            builder.start(set::APPLIES_TO_INTERNAL);
-            builder.end();
-            builder.leaf(set::ENABLED, "0");
-            builder.leaf(set::REPLY_MESSAGE, "");
-            builder.leaf(set::BODY_TYPE, "Text");
-            builder.end();
+            for applies_to in [
+                set::APPLIES_TO_INTERNAL,
+                set::APPLIES_TO_EXTERNAL_KNOWN,
+                set::APPLIES_TO_EXTERNAL_UNKNOWN,
+            ] {
+                builder.start(set::OOF_MESSAGE);
+                builder.start(applies_to);
+                builder.end();
+                builder.leaf(set::ENABLED, "0");
+                builder.leaf(set::REPLY_MESSAGE, "");
+                builder.leaf(set::BODY_TYPE, "Text");
+                builder.end();
+            }
             builder.end();
         }
         builder.end();
