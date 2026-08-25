@@ -541,14 +541,38 @@ async fn settings(
         // The OofState=0 (disabled) shape below is unchanged from the
         // fix earlier this session, confirmed via a direct live wire
         // comparison against z-push for the identical Get request: JUST
-        // Status/Get/OofState, no OofMessage blocks. The OofState=1
-        // (enabled) shape's OofMessage/AppliesToInternal/Enabled/
-        // ReplyMessage/BodyType structure is spec-derived (MS-ASSETTINGS'
-        // own schema) rather than live-toggled and confirmed the same
-        // way -- toggling VacationResponse.isEnabled=true on the real
-        // account, even briefly, risks a genuine auto-reply going out to
-        // a real sender, so that specific path needs a real device
-        // verification pass before being fully trusted.
+        // Status/Get/OofState, no OofMessage blocks.
+        //
+        // The OofState=1 (enabled) shape was a REAL bug, confirmed live
+        // by pulling the zoidberg pcap right after the user actually
+        // turned Automatic Replies on and got stuck on "Loading...":
+        // the device's own Set request encodes THREE OofMessage blocks,
+        // and -- this is the surprising, byte-confirmed part -- they are
+        // genuinely NESTED inside each other (OofMessage>AppliesToInternal
+        // +siblings, then a SECOND OofMessage as a further sibling inside
+        // that same block wrapping AppliesToExternalKnown, then a THIRD
+        // nested inside THAT wrapping AppliesToExternalUnknown), not three
+        // flat sibling blocks the way an earlier, already-reverted fix
+        // this session assumed (commit ee7f2b8, reverted because it
+        // wrongly added this shape to the DISABLED case). This gateway's
+        // Get response only ever echoed a single OofMessage back, so the
+        // device never received the shape it was itself using, and kept
+        // retrying Settings in a tight loop (confirmed in the same pcap:
+        // repeated Set/Get pairs roughly every 250ms) instead of ever
+        // showing the toggle as settled.
+        //
+        // JMAP's VacationResponse (RFC 8621) has no Internal/External-
+        // Known/ExternalUnknown concept at all -- just one isEnabled/
+        // subject/textBody. The device's own Set in this capture used
+        // Enabled=1 for Internal but Enabled=0 for both External variants
+        // (the "also apply to external senders" toggle the user didn't
+        // enable) -- we don't persist that per-variant distinction
+        // anywhere (nothing to persist it INTO), so this echoes the
+        // single stored message back into all three variants, all marked
+        // Enabled=1: simpler than trying to fake a distinction we don't
+        // track, and "Enabled" reflects the real overall Oof state
+        // correctly for all three, which is what matters for the device
+        // to stop treating the response as incomplete.
         if is_oof_set {
             let oof_state = wbxml::eas::find_text_after(document, set::OOF_STATE);
             let is_enabled = oof_state.is_some_and(|state| state != "0");
@@ -602,12 +626,29 @@ async fn settings(
                         .clone()
                         .or_else(|| vacation.subject.clone())
                         .unwrap_or_default();
+                    // Nested exactly as the real device's own Set encoded
+                    // it (see comment above) -- each AppliesTo* block is a
+                    // child of the previous OofMessage, not a sibling.
                     builder.start(set::OOF_MESSAGE);
                     builder.start(set::APPLIES_TO_INTERNAL);
                     builder.end();
                     builder.leaf(set::ENABLED, "1");
+                    builder.leaf(set::REPLY_MESSAGE, reply_message.clone());
+                    builder.leaf(set::BODY_TYPE, "Text");
+                    builder.start(set::OOF_MESSAGE);
+                    builder.start(set::APPLIES_TO_EXTERNAL_KNOWN);
+                    builder.end();
+                    builder.leaf(set::ENABLED, "1");
+                    builder.leaf(set::REPLY_MESSAGE, reply_message.clone());
+                    builder.leaf(set::BODY_TYPE, "Text");
+                    builder.start(set::OOF_MESSAGE);
+                    builder.start(set::APPLIES_TO_EXTERNAL_UNKNOWN);
+                    builder.end();
+                    builder.leaf(set::ENABLED, "1");
                     builder.leaf(set::REPLY_MESSAGE, reply_message);
                     builder.leaf(set::BODY_TYPE, "Text");
+                    builder.end();
+                    builder.end();
                     builder.end();
                 }
             }
