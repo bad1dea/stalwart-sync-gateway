@@ -2076,20 +2076,21 @@ fn write_note_command(
 ) {
     use wbxml::eas::{airsync as air, airsync_base as base, notes};
 
+    // Field order matches the real z-push-stalwart-jmap source (PR #187,
+    // pinned in config/z-push/Dockerfile: src/lib/syncobjects/
+    // syncnote.php's own $mapping order): Body, Categories,
+    // LastModifiedDate, MessageClass, Subject -- this gateway had
+    // Subject first and Body second (reversed), and MessageClass before
+    // Categories/LastModifiedDate instead of after.
     builder.start(tag);
     builder.leaf(air::SERVER_ID, note.id.clone());
     builder.start(air::APPLICATION_DATA);
-    builder.leaf(notes::SUBJECT, note.title.clone());
     builder.start(base::BODY);
     builder.leaf(base::TYPE, note.body_type.eas_value());
     builder.leaf(base::ESTIMATED_DATA_SIZE, note.body.len().to_string());
     builder.leaf(base::TRUNCATED, "0");
     builder.leaf(base::DATA, note.body.clone());
     builder.end();
-    builder.leaf(notes::MESSAGE_CLASS, "IPM.StickyNote");
-    if let Some(modified) = &note.modified {
-        builder.leaf(notes::LAST_MODIFIED_DATE, eas_datetime(modified));
-    }
     if !note.categories.is_empty() {
         builder.start(notes::CATEGORIES);
         for category in &note.categories {
@@ -2097,6 +2098,11 @@ fn write_note_command(
         }
         builder.end();
     }
+    if let Some(modified) = &note.modified {
+        builder.leaf(notes::LAST_MODIFIED_DATE, eas_datetime(modified));
+    }
+    builder.leaf(notes::MESSAGE_CLASS, "IPM.StickyNote");
+    builder.leaf(notes::SUBJECT, note.title.clone());
     builder.end();
     builder.end();
 }
