@@ -22,8 +22,8 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Sync: Contacts (write: add/edit/delete) | **Done** (`deploy-2026-08-25s`) | `ContactCard/set` | `sync_contacts_collection` now handles Add/Change/Delete + a real hash-diff (same shape as Notes), backed by `save_contact`/`destroy_contact`. `ContactCard/set` confirmed live to support real in-place update, so the JMAP id is a stable ServerId with no workaround. Full lifecycle live-verified with a throwaway contact. |
 | Sync: Calendar (read) | **Done** | `CalendarEvent/query`+`/get` (JSCalendar, draft-ietf-calext-jscalendarbis superseding RFC 8984) | Confirmed live against a real event. No recurrence handling confirmed — see below. |
 | Sync: Calendar (write: add/edit/delete, non-recurring only) | **Done** (`deploy-2026-08-25t`) | `CalendarEvent/set` | Same treatment as Contacts, via `save_calendar_event`/`destroy_calendar_event`. `start`/`duration` written without `timeZone`, mirroring `local_to_utc_eas`'s existing "absent timeZone == already UTC" convention. Recurrence/attendees/reminders explicitly out of scope. Full lifecycle live-verified with a throwaway event. |
-| Sync: Calendar recurrence (RRULE) | **Unverified/likely missing** | JSCalendar `recurrenceRules` | `write_calendar_add()` was reordered for field-order correctness this session but not audited for whether it reads/emits `RecurrenceType`/`Occurrences`/`Interval` etc. at all — needs a direct code check + a real recurring-event live test before claiming any status. |
-| Sync: Tasks | **Missing, structurally unclear** | No JMAP Tasks capability exists at all (confirmed: Stalwart's advertised capability list has no tasks-shaped URN). `GatewayCapabilities::tasks` is currently just aliased to `has(CALENDARS)` — a placeholder, not a real signal. | Likely needs a JSCalendar `Task`-type-in-Calendar approach (unverified) or an Email-backed workaround like Notes. Needs its own live-verification pass before design. |
+| Sync: Calendar recurrence (RRULE) | **Confirmed BLOCKED at the JMAP layer (2026-08-25)** | JSCalendar `recurrenceRules` — Stalwart rejects it outright | Live-tested directly, not just code-read: `CalendarEvent/set create` with `recurrenceRules` (multiple shapes tried — minimal `{"frequency":"weekly"}`, with `@type`, with `interval`) is rejected every time with `notCreated: {type: "invalidProperties", properties: ["recurrenceRules"]}` — the property itself is unrecognized, not just validated-and-rejected-for-content. `CalendarEvent/get` with `recurrenceRules`/`recurrenceOverrides` explicitly requested on an existing event silently omits both (no error, just absent) — same "silently drops the property" behavior already seen for `participants` (see MeetingResponse row). This is the same class of finding: blocked on Stalwart adding real recurrence support to `CalendarEvent`, not a gateway-side task. `write_calendar_command()` (renamed from `write_calendar_add` this session) still only emits the 6 non-recurring fields it always has; nothing to build here until Stalwart's JMAP support changes. |
+| Sync: Tasks | **Done, two-way (`deploy-2026-08-26i`)** | `CalendarEvent` with `@type: "Task"` — confirmed live, NOT a separate JMAP object | Overturns the earlier "structurally unclear" verdict. Live-tested directly (2026-08-25): Stalwart accepts and round-trips `@type: "Task"` on `CalendarEvent` — `title`/`due`/`start`/`progress`/`percentComplete`/`priority`/`description` all confirmed by reading the object back, not just a clean create response. There's no separate Tasks-list capability or object; Tasks rides on the SAME Calendar storage as Events, distinguished only by `@type`, with no server-side query filter for it (`{"type"`/`"@type": "Task"}` both come back `unsupportedFilter`, checked live) — `tasks_in_calendar()` fetches the whole calendar and filters client-side. `GatewayCapabilities::tasks` was already `has(CALENDARS)` with a comment calling it "a placeholder, not a real signal" — that alias turns out to have been correct all along. Full Add/Change/Delete lifecycle live-verified over the REAL WBXML wire protocol (not just direct JMAP): FolderSync correctly advertises a "Tasks" folder (type 7); a throwaway task Add → Change (mark complete) → confirmed via direct JMAP read that `progress` actually became `"completed"` server-side → Delete over the wire → confirmed via direct JMAP that the id came back `notFound`. One real open gap: `write_task_command()`'s field order (Subject, Complete, DueDate, UtcDueDate) is NOT device-verified — unlike Calendar/Contacts/Email there's no reference implementation to check it against (this codebase's own `docs/PR187_ANALYSIS.md` says Tasks was never attempted in the z-push fork this project was ported from), and MS-ASCMD's `ItemProperties` group (fetched fresh from learn.microsoft.com) is an `xs:choice`, not an `xs:sequence`, so the wire spec itself doesn't mandate an order. Needs a live device Tasks sync (e.g. iOS Reminders via the EAS account) before trusting it, same standing caveat as the ConversationId redo. |
 | Sync: Notes | **Done, two-way** | Email-backed synthetic-message workaround (`src/jmap/notes.rs`) | The most structurally interesting piece of this whole gateway — see that file's module doc. Full Add/Change/Delete supported. |
 | FolderSync | **Done (simplified)** | `Mailbox/get`, `ContactCard`-AddressBook listing, `CalendarEvent`-Calendar listing | Always full-resync-as-Adds on key "0", fixed key "1" after — not a real incremental folder diff, but functionally fine for a folder set that rarely changes. |
 | FolderCreate/Update/Delete | **Done** (`deploy-2026-08-25u`, mail only) | `Mailbox/set` create/update/destroy | `folder_create`/`folder_update`/`folder_delete` in `src/activesync.rs`. Mail-only per the original scoping note — a `note_`/`ab_`/`cal_`-prefixed id is rejected before calling JMAP. Error mapping (`alreadyExists`/`invalidProperties`/`forbidden`/`notFound`) confirmed live against the real account, including an actual rejected destroy-Inbox attempt. Full create→rename/reparent→delete lifecycle live-verified, including duplicate-name and bad-parent rejection paths. |
@@ -141,24 +141,26 @@ read/reply/send, plus calendar/contacts/notes sync.
    messages created and destroyed cleanly. No code change was needed —
    this item was a real open question with an unverified assumption
    underneath it, and it checked out as already correct.
-5. **Calendar recurrence.** A daily-driver calendar without recurring
-   events (the majority of most people's actual calendar load — standing
-   meetings, birthdays, etc.) is a soft-broken experience even though
-   single events sync fine. Needs a direct code read of
-   `write_calendar_add()`/the calendar-event JMAP mapping to establish
-   current status before scoping the fix.
+5. ⛔ **CONFIRMED BLOCKED (2026-08-25) — Calendar recurrence.** Not a gap
+   to build, a Stalwart limitation to wait on. Live-tested directly:
+   `recurrenceRules` is rejected as `invalidProperties` on `CalendarEvent/set
+   create` in every shape tried, and silently omitted from `CalendarEvent/get`
+   even when explicitly requested — the property is entirely unimplemented on
+   Stalwart's side, not merely unverified. Re-check if/when Stalwart's JMAP
+   Calendars support changes; nothing for this gateway to build until then.
+6. ✅ **DONE (`deploy-2026-08-26i`) — Tasks.** The "structurally hard, no
+   direct JMAP equivalent" framing this item used to carry turned out to be
+   wrong — moved out of section (c) entirely. Live-tested directly: Stalwart's
+   `CalendarEvent` accepts and round-trips `@type: "Task"` objects (title/due/
+   start/progress/percentComplete/priority/description all confirmed), so
+   Tasks needed no Notes-style workaround at all — it rides on the same
+   Calendar storage as Events. Full Add/Change/Delete lifecycle live-verified
+   over the real WBXML wire protocol against `eas-test.khuo.ng`. See the
+   status table row above for the complete story, including the one
+   remaining gap (Task field order not yet device-confirmed).
 
 ### (c) Structurally hard — no direct JMAP equivalent, needs a workaround
 
-6. **Tasks.** The same class of problem Notes already solved (no native
-   JMAP object) but with a materially less certain path forward — Notes
-   had an obvious host object (Email, with a real existing "Notes"
-   mailbox convention to reuse); Tasks has no equally obvious host.
-   JSCalendar's `Task` type (part of jscalendarbis, not yet confirmed
-   exposed by Stalwart's `CalendarEvent` objects) is the most promising
-   lead but is explicitly unverified — this needs a live capability check
-   before any design work, the same discipline every other claim in this
-   document set was held to.
 7. **GAL/directory search (Search/Find).** `Principal`
    (`urn:ietf:params:jmap:principals`) is the only capability in
    Stalwart's advertised list that looks like a plausible backing object,

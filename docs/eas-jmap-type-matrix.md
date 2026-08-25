@@ -43,7 +43,7 @@ inferred.
 | Location | 0x17 | 2.5-14.1 (16.0+ uses AirSyncBase:Location, codepage 17) | ✅ | JSCalendar `locations` (map; `locations["1"].name` for the simple case) | Gateway only emits the codepage-4 form — fine for the versions it advertises (`12.0,12.1,14.0` — all within the 2.5-14.1 window), but would need the AirSyncBase form too if 16.x is ever re-enabled. |
 | MeetingStatus | 0x18 | All | ⛔ | No direct single-field JSCalendar equivalent — inferred from participant roles/`replyTo` presence | MS-ASCAL's `MeetingStatus` (0=appointment, 1=meeting, 3=meeting received as attendee, 5/7=cancelled variants) doesn't map onto one JSCalendar property; would need to be derived from whether `participants` is populated and whose entry is "me." |
 | OrganizerEmail / OrganizerName | 0x19-0x1A | All | ⛔ *(today)* / 🟡 | JSCalendar `participants` entry with role `"owner"`, or a distinct top-level organizer concept in some JSCalendar drafts | Same participants-map mechanism as Attendees above — organizer is just a participant with a specific role, not a separate object. |
-| **Recurrence** (0x1B, container) with **Type** (0x1C), **Until** (0x1D), **Occurrences** (0x1E), **Interval** (0x1F), **DayOfWeek** (0x20), **DayOfMonth** (0x21), **WeekOfMonth** (0x22), **MonthOfYear** (0x23) | 0x1B-0x23 | All | ⛔ *(today)* / 🟡 | JSCalendar `recurrenceRules` (array of rule objects: `frequency`, `interval`, `until`/`count`, `byDay`, `byMonthDay`, `byMonth`, ...) — modeled on iCalendar RFC 5545 RRULE, structurally close to but NOT identical to MS-ASCAL's own scheme | **This is the field-by-field mapping the roadmap flagged as needed.** MS-ASCAL's `Type` (0=daily, 1=weekly, 2=monthly, 3=monthly-by-day, 5=yearly, 6=yearly-by-day) maps to JSCalendar `frequency` (`"daily"`/`"weekly"`/`"monthly"`/`"yearly"`) plus, for the "by day of week within month" variants, `byDay` entries carrying an ordinal (e.g. `{"day":"mo","nthOfPeriod":2}` for "2nd Monday"). `DayOfWeek`/`WeekOfMonth`/`MonthOfYear` are MS-ASCAL's own bitmask/ordinal encoding (DayOfWeek is a **bitmask**, Sunday=1 through Saturday=64 — confirmed against the element's known encoding, not re-verified against this exact spec revision's prose this pass) and need bit-by-bit unpacking into JSCalendar's array-of-strings `byDay` — genuine translation work in both directions, not a rename. `Until` vs `Occurrences` map cleanly to JSCalendar's mutually-exclusive `until`/`count`. |
+| **Recurrence** (0x1B, container) with **Type** (0x1C), **Until** (0x1D), **Occurrences** (0x1E), **Interval** (0x1F), **DayOfWeek** (0x20), **DayOfMonth** (0x21), **WeekOfMonth** (0x22), **MonthOfYear** (0x23) | 0x1B-0x23 | All | ⛔ **CONFIRMED BLOCKED (2026-08-25)** | JSCalendar `recurrenceRules` — Stalwart doesn't implement it | **The field-by-field mapping this row used to describe as the roadmap's next step is moot for now.** Live-tested directly against the real Stalwart instance: `CalendarEvent/set create` with a `recurrenceRules` array is rejected outright with `notCreated: {type: "invalidProperties", properties: ["recurrenceRules"]}` in every shape tried (minimal `{"frequency":"weekly"}`, with `@type: "RecurrenceRule"`, with `interval`) — the property itself is unrecognized, not validated-and-rejected for its content. `CalendarEvent/get` with `recurrenceRules`/`recurrenceOverrides` explicitly requested on an existing event silently omits both, no error. Same class of finding as `participants` (see Attendees row below) — blocked on Stalwart, not a translation-design question. The MS-ASCAL↔JSCalendar mapping described in the old version of this row (Type↔frequency, DayOfWeek as a Sunday=1..Saturday=64 bitmask, Until/Occurrences↔until/count) is preserved here for whenever Stalwart adds real support, but there's nothing to build against today. |
 | Reminder | 0x24 | All | ⛔ *(today)* / 🟡 | JSCalendar `alerts` (map of alert objects with a `trigger` — typically an `OffsetTrigger` with a signed `ISO 8601` duration relative to `start`) | MS-ASCAL's `Reminder` is a single integer (minutes before start); JSCalendar's `alerts` supports multiple richer alerts — a lossy-in-one-direction mapping (many alerts → one reminder) if ever round-tripped both ways. |
 | Sensitivity | 0x25 | All | ✅ | JSCalendar `privacy` (`public`/`private`/`secret`) | |
 | Subject | 0x26 | All | ✅ | JSCalendar `title` | |
@@ -108,22 +108,50 @@ remains scaffolded token constants only, unused.
 
 ## Tasks (MS-ASTASK, WBXML codepage 9)
 
-⛔ *(today)*. No JMAP Tasks capability exists at all — confirmed live (Stalwart's
-advertised capability list has no tasks-shaped URN), matching the gap-analysis
-doc's existing finding. `GatewayCapabilities::tasks` is currently just aliased to
-`has(CALENDARS)`, a placeholder signal, not a real one.
+✅ **Done, two-way (`deploy-2026-08-26i`)**. The gap-analysis doc's leading
+hypothesis — riding Tasks on top of `CalendarEvent`'s JSCalendar `Task`
+type — is confirmed correct, live: Stalwart accepts `@type: "Task"` on
+`CalendarEvent/set create` and round-trips `title`/`due`/`start`/`progress`/
+`percentComplete`/`priority`/`description` (all read back via
+`CalendarEvent/get`, not just inferred from a clean create response). There
+is no separate Tasks capability URN and none is needed — `GatewayCapabilities::
+tasks`'s existing `has(CALENDARS)` alias was correct all along, just
+unverified until now. `CalendarEvent/query` has no server-side filter for
+`@type` (`unsupportedFilter`, checked live both as `"type"` and `"@type"`),
+so `tasks_in_calendar()` (`jmap/client.rs`) fetches the whole calendar and
+filters to `@type == "Task"` client-side.
 
-The codepage itself (now fully scaffolded in `eas.rs`) shares its entire
-recurrence-field shape (`Type`/`Start`/`Until`/`Occurrences`/`Interval`/
-`DayOfMonth`/`DayOfWeek`/`WeekOfMonth`/`MonthOfYear`/`CalendarType`/`IsLeapMonth`/
-`FirstDayOfWeek`, tokens 0x10-0x26) with Calendar's own recurrence fields above —
-same translation problem, same JSCalendar `recurrenceRules` target, if Tasks is
-ever ridden on top of `CalendarEvent`'s JSCalendar `Task`-in-Calendar approach (the
-gap-analysis doc's leading unverified hypothesis for a Tasks host object). This is
-the strongest concrete evidence yet for that hypothesis being viable: the wire
-protocol itself treats Tasks-recurrence and Calendar-recurrence as the same shape,
-which is suggestive but not proof that JMAP's Calendar-as-Task story cooperates —
-still needs the live capability check the gap-analysis doc calls for before design.
+Implemented: `Subject`/`Complete`/`DueDate`/`UtcDueDate` (tokens 0x20/0x0a/
+0x0c/0x0d) — read via `sync_tasks_collection()`, write via `write_task_command()`
+(both `activesync.rs`), backed by `tasks_in_calendar()`/`save_task()`
+(`jmap/client.rs`); deletes reuse `destroy_calendar_event()` directly since
+Tasks and Events share the same underlying JMAP id space. Full Add/Change/
+Delete lifecycle live-verified over the real WBXML wire protocol against
+`eas-test.khuo.ng`: FolderSync correctly advertises a "Tasks" folder (type 7,
+`eas_folder_type::TASK` — cross-checked against z-push's `zpushdefs.php`
+`SYNC_FOLDER_TYPE_TASK`/`SYNC_FOLDER_TYPE_USER_TASK`, same bar as the existing
+`NOTE` constant); a throwaway task's Add → Change (Complete=1) → confirmed via
+direct JMAP that `progress` actually became `"completed"` server-side →
+Delete over the wire → confirmed via direct JMAP the id came back `notFound`.
+
+**Known gap:** `write_task_command()`'s field order is NOT device-verified.
+Unlike Calendar/Contacts/Email, no reference implementation exists to check it
+against — `docs/PR187_ANALYSIS.md` confirms Tasks was never attempted in the
+z-push fork this project was ported from. MS-ASCMD's `ItemProperties` group
+(which all `tasks:*` elements belong to, fetched fresh from
+learn.microsoft.com for this pass) is an `xs:choice`, not an `xs:sequence`, so
+unlike Email/Calendar's own `ItemProperties`-adjacent but still order-sensitive
+fields, the wire spec doesn't mandate an order here at all — the chosen order
+(Subject, Complete, DueDate, UtcDueDate) is a reasonable guess, not a verified
+one. Needs a real device Tasks sync (e.g. iOS Reminders via the EAS account)
+before being trusted, same standing caveat as the ConversationId redo.
+
+The codepage's recurrence-field shape (`Type`/`Start`/`Until`/`Occurrences`/
+`Interval`/`DayOfMonth`/`DayOfWeek`/`WeekOfMonth`/`MonthOfYear`/`CalendarType`/
+`IsLeapMonth`/`FirstDayOfWeek`, tokens 0x10-0x26) is scaffolded in `eas.rs` but
+unused, same status as Calendar's own recurrence fields — see that row above:
+confirmed blocked on Stalwart's side (`recurrenceRules` rejected outright),
+not a translation problem to solve here.
 
 ## Notes (MS-ASNOTE, WBXML codepage 23)
 
