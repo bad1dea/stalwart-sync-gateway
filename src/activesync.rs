@@ -489,6 +489,94 @@ async fn send_mail(
     }
 }
 
+/// Writes the `Get` block's content (OofState, StartTime/EndTime,
+/// OofMessage x3) shared by both the Get response path and the Set ack
+/// (which now echoes the full state immediately -- see the call site's
+/// own doc comment for why). Caller has already opened `Oof > Status`;
+/// this only writes `Get > ...` and leaves `Oof`'s own end tag to the
+/// caller.
+///
+/// The OofState=0 (disabled) shape is unchanged from the fix earlier
+/// this session, confirmed via a direct live wire comparison against
+/// z-push for the identical Get request: JUST Get/OofState, no
+/// OofMessage blocks at all.
+///
+/// The OofState=1/2 (enabled) shape was root-caused by reading THREE
+/// independent, currently-production, real-device-tested EAS server
+/// implementations (SOGo's SOGoActiveSyncDispatcher.m, grommunio-sync's
+/// grommunio.php, and z-push's own reference) rather than continuing to
+/// guess: OofState=2 for a real schedule matches the device's own Set
+/// convention and every schema check performed. The actual divergence,
+/// confirmed against SOGo's real, working Oof Get response: this
+/// gateway used to send Enabled=1 with full ReplyMessage/BodyType on
+/// ALL THREE OofMessage blocks, because JMAP's VacationResponse only has
+/// one unified message with no internal/external distinction. SOGo
+/// sends full content ONLY for AppliesToInternal -- AppliesToExternalKnown
+/// and AppliesToExternalUnknown get Enabled=0 (hardcoded), an EMPTY
+/// self-closing ReplyMessage (no text content, not even an empty
+/// string), and NO BodyType element at all.
+fn write_oof_get_body(
+    builder: &mut wbxml::eas::DocumentBuilder,
+    vacation: &Option<crate::jmap::vacation::VacationResponse>,
+) {
+    use wbxml::eas::settings as set;
+
+    let is_enabled = vacation.as_ref().is_some_and(|v| v.is_enabled);
+    let oof_state_value = if !is_enabled {
+        "0"
+    } else if vacation
+        .as_ref()
+        .is_some_and(|v| v.from_date.is_some() && v.to_date.is_some())
+    {
+        "2"
+    } else {
+        "1"
+    };
+    builder.start(set::GET);
+    builder.leaf(set::OOF_STATE, oof_state_value);
+    if is_enabled {
+        if let Some(vacation) = vacation {
+            // Dashed ISO with a literal ".000" suffix, matching the
+            // device's own StartTime/EndTime encoding exactly (same
+            // failure class as the original DateReceived bug, commit
+            // 1bac5ae) -- see eas_datetime_dashes's own doc comment.
+            if let Some(from) = &vacation.from_date {
+                builder.leaf(set::START_TIME, eas_datetime_dashes(from));
+            }
+            if let Some(to) = &vacation.to_date {
+                builder.leaf(set::END_TIME, eas_datetime_dashes(to));
+            }
+            let reply_message = vacation
+                .text_body
+                .clone()
+                .or_else(|| vacation.subject.clone())
+                .unwrap_or_default();
+            // Three SIBLING OofMessage blocks (each fully closed before
+            // the next starts), NOT nested -- confirmed live via
+            // idevicesyslog that iOS's WBXML *decoder* rejects
+            // OofMessage nested inside OofMessage even though its own
+            // *encoder* produces exactly that shape when sending a Set.
+            builder.start(set::OOF_MESSAGE);
+            builder.empty_tag(set::APPLIES_TO_INTERNAL);
+            builder.leaf(set::ENABLED, "1");
+            builder.leaf(set::REPLY_MESSAGE, reply_message);
+            builder.leaf(set::BODY_TYPE, "Text");
+            builder.end();
+            builder.start(set::OOF_MESSAGE);
+            builder.empty_tag(set::APPLIES_TO_EXTERNAL_KNOWN);
+            builder.leaf(set::ENABLED, "0");
+            builder.empty_tag(set::REPLY_MESSAGE);
+            builder.end();
+            builder.start(set::OOF_MESSAGE);
+            builder.empty_tag(set::APPLIES_TO_EXTERNAL_UNKNOWN);
+            builder.leaf(set::ENABLED, "0");
+            builder.empty_tag(set::REPLY_MESSAGE);
+            builder.end();
+        }
+    }
+    builder.end();
+}
+
 async fn settings(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
@@ -592,129 +680,35 @@ async fn settings(
                 from_date,
                 to_date,
             };
-            match state.jmap.set_vacation_response(auth, update).await {
-                Ok(()) => {
-                    builder.start(set::OOF);
-                    builder.leaf(set::STATUS, "1");
-                    builder.end();
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "failed to persist Oof Set via VacationResponse/set");
-                    builder.start(set::OOF);
-                    builder.leaf(set::STATUS, "1");
-                    builder.end();
-                }
+            if let Err(error) = state.jmap.set_vacation_response(auth, update).await {
+                tracing::warn!(%error, "failed to persist Oof Set via VacationResponse/set");
             }
-        } else {
+            // Real experiment: a Set ack used to be a bare `Oof>Status=1`,
+            // requiring the device to make a SEPARATE Get round-trip to
+            // learn the new state -- two independent requests, two
+            // independent chances for the client's own request-tracking
+            // to race/drop one (the log evidence for that: every capture
+            // this session shows `_oofSettingsRequestsFinished called
+            // back with status -1` / "received results for an unknown
+            // oof settings request" immediately before the real result,
+            // every single time). The [MS-ASWBXML] SettingsResponse.xsd
+            // schema doesn't tie `Get` content to the request having been
+            // a Get -- Oof's response shape is just `Status, Get` (both
+            // optional) regardless of whether the request was a Get or a
+            // Set. Re-fetching and echoing the full state immediately in
+            // the Set ack removes that race entirely: the device gets
+            // the authoritative state in the SAME response it's already
+            // waiting on, no second request needed.
             let vacation = state.jmap.get_vacation_response(auth).await.ok().flatten();
-            let is_enabled = vacation.as_ref().is_some_and(|v| v.is_enabled);
-
-            // Real fix, found by reading THREE independent, currently-
-            // production, real-device-tested EAS server implementations
-            // (SOGo's SOGoActiveSyncDispatcher.m, grommunio-sync's
-            // grommunio.php, and z-push's own reference) rather than
-            // guessing further -- the OofState=1-unconditionally
-            // "experiment" that preceded this commit fixed the toggle but
-            // broke End Date display, proving OofState=2 for a real
-            // schedule is correct after all (matches the device's own
-            // Set convention and every schema check already done).
-            //
-            // The actual divergence, confirmed against SOGo's real,
-            // working Oof Get response: this gateway sent Enabled=1 with
-            // full ReplyMessage/BodyType on ALL THREE OofMessage blocks,
-            // because JMAP's VacationResponse only has one unified
-            // message with no internal/external distinction. SOGo (and
-            // presumably real Exchange, which SOGo's implementation is
-            // reverse-engineered against) sends Enabled=1 with real
-            // content ONLY for AppliesToInternal -- AppliesToExternalKnown
-            // and AppliesToExternalUnknown get Enabled=0 (hardcoded), an
-            // EMPTY self-closing ReplyMessage (no text content at all,
-            // not even an empty string), and NO BodyType element at all.
-            // A real device apparently never expects to see all three
-            // audiences simultaneously "enabled" with identical content
-            // this way, which fits everything observed: the SAME
-            // structurally-valid, schema-correct bytes producing
-            // different symptoms depending on values sent.
-            let oof_state_value = if !is_enabled {
-                "0"
-            } else if vacation
-                .as_ref()
-                .is_some_and(|v| v.from_date.is_some() && v.to_date.is_some())
-            {
-                "2"
-            } else {
-                "1"
-            };
             builder.start(set::OOF);
             builder.leaf(set::STATUS, "1");
-            builder.start(set::GET);
-            builder.leaf(set::OOF_STATE, oof_state_value);
-            if is_enabled {
-                if let Some(vacation) = &vacation {
-                    // Real bug, found live: pulled the zoidberg pcap again
-                    // after the user reported Automatic Replies STILL
-                    // stuck on "Loading..." even with the nested
-                    // OofMessage fix deployed and structurally correct.
-                    // The device's own Set request sends StartTime/EndTime
-                    // in DASHED ISO form ("2026-08-25T16:14:32.000Z"), but
-                    // this Get response was echoing the COMPACT form
-                    // ("20260825T161432Z") -- the exact same "wrong date
-                    // format on one specific field" failure class as the
-                    // original DateReceived bug (commit 1bac5ae). Fixed by
-                    // mirroring what the device itself sent, same
-                    // reasoning as that fix: eas_datetime_dashes(), not
-                    // eas_datetime().
-                    if let Some(from) = &vacation.from_date {
-                        builder.leaf(set::START_TIME, eas_datetime_dashes(from));
-                    }
-                    if let Some(to) = &vacation.to_date {
-                        builder.leaf(set::END_TIME, eas_datetime_dashes(to));
-                    }
-                    let reply_message = vacation
-                        .text_body
-                        .clone()
-                        .or_else(|| vacation.subject.clone())
-                        .unwrap_or_default();
-                    // Real bug, found live via idevicesyslog (not just the
-                    // pcap): even though this exact nested shape is
-                    // byte-for-byte well-formed WBXML (verified by a full
-                    // manual structural walk, balanced start/end, no
-                    // leftover bytes) and matches what the device's OWN
-                    // Set request encodes, exchangesyncd logged a real
-                    // parse error receiving it back: "We have an int in
-                    // our WBXML, but Exchange never gives us this. Parse
-                    // error." -- iOS's WBXML *decoder* doesn't accept
-                    // OofMessage nested inside OofMessage, even though its
-                    // own *encoder* produces exactly that shape. Lenient
-                    // on write, strict on read -- an asymmetry, not a
-                    // contradiction. Three SIBLING OofMessage blocks
-                    // instead (closed before the next starts) -- this is
-                    // the shape an earlier, since-reverted fix this
-                    // session used (commit ee7f2b8), but that revert
-                    // (folded into commit c6beadf) was specifically
-                    // because it wrongly applied 3x blocks to the
-                    // DISABLED case too, proven wrong via z-push
-                    // comparison; nobody had tried siblings-only-when-
-                    // enabled until now.
-                    builder.start(set::OOF_MESSAGE);
-                    builder.empty_tag(set::APPLIES_TO_INTERNAL);
-                    builder.leaf(set::ENABLED, "1");
-                    builder.leaf(set::REPLY_MESSAGE, reply_message);
-                    builder.leaf(set::BODY_TYPE, "Text");
-                    builder.end();
-                    builder.start(set::OOF_MESSAGE);
-                    builder.empty_tag(set::APPLIES_TO_EXTERNAL_KNOWN);
-                    builder.leaf(set::ENABLED, "0");
-                    builder.empty_tag(set::REPLY_MESSAGE);
-                    builder.end();
-                    builder.start(set::OOF_MESSAGE);
-                    builder.empty_tag(set::APPLIES_TO_EXTERNAL_UNKNOWN);
-                    builder.leaf(set::ENABLED, "0");
-                    builder.empty_tag(set::REPLY_MESSAGE);
-                    builder.end();
-                }
-            }
+            write_oof_get_body(&mut builder, &vacation);
             builder.end();
+        } else {
+            let vacation = state.jmap.get_vacation_response(auth).await.ok().flatten();
+            builder.start(set::OOF);
+            builder.leaf(set::STATUS, "1");
+            write_oof_get_body(&mut builder, &vacation);
             builder.end();
         }
     }
