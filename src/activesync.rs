@@ -1257,7 +1257,11 @@ fn apply_body_preference(
 
     let (out_type, full_text) = match pref.body_type {
         Some(1) if body.body_type == EmailBodyType::Html => {
-            (EmailBodyType::Plain, strip_html_tags(&body.value))
+            // Collapse whitespace too, not just strip tags -- an HTML
+            // source's leading indentation/blank lines (from a <head>,
+            // template formatting, etc.) otherwise eats most of a small
+            // TruncationSize budget before any real text appears.
+            (EmailBodyType::Plain, collapse_whitespace(&strip_html_tags(&body.value)))
         }
         _ => (body.body_type, body.value),
     };
@@ -1287,12 +1291,14 @@ fn plain_text_preview(body: &crate::model::EmailBody) -> String {
         crate::model::EmailBodyType::Html => strip_html_tags(&body.value),
         crate::model::EmailBodyType::Plain => body.value.clone(),
     };
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(PREVIEW_CHARS)
-        .collect()
+    collapse_whitespace(&text).chars().take(PREVIEW_CHARS).collect()
+}
+
+/// Collapses any run of whitespace (including the blank lines an HTML
+/// source's indentation/head section leaves behind once tags are
+/// stripped) to a single space.
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn strip_html_tags(html: &str) -> String {
@@ -2233,11 +2239,34 @@ mod tests {
         assert_eq!(out_type, EmailBodyType::Plain);
         assert_eq!(out_value.len(), 500);
         assert!(!out_value.contains('<'));
-        // full_len reflects the converted (HTML-stripped) plain text's true
-        // length, not the original HTML source's -- EstimatedDataSize
-        // describes what Type/Data now claim to be (plain text).
-        assert_eq!(full_len, long_text.len());
+        // full_len reflects the converted (HTML-stripped, whitespace-
+        // collapsed) plain text's true length, not the original HTML
+        // source's -- 200 "word " tokens collapsed to single spaces is
+        // one byte shorter than the source (no trailing space survives
+        // the join). EstimatedDataSize describes what Type/Data now
+        // claim to be (plain text).
+        assert_eq!(full_len, long_text.trim_end().len());
         assert!(truncated);
+    }
+
+    #[test]
+    fn apply_body_preference_plain_conversion_collapses_leading_blank_lines() {
+        // Real bug, confirmed live: an HTML source's <head>/indentation
+        // whitespace survived tag-stripping untouched, so a small
+        // TruncationSize budget was mostly blank lines before any real
+        // text -- e.g. a real synced message's first 80 characters were
+        // literally "\n\n\n\n    \n    \n    \n    \n    \n\n    \n\n\n\n\n    \n ...".
+        let body = EmailBody {
+            body_type: EmailBodyType::Html,
+            value: "<html>\n<head>\n    \n    \n</head>\n<body>\n\n\nHello world\n</body>\n</html>".to_owned(),
+        };
+        let pref = BodyPreference {
+            body_type: Some(1),
+            truncation_size: Some(500),
+        };
+        let (_, out_value, _, truncated) = apply_body_preference(body, Some(pref));
+        assert_eq!(out_value, "Hello world");
+        assert!(!truncated);
     }
 
     #[test]
