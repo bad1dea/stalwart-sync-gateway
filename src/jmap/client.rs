@@ -936,9 +936,17 @@ impl JmapClient {
             // `participants` entirely unless a top-level `replyTo` is
             // ALSO present (JSCalendar RFC 8984 §4.4.1 -- a companion
             // property to `participants`+`expectReply`, not a per-
-            // participant field). This is the fix for the earlier
-            // "blocked at the JMAP layer" verdict -- it was never a
+            // participant field) -- this is the fix for the earlier
+            // "blocked at the JMAP layer" verdict, it was never a
             // Stalwart capability gap, just an incomplete write payload.
+            // A SECOND, separately-confirmed requirement (live-tested the
+            // same way, isolating one field at a time): every participant
+            // ALSO needs its own `calendarAddress`, not just `email` +
+            // `sendTo.imip` -- omitting it reproduces the exact same
+            // silent whole-map drop as a missing `replyTo` did. Neither
+            // omission errors; both just vanish on read-back, which is
+            // why this needed isolating field-by-field rather than
+            // trusting the first fix that seemed to work.
             let organizer_email = auth.authorization.username.to_owned();
             let mut participants = serde_json::Map::new();
             participants.insert(
@@ -946,6 +954,7 @@ impl JmapClient {
                 serde_json::json!({
                     "@type": "Participant",
                     "email": organizer_email,
+                    "calendarAddress": format!("mailto:{organizer_email}"),
                     "roles": {"owner": true},
                     "participationStatus": "accepted",
                     "sendTo": {"imip": format!("mailto:{organizer_email}")}
@@ -960,6 +969,7 @@ impl JmapClient {
                 let mut participant = serde_json::json!({
                     "@type": "Participant",
                     "email": attendee.email,
+                    "calendarAddress": format!("mailto:{}", attendee.email),
                     "roles": roles,
                     "participationStatus": "needs-action",
                     "expectReply": true,
