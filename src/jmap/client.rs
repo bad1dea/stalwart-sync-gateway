@@ -823,7 +823,7 @@ impl JmapClient {
                     },
                     "properties": [
                         "id", "@type", "title", "start", "timeZone", "duration",
-                        "locations", "showWithoutTime"
+                        "locations", "showWithoutTime", "participants"
                     ]
                 }),
                 "g",
@@ -846,11 +846,24 @@ impl JmapClient {
                 "CalendarEvent/get" => {
                     let get: GetResponse<CalendarEventObject> = serde_json::from_value(method.1)
                         .context("invalid CalendarEvent/get response")?;
+                    let username = auth.authorization.username.as_str();
                     return Ok(get
                         .list
                         .into_iter()
                         .filter(|item| item.kind != "Task")
                         .map(CalendarEvent::from)
+                        .map(|mut event| {
+                            // No organizer at all (a plain, non-meeting
+                            // event) still needs `is_organizer` -- doesn't
+                            // matter which way since `write_calendar_command`
+                            // only reads it when `attendees` is non-empty.
+                            event.is_organizer = event
+                                .organizer_email
+                                .as_deref()
+                                .map(|email| email.eq_ignore_ascii_case(username))
+                                .unwrap_or(true);
+                            event
+                        })
                         .collect());
                 }
                 "error" => anyhow::bail!("JMAP method error in calendar sync"),
@@ -916,6 +929,54 @@ impl JmapClient {
             event.insert(
                 "showWithoutTime".to_owned(),
                 serde_json::Value::Bool(all_day),
+            );
+        }
+        if !fields.attendees.is_empty() {
+            // Confirmed live 2026-08-25: Stalwart silently drops
+            // `participants` entirely unless a top-level `replyTo` is
+            // ALSO present (JSCalendar RFC 8984 §4.4.1 -- a companion
+            // property to `participants`+`expectReply`, not a per-
+            // participant field). This is the fix for the earlier
+            // "blocked at the JMAP layer" verdict -- it was never a
+            // Stalwart capability gap, just an incomplete write payload.
+            let organizer_email = auth.authorization.username.to_owned();
+            let mut participants = serde_json::Map::new();
+            participants.insert(
+                "org".to_owned(),
+                serde_json::json!({
+                    "@type": "Participant",
+                    "email": organizer_email,
+                    "roles": {"owner": true},
+                    "participationStatus": "accepted",
+                    "sendTo": {"imip": format!("mailto:{organizer_email}")}
+                }),
+            );
+            for (i, attendee) in fields.attendees.iter().enumerate() {
+                let mut roles = serde_json::Map::new();
+                roles.insert("attendee".to_owned(), serde_json::Value::Bool(true));
+                if attendee.optional {
+                    roles.insert("optional".to_owned(), serde_json::Value::Bool(true));
+                }
+                let mut participant = serde_json::json!({
+                    "@type": "Participant",
+                    "email": attendee.email,
+                    "roles": roles,
+                    "participationStatus": "needs-action",
+                    "expectReply": true,
+                    "sendTo": {"imip": format!("mailto:{}", attendee.email)}
+                });
+                if let Some(name) = &attendee.name {
+                    participant["name"] = serde_json::Value::String(name.clone());
+                }
+                participants.insert(format!("att{i}"), participant);
+            }
+            event.insert(
+                "replyTo".to_owned(),
+                serde_json::json!({ "imip": format!("mailto:{organizer_email}") }),
+            );
+            event.insert(
+                "participants".to_owned(),
+                serde_json::Value::Object(participants),
             );
         }
 
@@ -2358,11 +2419,40 @@ struct CalendarEventObject {
     locations: BTreeMap<String, CalendarEventLocation>,
     #[serde(default)]
     show_without_time: bool,
+    /// Participant map keyed by an arbitrary JMAP-assigned id (NOT the
+    /// email) -- confirmed live 2026-08-25 alongside `reply_to`: Stalwart
+    /// silently drops a `participants`-only create with no top-level
+    /// `replyTo`, but round-trips both perfectly once `replyTo` is
+    /// present. That earlier "blocked at the JMAP layer" verdict was
+    /// wrong -- it was an incomplete write payload, not a missing
+    /// capability. See `save_calendar_event` for the write side.
+    #[serde(default)]
+    participants: Option<BTreeMap<String, ParticipantObject>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct CalendarEventLocation {
     name: Option<String>,
+}
+
+/// One JSCalendar `Participant` (RFC 8984 §4.4.2). The organizer is the
+/// participant whose `roles` includes `"owner"` -- real MS-ASCAL
+/// (confirmed against the live spec's own worked example) never lists
+/// the organizer as an Attendee at all, so `From<CalendarEventObject>`
+/// splits this map into `organizer_email`/`organizer_name` (the `"owner"`
+/// entry) plus `attendees` (everyone else) rather than passing it through
+/// as one flat list.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ParticipantObject {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    roles: BTreeMap<String, bool>,
+    #[serde(default)]
+    participation_status: Option<String>,
 }
 
 impl From<CalendarEventObject> for CalendarEvent {
@@ -2388,6 +2478,27 @@ impl From<CalendarEventObject> for CalendarEvent {
             .locations
             .into_values()
             .find_map(|location| location.name);
+
+        let mut organizer_email = None;
+        let mut organizer_name = None;
+        let mut attendees = Vec::new();
+        for participant in value.participants.into_iter().flatten().map(|(_, p)| p) {
+            let Some(email) = participant.email else {
+                continue;
+            };
+            if participant.roles.get("owner").copied().unwrap_or(false) {
+                organizer_email = Some(email);
+                organizer_name = participant.name;
+            } else {
+                attendees.push(crate::model::Attendee {
+                    email,
+                    name: participant.name,
+                    participation_status: participant.participation_status,
+                    optional: participant.roles.get("optional").copied().unwrap_or(false),
+                });
+            }
+        }
+
         Self {
             id: value.id,
             calendar_ids: Vec::new(),
@@ -2396,6 +2507,10 @@ impl From<CalendarEventObject> for CalendarEvent {
             start_utc,
             end_utc,
             all_day: value.show_without_time,
+            organizer_email,
+            organizer_name,
+            attendees,
+            is_organizer: false,
         }
     }
 }

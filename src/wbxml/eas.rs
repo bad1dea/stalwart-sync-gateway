@@ -1068,9 +1068,11 @@ pub struct SyncClientCommand {
 
 /// ActiveSync Calendar class fields decoded from one Add/Change command's
 /// ApplicationData, limited to the non-recurring subset this gateway
-/// round-trips on read (see `write_calendar_add`) -- recurrence,
-/// attendees, and reminders are explicitly out of scope, same as the
-/// read path. `start_time`/`end_time` arrive already in EAS's compact
+/// round-trips on read (see `write_calendar_add`) -- recurrence and
+/// reminders are explicitly out of scope, same as the read path.
+/// Attendees ARE now round-tripped (2026-08-25 -- see `Attendee` doc
+/// comment for why this was previously marked out of scope and no
+/// longer is). `start_time`/`end_time` arrive already in EAS's compact
 /// UTC DateTime form (`YYYYMMDDTHHMMSSZ`) -- the client sends this
 /// natively, no timezone conversion needed on the way in (unlike the
 /// read path's `local_to_utc_eas`, which exists because JSCalendar's
@@ -1083,6 +1085,19 @@ pub struct CalendarFields {
     pub start_time: Option<String>,
     pub end_time: Option<String>,
     pub all_day_event: Option<bool>,
+    pub attendees: Vec<AttendeeField>,
+}
+
+/// One `calendar:Attendee` from a client Add/Change -- sent when the
+/// authenticated user is creating/editing an event AS ORGANIZER and adds
+/// invitees. `optional` comes from AttendeeType (2 = Optional per
+/// [MS-ASCAL], confirmed against the live spec page, not guessed) --
+/// absent or any other value defaults to Required.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AttendeeField {
+    pub email: String,
+    pub name: Option<String>,
+    pub optional: bool,
 }
 
 /// ActiveSync Tasks class fields decoded from one Add/Change command's
@@ -1467,17 +1482,36 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
     fields
 }
 
-/// Same shape as `extract_contact_fields` -- flat leaves, no nesting for
-/// the fields this gateway round-trips.
+/// Mostly flat leaves like `extract_contact_fields`, except Attendees --
+/// `calendar:Attendees` (0x07) contains repeated `calendar:Attendee`
+/// (0x08) children, each with its own Email/Name/Type leaves, so those
+/// need a small accumulator (`current_attendee`) rather than the
+/// path-top check the flat fields use.
 fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     let mut fields = CalendarFields::default();
     let mut path: Vec<Token> = Vec::new();
+    let mut current_attendee: Option<AttendeeField> = None;
 
     for node in nodes {
         match node {
-            Node::Start(token) => path.push(*token),
+            Node::Start(token) => {
+                if same_token(*token, calendar::ATTENDEE) {
+                    current_attendee = Some(AttendeeField::default());
+                }
+                path.push(*token);
+            }
             Node::Text(text) => {
                 let Some(&top) = path.last() else { continue };
+                if let Some(attendee) = current_attendee.as_mut() {
+                    if same_token(top, calendar::ATTENDEE_EMAIL) {
+                        attendee.email = text.clone();
+                    } else if same_token(top, calendar::ATTENDEE_NAME) {
+                        attendee.name = Some(text.clone());
+                    } else if same_token(top, calendar::ATTENDEE_TYPE) {
+                        attendee.optional = text == "2";
+                    }
+                    continue;
+                }
                 if same_token(top, calendar::SUBJECT) {
                     fields.subject = Some(text.clone());
                 } else if same_token(top, calendar::LOCATION) {
@@ -1491,6 +1525,13 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                 }
             }
             Node::End => {
+                if path.last().is_some_and(|&t| same_token(t, calendar::ATTENDEE)) {
+                    if let Some(attendee) = current_attendee.take() {
+                        if !attendee.email.is_empty() {
+                            fields.attendees.push(attendee);
+                        }
+                    }
+                }
                 path.pop();
             }
             Node::Opaque(_) => {}
@@ -1861,6 +1902,58 @@ mod tests {
         assert_eq!(command.task.subject.as_deref(), Some("Renew passport"));
         assert_eq!(command.task.complete, Some(false));
         assert_eq!(command.task.due_date.as_deref(), Some("20260905T090000Z"));
+    }
+
+    #[test]
+    fn parses_calendar_add_with_two_attendees() {
+        // Exercises extract_calendar_fields()'s Attendees accumulator --
+        // two sibling Attendee blocks must produce two separate
+        // AttendeeField entries, not get merged or dropped, and
+        // AttendeeType 2 must set `optional` while the default (absent)
+        // stays Required.
+        let mut builder = DocumentBuilder::new();
+        builder.start(airsync::SYNC);
+        builder.start(airsync::COLLECTIONS);
+        builder.start(airsync::COLLECTION);
+        builder.leaf(airsync::SYNC_KEY, "1");
+        builder.leaf(airsync::COLLECTION_ID, "cal_x");
+        builder.start(airsync::COMMANDS);
+        builder.start(airsync::ADD);
+        builder.leaf(airsync::CLIENT_ID, "client-cal-1");
+        builder.start(airsync::APPLICATION_DATA);
+        builder.leaf(calendar::SUBJECT, "Standup");
+        builder.start(calendar::ATTENDEES);
+        builder.start(calendar::ATTENDEE);
+        builder.leaf(calendar::ATTENDEE_EMAIL, "chris@fourthcoffee.com");
+        builder.leaf(calendar::ATTENDEE_NAME, "Chris Gray");
+        builder.end();
+        builder.start(calendar::ATTENDEE);
+        builder.leaf(calendar::ATTENDEE_EMAIL, "pat@fourthcoffee.com");
+        builder.leaf(calendar::ATTENDEE_TYPE, "2");
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+
+        let collections = sync_collections(&builder.finish());
+
+        let command = &collections[0].commands[0];
+        assert_eq!(command.calendar.subject.as_deref(), Some("Standup"));
+        assert_eq!(command.calendar.attendees.len(), 2);
+        assert_eq!(command.calendar.attendees[0].email, "chris@fourthcoffee.com");
+        assert_eq!(
+            command.calendar.attendees[0].name.as_deref(),
+            Some("Chris Gray")
+        );
+        assert!(!command.calendar.attendees[0].optional);
+        assert_eq!(command.calendar.attendees[1].email, "pat@fourthcoffee.com");
+        assert_eq!(command.calendar.attendees[1].name, None);
+        assert!(command.calendar.attendees[1].optional);
     }
 
     #[test]

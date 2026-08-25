@@ -2515,6 +2515,10 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     event.start_utc.hash(&mut hasher);
     event.end_utc.hash(&mut hasher);
     event.all_day.hash(&mut hasher);
+    event.organizer_email.hash(&mut hasher);
+    event.organizer_name.hash(&mut hasher);
+    event.is_organizer.hash(&mut hasher);
+    event.attendees.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -2528,10 +2532,12 @@ fn write_calendar_command(
     // Field order matches the real z-push-stalwart-jmap source (PR #187,
     // pinned in config/z-push/Dockerfile: src/lib/syncobjects/
     // syncappointment.php's own $mapping, filtered to the fields this
-    // gateway actually sets): DtStamp, StartTime, Subject, Location,
-    // EndTime, AllDayEvent. This gateway had Subject first and DtStamp
-    // last -- reversed -- same failure class as every other object
-    // checked against this source.
+    // gateway actually sets): DtStamp, StartTime, Subject, OrganizerName,
+    // OrganizerEmail, Location, EndTime, AllDayEvent, MeetingStatus,
+    // Attendees (confirmed against a real worked [MS-ASCAL] Sync example,
+    // not just the PHP source, for the Organizer/MeetingStatus/Attendees
+    // placement specifically -- the PR #187 mapping doesn't cover those
+    // three since z-push-stalwart-jmap never implemented them).
     builder.start(tag);
     builder.leaf(air::SERVER_ID, event.id.clone());
     builder.start(air::APPLICATION_DATA);
@@ -2543,6 +2549,12 @@ fn write_calendar_command(
         builder.leaf(cal::START_TIME, start.clone());
     }
     builder.leaf(cal::SUBJECT, event.title.clone());
+    if let Some(name) = &event.organizer_name {
+        builder.leaf(cal::ORGANIZER_NAME, name.clone());
+    }
+    if let Some(email) = &event.organizer_email {
+        builder.leaf(cal::ORGANIZER_EMAIL, email.clone());
+    }
     if let Some(location) = &event.location {
         builder.leaf(cal::LOCATION, location.clone());
     }
@@ -2550,6 +2562,45 @@ fn write_calendar_command(
         builder.leaf(cal::END_TIME, end.clone());
     }
     builder.leaf(cal::ALL_DAY_EVENT, if event.all_day { "1" } else { "0" });
+    if !event.attendees.is_empty() {
+        // [MS-ASCAL] MeetingStatus: 1 = meeting, organizer's own copy;
+        // 3 = meeting, received as an attendee. The organizer is NEVER
+        // listed as an Attendee (confirmed against the live spec's own
+        // worked example) -- OrganizerName/OrganizerEmail above already
+        // covers that, so `attendees` here only ever holds everyone else.
+        builder.leaf(
+            cal::MEETING_STATUS,
+            if event.is_organizer { "1" } else { "3" },
+        );
+        builder.start(cal::ATTENDEES);
+        for attendee in &event.attendees {
+            builder.start(cal::ATTENDEE);
+            builder.leaf(cal::ATTENDEE_EMAIL, attendee.email.clone());
+            if let Some(name) = &attendee.name {
+                builder.leaf(cal::ATTENDEE_NAME, name.clone());
+            }
+            // AttendeeStatus values confirmed against the live [MS-ASCAL]
+            // spec page (2.2.2.5), not guessed: 0 = response unknown,
+            // 2 = tentative, 3 = accepted, 4 = declined, 5 = not
+            // responded. JSCalendar's `participationStatus` has no
+            // "response unknown" distinct from "needs-action" (not yet
+            // responded), so that maps to 5, not 0 -- 0 is reserved for a
+            // state JSCalendar doesn't represent here at all.
+            let status = match attendee.participation_status.as_deref() {
+                Some("accepted") => "3",
+                Some("declined") => "4",
+                Some("tentative") => "2",
+                _ => "5",
+            };
+            builder.leaf(cal::ATTENDEE_STATUS, status);
+            builder.leaf(
+                cal::ATTENDEE_TYPE,
+                if attendee.optional { "2" } else { "1" },
+            );
+            builder.end();
+        }
+        builder.end();
+    }
     builder.end();
     builder.end();
 }

@@ -128,6 +128,30 @@ pub struct CalendarEvent {
     pub start_utc: Option<String>,
     pub end_utc: Option<String>,
     pub all_day: bool,
+    pub organizer_email: Option<String>,
+    pub organizer_name: Option<String>,
+    pub attendees: Vec<Attendee>,
+    /// Whether the authenticated user IS the organizer -- can't be derived
+    /// from `organizer_email` alone at model-construction time (that
+    /// comparison needs the auth session), so `calendar_events_in_calendar`
+    /// sets this explicitly after mapping. Drives MeetingStatus (1 vs 3) in
+    /// `write_calendar_command`.
+    pub is_organizer: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Attendee {
+    pub email: String,
+    pub name: Option<String>,
+    /// JSCalendar `participationStatus` ("needs-action"/"accepted"/
+    /// "declined"/"tentative"), kept as the raw JMAP string and mapped to
+    /// MS-ASCAL's AttendeeStatus ints at the WBXML-writing call site --
+    /// see `write_calendar_command`'s own comment for the confirmed enum.
+    pub participation_status: Option<String>,
+    /// True when this participant's JSCalendar `roles` includes
+    /// `"optional"` -- maps to MS-ASCAL AttendeeType 2 (Optional) instead
+    /// of the default 1 (Required).
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
