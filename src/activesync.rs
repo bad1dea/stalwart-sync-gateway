@@ -656,29 +656,47 @@ async fn settings(
                         .clone()
                         .or_else(|| vacation.subject.clone())
                         .unwrap_or_default();
-                    // Nested exactly as the real device's own Set encoded
-                    // it (see comment above) -- each AppliesTo* block is a
-                    // child of the previous OofMessage, not a sibling.
+                    // Real bug, found live via idevicesyslog (not just the
+                    // pcap): even though this exact nested shape is
+                    // byte-for-byte well-formed WBXML (verified by a full
+                    // manual structural walk, balanced start/end, no
+                    // leftover bytes) and matches what the device's OWN
+                    // Set request encodes, exchangesyncd logged a real
+                    // parse error receiving it back: "We have an int in
+                    // our WBXML, but Exchange never gives us this. Parse
+                    // error." -- iOS's WBXML *decoder* doesn't accept
+                    // OofMessage nested inside OofMessage, even though its
+                    // own *encoder* produces exactly that shape. Lenient
+                    // on write, strict on read -- an asymmetry, not a
+                    // contradiction. Three SIBLING OofMessage blocks
+                    // instead (closed before the next starts) -- this is
+                    // the shape an earlier, since-reverted fix this
+                    // session used (commit ee7f2b8), but that revert
+                    // (folded into commit c6beadf) was specifically
+                    // because it wrongly applied 3x blocks to the
+                    // DISABLED case too, proven wrong via z-push
+                    // comparison; nobody had tried siblings-only-when-
+                    // enabled until now.
                     builder.start(set::OOF_MESSAGE);
                     builder.start(set::APPLIES_TO_INTERNAL);
                     builder.end();
                     builder.leaf(set::ENABLED, "1");
                     builder.leaf(set::REPLY_MESSAGE, reply_message.clone());
                     builder.leaf(set::BODY_TYPE, "Text");
+                    builder.end();
                     builder.start(set::OOF_MESSAGE);
                     builder.start(set::APPLIES_TO_EXTERNAL_KNOWN);
                     builder.end();
                     builder.leaf(set::ENABLED, "1");
                     builder.leaf(set::REPLY_MESSAGE, reply_message.clone());
                     builder.leaf(set::BODY_TYPE, "Text");
+                    builder.end();
                     builder.start(set::OOF_MESSAGE);
                     builder.start(set::APPLIES_TO_EXTERNAL_UNKNOWN);
                     builder.end();
                     builder.leaf(set::ENABLED, "1");
                     builder.leaf(set::REPLY_MESSAGE, reply_message);
                     builder.leaf(set::BODY_TYPE, "Text");
-                    builder.end();
-                    builder.end();
                     builder.end();
                 }
             }
