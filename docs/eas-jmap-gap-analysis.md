@@ -37,8 +37,8 @@ read/reply/send, plus calendar/contacts/notes sync.
 | SmartReply / SmartForward | **Done, but threading fidelity unverified** | Same `EmailSubmission/set` path as SendMail | Whether In-Reply-To/References/threading is actually correct (vs. just "the mail sends") has not had the same live-pcap scrutiny DateReceived/Oof got — flagged as a real open question, not assumed correct. |
 | ResolveRecipients / ValidateCert (S/MIME) | **Missing, low priority** | No obvious JMAP equivalent surveyed | Out of scope for a personal-account iPad daily driver; flag to user before investing. |
 | Settings: DeviceInformation / UserInformation | **Done (Get)** | Static/echo — no real JMAP-backed device-info storage | `PrimarySmtpAddress` bug (unrecognized field, cascading parse failure) fixed this session by removing it; `EmailAddresses>SMTPAddress` carries the same info in a valid shape. |
-| Settings: Oof (Get) | **Done (stub)** | **None currently** — hand-rolled, always reports disabled | Real, confirmed-available JMAP object (`VacationResponse`) is sitting unused. See roadmap below — this is probably the single cheapest high-value fix available. |
-| Settings: Oof (Set) | **Stubbed, doesn't persist** | `VacationResponse/set` (not called) | Accepts the Set (no client-side hang/error) but silently drops it. |
+| Settings: Oof (Get) | **Done** *(disabled path live-verified; enabled path spec-derived, not device-verified)* | `VacationResponse/get` (`src/jmap/vacation.rs`) | Real account state now read on every Get. Disabled (`OofState=0`) shape confirmed live, unchanged from the earlier z-push comparison fix. Enabled shape's `OofMessage` block is built from MS-ASSETTINGS' own schema, not live-toggled -- see `src/jmap/vacation.rs` module doc for why (toggling `isEnabled=true` on the real account risks a genuine auto-reply going out unsupervised). Verify with a real device present before fully trusting the enabled path. |
+| Settings: Oof (Set) | **Done, persists** | `VacationResponse/set` (`src/jmap/vacation.rs`) | Live-verified end to end with `isEnabled=false` (safe -- confirmed via direct JMAP query that `subject`/`textBody` actually persisted to the real `VacationResponse.singleton` object, then cleaned back up). `isEnabled=true` was deliberately never live-toggled for the same reason as the Get path above. |
 | Settings: RightsManagementInformation (IRM) | **Missing, out of scope** | N/A | Enterprise feature, not relevant to this account. |
 | Provision | **Done** | N/A (gateway-local, accept-everything policy) | PolicyStatus bug fixed this session. |
 | MeetingResponse | **Missing** | Candidate: `CalendarEvent/set` (participant status update) or a dedicated JMAP scheduling reply mechanism — **not surveyed this session**, needs its own research pass | High-value gap for the calendar use case — see roadmap. |
@@ -49,16 +49,16 @@ read/reply/send, plus calendar/contacts/notes sync.
 
 ### (a) Cheap — Stalwart's JMAP already exposes it directly
 
-1. **Wire Settings>Oof to `VacationResponse/get`/`/set`.** This is the
-   standout item: Stalwart already advertises the `vacationresponse`
-   capability (confirmed live), the current code is a stub with a comment
-   explicitly saying real persistence is the intended next step, and the
-   EAS-side shape (`Status/Get/OofState`, now correctly minimal per this
-   session's fix) is already right — only the backing store needs to
-   change from "always disabled" to a real `VacationResponse/get` call,
-   and Set needs a real `VacationResponse/set` call. Low risk, directly
-   fixes a feature the user already noticed was broken ("Automatic
-   replies... loading").
+1. ✅ **DONE (`deploy-2026-08-25r`) — Wire Settings>Oof to
+   `VacationResponse/get`/`/set`.** Shipped and live-verified overnight:
+   Get now reads the real account state, Set actually persists (confirmed
+   via a direct JMAP query showing `subject`/`textBody` landed on the
+   real `VacationResponse.singleton` object). One deliberate gap left
+   open: the `isEnabled=true` path was never live-toggled on the real
+   account (real auto-reply risk, unsupervised) — the enabled Get
+   response shape is spec-derived, not device-confirmed. Worth a live
+   device test with the user present before fully trusting it. See
+   `src/jmap/vacation.rs`'s module doc for the complete reasoning.
 2. **Contacts/Calendar two-way sync (`ContactCard/set` /
    `CalendarEvent/set`).** Both read paths are already solid and live-
    verified; the missing half is purely "handle
