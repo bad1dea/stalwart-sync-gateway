@@ -1236,22 +1236,27 @@ fn write_email_fields(
         builder.start(base::ATTACHMENTS);
         for attachment in email.attachments {
             // Real bug, confirmed live via idevicesyslog on the zoidberg
-            // A/B test: iOS's WBXML parser is a strict per-position
-            // grammar, not a flat tag lookup -- sending ContentType
-            // right after FileReference (skipping the required Method
-            // field, per MS-ASAIRS's Attachment element sequence:
-            // DisplayName, FileReference, Method, EstimatedDataSize,
-            // IsInline, [NativeBodyType], [ContentType]) desynced its
-            // parser state entirely: `No parse rule from object <private>
-            // for codePage 0x11 token 0x17 (CPT = 69911)` -- 0x11=17 is
-            // AirSyncBase, 0x17 is ContentType -- and the WHOLE Sync task
-            // failed (`ASFolderItemsSyncTask ... failed with status: 1`),
-            // discarding every field in the response, mail included, not
-            // just the broken attachment. This is why SyncKey never
-            // durably advanced even after the BodyPreference/
-            // MoreAvailable fixes landed correctly in isolation: any
-            // batch containing an attachment (this mailbox has several)
-            // tripped this on every attempt.
+            // A/B test, in two rounds. Round 1: iOS's WBXML parser is a
+            // strict per-position grammar, not a flat tag lookup --
+            // sending ContentType right after FileReference (skipping
+            // Method entirely) desynced its parser state: `No parse rule
+            // from object <private> for codePage 0x11 token 0x17 (CPT =
+            // 69911)` -- 0x11=17 is AirSyncBase, 0x17 is ContentType --
+            // and the WHOLE Sync task failed (`ASFolderItemsSyncTask ...
+            // failed with status: 1`), discarding every field in the
+            // response, not just the broken attachment. Fixing the field
+            // ORDER (adding Method, moving ContentType last) did NOT
+            // clear the error, though -- round 2, verified against the
+            // working PHP z-push reference's own `SyncBaseAttachment`
+            // construction (config/z-push/jmap.php): it sets
+            // displayname/filereference/method/estimatedDataSize/
+            // isinline (and optionally contentid) for a Sync response's
+            // attachment list, but NEVER contenttype -- that only
+            // appears on a completely different class
+            // (SyncItemOperationsAttachment) used for the separate
+            // GetAttachment-download response. ContentType simply isn't
+            // valid in this position at all, regardless of order --
+            // removed entirely, matching the reference exactly.
             builder.start(base::ATTACHMENT);
             builder.leaf(base::DISPLAY_NAME, attachment.name.clone());
             // GetAttachment addresses attachments by an opaque server-
@@ -1271,7 +1276,6 @@ fn write_email_fields(
             builder.leaf(base::METHOD, "1");
             builder.leaf(base::ESTIMATED_DATA_SIZE, attachment.size.to_string());
             builder.leaf(base::IS_INLINE, "0");
-            builder.leaf(base::CONTENT_TYPE, attachment.content_type);
             builder.end();
         }
         builder.end();
@@ -2342,17 +2346,25 @@ mod tests {
     #[test]
     fn write_email_fields_attachment_field_order_matches_ms_asairs() {
         // Real bug, confirmed live via idevicesyslog on the zoidberg A/B
-        // test: iOS's WBXML parser is a strict per-position grammar, not
-        // a flat tag lookup. The old field order (DisplayName,
-        // FileReference, ContentType, EstimatedDataSize, IsInline --
-        // ContentType right after FileReference, Method never sent at
-        // all) desynced iOS's parser mid-Attachment: "No parse rule from
-        // object <private> for codePage 0x11 token 0x17 (CPT = 69911)"
-        // (0x11=17 is AirSyncBase, 0x17 is ContentType) -- and the WHOLE
-        // Sync task failed, discarding every field in the response, not
-        // just the attachment. MS-ASAIRS's real Attachment sequence is
-        // DisplayName, FileReference, Method, EstimatedDataSize,
-        // IsInline, ContentType.
+        // test, in two rounds. Round 1: iOS's WBXML parser is a strict
+        // per-position grammar, not a flat tag lookup -- the old field
+        // order (DisplayName, FileReference, ContentType,
+        // EstimatedDataSize, IsInline -- ContentType right after
+        // FileReference, Method never sent at all) desynced iOS's parser
+        // mid-Attachment: "No parse rule from object <private> for
+        // codePage 0x11 token 0x17 (CPT = 69911)" (0x11=17 is
+        // AirSyncBase, 0x17 is ContentType) -- and the WHOLE Sync task
+        // failed, discarding every field in the response, not just the
+        // attachment. Fixing the ORDER (adding Method, moving ContentType
+        // last) did not clear the error, though -- round 2, verified
+        // against the working PHP z-push reference's own
+        // SyncBaseAttachment construction (config/z-push/jmap.php): it
+        // never sets contenttype for a Sync response's attachment list
+        // at all (only for the unrelated GetAttachment-download
+        // response's own class) -- ContentType simply isn't valid here
+        // regardless of position, so this gateway's real Attachment
+        // sequence is just DisplayName, FileReference, Method,
+        // EstimatedDataSize, IsInline.
         let email = Email {
             id: "email-1".to_owned(),
             mailbox_ids: vec![],
@@ -2386,19 +2398,21 @@ mod tests {
             base::METHOD.token,
             base::ESTIMATED_DATA_SIZE.token,
             base::IS_INLINE.token,
-            base::CONTENT_TYPE.token,
         ];
         let actual_order: Vec<_> = doc
             .nodes
             .iter()
             .filter_map(|n| match n {
-                Node::Start(t) if t.code_page == base::PAGE && expected_order.contains(&t.token) => {
+                Node::Start(t)
+                    if t.code_page == base::PAGE
+                        && (expected_order.contains(&t.token) || t.token == base::CONTENT_TYPE.token) =>
+                {
                     Some(t.token)
                 }
                 _ => None,
             })
             .collect();
-        assert_eq!(actual_order, expected_order);
+        assert_eq!(actual_order, expected_order, "ContentType must not appear at all");
     }
 
     #[test]
