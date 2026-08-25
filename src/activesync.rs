@@ -474,13 +474,27 @@ async fn settings(
     builder.leaf(set::STATUS, "1");
 
     if include_user {
+        // Real bug, confirmed live via idevicesyslog on the zoidberg A/B
+        // test: "No parse rule from object <private> for codePage 0x12
+        // token 0x23" -- 0x12=18 is Settings, 0x23 is
+        // set::PRIMARY_SMTP_ADDRESS. iOS's parser desynced on this
+        // unrecognized field and every subsequent field in the SAME
+        // response misparsed too (the immediately-following "We have an
+        // int in our WBXML, but Exchange never gives us this" is the same
+        // cascade, not a separate bug -- the same failure class as the
+        // Attachment field-order bug: one bad field corrupts the whole
+        // response). The working PHP z-push reference (config/z-push/
+        // *.php in the homelab repo) doesn't implement EmailAddresses/
+        // PrimarySmtpAddress at all, so rather than guess at where this
+        // field actually belongs in MS-ASSETTINGS's real schema, just
+        // stop sending it -- EmailAddresses > SMTPAddress below already
+        // conveys the same information in a schema-valid way.
         builder.start(set::USER_INFORMATION);
         builder.leaf(set::STATUS, "1");
         builder.start(set::GET);
         builder.start(set::EMAIL_ADDRESSES);
         builder.leaf(set::SMTP_ADDRESS, auth.username());
         builder.end();
-        builder.leaf(set::PRIMARY_SMTP_ADDRESS, auth.username());
         builder.end();
         builder.end();
     }
