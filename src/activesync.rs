@@ -624,7 +624,17 @@ async fn provision(state: &AppState, document: &wbxml::Document, command: &str) 
     builder.start(prov::POLICIES);
     builder.start(prov::POLICY);
     builder.leaf(prov::POLICY_TYPE, policy_type);
-    builder.leaf(prov::STATUS, "2");
+    // Real bug, found via the full z-push-stalwart-jmap source (PR #187):
+    // per src/lib/core/zpushdefs.php, Policy-level Status 2 means
+    // SYNC_PROVISION_POLICYSTATUS_NOPOLICY (a non-success state) -- 1 is
+    // SYNC_PROVISION_POLICYSTATUS_SUCCESS, z-push's own default/working
+    // value. This gateway was telling every device its policy request
+    // failed while still handing out a PolicyKey, a self-contradictory
+    // response. Never observed triggering a live failure (no real
+    // device in this session has actually issued a Provision command),
+    // but matches the exact same failure class as every other bug found
+    // this way.
+    builder.leaf(prov::STATUS, "1");
     builder.leaf(prov::POLICY_KEY, "1");
     builder.end();
     builder.end();
