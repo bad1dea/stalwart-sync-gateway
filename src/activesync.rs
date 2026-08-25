@@ -522,15 +522,18 @@ fn write_oof_get_body(
     use wbxml::eas::settings as set;
 
     let is_enabled = vacation.as_ref().is_some_and(|v| v.is_enabled);
-    // Only End Date drives "scheduled" now -- see the StartTime-omission
-    // comment below for why from_date is no longer part of this check.
-    let oof_state_value = if !is_enabled {
-        "0"
-    } else if vacation.as_ref().is_some_and(|v| v.to_date.is_some()) {
-        "2"
-    } else {
-        "1"
-    };
+    // Real fix: the previous OofState=1-unconditionally experiment
+    // (commit 71b632b) was tested WHILE StartTime was still present in
+    // the response -- that combination fixed the toggle but broke End
+    // Date display, which was wrongly attributed to the OofState value
+    // itself. The very next commit (591d5f0) separately found dropping
+    // StartTime fixes End Date display, tested only against OofState=2.
+    // The one combination never actually tried: OofState=1 WITH
+    // StartTime dropped. Testing it now -- if End Date display turns out
+    // to depend on EndTime's mere presence rather than OofState==2
+    // specifically, this combination gets a correct toggle AND a correct
+    // End Date simultaneously.
+    let oof_state_value = if is_enabled { "1" } else { "0" };
     builder.start(set::GET);
     builder.leaf(set::OOF_STATE, oof_state_value);
     if is_enabled {
