@@ -29,21 +29,79 @@ pub mod folder_hierarchy {
 /// actually maps from JSContact are included, not the full ~50-field
 /// spec table -- numbering still per spec so adding more later is a
 /// drop-in, not a renumbering.
+/// MS-ASWBXML codepage 1 (Contacts). The 12 tokens this gateway actually
+/// uses (COMPANY_NAME through BUSINESS_PHONE_NUMBER) were all
+/// cross-checked against [MS-ASWBXML] v20250520 while adding the rest of
+/// this codepage's tokens below and are confirmed correct byte-for-byte.
+/// Everything from ANNIVERSARY down is newly scaffolded (unused by
+/// `write_contact_add()` today) -- see docs/eas-jmap-type-matrix.md for
+/// which of these JSContact (RFC 9553) can actually back.
 pub mod contacts {
     use super::Token;
 
     pub const PAGE: u8 = 1;
+    pub const ANNIVERSARY: Token = tag(0x05, false);
+    pub const ASSISTANT_NAME: Token = tag(0x06, false);
+    pub const ASSISTANT_PHONE_NUMBER: Token = tag(0x07, false);
+    pub const BIRTHDAY: Token = tag(0x08, false);
+    /// 2.5 only -- 12.0+ uses AirSyncBase:Body (codepage 17) instead.
+    pub const BODY: Token = tag(0x09, false);
+    /// 2.5 only.
+    pub const BODY_SIZE: Token = tag(0x0a, false);
+    /// 2.5 only.
+    pub const BODY_TRUNCATED: Token = tag(0x0b, false);
+    pub const BUSINESS_2_PHONE_NUMBER: Token = tag(0x0c, false);
+    pub const BUSINESS_ADDRESS_CITY: Token = tag(0x0d, false);
+    pub const BUSINESS_ADDRESS_COUNTRY: Token = tag(0x0e, false);
+    pub const BUSINESS_ADDRESS_POSTAL_CODE: Token = tag(0x0f, false);
+    pub const BUSINESS_ADDRESS_STATE: Token = tag(0x10, false);
+    pub const BUSINESS_ADDRESS_STREET: Token = tag(0x11, false);
+    pub const BUSINESS_FAX_NUMBER: Token = tag(0x12, false);
+    pub const BUSINESS_PHONE_NUMBER: Token = tag(0x13, false);
+    pub const CAR_PHONE_NUMBER: Token = tag(0x14, false);
+    pub const CATEGORIES: Token = tag(0x15, true);
+    pub const CATEGORY: Token = tag(0x16, false);
+    pub const CHILDREN: Token = tag(0x17, true);
+    pub const CHILD: Token = tag(0x18, false);
     pub const COMPANY_NAME: Token = tag(0x19, false);
+    pub const DEPARTMENT: Token = tag(0x1a, false);
     pub const EMAIL1_ADDRESS: Token = tag(0x1b, false);
     pub const EMAIL2_ADDRESS: Token = tag(0x1c, false);
     pub const EMAIL3_ADDRESS: Token = tag(0x1d, false);
     pub const FILE_AS: Token = tag(0x1e, false);
     pub const FIRST_NAME: Token = tag(0x1f, false);
+    pub const HOME_2_PHONE_NUMBER: Token = tag(0x20, false);
+    pub const HOME_ADDRESS_CITY: Token = tag(0x21, false);
+    pub const HOME_ADDRESS_COUNTRY: Token = tag(0x22, false);
+    pub const HOME_ADDRESS_POSTAL_CODE: Token = tag(0x23, false);
+    pub const HOME_ADDRESS_STATE: Token = tag(0x24, false);
+    pub const HOME_ADDRESS_STREET: Token = tag(0x25, false);
+    pub const HOME_FAX_NUMBER: Token = tag(0x26, false);
     pub const HOME_PHONE_NUMBER: Token = tag(0x27, false);
     pub const JOB_TITLE: Token = tag(0x28, false);
     pub const LAST_NAME: Token = tag(0x29, false);
+    pub const MIDDLE_NAME: Token = tag(0x2a, false);
     pub const MOBILE_PHONE_NUMBER: Token = tag(0x2b, false);
-    pub const BUSINESS_PHONE_NUMBER: Token = tag(0x13, false);
+    pub const OFFICE_LOCATION: Token = tag(0x2c, false);
+    pub const OTHER_ADDRESS_CITY: Token = tag(0x2d, false);
+    pub const OTHER_ADDRESS_COUNTRY: Token = tag(0x2e, false);
+    pub const OTHER_ADDRESS_POSTAL_CODE: Token = tag(0x2f, false);
+    pub const OTHER_ADDRESS_STATE: Token = tag(0x30, false);
+    pub const OTHER_ADDRESS_STREET: Token = tag(0x31, false);
+    pub const PAGER_NUMBER: Token = tag(0x32, false);
+    pub const RADIO_PHONE_NUMBER: Token = tag(0x33, false);
+    pub const SPOUSE: Token = tag(0x34, false);
+    pub const SUFFIX: Token = tag(0x35, false);
+    pub const TITLE: Token = tag(0x36, false);
+    pub const WEB_PAGE: Token = tag(0x37, false);
+    pub const YOMI_COMPANY_NAME: Token = tag(0x38, false);
+    pub const YOMI_FIRST_NAME: Token = tag(0x39, false);
+    pub const YOMI_LAST_NAME: Token = tag(0x3a, false);
+    pub const PICTURE: Token = tag(0x3c, false);
+    /// 14.0, 14.1, 16.0, 16.1 only.
+    pub const ALIAS: Token = tag(0x3d, false);
+    /// 14.0, 14.1, 16.0, 16.1 only.
+    pub const WEIGHTED_RANK: Token = tag(0x3e, false);
 
     pub const fn tag(token: u8, has_content: bool) -> Token {
         Token {
@@ -55,25 +113,88 @@ pub mod contacts {
     }
 }
 
-/// MS-ASWBXML codepage 4 (Calendar). Numbering reconstructed from memory
-/// at lower confidence than the other codepages added this session (no
-/// second source to cross-check against, unlike Notes/ItemOperations/
-/// Settings/ComposeMail which were verified against Z-Push's own
-/// wbxmldefs or a live device trace) -- flag this file first if a real
-/// calendar event doesn't render correctly on a real device.
+/// MS-ASWBXML codepage 4 (Calendar). The 9 tokens this gateway actually
+/// uses (ALL_DAY_EVENT through UID) carried a comment saying their
+/// numbering was "reconstructed from memory at lower confidence" than
+/// every other codepage in this file -- now cross-checked directly
+/// against [MS-ASWBXML] v20250520 while adding the rest of this
+/// codepage's tokens below, and all 9 are confirmed correct byte-for-
+/// byte. Confidence upgraded; the rest of this codepage (RECURRENCE and
+/// its 9 sibling fields, ATTENDEES, EXCEPTION, ORGANIZER_EMAIL/NAME,
+/// REMINDER, ...) is newly scaffolded and unused by
+/// `write_calendar_add()` today -- see docs/eas-jmap-type-matrix.md for
+/// the field-by-field JSCalendar (RFC 8984 / jscalendarbis) mapping this
+/// would need.
 pub mod calendar {
     use super::Token;
 
     pub const PAGE: u8 = 4;
+    pub const TIMEZONE: Token = tag(0x05, false);
     pub const ALL_DAY_EVENT: Token = tag(0x06, false);
+    pub const ATTENDEES: Token = tag(0x07, true);
+    pub const ATTENDEE: Token = tag(0x08, true);
+    pub const ATTENDEE_EMAIL: Token = tag(0x09, false);
+    pub const ATTENDEE_NAME: Token = tag(0x0a, false);
+    /// 2.5 only -- 12.0+ uses AirSyncBase:Body (codepage 17) instead.
+    pub const BODY: Token = tag(0x0b, false);
+    /// 2.5 only.
+    pub const BODY_TRUNCATED: Token = tag(0x0c, false);
     pub const BUSY_STATUS: Token = tag(0x0d, false);
+    pub const CATEGORIES: Token = tag(0x0e, true);
+    pub const CATEGORY: Token = tag(0x0f, false);
     pub const DTSTAMP: Token = tag(0x11, false);
     pub const END_TIME: Token = tag(0x12, false);
+    pub const EXCEPTION: Token = tag(0x13, true);
+    pub const EXCEPTIONS: Token = tag(0x14, true);
+    pub const DELETED: Token = tag(0x15, false);
+    /// 2.5, 12.0, 12.1, 14.0, 14.1 only -- dropped in 16.0/16.1 with no
+    /// listed replacement (unlike the plain Location/Body supersessions
+    /// noted elsewhere in this codepage).
+    pub const EXCEPTION_START_TIME: Token = tag(0x16, false);
+    /// 2.5, 12.0, 12.1, 14.0, 14.1 only -- 16.0+ uses AirSyncBase:Location
+    /// (codepage 17) instead.
     pub const LOCATION: Token = tag(0x17, false);
+    pub const MEETING_STATUS: Token = tag(0x18, false);
+    pub const ORGANIZER_EMAIL: Token = tag(0x19, false);
+    pub const ORGANIZER_NAME: Token = tag(0x1a, false);
+    pub const RECURRENCE: Token = tag(0x1b, true);
+    pub const RECURRENCE_TYPE: Token = tag(0x1c, false);
+    pub const RECURRENCE_UNTIL: Token = tag(0x1d, false);
+    pub const RECURRENCE_OCCURRENCES: Token = tag(0x1e, false);
+    pub const RECURRENCE_INTERVAL: Token = tag(0x1f, false);
+    pub const RECURRENCE_DAY_OF_WEEK: Token = tag(0x20, false);
+    pub const RECURRENCE_DAY_OF_MONTH: Token = tag(0x21, false);
+    pub const RECURRENCE_WEEK_OF_MONTH: Token = tag(0x22, false);
+    pub const RECURRENCE_MONTH_OF_YEAR: Token = tag(0x23, false);
+    pub const REMINDER: Token = tag(0x24, false);
     pub const SENSITIVITY: Token = tag(0x25, false);
     pub const SUBJECT: Token = tag(0x26, false);
     pub const START_TIME: Token = tag(0x27, false);
     pub const UID: Token = tag(0x28, false);
+    /// 12.0+ only.
+    pub const ATTENDEE_STATUS: Token = tag(0x29, false);
+    /// 12.0+ only.
+    pub const ATTENDEE_TYPE: Token = tag(0x2a, false);
+    /// 14.0+ only.
+    pub const DISALLOW_NEW_TIME_PROPOSAL: Token = tag(0x33, false);
+    /// 14.0+ only.
+    pub const RESPONSE_REQUESTED: Token = tag(0x34, false);
+    /// 14.0+ only.
+    pub const APPOINTMENT_REPLY_TIME: Token = tag(0x35, false);
+    /// 14.0+ only.
+    pub const RESPONSE_TYPE: Token = tag(0x36, false);
+    /// 14.0+ only.
+    pub const CALENDAR_TYPE: Token = tag(0x37, false);
+    /// 14.0+ only.
+    pub const IS_LEAP_MONTH: Token = tag(0x38, false);
+    /// 14.1+ only.
+    pub const FIRST_DAY_OF_WEEK: Token = tag(0x39, false);
+    /// 14.1+ only.
+    pub const ONLINE_MEETING_CONF_LINK: Token = tag(0x3a, false);
+    /// 14.1+ only.
+    pub const ONLINE_MEETING_EXTERNAL_LINK: Token = tag(0x3b, false);
+    /// 16.0+ only.
+    pub const CLIENT_UID: Token = tag(0x3c, false);
 
     pub const fn tag(token: u8, has_content: bool) -> Token {
         Token {
@@ -380,6 +501,503 @@ pub mod compose_mail {
     pub const MIME: Token = tag(0x10, false);
     pub const CLIENT_ID: Token = tag(0x11, false);
     pub const STATUS: Token = tag(0x12, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Token-only scaffolding below: codepages for commands this gateway does
+// NOT implement yet (MeetingResponse/Tasks/ResolveRecipients/ValidateCert/
+// Search/GAL/Find), plus supplementary codepages for classes that ARE
+// implemented but only partially (Contacts2, Email2, RightsManagement,
+// DocumentLibrary). Every token BYTE below is transcribed directly from
+// [MS-ASWBXML] v20250520 (the PDF at
+// https://officeprotocoldoc.z19.web.core.windows.net/files/MS-ASWBXML/
+// [MS-ASWBXML].pdf), section 2.1.2.1 -- not guessed. See
+// docs/eas-jmap-command-matrix.md and docs/eas-jmap-type-matrix.md for
+// what each of these would need to actually get wired up.
+//
+// `has_content` on every constant below is an INFERRED guess (container
+// vs. leaf, from each element's ordinary XML role), NOT independently
+// confirmed against a live encode or a second source the way the
+// token-byte values above it are -- unlike the byte value, this field
+// isn't given by the WBXML spec's own per-codepage table at all (it only
+// lists tag name / token / protocol versions). It also isn't functionally
+// load-bearing today: DocumentBuilder::start()/leaf() already force
+// has_content to true/false themselves regardless of what a constant
+// declares (see the note on this in the test module below), so this is
+// documentation for a future implementer, not a currently-exercised
+// value. Confirm it against a real request/response before relying on it.
+// ---------------------------------------------------------------------
+
+/// WBXML codepage 8 (MeetingResponse), [MS-ASCMD] section 2.2.1.11. The
+/// core fields (through UserResponse) are "All" protocol versions; the
+/// rest are 14.1+ (InstanceId) or 16.0/16.1 (ProposedStartTime/
+/// ProposedEndTime/SendResponse) -- this gateway currently advertises
+/// SUPPORTED_PROTOCOLS "12.0,12.1,14.0" only (see activesync.rs), so a
+/// real device would never send those three fields against this gateway
+/// as it stands today.
+pub mod meeting_response {
+    use super::Token;
+
+    pub const PAGE: u8 = 8;
+    pub const CALENDAR_ID: Token = tag(0x05, false);
+    pub const COLLECTION_ID: Token = tag(0x06, false);
+    pub const MEETING_RESPONSE: Token = tag(0x07, true);
+    pub const REQUEST_ID: Token = tag(0x08, false);
+    pub const REQUEST: Token = tag(0x09, true);
+    pub const RESULT: Token = tag(0x0a, true);
+    pub const STATUS: Token = tag(0x0b, false);
+    pub const USER_RESPONSE: Token = tag(0x0c, false);
+    /// 14.1, 16.0, 16.1 only.
+    pub const INSTANCE_ID: Token = tag(0x0e, false);
+    /// 16.1 only.
+    pub const PROPOSED_START_TIME: Token = tag(0x10, false);
+    /// 16.1 only.
+    pub const PROPOSED_END_TIME: Token = tag(0x11, false);
+    /// 16.0, 16.1 only.
+    pub const SEND_RESPONSE: Token = tag(0x12, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
+/// WBXML codepage 9 (Tasks), [MS-ASTASK]. Shares its recurrence-field
+/// shape (Type/Start/Until/Occurrences/Interval/DayOfMonth/DayOfWeek/
+/// WeekOfMonth/MonthOfYear/...) with Calendar's own recurrence codepage --
+/// see docs/eas-jmap-type-matrix.md for the field-by-field JSCalendar
+/// mapping, which both this and Calendar's recurrence would share. Note
+/// 1 in the spec: for protocol versions 12.0+, the Body element actually
+/// used is AirSyncBase's (codepage 17), not Tasks' own 0x05 -- 0x05 here
+/// is 2.5-only.
+pub mod tasks {
+    use super::Token;
+
+    pub const PAGE: u8 = 9;
+    /// 2.5 only -- 12.0+ uses AirSyncBase:Body (codepage 17) instead.
+    pub const BODY: Token = tag(0x05, false);
+    /// 2.5 only.
+    pub const BODY_SIZE: Token = tag(0x06, false);
+    /// 2.5 only.
+    pub const BODY_TRUNCATED: Token = tag(0x07, false);
+    pub const CATEGORIES: Token = tag(0x08, true);
+    pub const CATEGORY: Token = tag(0x09, false);
+    pub const COMPLETE: Token = tag(0x0a, false);
+    pub const DATE_COMPLETED: Token = tag(0x0b, false);
+    pub const DUE_DATE: Token = tag(0x0c, false);
+    pub const UTC_DUE_DATE: Token = tag(0x0d, false);
+    pub const IMPORTANCE: Token = tag(0x0e, false);
+    pub const RECURRENCE: Token = tag(0x0f, true);
+    pub const TYPE: Token = tag(0x10, false);
+    pub const START: Token = tag(0x11, false);
+    pub const UNTIL: Token = tag(0x12, false);
+    pub const OCCURRENCES: Token = tag(0x13, false);
+    pub const INTERVAL: Token = tag(0x14, false);
+    pub const DAY_OF_MONTH: Token = tag(0x15, false);
+    pub const DAY_OF_WEEK: Token = tag(0x16, false);
+    pub const WEEK_OF_MONTH: Token = tag(0x17, false);
+    pub const MONTH_OF_YEAR: Token = tag(0x18, false);
+    pub const REGENERATE: Token = tag(0x19, false);
+    pub const DEAD_OCCUR: Token = tag(0x1a, false);
+    pub const REMINDER_SET: Token = tag(0x1b, false);
+    pub const REMINDER_TIME: Token = tag(0x1c, false);
+    pub const SENSITIVITY: Token = tag(0x1d, false);
+    pub const START_DATE: Token = tag(0x1e, false);
+    pub const UTC_START_DATE: Token = tag(0x1f, false);
+    pub const SUBJECT: Token = tag(0x20, false);
+    /// 12.0, 12.1, 14.0, 14.1, 16.0, 16.1 only.
+    pub const ORDINAL_DATE: Token = tag(0x22, false);
+    /// 12.0, 12.1, 14.0, 14.1, 16.0, 16.1 only.
+    pub const SUB_ORDINAL_DATE: Token = tag(0x23, false);
+    /// 14.0, 14.1, 16.0, 16.1 only.
+    pub const CALENDAR_TYPE: Token = tag(0x24, false);
+    /// 14.0, 14.1, 16.0, 16.1 only.
+    pub const IS_LEAP_MONTH: Token = tag(0x25, false);
+    /// 14.1, 16.0, 16.1 only.
+    pub const FIRST_DAY_OF_WEEK: Token = tag(0x26, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
+/// WBXML codepage 10 (ResolveRecipients), [MS-ASCMD] section 2.2.1.15.
+pub mod resolve_recipients {
+    use super::Token;
+
+    pub const PAGE: u8 = 10;
+    pub const RESOLVE_RECIPIENTS: Token = tag(0x05, true);
+    pub const RESPONSE: Token = tag(0x06, true);
+    pub const STATUS: Token = tag(0x07, false);
+    pub const TYPE: Token = tag(0x08, false);
+    pub const RECIPIENT: Token = tag(0x09, true);
+    pub const DISPLAY_NAME: Token = tag(0x0a, false);
+    pub const EMAIL_ADDRESS: Token = tag(0x0b, false);
+    pub const CERTIFICATES: Token = tag(0x0c, true);
+    pub const CERTIFICATE: Token = tag(0x0d, false);
+    pub const MINI_CERTIFICATE: Token = tag(0x0e, false);
+    pub const OPTIONS: Token = tag(0x0f, true);
+    pub const TO: Token = tag(0x10, false);
+    pub const CERTIFICATE_RETRIEVAL: Token = tag(0x11, false);
+    pub const RECIPIENT_COUNT: Token = tag(0x12, false);
+    pub const MAX_CERTIFICATES: Token = tag(0x13, false);
+    pub const MAX_AMBIGUOUS_RECIPIENTS: Token = tag(0x14, false);
+    pub const CERTIFICATE_COUNT: Token = tag(0x15, false);
+    /// 14.0, 14.1, 16.0, 16.1 only.
+    pub const AVAILABILITY: Token = tag(0x16, true);
+    /// 14.0, 14.1, 16.0, 16.1 only.
+    pub const START_TIME: Token = tag(0x17, false);
+    /// 14.0, 14.1, 16.0, 16.1 only.
+    pub const END_TIME: Token = tag(0x18, false);
+    /// 14.0, 14.1, 16.0, 16.1 only.
+    pub const MERGED_FREE_BUSY: Token = tag(0x19, false);
+    /// 14.1, 16.0, 16.1 only.
+    pub const PICTURE: Token = tag(0x1a, true);
+    /// 14.1, 16.0, 16.1 only.
+    pub const MAX_SIZE: Token = tag(0x1b, false);
+    /// 14.1, 16.0, 16.1 only.
+    pub const DATA: Token = tag(0x1c, false);
+    /// 14.1, 16.0, 16.1 only.
+    pub const MAX_PICTURES: Token = tag(0x1d, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
+/// WBXML codepage 11 (ValidateCert), [MS-ASCMD] section 2.2.1.22.
+pub mod validate_cert {
+    use super::Token;
+
+    pub const PAGE: u8 = 11;
+    pub const VALIDATE_CERT: Token = tag(0x05, true);
+    pub const CERTIFICATES: Token = tag(0x06, true);
+    pub const CERTIFICATE: Token = tag(0x07, false);
+    pub const CERTIFICATE_CHAIN: Token = tag(0x08, true);
+    pub const CHECK_CRL: Token = tag(0x09, false);
+    pub const STATUS: Token = tag(0x0a, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
+/// WBXML codepage 12 (Contacts2), [MS-ASCNTC] -- supplementary fields for
+/// the already-implemented Contacts class (codepage 1). Not wired into
+/// `write_contact_add()` yet.
+pub mod contacts2 {
+    use super::Token;
+
+    pub const PAGE: u8 = 12;
+    pub const CUSTOMER_ID: Token = tag(0x05, false);
+    pub const GOVERNMENT_ID: Token = tag(0x06, false);
+    pub const IM_ADDRESS: Token = tag(0x07, false);
+    pub const IM_ADDRESS_2: Token = tag(0x08, false);
+    pub const IM_ADDRESS_3: Token = tag(0x09, false);
+    pub const MANAGER_NAME: Token = tag(0x0a, false);
+    pub const COMPANY_MAIN_PHONE: Token = tag(0x0b, false);
+    pub const ACCOUNT_NAME: Token = tag(0x0c, false);
+    pub const NICK_NAME: Token = tag(0x0d, false);
+    pub const MMS: Token = tag(0x0e, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
+/// WBXML codepage 15 (Search), [MS-ASCMD] section 2.2.1.16. Mailbox/
+/// document-library search -- see codepage 16 (GAL) below for the
+/// directory/people-search half of the same `Search` command. 0x06,
+/// 0x16, 0x1c, 0x1d are gaps in the spec's own token table (not used by
+/// any current tag), not omissions here.
+pub mod search {
+    use super::Token;
+
+    pub const PAGE: u8 = 15;
+    pub const SEARCH: Token = tag(0x05, true);
+    pub const STORE: Token = tag(0x07, true);
+    pub const NAME: Token = tag(0x08, false);
+    pub const QUERY: Token = tag(0x09, false);
+    pub const OPTIONS: Token = tag(0x0a, true);
+    pub const RANGE: Token = tag(0x0b, false);
+    pub const STATUS: Token = tag(0x0c, false);
+    pub const RESPONSE: Token = tag(0x0d, true);
+    pub const RESULT: Token = tag(0x0e, true);
+    pub const PROPERTIES: Token = tag(0x0f, true);
+    pub const TOTAL: Token = tag(0x10, false);
+    /// 12.0+ only.
+    pub const EQUAL_TO: Token = tag(0x11, true);
+    /// 12.0+ only.
+    pub const VALUE: Token = tag(0x12, false);
+    /// 12.0+ only.
+    pub const AND: Token = tag(0x13, true);
+    /// 12.0+ only.
+    pub const OR: Token = tag(0x14, true);
+    /// 12.0+ only.
+    pub const FREE_TEXT: Token = tag(0x15, false);
+    /// 12.0+ only.
+    pub const DEEP_TRAVERSAL: Token = tag(0x17, false);
+    /// 12.0+ only.
+    pub const LONG_ID: Token = tag(0x18, false);
+    /// 12.0+ only.
+    pub const REBUILD_RESULTS: Token = tag(0x19, false);
+    /// 12.0+ only.
+    pub const LESS_THAN: Token = tag(0x1a, true);
+    /// 12.0+ only.
+    pub const GREATER_THAN: Token = tag(0x1b, true);
+    /// 12.1+ only.
+    pub const USER_NAME: Token = tag(0x1e, false);
+    /// 12.1+ only.
+    pub const PASSWORD: Token = tag(0x1f, false);
+    /// 14.0+ only.
+    pub const CONVERSATION_ID: Token = tag(0x20, false);
+    /// 14.1+ only.
+    pub const PICTURE: Token = tag(0x21, true);
+    /// 14.1+ only.
+    pub const MAX_SIZE: Token = tag(0x22, false);
+    /// 14.1+ only.
+    pub const MAX_PICTURES: Token = tag(0x23, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
+/// WBXML codepage 16 (GAL), [MS-ASCMD] section 2.2.1.16 -- the directory/
+/// people-search result shape for a `Search` command whose `Store>Name`
+/// is `"GAL"`, as opposed to codepage 15's mailbox/document-library
+/// result shape.
+pub mod gal {
+    use super::Token;
+
+    pub const PAGE: u8 = 16;
+    pub const DISPLAY_NAME: Token = tag(0x05, false);
+    pub const PHONE: Token = tag(0x06, false);
+    pub const OFFICE: Token = tag(0x07, false);
+    pub const TITLE: Token = tag(0x08, false);
+    pub const COMPANY: Token = tag(0x09, false);
+    pub const ALIAS: Token = tag(0x0a, false);
+    pub const FIRST_NAME: Token = tag(0x0b, false);
+    pub const LAST_NAME: Token = tag(0x0c, false);
+    pub const HOME_PHONE: Token = tag(0x0d, false);
+    pub const MOBILE_PHONE: Token = tag(0x0e, false);
+    pub const EMAIL_ADDRESS: Token = tag(0x0f, false);
+    /// 14.1, 16.0, 16.1 only.
+    pub const PICTURE: Token = tag(0x10, true);
+    /// 14.1, 16.0, 16.1 only.
+    pub const STATUS: Token = tag(0x11, false);
+    /// 14.1, 16.0, 16.1 only.
+    pub const DATA: Token = tag(0x12, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
+/// WBXML codepage 19 (DocumentLibrary), [MS-ASDOC] -- SharePoint/UNC
+/// document search and retrieval. Out of scope for this gateway (no
+/// SharePoint/UNC backend exists or is planned); scaffolded for
+/// completeness only, per the spec table, all versions 12.0+.
+pub mod document_library {
+    use super::Token;
+
+    pub const PAGE: u8 = 19;
+    pub const LINK_ID: Token = tag(0x05, false);
+    pub const DISPLAY_NAME: Token = tag(0x06, false);
+    pub const IS_FOLDER: Token = tag(0x07, false);
+    pub const CREATION_DATE: Token = tag(0x08, false);
+    pub const LAST_MODIFIED_DATE: Token = tag(0x09, false);
+    pub const IS_HIDDEN: Token = tag(0x0a, false);
+    pub const CONTENT_LENGTH: Token = tag(0x0b, false);
+    pub const CONTENT_TYPE: Token = tag(0x0c, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
+/// WBXML codepage 22 (Email2), [MS-ASEMAIL] -- supplementary fields for
+/// the already-implemented Email class (codepage 2). `CONVERSATION_ID`/
+/// `CONVERSATION_INDEX` are exactly what the gap-analysis doc's reverted
+/// conversation-threading attempt (commit `d199d37`) needs -- confirmed
+/// present and correctly-numbered here, so a redo has real token values
+/// to build on rather than needing to re-derive them.
+pub mod email2 {
+    use super::Token;
+
+    pub const PAGE: u8 = 22;
+    /// 14.0+ only.
+    pub const UM_CALLER_ID: Token = tag(0x05, false);
+    /// 14.0+ only.
+    pub const UM_USER_NOTES: Token = tag(0x06, false);
+    /// 14.0+ only.
+    pub const UM_ATT_DURATION: Token = tag(0x07, false);
+    /// 14.0+ only.
+    pub const UM_ATT_ORDER: Token = tag(0x08, false);
+    /// 14.0+ only.
+    pub const CONVERSATION_ID: Token = tag(0x09, false);
+    /// 14.0+ only.
+    pub const CONVERSATION_INDEX: Token = tag(0x0a, false);
+    /// 14.0+ only.
+    pub const LAST_VERB_EXECUTED: Token = tag(0x0b, false);
+    /// 14.0+ only.
+    pub const LAST_VERB_EXECUTION_TIME: Token = tag(0x0c, false);
+    /// 14.0+ only.
+    pub const RECEIVED_AS_BCC: Token = tag(0x0d, false);
+    /// 14.0+ only.
+    pub const SENDER: Token = tag(0x0e, false);
+    /// 14.0+ only.
+    pub const CALENDAR_TYPE: Token = tag(0x0f, false);
+    /// 14.0+ only.
+    pub const IS_LEAP_MONTH: Token = tag(0x10, false);
+    /// 14.1+ only.
+    pub const ACCOUNT_ID: Token = tag(0x11, false);
+    /// 14.1+ only.
+    pub const FIRST_DAY_OF_WEEK: Token = tag(0x12, false);
+    /// 14.1+ only.
+    pub const MEETING_MESSAGE_TYPE: Token = tag(0x13, false);
+    /// 16.0+ only.
+    pub const IS_DRAFT: Token = tag(0x15, false);
+    /// 16.0+ only.
+    pub const BCC: Token = tag(0x16, false);
+    /// 16.0+ only.
+    pub const SEND: Token = tag(0x17, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
+/// WBXML codepage 24 (RightsManagement), [MS-ASRM] -- IRM/rights-managed
+/// email. All fields 14.1+. Out of scope per the gap-analysis doc
+/// (enterprise feature, not relevant to a personal account); scaffolded
+/// for completeness only.
+pub mod rights_management {
+    use super::Token;
+
+    pub const PAGE: u8 = 24;
+    pub const RIGHTS_MANAGEMENT_SUPPORT: Token = tag(0x05, false);
+    pub const RIGHTS_MANAGEMENT_TEMPLATES: Token = tag(0x06, true);
+    pub const RIGHTS_MANAGEMENT_TEMPLATE: Token = tag(0x07, true);
+    pub const RIGHTS_MANAGEMENT_LICENSE: Token = tag(0x08, true);
+    pub const EDIT_ALLOWED: Token = tag(0x09, false);
+    pub const REPLY_ALLOWED: Token = tag(0x0a, false);
+    pub const REPLY_ALL_ALLOWED: Token = tag(0x0b, false);
+    pub const FORWARD_ALLOWED: Token = tag(0x0c, false);
+    pub const MODIFY_RECIPIENTS_ALLOWED: Token = tag(0x0d, false);
+    pub const EXTRACT_ALLOWED: Token = tag(0x0e, false);
+    pub const PRINT_ALLOWED: Token = tag(0x0f, false);
+    pub const EXPORT_ALLOWED: Token = tag(0x10, false);
+    pub const PROGRAMMATIC_ACCESS_ALLOWED: Token = tag(0x11, false);
+    pub const OWNER: Token = tag(0x12, false);
+    pub const CONTENT_EXPIRY_DATE: Token = tag(0x13, false);
+    pub const TEMPLATE_ID: Token = tag(0x14, false);
+    pub const TEMPLATE_NAME: Token = tag(0x15, false);
+    pub const TEMPLATE_DESCRIPTION: Token = tag(0x16, false);
+    pub const CONTENT_OWNER: Token = tag(0x17, false);
+    pub const REMOVE_RIGHTS_MANAGEMENT_PROTECTION: Token = tag(0x18, false);
+
+    pub const fn tag(token: u8, has_content: bool) -> Token {
+        Token {
+            code_page: PAGE,
+            token,
+            has_content,
+            has_attributes: false,
+        }
+    }
+}
+
+/// WBXML codepage 25 (Find), [MS-ASCMD] section 2.2.1.2. Real bug-in-
+/// waiting if this is ever wired up without checking this comment first:
+/// EVERY tag in this codepage is gated to protocol version 16.1 ONLY
+/// (confirmed directly in the spec's own per-tag version column, not
+/// inferred) -- and this gateway currently advertises
+/// `SUPPORTED_PROTOCOLS = "12.0,12.1,14.0"` (see activesync.rs), a
+/// deliberate cap put in place this session after the whole
+/// over-advertisement root-cause saga. A real device will never invoke
+/// Find against this gateway as it stands today no matter how complete
+/// an implementation is written, unless/until 16.1 gets re-added to that
+/// advertised list -- which is its own decision with its own risk, not
+/// a prerequisite to casually bundle in with implementing Find itself.
+pub mod find {
+    use super::Token;
+
+    pub const PAGE: u8 = 25;
+    pub const FIND: Token = tag(0x05, true);
+    pub const SEARCH_ID: Token = tag(0x06, false);
+    pub const EXECUTE_SEARCH: Token = tag(0x07, true);
+    pub const MAILBOX_SEARCH_CRITERION: Token = tag(0x08, true);
+    pub const QUERY: Token = tag(0x09, false);
+    pub const STATUS: Token = tag(0x0a, false);
+    pub const FREE_TEXT: Token = tag(0x0b, false);
+    pub const OPTIONS: Token = tag(0x0c, true);
+    pub const RANGE: Token = tag(0x0d, false);
+    pub const DEEP_TRAVERSAL: Token = tag(0x0e, false);
+    pub const RESPONSE: Token = tag(0x11, true);
+    pub const RESULT: Token = tag(0x12, true);
+    pub const PROPERTIES: Token = tag(0x13, true);
+    pub const PREVIEW: Token = tag(0x14, false);
+    pub const HAS_ATTACHMENTS: Token = tag(0x15, false);
+    pub const TOTAL: Token = tag(0x16, false);
+    pub const DISPLAY_CC: Token = tag(0x17, false);
+    pub const DISPLAY_BCC: Token = tag(0x18, false);
+    pub const GAL_SEARCH_CRITERION: Token = tag(0x19, true);
+    pub const MAX_PICTURES: Token = tag(0x20, false);
+    pub const MAX_SIZE: Token = tag(0x21, false);
+    pub const PICTURE: Token = tag(0x22, true);
 
     pub const fn tag(token: u8, has_content: bool) -> Token {
         Token {
