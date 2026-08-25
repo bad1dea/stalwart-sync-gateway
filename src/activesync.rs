@@ -609,23 +609,27 @@ async fn settings(
             let vacation = state.jmap.get_vacation_response(auth).await.ok().flatten();
             let is_enabled = vacation.as_ref().is_some_and(|v| v.is_enabled);
 
-            // Real bug, found live via pcap: a real device's own Set used
-            // OofState=2 when it included a StartTime/EndTime schedule,
-            // and OofState=1 when it didn't (no dates at all) -- this
-            // gateway's Get response always hardcoded "1" whenever
-            // enabled, regardless of whether a schedule exists. Mirror
-            // the device's own convention: 2 = enabled+scheduled, 1 =
-            // enabled+indefinite, 0 = disabled.
-            let has_schedule = vacation
-                .as_ref()
-                .is_some_and(|v| v.from_date.is_some() && v.to_date.is_some());
-            let oof_state_value = if !is_enabled {
-                "0"
-            } else if has_schedule {
-                "2"
-            } else {
-                "1"
-            };
+            // EXPERIMENTAL, not yet confirmed: the device's own Set uses
+            // OofState=2 when it includes a StartTime/EndTime schedule,
+            // and this gateway mirrored that back on Get (2 when a
+            // schedule exists, matching the device's own convention: see
+            // commit 56527b0). That mirrored response is now confirmed
+            // byte-for-byte correct on every dimension checkable against
+            // a primary source (schema, date format, device's own wire
+            // encoding, z-push's actual encoder) -- yet the user reports
+            // Automatic Replies still shows OFF specifically and only
+            // when a schedule is set (the no-schedule/OofState=1 case
+            // reportedly displays correctly). With every other avenue
+            // exhausted, testing the simplest explanation for a
+            // value-specific display bug: a client-side check written as
+            // `oofState == 1` instead of `oofState != 0`, which would
+            // fail silently for the scheduled case specifically. Reports
+            // OofState=1 unconditionally whenever enabled (dropping the
+            // 2-for-scheduled distinction) while still including the
+            // real StartTime/EndTime so the schedule itself isn't lost.
+            // If this doesn't fix the display, revert to mirroring 2 --
+            // that version was schema-correct, this one is a guess.
+            let oof_state_value = if is_enabled { "1" } else { "0" };
             builder.start(set::OOF);
             builder.leaf(set::STATUS, "1");
             builder.start(set::GET);
