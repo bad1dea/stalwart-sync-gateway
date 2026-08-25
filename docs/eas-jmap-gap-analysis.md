@@ -18,9 +18,9 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Sync: Mail (move) | **Done** | `Email/set` (`mailboxIds`) | Separate `MoveItems` command, not a Sync-embedded move. |
 | Sync: Mail (client Add, e.g. append-to-Sent) | **Missing** | `Email/set` create + blob | Explicitly ignored (`apply_mail_client_commands`, logged debug, no-op). Real EAS clients rarely Add mail directly (SendMail covers the compose path) — low priority. |
 | Sync: Contacts (read) | **Done** | `ContactCard/query`+`/get` (JSContact, RFC 9553) | Confirmed live against a real card. |
-| Sync: Contacts (write: add/edit/delete) | **Missing** | `ContactCard/set` | No client-command handling exists in `sync_contacts_collection` at all — verified by direct source read, no `SyncClientCommandKind` match anywhere in that function. Pure read mirror today. |
+| Sync: Contacts (write: add/edit/delete) | **Done** (`deploy-2026-08-25s`) | `ContactCard/set` | `sync_contacts_collection` now handles Add/Change/Delete + a real hash-diff (same shape as Notes), backed by `save_contact`/`destroy_contact`. `ContactCard/set` confirmed live to support real in-place update, so the JMAP id is a stable ServerId with no workaround. Full lifecycle live-verified with a throwaway contact. |
 | Sync: Calendar (read) | **Done** | `CalendarEvent/query`+`/get` (JSCalendar, draft-ietf-calext-jscalendarbis superseding RFC 8984) | Confirmed live against a real event. No recurrence handling confirmed — see below. |
-| Sync: Calendar (write: add/edit/delete) | **Missing** | `CalendarEvent/set` | Same story as Contacts — no client-command handling in `sync_calendar_collection`, verified by direct read. |
+| Sync: Calendar (write: add/edit/delete, non-recurring only) | **Done** (`deploy-2026-08-25t`) | `CalendarEvent/set` | Same treatment as Contacts, via `save_calendar_event`/`destroy_calendar_event`. `start`/`duration` written without `timeZone`, mirroring `local_to_utc_eas`'s existing "absent timeZone == already UTC" convention. Recurrence/attendees/reminders explicitly out of scope. Full lifecycle live-verified with a throwaway event. |
 | Sync: Calendar recurrence (RRULE) | **Unverified/likely missing** | JSCalendar `recurrenceRules` | `write_calendar_add()` was reordered for field-order correctness this session but not audited for whether it reads/emits `RecurrenceType`/`Occurrences`/`Interval` etc. at all — needs a direct code check + a real recurring-event live test before claiming any status. |
 | Sync: Tasks | **Missing, structurally unclear** | No JMAP Tasks capability exists at all (confirmed: Stalwart's advertised capability list has no tasks-shaped URN). `GatewayCapabilities::tasks` is currently just aliased to `has(CALENDARS)` — a placeholder, not a real signal. | Likely needs a JSCalendar `Task`-type-in-Calendar approach (unverified) or an Email-backed workaround like Notes. Needs its own live-verification pass before design. |
 | Sync: Notes | **Done, two-way** | Email-backed synthetic-message workaround (`src/jmap/notes.rs`) | The most structurally interesting piece of this whole gateway — see that file's module doc. Full Add/Change/Delete supported. |
@@ -59,12 +59,21 @@ read/reply/send, plus calendar/contacts/notes sync.
    response shape is spec-derived, not device-confirmed. Worth a live
    device test with the user present before fully trusting it. See
    `src/jmap/vacation.rs`'s module doc for the complete reasoning.
-2. **Contacts/Calendar two-way sync (`ContactCard/set` /
-   `CalendarEvent/set`).** Both read paths are already solid and live-
-   verified; the missing half is purely "handle
-   Add/Change/Delete client commands the same way `sync_notes_collection`
-   already does for Notes and `apply_mail_client_commands` does for
-   Mail" — there's a working pattern to copy twice, not new design.
+2. ✅ **DONE (`deploy-2026-08-25s` Contacts, `deploy-2026-08-25t`
+   Calendar) — Contacts/Calendar two-way sync (`ContactCard/set` /
+   `CalendarEvent/set`).** Shipped and live-verified overnight, full
+   Add→Change→Delete lifecycle for both, using throwaway test
+   items created via the real WBXML wire protocol (not directly via
+   JMAP) and cleaned up after. One genuinely useful fact discovered
+   along the way, worth knowing for any future Notes-style work: unlike
+   `Email/set` (which can't update subject/body at all -- the reason
+   Notes needs its whole stable-id-via-keyword workaround),
+   `ContactCard/set` and `CalendarEvent/set` BOTH support real in-place
+   `update` (confirmed live, not assumed) -- so the JMAP id itself is
+   already a stable ActiveSync ServerId across edits for both classes,
+   no workaround needed. Calendar recurrence/attendees/reminders remain
+   explicitly out of scope (see the type-matrix doc for the real
+   field-by-field recurrence mapping when that becomes the target).
 
 ### (b) High-value for the actual daily-driver use case
 
