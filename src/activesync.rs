@@ -1471,6 +1471,14 @@ fn strip_html_tags(html: &str) -> String {
                 .all(|(a, b)| a.eq_ignore_ascii_case(&b))
     }
 
+    // Real bug: a '>' inside a quoted attribute value (common in inline
+    // CSS/JS -- e.g. style="width:5px>2px?10px:0", or an onclick handler
+    // doing a numeric comparison) prematurely ended in_tag with no quote
+    // tracking, leaking the rest of that tag ('s remaining attributes,
+    // the real closing '>') as literal output text -- visible as
+    // fragments of raw markup in an otherwise-stripped preview/body.
+    let mut in_attr_quote: Option<char> = None;
+
     let chars: Vec<char> = html.chars().collect();
     let mut skip_until: Option<&'static str> = None;
     let mut i = 0usize;
@@ -1483,6 +1491,19 @@ fn strip_html_tags(html: &str) -> String {
             continue;
         }
         let ch = chars[i];
+        if in_tag {
+            if let Some(q) = in_attr_quote {
+                if ch == q {
+                    in_attr_quote = None;
+                }
+            } else if ch == '"' || ch == '\'' {
+                in_attr_quote = Some(ch);
+            } else if ch == '>' {
+                in_tag = false;
+            }
+            i += 1;
+            continue;
+        }
         if ch == '<' {
             if starts_with_ci(&chars[i + 1..], "style") {
                 skip_until = Some("</style>");
@@ -1490,9 +1511,7 @@ fn strip_html_tags(html: &str) -> String {
                 skip_until = Some("</script>");
             }
             in_tag = true;
-        } else if ch == '>' {
-            in_tag = false;
-        } else if !in_tag {
+        } else {
             out.push(ch);
         }
         i += 1;
@@ -2449,6 +2468,22 @@ mod tests {
             value: "<html><head><style>@import url(\"https://example.com/x.css\"); :root { color-scheme: light dark; }</style><script>track();</script></head><body><p>Invoice attached, thanks!</p></body></html>".to_owned(),
         };
         assert_eq!(plain_text_preview(&body), "Invoice attached, thanks!");
+    }
+
+    #[test]
+    fn plain_text_preview_handles_gt_inside_quoted_attribute_values() {
+        // Real bug: a '>' inside a quoted attribute value (common in
+        // inline CSS/JS -- a numeric comparison, or a CSS calc()/media
+        // query) prematurely ended the "inside a tag" state with no
+        // quote tracking, leaking the rest of that tag's text (its
+        // remaining attributes, the real closing '>') as literal output
+        // -- visible as fragments of raw markup in an otherwise-stripped
+        // preview.
+        let body = EmailBody {
+            body_type: EmailBodyType::Html,
+            value: r#"<div style="width:5px>2px?10px:0" data-x="a>b" onclick="if(x>1)y()">Real text</div>"#.to_owned(),
+        };
+        assert_eq!(plain_text_preview(&body), "Real text");
     }
 
     #[test]
