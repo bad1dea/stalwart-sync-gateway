@@ -42,8 +42,8 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Settings: Oof (Set) | **Done, persists** | `VacationResponse/set` (`src/jmap/vacation.rs`) | Live-verified end to end with `isEnabled=false` (safe -- confirmed via direct JMAP query that `subject`/`textBody` actually persisted to the real `VacationResponse.singleton` object, then cleaned back up). `isEnabled=true` was deliberately never live-toggled for the same reason as the Get path above. |
 | Settings: RightsManagementInformation (IRM) | **Missing, out of scope** | N/A | Enterprise feature, not relevant to this account. |
 | Provision | **Done** | N/A (gateway-local, accept-everything policy) | PolicyStatus bug fixed this session. |
-| MeetingResponse | **Blocked at the JMAP layer** | `CalendarEvent/set` participant status update — **confirmed unsupported**, not just untested | Live-tested directly: a throwaway event created with a fully self-contained `participants` map (same account only, no `sendTo`, `expectReply: false` -- safe by construction) had `participants` silently dropped by Stalwart's `create` entirely; `CalendarEvent/get` never returns the property even when explicitly requested, and a follow-up `update` on `participants/p1/participationStatus` failed with `invalidProperties`. This corrects the previous session's read of `Calendar/get`'s `myRights.mayRSVP: true` as evidence of a working mechanism -- that's a generic ACL flag, unrelated to whether `participants` is actually implemented. Blocked on Stalwart, not a gateway-side task. See `docs/eas-jmap-command-matrix.md`'s MeetingResponse row for the full test trail. |
-| Sync: Calendar (attendees, read path) | **Blocked at the JMAP layer, same root cause as MeetingResponse** | `participants` on `CalendarEvent` -- confirmed absent | Since Stalwart doesn't store `participants` at all (see MeetingResponse row above), there is currently nothing for a read-only attendees field to display for ANY event on this account -- adding an `attendees` field to the `CalendarEvent` model right now would be dead code with nothing to populate it. Re-check if/when Stalwart adds `participants` support. |
+| MeetingResponse | **Still not implemented -- but reclassified: blocked on protocol version, not JMAP.** | MS-ASCMD 2.2.1.11 itself: *"When protocol versions 2.5, 12.0, 12.1, or 14.0 are used, MeetingResponse cannot be used to modify meeting requests in the Calendar folder"* -- only the Inbox meeting-request email. | **The earlier "blocked at the JMAP layer" verdict was WRONG and has been corrected (2026-08-25/26).** `participants` was never a Stalwart capability gap -- the original test omitted a required top-level `replyTo` (JSCalendar RFC 8984 §4.4.1, a companion property to `participants`+`expectReply`, found via a GitHub maintainer reply to an identical bug report) and, separately, each participant needs its own `calendarAddress` (found the same way: isolate one field, retest). Both fixed and live-verified (`deploy-2026-08-26l`) -- see the Attendees row below. What's ACTUALLY blocking MeetingResponse is unrelated: this gateway advertises protocol `12.0,12.1,14.0` (fixed, not touched), and the real spec text says at those versions MeetingResponse can only target the Inbox (the meeting-request email), never the Calendar folder directly. Building this needs the Inbox-side iTip flow understood first -- how Stalwart surfaces an incoming meeting request over JMAP, and how to correlate a MeetingResponse's Inbox `RequestId` back to the right `CalendarEvent` -- not yet investigated. |
+| Sync: Calendar (attendees, read+write) | **Done, two-way (`deploy-2026-08-26l`)** | JSCalendar `participants` + top-level `replyTo`, each participant needs `calendarAddress` too | **Overturns the "blocked, same root cause as MeetingResponse" verdict above.** Write path: `extract_calendar_fields` accumulates repeated `calendar:Attendee` blocks into `CalendarFields.attendees`; `save_calendar_event` builds a `participants` map (organizer `role:owner` + one entry per invitee `role:attendee`[+`optional`]) plus the required `replyTo`, only when attendees is non-empty. Read path: `CalendarEventObject` requests `participants`, splits it into `organizer_email`/`organizer_name` (the `role:owner` entry -- confirmed against the live [MS-ASCAL] spec's own worked example that the organizer is NEVER listed as an Attendee) and `CalendarEvent.attendees` (everyone else); `is_organizer` is set by comparing `organizer_email` to the authenticated user. `write_calendar_command` emits OrganizerName/OrganizerEmail (PR #187 field order) and, when attendees is non-empty, MeetingStatus (1 organizer's copy / 3 received as attendee) plus Attendees (AttendeeStatus 0/2/3/4/5, AttendeeType 1/2/3 -- both confirmed against the live spec pages). Full round trip live-verified over the real WBXML wire protocol: a throwaway event with 2 attendees, AND the user's own real "Invite Calendar" event (organizer khuong@khuo.ng, khuong@khuong.info Accepted, khuong.hoang@outlook.com Tentative) both read back correctly with the right per-person AttendeeStatus codes. |
 | Conversation threading (Email2:ConversationId) | **Redone (`deploy-2026-08-25w`), structurally + live-wire verified, NOT yet device-confirmed** | JMAP `Email.threadId` -> deterministic fixed-16-byte value (UUID v5) | The `d199d37` revert's own root-cause hypothesis checked out on BOTH counts: (1) the original used WBXML token `0x0a` for `CONVERSATION_ID`, confirmed wrong against the primary MS-ASWBXML spec (fresh token-scaffolding pass, `e953835`) -- `0x0a` is actually `CONVERSATION_INDEX`, a different field; correct value is `0x09`. (2) the original sent the raw (often single-byte) JMAP `threadId` string directly; real Exchange servers send a fixed 16-byte GUID-shaped value, which iOS likely validates more strictly than the spec text implies. `eas_conversation_id()` now derives a deterministic fixed-16-byte value via UUID v5 (namespace + threadId). Field position corrected against z-push's own `syncmail.php` mapping too: the `>=14.0` block (which `ConversationId` belongs to) is appended strictly after the `>=12.0` block once version gates apply -- placed right after `NativeBodyType`. Verified: 52/52 unit tests pass (including new coverage for the hash's determinism/fixed-length property and the field's position/opacity); live against zoidberg, a real 8-message sync produced 8 correctly-shaped 16-byte `ConversationId` values with the full 487-node WBXML document decoding with zero corruption; a SECOND independent device sync of the same mailbox produced byte-for-byte IDENTICAL values in the same order, confirming determinism live, not just in a unit test. **What's NOT verified**: actual iOS Mail rendering/acceptance of this field -- the previous incident was a real, device-visible sync error the server saw zero trace of, meaning only an actual device can confirm whether THIS shape is accepted. Deployed to the isolated zoidberg/eas-test instance only. Do not port to production (hermes) until a human confirms live: sync a real device against `eas-test.khuo.ng`, watch for any sync error (not just "does mail still show up" -- the previous failure was silent server-side), and ideally confirm two messages in the same real conversation actually group together in the Mail app's threaded view. |
 | Attachment on send (composing/replying with a client-attached file) | **Done, confirmed live** | `upload_blob()` + `Email/import`, whole client MIME passed through opaque | Live-tested this session: a self-addressed `SmartForward` with a real `multipart/mixed` attachment part survived byte-identical (confirmed by downloading the blob and diffing content, not just checking metadata) on both the Sent Items and delivered Inbox copies. Root cause of why this "just works" with zero special handling: both EAS transports (raw-MIME 14.0+ and the WBXML-wrapped `ComposeMail` form) always require the CLIENT to submit the complete, already-composed MIME — attachments included — there is no "reference an existing attachment without re-uploading it" mechanism in the real protocol for this gateway to have missed. `rewrite_from_header()` only touches bytes before the header/body separator, so the entire multipart structure after it (including all attachment parts) was never at risk of mutation to begin with. |
 
@@ -88,38 +88,45 @@ read/reply/send, plus calendar/contacts/notes sync.
 
 ### (b) High-value for the actual daily-driver use case
 
-3. **MeetingResponse (accept/decline/tentative) — now confirmed BLOCKED,
-   not just deferred.** Calendar sync is currently read-only in every
-   sense, including the single most common calendar *interaction* on a
-   phone — responding to an invite.
+3. ✅ **DONE — Calendar attendees, two-way (`deploy-2026-08-26l`).**
+   **This corrects TWO layers of wrong prior verdicts, not one.** The
+   original read of `Calendar/get`'s `myRights.mayRSVP: true` as evidence
+   of a working scheduling mechanism was already flagged wrong (it's a
+   generic per-calendar ACL right). The FOLLOW-UP conclusion —
+   "`participants` confirmed unsupported, blocked at the JMAP layer" —
+   was ALSO wrong, and stayed wrong for a full extra session because
+   nobody re-tested it after being told it was settled. What actually
+   happened: the original test's `participants` payload was missing a
+   required top-level `replyTo` (JSCalendar RFC 8984 §4.4.1 — found via a
+   Stalwart maintainer's terse reply to an identical bug report on
+   GitHub: *"Your event does not include an organiser"*), and, found
+   separately by isolating one field at a time the same way, each
+   participant also needs its own `calendarAddress`, not just `email` +
+   `sendTo.imip`. Neither omission errors — both just cause a silent,
+   total drop of the whole `participants` map on read-back, which is
+   exactly why the earlier test read as "unsupported" instead of
+   "malformed." Both fixed; participants round-trip perfectly now. See
+   the Attendees row in the status table above for what got built and
+   how it was verified (including against the user's own real invite).
 
-   **Correction to this session's earlier research.** The previous pass
-   read `Calendar/get`'s `myRights.mayRSVP: true` as evidence Stalwart
-   has a working scheduling-reply mechanism, and deliberately held off
-   implementing on the theory that flipping `participationStatus` might
-   auto-send a real iTIP reply to a third party. A follow-up live test
-   (safe by construction: a throwaway event with a fully self-contained
-   `participants` map — same account as the only participant, no
-   `sendTo`, `expectReply: false`, so nothing could be emailed to anyone
-   either way) found something more fundamental: Stalwart's
-   `CalendarEvent/set create` silently DROPS `participants` entirely —
-   `CalendarEvent/get` never returns it, even when explicitly requested
-   via `properties`, and a follow-up `update` targeting
-   `participants/p1/participationStatus` failed outright with
-   `invalidProperties` because nothing was ever stored. `mayRSVP: true`
-   is a generic per-calendar ACL right that exists independent of
-   whether individual events actually carry participant data — it was
-   never real evidence of a working RSVP path.
-
-   This means BOTH MeetingResponse and attendee data on Calendar events
-   (even read-only) are blocked on Stalwart adding `participants` support
-   to `CalendarEvent`, not on any gateway-side risk-avoidance decision.
-   Nothing to build here right now. Re-check Stalwart's JMAP Calendars
-   support periodically; when `participants` starts round-tripping
-   through `CalendarEvent/get`, this whole item becomes tractable again
-   and the original plan (attendees read path, then MeetingResponse via
-   `participationStatus`, tested live with the user present given the
-   real third-party-email risk once it's real) still applies.
+   **What's still NOT done: MeetingResponse (Accept/Decline/Tentative).**
+   This is a real, separate gap with a real, separate reason, found by
+   actually reading the MS-ASCMD spec text rather than assuming it
+   follows from the participants fix: *"When protocol versions 2.5,
+   12.0, 12.1, or 14.0 are used, MeetingResponse cannot be used to modify
+   meeting requests in the Calendar folder"* — only the Inbox
+   meeting-request email. This gateway advertises `12.0,12.1,14.0`
+   (fixed, not touched per the standing hard boundary), so a real device
+   negotiating with it can only Accept/Decline through Mail, never by
+   tapping a button directly on the Calendar event. Building this needs:
+   (a) understanding how Stalwart's iTip pipeline surfaces an incoming
+   meeting-request email over JMAP (does it auto-create a placeholder
+   `CalendarEvent`? via `autoAddInvitations`? is there a stable
+   correlation id between the email and the event?), and (b) mapping a
+   MeetingResponse `Request`'s Inbox `CollectionId`+`RequestId` back to
+   the right `CalendarEvent` to patch. Neither is investigated yet. Not
+   guessable from here — needs its own session with a real inbound
+   invite to test against.
 4. ✅ **DONE (verification only, no code change needed) — SmartReply/
    SmartForward threading fidelity.** Live-tested this session: a
    self-addressed test message (no third party involved — sent
