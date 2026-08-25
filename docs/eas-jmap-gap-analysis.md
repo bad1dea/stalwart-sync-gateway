@@ -35,7 +35,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | MoveItems | **Done** | `Email/set` (`mailboxIds`) | Mail only — no move primitive wired for contacts/calendar/notes (notes moves would need `save_note`'s mailbox param, unverified if MoveItems dispatches there). |
 | Search / Find | **Missing** | Candidate: Stalwart's `Principal` object (`urn:ietf:params:jmap:principals`) for GAL/directory search; `Email/query` full-text filter for mailbox search | Both fall through to 501 despite `Find` being falsely advertised in `SUPPORTED_COMMANDS`. GAL search specifically needs checking whether Stalwart's Principal/query supports free-text search — unverified. |
 | SendMail | **Done** | `EmailSubmission/set` (blob-upload then submit) | Confirmed live and working. |
-| SmartReply / SmartForward | **Done, but threading fidelity unverified** | Same `EmailSubmission/set` path as SendMail | Whether In-Reply-To/References/threading is actually correct (vs. just "the mail sends") has not had the same live-pcap scrutiny DateReceived/Oof got — flagged as a real open question, not assumed correct. |
+| SmartReply / SmartForward | **Done, threading fidelity confirmed** | Same `EmailSubmission/set` path as SendMail | Live-tested this session with a self-addressed message carrying a real Message-ID/In-Reply-To/References triplet: byte-identical values confirmed on both the Sent Items copy and the delivered Inbox copy. See roadmap item 4 for the full test. |
 | ResolveRecipients / ValidateCert (S/MIME) | **Missing, low priority** | No obvious JMAP equivalent surveyed | Out of scope for a personal-account iPad daily driver; flag to user before investing. |
 | Settings: DeviceInformation / UserInformation | **Done (Get)** | Static/echo — no real JMAP-backed device-info storage | `PrimarySmtpAddress` bug (unrecognized field, cascading parse failure) fixed this session by removing it; `EmailAddresses>SMTPAddress` carries the same info in a valid shape. |
 | Settings: Oof (Get) | **Done** *(disabled path live-verified; enabled path spec-derived, not device-verified)* | `VacationResponse/get` (`src/jmap/vacation.rs`) | Real account state now read on every Get. Disabled (`OofState=0`) shape confirmed live, unchanged from the earlier z-push comparison fix. Enabled shape's `OofMessage` block is built from MS-ASSETTINGS' own schema, not live-toggled -- see `src/jmap/vacation.rs` module doc for why (toggling `isEnabled=true` on the real account risks a genuine auto-reply going out unsupervised). Verify with a real device present before fully trusting the enabled path. |
@@ -120,13 +120,27 @@ read/reply/send, plus calendar/contacts/notes sync.
    and the original plan (attendees read path, then MeetingResponse via
    `participationStatus`, tested live with the user present given the
    real third-party-email risk once it's real) still applies.
-4. **SmartReply/SmartForward threading-fidelity verification.** Mail send
-   already works, but "does it actually thread correctly in the
-   recipient's client" hasn't been checked with the same rigor as every
-   other bug this project fixed. Given this project's own hard-won lesson
-   (structural correctness ≠ live-verified correctness), this should get
-   the same pcap-diff treatment before being trusted for real
-   correspondence.
+4. ✅ **DONE (verification only, no code change needed) — SmartReply/
+   SmartForward threading fidelity.** Live-tested this session: a
+   self-addressed test message (no third party involved — sent
+   khuong@khuo.ng to khuong@khuo.ng, safe by construction) with a real
+   `Message-ID`/`In-Reply-To`/`References` triplet was submitted through
+   the raw-MIME `SmartReply` transport, then read back via direct JMAP
+   query from BOTH the Sent Items copy and the actually-delivered Inbox
+   copy — all three header values were byte-identical to what was sent.
+   Confirmed by direct source read first: `send_mail()` treats SendMail/
+   SmartForward/SmartReply as one identical code path (the EAS-level
+   distinction is purely client-side; the gateway does no ItemId/
+   CollectionId-based original-message linking of its own), and the only
+   MIME mutation in the whole pipeline is `rewrite_from_header()` in
+   `src/jmap/client.rs`, which parses headers into logical (unfolded)
+   lines, rewrites ONLY the `From:` entry, and leaves every other
+   header's VALUE untouched (it does reformat other multi-line headers
+   onto single unfolded lines when reassembling — semantically identical
+   per RFC 5322, confirmed not to affect the live test's outcome). Test
+   messages created and destroyed cleanly. No code change was needed —
+   this item was a real open question with an unverified assumption
+   underneath it, and it checked out as already correct.
 5. **Calendar recurrence.** A daily-driver calendar without recurring
    events (the majority of most people's actual calendar load — standing
    meetings, birthdays, etc.) is a soft-broken experience even though
