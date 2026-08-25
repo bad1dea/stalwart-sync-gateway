@@ -107,6 +107,10 @@ pub mod airsync {
     pub const COLLECTION: Token = tag(0x0f, false);
     pub const COLLECTION_ID: Token = tag(0x12, false);
     pub const GET_CHANGES: Token = tag(0x13, false);
+    // Empty-presence boolean flag (Start immediately followed by End, no
+    // text) -- signals the client that this Collection's response didn't
+    // cover everything; a spec-required tag this gateway never sent.
+    pub const MORE_AVAILABLE: Token = tag(0x14, false);
     pub const WINDOW_SIZE: Token = tag(0x15, false);
     pub const OPTIONS: Token = tag(0x17, true);
     pub const COMMANDS: Token = tag(0x16, false);

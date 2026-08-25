@@ -291,15 +291,24 @@ impl JmapClient {
         Ok(collections)
     }
 
+    /// Returns the mailbox's newest messages (up to `limit`) plus whether
+    /// more exist beyond that window -- real bug, confirmed live via the
+    /// zoidberg A/B test: a real device's first Sync omitted WindowSize
+    /// (default 25), the mailbox had well over 25 messages, and the
+    /// gateway silently truncated to 25 with no `MoreAvailable` flag --
+    /// a real EAS protocol violation (the spec requires it whenever a
+    /// windowed response doesn't cover everything) that plausibly
+    /// contributed to the client discarding the response outright.
     pub async fn emails_in_mailbox(
         &self,
         auth: &AuthenticatedSession,
         mailbox_id: &str,
         limit: usize,
-    ) -> anyhow::Result<Vec<Email>> {
+    ) -> anyhow::Result<(Vec<Email>, bool)> {
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         };
+        let limit = limit.clamp(1, 100);
 
         let calls = vec![
             MethodCall::new(
@@ -308,7 +317,8 @@ impl JmapClient {
                     "accountId": account_id,
                     "filter": { "inMailbox": mailbox_id },
                     "sort": [{ "property": "receivedAt", "isAscending": false }],
-                    "limit": limit.clamp(1, 100)
+                    "limit": limit,
+                    "calculateTotal": true
                 }),
                 "q",
             ),
@@ -340,19 +350,27 @@ impl JmapClient {
             )
             .await?;
 
+        let mut total: Option<u64> = None;
         for method in response.method_responses {
             match method.0.as_str() {
+                "Email/query" => {
+                    let query: QueryResponse =
+                        serde_json::from_value(method.1).context("invalid Email/query response")?;
+                    total = query.total;
+                }
                 "Email/get" => {
                     let get: GetResponse<EmailObject> =
                         serde_json::from_value(method.1).context("invalid Email/get response")?;
-                    return Ok(get.list.into_iter().map(Email::from).collect());
+                    let emails: Vec<Email> = get.list.into_iter().map(Email::from).collect();
+                    let has_more = total.is_some_and(|total| total as usize > limit);
+                    return Ok((emails, has_more));
                 }
                 "error" => anyhow::bail!("JMAP method error in email sync"),
                 _ => {}
             }
         }
 
-        Ok(Vec::new())
+        Ok((Vec::new(), false))
     }
 
     /// Lists contacts in a JSContact address book, newest-touched first.
@@ -1019,6 +1037,15 @@ pub(crate) struct MethodResponse<T>(pub(crate) String, pub(crate) T, pub(crate) 
 pub(crate) struct GetResponse<T> {
     #[serde(default)]
     pub(crate) list: Vec<T>,
+}
+
+/// Just the `total` out of an Email/query response (requires
+/// `calculateTotal: true` on the call) -- used to detect whether a
+/// windowed query left more messages unfetched, for EAS's MoreAvailable.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct QueryResponse {
+    #[serde(default)]
+    total: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]

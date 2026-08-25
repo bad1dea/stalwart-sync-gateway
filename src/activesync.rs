@@ -826,12 +826,12 @@ async fn sync_mail(
         };
 
         if collection.get_changes && is_mail_collection {
-            let emails = match state
+            let (emails, has_more) = match state
                 .jmap
                 .emails_in_mailbox(auth, &collection.collection_id, collection.window_size)
                 .await
             {
-                Ok(emails) => emails,
+                Ok(result) => result,
                 Err(error) => {
                     tracing::warn!(
                         %error,
@@ -901,6 +901,15 @@ async fn sync_mail(
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "1");
+            // Only meaningful on the first-sync full-window fetch -- a
+            // non-first Sync's emails_to_send is already the small
+            // unseen-since-last-time diff, not itself windowed by
+            // `limit`, so `has_more` (from the raw unfiltered query)
+            // doesn't describe it.
+            if collection.sync_key == "0" && has_more {
+                builder.start(air::MORE_AVAILABLE);
+                builder.end();
+            }
             write_fetch_responses(&mut builder, fetch_responses);
 
             if !emails_to_send.is_empty() {
