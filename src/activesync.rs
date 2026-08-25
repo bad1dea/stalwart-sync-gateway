@@ -1199,14 +1199,39 @@ fn write_email_fields(
 ) {
     use wbxml::eas::{airsync_base as base, email as mail};
 
-    builder.leaf(mail::MESSAGE_CLASS, "IPM.Note");
+    // Field order matches the real z-push-stalwart-jmap source (PR #187,
+    // pinned in config/z-push/Dockerfile: src/lib/syncobjects/
+    // syncmail.php's own $mapping, protocol version 14.0's actual final
+    // shape after its >=2.5/>=12.0/>=14.0 gates and unset() calls are
+    // applied): To, Cc, From, Subject, DateReceived, DisplayTo,
+    // Importance, Read, MessageClass, [AirSyncBase:Body],
+    // [AirSyncBase:Attachments], [AirSyncBase:NativeBodyType]. This
+    // gateway had MessageClass and Subject first, DateReceived third,
+    // From/To/DisplayTo/Cc all out of order, and Attachments after
+    // NativeBodyType instead of before -- almost nothing was in the
+    // right slot. This is very likely the actual explanation for the
+    // original "every message shows the same time" symptom the whole
+    // session started from: DateReceived itself was always proven
+    // correct on the wire (repeated bracketing tests), but iOS's WBXML
+    // parser has proven to be position-sensitive, not a flat tag
+    // lookup, for every other object checked against this same source
+    // (Attachment, Preview, Notes) -- a field in the wrong slot can be
+    // silently misassigned rather than hard-rejected, which fits a
+    // "wrong value" symptom instead of a parse error far better than
+    // any hypothesis tried before this source was found.
+    if !email.to.is_empty() {
+        builder.leaf(mail::TO, email.to.clone());
+    }
+    if !email.cc.is_empty() {
+        builder.leaf(mail::CC, email.cc);
+    }
+    if !email.from.is_empty() {
+        builder.leaf(mail::FROM, email.from);
+    }
     builder.leaf(mail::SUBJECT, email.subject);
     if let Some(received_at) = email.received_at {
         // JMAP receivedAt is ISO 8601 ("2026-08-24T02:05:00Z"); MS-ASEMAIL
         // DateReceived requires the compact EAS form (no dashes/colons).
-        // This was sent raw for a long time -- iOS silently mis-renders (or
-        // ignores) an ISO-formatted DateReceived, which showed up live as
-        // "timestamps are off" on every synced message.
         let formatted = eas_datetime(&received_at);
         tracing::debug!(
             server_id = email_id,
@@ -1221,18 +1246,12 @@ fn write_email_fields(
             "email has no receivedAt -- DateReceived omitted entirely"
         );
     }
-    if !email.from.is_empty() {
-        builder.leaf(mail::FROM, email.from);
-    }
     if !email.to.is_empty() {
-        builder.leaf(mail::TO, email.to.clone());
         builder.leaf(mail::DISPLAY_TO, email.to);
-    }
-    if !email.cc.is_empty() {
-        builder.leaf(mail::CC, email.cc);
     }
     builder.leaf(mail::IMPORTANCE, "1");
     builder.leaf(mail::READ, if email.read { "1" } else { "0" });
+    builder.leaf(mail::MESSAGE_CLASS, "IPM.Note");
     // Metadata only (no content -- see the project's logging constraint on
     // mail bodies): lets a body-not-rendering report be diagnosed without
     // needing to inspect an account's real mail.
@@ -1243,6 +1262,10 @@ fn write_email_fields(
         body_len = email.body.as_ref().map(|b| b.value.len()),
         "email body summary"
     );
+    // NativeBodyType is captured here but emitted AFTER Attachments below,
+    // matching z-push's real appended order (Body, Attachments,
+    // NativeBodyType) -- this gateway had it right after Body instead.
+    let mut native_body_type = None;
     if let Some(body) = email.body {
         // Real structural bug, found via the full z-push-stalwart-jmap
         // source (PR #187): AirSyncBase:Preview is a CHILD of Body (in
@@ -1257,7 +1280,7 @@ fn write_email_fields(
         // a schema position iOS's parser doesn't associate with the
         // list-view snippet at all.
         let preview_text = plain_text_preview(&body);
-        let native_type = body.body_type;
+        native_body_type = Some(body.body_type);
         let (out_type, out_value, full_len, truncated) = apply_body_preference(body, body_pref);
         builder.start(base::BODY);
         builder.leaf(base::TYPE, out_type.eas_value());
@@ -1268,7 +1291,6 @@ fn write_email_fields(
         builder.leaf(base::DATA, out_value);
         builder.leaf(base::PREVIEW, preview_text);
         builder.end();
-        builder.leaf(base::NATIVE_BODY_TYPE, native_type.eas_value());
     }
     if !email.attachments.is_empty() {
         builder.start(base::ATTACHMENTS);
@@ -1317,6 +1339,9 @@ fn write_email_fields(
             builder.end();
         }
         builder.end();
+    }
+    if let Some(native_type) = native_body_type {
+        builder.leaf(base::NATIVE_BODY_TYPE, native_type.eas_value());
     }
 }
 
@@ -2388,6 +2413,77 @@ mod tests {
         assert_eq!(out_value, "short");
         assert_eq!(full_len, 5);
         assert!(!truncated);
+    }
+
+    #[test]
+    fn write_email_fields_outer_order_matches_syncmail_at_protocol_14() {
+        // Real bug, found via the full z-push-stalwart-jmap source (PR
+        // #187): src/lib/syncobjects/syncmail.php's own $mapping, once
+        // its >=2.5/>=12.0/>=14.0 gates and unset() calls are applied at
+        // protocol 14.0 (this gateway's now-clamped ceiling), has a
+        // final field order of To, Cc, From, Subject, DateReceived,
+        // DisplayTo, Importance, Read, MessageClass, [Body],
+        // [Attachments], [NativeBodyType]. This gateway had MessageClass
+        // and Subject first, DateReceived third, From/To/DisplayTo/Cc
+        // all out of order, and Attachments after NativeBodyType instead
+        // of before -- almost nothing was in the right slot. Likely
+        // explains the session's original "every message shows the same
+        // time" symptom: DateReceived was always proven correct on the
+        // wire, but a field in the wrong slot can be silently
+        // misassigned by iOS's position-sensitive parser rather than
+        // hard-rejected (the same failure class already confirmed for
+        // Attachment/Preview/Notes).
+        let email = Email {
+            id: "email-1".to_owned(),
+            mailbox_ids: vec![],
+            subject: "Subject".to_owned(),
+            received_at: Some("2026-08-24T02:05:00Z".to_owned()),
+            keywords: vec![],
+            from: "sender@example.com".to_owned(),
+            to: "recipient@example.com".to_owned(),
+            cc: "cc@example.com".to_owned(),
+            read: true,
+            body: Some(EmailBody {
+                body_type: EmailBodyType::Plain,
+                value: "Hello".to_owned(),
+            }),
+            attachments: vec![EmailAttachment {
+                blob_id: "blob-1".to_owned(),
+                name: "file.txt".to_owned(),
+                content_type: "text/plain".to_owned(),
+                size: 10,
+            }],
+        };
+        let mut builder = DocumentBuilder::new();
+        write_email_fields(&mut builder, "email-1", email, None);
+        let doc = builder.finish();
+
+        use crate::wbxml::eas::email as mail;
+        let expected_order = [
+            (mail::TO.code_page, mail::TO.token),
+            (mail::CC.code_page, mail::CC.token),
+            (mail::FROM.code_page, mail::FROM.token),
+            (mail::SUBJECT.code_page, mail::SUBJECT.token),
+            (mail::DATE_RECEIVED.code_page, mail::DATE_RECEIVED.token),
+            (mail::DISPLAY_TO.code_page, mail::DISPLAY_TO.token),
+            (mail::IMPORTANCE.code_page, mail::IMPORTANCE.token),
+            (mail::READ.code_page, mail::READ.token),
+            (mail::MESSAGE_CLASS.code_page, mail::MESSAGE_CLASS.token),
+            (base::BODY.code_page, base::BODY.token),
+            (base::ATTACHMENTS.code_page, base::ATTACHMENTS.token),
+            (base::NATIVE_BODY_TYPE.code_page, base::NATIVE_BODY_TYPE.token),
+        ];
+        let actual_order: Vec<_> = doc
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                Node::Start(t) if expected_order.contains(&(t.code_page, t.token)) => {
+                    Some((t.code_page, t.token))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(actual_order, expected_order);
     }
 
     #[test]
