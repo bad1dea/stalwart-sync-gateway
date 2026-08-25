@@ -332,7 +332,7 @@ impl JmapClient {
                         "path": "/ids"
                     },
                     "properties": [
-                        "id", "mailboxIds", "keywords", "receivedAt", "subject",
+                        "id", "blobId", "mailboxIds", "keywords", "receivedAt", "subject",
                         "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments"
                     ],
                     "fetchAllBodyValues": true,
@@ -526,7 +526,7 @@ impl JmapClient {
                 "accountId": account_id,
                 "ids": [email_id],
                 "properties": [
-                    "id", "mailboxIds", "keywords", "receivedAt", "subject",
+                    "id", "blobId", "mailboxIds", "keywords", "receivedAt", "subject",
                     "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments"
                 ],
                 "fetchAllBodyValues": true,
@@ -1053,6 +1053,8 @@ pub(crate) struct QueryResponse {
 struct EmailObject {
     id: String,
     #[serde(default)]
+    blob_id: Option<String>,
+    #[serde(default)]
     mailbox_ids: BTreeMap<String, bool>,
     #[serde(default)]
     keywords: BTreeMap<String, bool>,
@@ -1148,6 +1150,7 @@ impl From<EmailObject> for Email {
             read: value.keywords.get("$seen").copied().unwrap_or(false),
             body,
             attachments,
+            blob_id: value.blob_id,
         }
     }
 }

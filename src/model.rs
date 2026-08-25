@@ -52,6 +52,13 @@ pub struct Email {
     pub read: bool,
     pub body: Option<EmailBody>,
     pub attachments: Vec<EmailAttachment>,
+    /// The blobId of the message's own raw RFC822 source (JMAP Email
+    /// objects expose this directly, distinct from any attachment's own
+    /// blobId) -- needed to answer a BodyPreference Type=4 (MIME) fetch,
+    /// which real EAS clients (confirmed live: a real iPad) request when
+    /// actually opening a message, as opposed to the plain/HTML type the
+    /// list-sync view asks for.
+    pub blob_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

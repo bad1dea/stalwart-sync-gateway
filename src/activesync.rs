@@ -532,36 +532,23 @@ async fn settings(
         // this to Stalwart's ManageSieve vacation extension is the real
         // fix; this stub only stops the client-side hang.
         //
-        // Real structural bug, found via the full z-push-stalwart-jmap
-        // source (PR #187): src/lib/syncobjects/syncoof.php's own
-        // $mapping repeats OofMessage once per AppliesTo* variant
-        // (Internal, ExternalKnown, ExternalUnknown -- see
-        // syncoofmessage.php's own mapping for the fields each one
-        // carries), NOT a single OofMessage with only
-        // AppliesToInternal. iOS's Automatic Replies screen still
-        // spinning forever with only the token-number/order fixes
-        // applied elsewhere this session is very likely because it was
-        // waiting for the two OofMessage blocks (ExternalKnown,
-        // ExternalUnknown) this gateway never sent at all, not just a
-        // position bug within the one block it did send.
+        // Real bug, found via a direct live wire comparison against
+        // z-push for the identical Get request (Options>BodyType=TEXT,
+        // matching what the real device actually sends): z-push's real
+        // response for OofState=0 is JUST Status/Get/OofState -- no
+        // OofMessage blocks at all. An earlier fix this session added 3
+        // repeated OofMessage blocks unconditionally, reasoning from
+        // syncoof.php's $mapping alone without confirming against a live
+        // response -- wrong: OofMessage only appears when Out-of-Office
+        // is actually enabled (nothing to describe per-recipient-type
+        // when it's off). Sending them anyway is the same "unrecognized
+        // extra content" failure class as ContentType/PrimarySmtpAddress
+        // -- match z-push's real minimal shape instead.
         builder.start(set::OOF);
         builder.leaf(set::STATUS, "1");
         if !is_oof_set {
             builder.start(set::GET);
             builder.leaf(set::OOF_STATE, "0");
-            for applies_to in [
-                set::APPLIES_TO_INTERNAL,
-                set::APPLIES_TO_EXTERNAL_KNOWN,
-                set::APPLIES_TO_EXTERNAL_UNKNOWN,
-            ] {
-                builder.start(set::OOF_MESSAGE);
-                builder.start(applies_to);
-                builder.end();
-                builder.leaf(set::ENABLED, "0");
-                builder.leaf(set::REPLY_MESSAGE, "");
-                builder.leaf(set::BODY_TYPE, "Text");
-                builder.end();
-            }
             builder.end();
         }
         builder.end();
@@ -890,7 +877,8 @@ async fn sync_mail(
             false
         };
         let fetch_responses = if is_mail_collection && !collection.commands.is_empty() {
-            resolve_fetch_commands(state, auth, &collection.commands).await
+            resolve_fetch_commands(state, auth, &collection.commands, collection.body_pref_type)
+                .await
         } else {
             Vec::new()
         };
@@ -994,10 +982,15 @@ async fn sync_mail(
                 let body_pref = BodyPreference {
                     body_type: collection.body_pref_type,
                     truncation_size: collection.body_pref_truncation_size,
+                    // MIME (Type=4) is what a real device asks for when
+                    // actually opening a message (see
+                    // resolve_fetch_commands's own docs) -- the list-sync
+                    // Add path never needs a pre-fetched MIME blob.
+                    mime_data: None,
                 };
                 builder.start(air::COMMANDS);
                 for email in emails_to_send {
-                    write_email_add(&mut builder, email, Some(body_pref));
+                    write_email_add(&mut builder, email, Some(body_pref.clone()));
                 }
                 builder.end();
             }
@@ -1132,11 +1125,59 @@ async fn resolve_fetch_commands(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
     commands: &[wbxml::eas::SyncClientCommand],
-) -> Vec<(String, anyhow::Result<Option<crate::model::Email>>)> {
+    body_pref_type: Option<u8>,
+) -> Vec<(String, anyhow::Result<Option<(crate::model::Email, Option<String>)>>)> {
     let mut results = Vec::new();
     for command in commands {
         if command.kind == wbxml::eas::SyncClientCommandKind::Fetch {
             let result = state.jmap.get_email_by_id(auth, &command.server_id).await;
+            let result = match result {
+                Ok(Some(email)) => {
+                    // Real bug, found via a direct live wire comparison
+                    // against z-push for this exact scenario: opening a
+                    // message sends its OWN BodyPreference (Type=4/MIME,
+                    // MimeSupport=2 -- confirmed live from a real iPad),
+                    // completely separate from the list-sync's Type=1
+                    // preference. This gateway had no handling for Type=4
+                    // at all -- it fell through and sent the original
+                    // HTML untouched, no MIME envelope, which is very
+                    // likely why the message body showed as literal
+                    // "<!DOCTYPE html>..." source text rather than
+                    // rendering: iOS expected a MIME-wrapped part and got
+                    // raw markup with no MIME headers to make sense of it.
+                    // z-push's own selectBody() downloads the email's
+                    // raw RFC822 blob directly when MIME is requested
+                    // (config/z-push/jmap.php) rather than building one
+                    // by hand -- do the same here.
+                    let mime = if body_pref_type == Some(4) {
+                        match &email.blob_id {
+                            Some(blob_id) => {
+                                match state
+                                    .jmap
+                                    .download_blob(auth, blob_id, "message.eml")
+                                    .await
+                                {
+                                    Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            %error,
+                                            server_id = command.server_id,
+                                            "Sync Fetch: MIME blob download failed, falling back to non-MIME body"
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+                    Ok(Some((email, mime)))
+                }
+                Ok(None) => Ok(None),
+                Err(error) => Err(error),
+            };
             results.push((command.server_id.clone(), result));
         }
     }
@@ -1148,7 +1189,7 @@ async fn resolve_fetch_commands(
 /// can't drift.
 fn write_fetch_responses(
     builder: &mut wbxml::eas::DocumentBuilder,
-    results: Vec<(String, anyhow::Result<Option<crate::model::Email>>)>,
+    results: Vec<(String, anyhow::Result<Option<(crate::model::Email, Option<String>)>>)>,
 ) {
     use wbxml::eas::airsync as air;
 
@@ -1160,10 +1201,15 @@ fn write_fetch_responses(
         builder.start(air::FETCH);
         builder.leaf(air::SERVER_ID, server_id.clone());
         match result {
-            Ok(Some(email)) => {
+            Ok(Some((email, mime))) => {
                 builder.leaf(air::STATUS, "1");
                 builder.start(air::APPLICATION_DATA);
-                write_email_fields(builder, &server_id, email, None);
+                let body_pref = mime.map(|mime_data| BodyPreference {
+                    body_type: Some(4),
+                    truncation_size: None,
+                    mime_data: Some(mime_data),
+                });
+                write_email_fields(builder, &server_id, email, body_pref);
                 builder.end();
             }
             Ok(None) => {
@@ -1189,10 +1235,14 @@ fn write_fetch_responses(
 /// Sync-embedded Fetch) means "always full body" -- correct there, since
 /// those are the explicit "user opened this message" fetches, not the
 /// list sync.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct BodyPreference {
     body_type: Option<u8>,
     truncation_size: Option<usize>,
+    /// Pre-fetched raw RFC822 MIME source, when body_type == Some(4). Has
+    /// to be fetched async (a JMAP blob download) before write_email_fields
+    /// runs, since that function isn't async -- see resolve_fetch_commands.
+    mime_data: Option<String>,
 }
 
 fn write_email_add(
@@ -1312,16 +1362,37 @@ fn write_email_fields(
         // list-view snippet at all.
         let preview_text = plain_text_preview(&body);
         native_body_type = Some(body.body_type);
-        let (out_type, out_value, full_len, truncated) = apply_body_preference(body, body_pref);
-        builder.start(base::BODY);
-        builder.leaf(base::TYPE, out_type.eas_value());
-        // Full untruncated size, even when Data below is cut short -- this
-        // is how the client knows there's more to fetch via ItemOperations.
-        builder.leaf(base::ESTIMATED_DATA_SIZE, full_len.to_string());
-        builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
-        builder.leaf(base::DATA, out_value);
-        builder.leaf(base::PREVIEW, preview_text);
-        builder.end();
+        // Real bug, found via a direct live wire comparison against
+        // z-push for a real message-open: the request's own
+        // BodyPreference asked for Type=4 (MIME), not plain/HTML, and
+        // this gateway had no MIME path at all -- see
+        // resolve_fetch_commands's own docs for the full story. A MIME
+        // reply bypasses apply_body_preference's HTML/plain conversion
+        // entirely: the pre-fetched raw RFC822 source IS the Data,
+        // Type is the literal "4", verbatim (not truncated -- z-push's
+        // own MIME path doesn't truncate it either).
+        if let Some(mime) = body_pref.as_ref().and_then(|p| p.mime_data.clone()) {
+            builder.start(base::BODY);
+            builder.leaf(base::TYPE, "4");
+            builder.leaf(base::ESTIMATED_DATA_SIZE, mime.len().to_string());
+            builder.leaf(base::TRUNCATED, "0");
+            builder.leaf(base::DATA, mime);
+            builder.leaf(base::PREVIEW, preview_text);
+            builder.end();
+        } else {
+            let (out_type, out_value, full_len, truncated) =
+                apply_body_preference(body, body_pref);
+            builder.start(base::BODY);
+            builder.leaf(base::TYPE, out_type.eas_value());
+            // Full untruncated size, even when Data below is cut short --
+            // this is how the client knows there's more to fetch via
+            // ItemOperations.
+            builder.leaf(base::ESTIMATED_DATA_SIZE, full_len.to_string());
+            builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
+            builder.leaf(base::DATA, out_value);
+            builder.leaf(base::PREVIEW, preview_text);
+            builder.end();
+        }
     }
     if !email.attachments.is_empty() {
         builder.start(base::ATTACHMENTS);
@@ -2514,6 +2585,7 @@ mod tests {
         let pref = BodyPreference {
             body_type: Some(1),
             truncation_size: Some(500),
+            mime_data: None,
         };
         let (out_type, out_value, full_len, truncated) = apply_body_preference(body, Some(pref));
         assert_eq!(out_type, EmailBodyType::Plain);
@@ -2543,6 +2615,7 @@ mod tests {
         let pref = BodyPreference {
             body_type: Some(1),
             truncation_size: Some(500),
+            mime_data: None,
         };
         let (_, out_value, _, truncated) = apply_body_preference(body, Some(pref));
         assert_eq!(out_value, "Hello world");
@@ -2558,6 +2631,7 @@ mod tests {
         let pref = BodyPreference {
             body_type: Some(1),
             truncation_size: Some(500),
+            mime_data: None,
         };
         let (_, out_value, full_len, truncated) = apply_body_preference(body, Some(pref));
         assert_eq!(out_value, "short");
@@ -2603,6 +2677,7 @@ mod tests {
                 content_type: "text/plain".to_owned(),
                 size: 10,
             }],
+            blob_id: None,
         };
         let mut builder = DocumentBuilder::new();
         write_email_fields(&mut builder, "email-1", email, None);
@@ -2660,6 +2735,7 @@ mod tests {
                 value: "Hello world".to_owned(),
             }),
             attachments: vec![],
+            blob_id: None,
         };
         let mut builder = DocumentBuilder::new();
         write_email_fields(&mut builder, "email-1", email, None);
@@ -2737,6 +2813,7 @@ mod tests {
                 content_type: "application/pdf".to_owned(),
                 size: 1234,
             }],
+            blob_id: None,
         };
         let mut builder = DocumentBuilder::new();
         write_email_fields(&mut builder, "email-1", email, None);
@@ -2779,6 +2856,7 @@ mod tests {
         let pref = BodyPreference {
             body_type: Some(2),
             truncation_size: Some(10),
+            mime_data: None,
         };
         let (out_type, out_value, _, truncated) = apply_body_preference(body, Some(pref));
         assert_eq!(out_type, EmailBodyType::Html);
