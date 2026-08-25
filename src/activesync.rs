@@ -16,7 +16,28 @@ use crate::{
     wbxml,
 };
 
-const SUPPORTED_PROTOCOLS: &str = "12.1,14.0,14.1,16.0,16.1";
+// Real bug, root-caused via the full z-push-stalwart-jmap source (PR #187,
+// pinned in config/z-push/Dockerfile) -- verified against
+// src/lib/syncobjects/*.php: nearly every WBXML class (SyncMail,
+// SyncContact, SyncAppointment, SyncUserInformation, SyncBaseAttachment,
+// ...) conditionally changes its field set -- sometimes its ENTIRE shape,
+// e.g. SyncUserInformation's EmailAddresses moves from a direct child of
+// Get to nested inside Accounts>Account>EmailAddresses at >=14.1 -- based
+// on `Request::GetProtocolVersion()`, which iOS derives from the HIGHEST
+// version this server advertises in MS-ASProtocolVersions. This gateway
+// implements none of that version-conditional branching anywhere; it
+// always sends the <=14.0 shape regardless of what it claims to support.
+// Advertising up to 16.1 (as this did) let iOS negotiate a protocol
+// version whose schema this gateway doesn't actually speak, which is the
+// root cause behind the whole family of "No parse rule ..." / "We have
+// an int in our WBXML" errors seen live (Attachment's ContentType field
+// is itself gated to >=16.0 in the real source -- confirmed the same
+// day, independently, via idevicesyslog, before this root cause was
+// found). Matching z-push's own advertised ceiling exactly (confirmed
+// against a live z-push OPTIONS response: "12.0,12.1,14.0") makes iOS
+// negotiate the SAME protocol version z-push does, so every class
+// collapses onto the single shape this gateway actually implements.
+const SUPPORTED_PROTOCOLS: &str = "12.0,12.1,14.0";
 const SUPPORTED_COMMANDS: &str = "Sync,SendMail,SmartForward,SmartReply,GetAttachment,FolderSync,FolderCreate,FolderDelete,FolderUpdate,MoveItems,GetItemEstimate,MeetingResponse,Search,Settings,Ping,ItemOperations,Provision,ResolveRecipients,ValidateCert,Find";
 
 #[derive(Debug, Deserialize)]
@@ -1213,13 +1234,19 @@ fn write_email_fields(
         "email body summary"
     );
     if let Some(body) = email.body {
-        // The list view's snippet line -- a real, dedicated field for this
-        // (AirSyncBase:Preview), separate from Body. Never sending one
-        // meant iOS had nothing to summarize with and fell back to
-        // showing raw markup from Body's Data verbatim as the preview
-        // line -- confirmed live (every message's preview was literal
-        // "<html xmlns:v=..." source, not rendered/extracted text).
-        builder.leaf(base::PREVIEW, plain_text_preview(&body));
+        // Real structural bug, found via the full z-push-stalwart-jmap
+        // source (PR #187): AirSyncBase:Preview is a CHILD of Body (in
+        // SyncBaseBody's own $mapping, appended after Data), not a
+        // sibling of Body under ApplicationData/Email. This gateway had
+        // it as a sibling, written BEFORE Body even opened. iOS never
+        // hard-errored on it (unlike the Attachment/Settings bugs) --
+        // it silently ignored a Preview in the wrong position instead,
+        // which is why every message's list-row preview was still
+        // showing raw HTML/markup even after the "strip tags" fix
+        // landed: the correctly-stripped Preview text was being sent to
+        // a schema position iOS's parser doesn't associate with the
+        // list-view snippet at all.
+        let preview_text = plain_text_preview(&body);
         let native_type = body.body_type;
         let (out_type, out_value, full_len, truncated) = apply_body_preference(body, body_pref);
         builder.start(base::BODY);
@@ -1229,6 +1256,7 @@ fn write_email_fields(
         builder.leaf(base::ESTIMATED_DATA_SIZE, full_len.to_string());
         builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
         builder.leaf(base::DATA, out_value);
+        builder.leaf(base::PREVIEW, preview_text);
         builder.end();
         builder.leaf(base::NATIVE_BODY_TYPE, native_type.eas_value());
     }
@@ -2198,6 +2226,9 @@ fn eas_options_response(status: StatusCode) -> Response {
         "MS-ASProtocolCommands",
         HeaderValue::from_static(SUPPORTED_COMMANDS),
     );
+    // z-push (the working reference) sends this on every OPTIONS response
+    // too -- this gateway never did. Matches the protocol ceiling above.
+    headers.insert("MS-Server-ActiveSync", HeaderValue::from_static("14.0"));
     headers.insert("X-AspNet-Version", HeaderValue::from_static("4.0.30319"));
     headers.insert("Content-Length", HeaderValue::from_static("0"));
     response
@@ -2341,6 +2372,68 @@ mod tests {
         assert_eq!(out_value, "short");
         assert_eq!(full_len, 5);
         assert!(!truncated);
+    }
+
+    #[test]
+    fn write_email_fields_preview_is_nested_inside_body_after_data() {
+        // Real structural bug, found via the full z-push-stalwart-jmap
+        // source (PR #187): AirSyncBase:Preview is a child of Body (in
+        // SyncBaseBody's own $mapping, appended after Data), not a
+        // sibling of Body under ApplicationData. iOS never hard-errored
+        // on the old (wrong) position -- it silently ignored it, which
+        // is why previews kept showing raw markup even after the
+        // separate "strip HTML tags" fix landed.
+        let email = Email {
+            id: "email-1".to_owned(),
+            mailbox_ids: vec![],
+            subject: "Subject".to_owned(),
+            received_at: None,
+            keywords: vec![],
+            from: String::new(),
+            to: String::new(),
+            cc: String::new(),
+            read: false,
+            body: Some(EmailBody {
+                body_type: EmailBodyType::Plain,
+                value: "Hello world".to_owned(),
+            }),
+            attachments: vec![],
+        };
+        let mut builder = DocumentBuilder::new();
+        write_email_fields(&mut builder, "email-1", email, None);
+        let doc = builder.finish();
+
+        let mut depth = 0i32;
+        let mut body_depth = None;
+        let mut preview_depth = None;
+        let mut data_seen_before_preview = false;
+        let mut data_seen = false;
+        for node in &doc.nodes {
+            match node {
+                Node::Start(t) if t.code_page == base::PAGE && t.token == base::BODY.token => {
+                    body_depth = Some(depth);
+                    depth += 1;
+                }
+                Node::Start(t) if t.code_page == base::PAGE && t.token == base::DATA.token => {
+                    data_seen = true;
+                    depth += 1;
+                }
+                Node::Start(t) if t.code_page == base::PAGE && t.token == base::PREVIEW.token => {
+                    preview_depth = Some(depth);
+                    data_seen_before_preview = data_seen;
+                    depth += 1;
+                }
+                Node::Start(_) => depth += 1,
+                Node::End => depth -= 1,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            preview_depth,
+            body_depth.map(|d| d + 1),
+            "Preview must be one level deeper than Body -- i.e. nested inside it"
+        );
+        assert!(data_seen_before_preview, "Data must come before Preview");
     }
 
     #[test]
