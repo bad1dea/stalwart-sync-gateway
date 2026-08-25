@@ -212,6 +212,15 @@ pub async fn post_handler(
                 if command.eq_ignore_ascii_case("FolderSync") {
                     return folder_sync(&state, &auth, &document, command).await;
                 }
+                if command.eq_ignore_ascii_case("FolderCreate") {
+                    return folder_create(&state, &auth, &document, command).await;
+                }
+                if command.eq_ignore_ascii_case("FolderDelete") {
+                    return folder_delete(&state, &auth, &document, command).await;
+                }
+                if command.eq_ignore_ascii_case("FolderUpdate") {
+                    return folder_update(&state, &auth, &document, command).await;
+                }
                 if command.eq_ignore_ascii_case("Sync") {
                     return sync_mail(&state, &auth, &query, &document, command).await;
                 }
@@ -2748,6 +2757,223 @@ async fn folder_sync(
         .into_response()
 }
 
+/// A `note_`/`ab_`/`cal_`-prefixed collection id is a synthetic id this
+/// gateway itself invents for Notes/Contacts/Calendar (see
+/// `jmap::client::collections()`) -- never a real JMAP `Mailbox` id.
+/// FolderCreate/FolderUpdate/FolderDelete are mail-only (per the command
+/// matrix: no create/rename/delete primitive exists for the
+/// heuristically-derived address-book/calendar listings), so any of
+/// these prefixes on a ParentId/ServerId is rejected before ever calling
+/// JMAP, rather than relying on it to fail incidentally.
+fn is_non_mail_collection_id(id: &str) -> bool {
+    id.starts_with("note_") || id.starts_with("ab_") || id.starts_with("cal_")
+}
+
+/// [MS-ASCMD] section 2.2.1.3. Request: SyncKey, ParentId, DisplayName,
+/// Type (in that order, verified against section 6.9's XML schema).
+/// Response: Status, SyncKey, ServerId -- SyncKey/ServerId are
+/// `minOccurs="0"` in the schema; this always includes SyncKey (echoed
+/// back unchanged -- this gateway doesn't maintain incremental
+/// folder-hierarchy sync state beyond FolderSync's own always-full-relist
+/// scheme, so there's nothing to advance here) and ServerId only on
+/// success. Status codes verified against section 2.2.3.177.3.
+async fn folder_create(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    document: &wbxml::Document,
+    command: &str,
+) -> Response {
+    use wbxml::eas::folder_hierarchy as fh;
+
+    let sync_key = wbxml::eas::find_text_after(document, fh::SYNC_KEY).unwrap_or("0");
+    let Some(parent_id) = wbxml::eas::find_text_after(document, fh::PARENT_ID) else {
+        return folder_create_status_response(state, command, "10", sync_key, None);
+    };
+    let Some(display_name) = wbxml::eas::find_text_after(document, fh::DISPLAY_NAME) else {
+        return folder_create_status_response(state, command, "10", sync_key, None);
+    };
+
+    if parent_id != "0" && is_non_mail_collection_id(parent_id) {
+        return folder_create_status_response(state, command, "5", sync_key, None);
+    }
+    let jmap_parent_id = if parent_id == "0" {
+        None
+    } else {
+        Some(parent_id)
+    };
+
+    match state
+        .jmap
+        .create_mailbox(auth, jmap_parent_id, display_name)
+        .await
+    {
+        Ok(crate::jmap::client::CreateMailboxOutcome::Created(id)) => {
+            folder_create_status_response(state, command, "1", sync_key, Some(id))
+        }
+        Ok(crate::jmap::client::CreateMailboxOutcome::NameExists) => {
+            folder_create_status_response(state, command, "2", sync_key, None)
+        }
+        Ok(crate::jmap::client::CreateMailboxOutcome::ParentNotFound) => {
+            folder_create_status_response(state, command, "5", sync_key, None)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "FolderCreate failed");
+            folder_create_status_response(state, command, "6", sync_key, None)
+        }
+    }
+}
+
+fn folder_create_status_response(
+    state: &AppState,
+    command: &str,
+    status: &str,
+    sync_key: &str,
+    server_id: Option<String>,
+) -> Response {
+    use wbxml::eas::folder_hierarchy as fh;
+    let mut builder = wbxml::eas::DocumentBuilder::new();
+    builder.start(fh::FOLDER_CREATE);
+    builder.leaf(fh::STATUS, status);
+    builder.leaf(fh::SYNC_KEY, sync_key.to_owned());
+    if let Some(server_id) = server_id {
+        builder.leaf(fh::SERVER_ID, server_id);
+    }
+    builder.end();
+    let body = wbxml::encode_document(&builder.finish());
+    state
+        .metrics
+        .eas_requests_total
+        .with_label_values(&[command, "200"])
+        .inc();
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/vnd.ms-sync.wbxml")],
+        body,
+    )
+        .into_response()
+}
+
+/// [MS-ASCMD] section 2.2.1.4. Request: SyncKey, ServerId. Response:
+/// Status, SyncKey. Status codes verified against section 2.2.3.177.4.
+async fn folder_delete(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    document: &wbxml::Document,
+    command: &str,
+) -> Response {
+    use wbxml::eas::folder_hierarchy as fh;
+
+    let sync_key = wbxml::eas::find_text_after(document, fh::SYNC_KEY).unwrap_or("0");
+    let Some(server_id) = wbxml::eas::find_text_after(document, fh::SERVER_ID) else {
+        return folder_status_response(state, command, fh::FOLDER_DELETE, "10", sync_key);
+    };
+
+    if is_non_mail_collection_id(server_id) {
+        return folder_status_response(state, command, fh::FOLDER_DELETE, "4", sync_key);
+    }
+
+    match state.jmap.destroy_mailbox(auth, server_id).await {
+        Ok(crate::jmap::client::DestroyMailboxOutcome::Destroyed) => {
+            folder_status_response(state, command, fh::FOLDER_DELETE, "1", sync_key)
+        }
+        Ok(crate::jmap::client::DestroyMailboxOutcome::NotFound) => {
+            folder_status_response(state, command, fh::FOLDER_DELETE, "4", sync_key)
+        }
+        Ok(crate::jmap::client::DestroyMailboxOutcome::Forbidden) => {
+            folder_status_response(state, command, fh::FOLDER_DELETE, "3", sync_key)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "FolderDelete failed");
+            folder_status_response(state, command, fh::FOLDER_DELETE, "6", sync_key)
+        }
+    }
+}
+
+/// [MS-ASCMD] section 2.2.1.6. Request: SyncKey, ServerId, ParentId,
+/// DisplayName (in that order, verified against section 6.16's XML
+/// schema). Response: Status, SyncKey. Status codes verified against
+/// section 2.2.3.177.6.
+async fn folder_update(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    document: &wbxml::Document,
+    command: &str,
+) -> Response {
+    use wbxml::eas::folder_hierarchy as fh;
+
+    let sync_key = wbxml::eas::find_text_after(document, fh::SYNC_KEY).unwrap_or("0");
+    let Some(server_id) = wbxml::eas::find_text_after(document, fh::SERVER_ID) else {
+        return folder_status_response(state, command, fh::FOLDER_UPDATE, "10", sync_key);
+    };
+    let Some(parent_id) = wbxml::eas::find_text_after(document, fh::PARENT_ID) else {
+        return folder_status_response(state, command, fh::FOLDER_UPDATE, "10", sync_key);
+    };
+    let Some(display_name) = wbxml::eas::find_text_after(document, fh::DISPLAY_NAME) else {
+        return folder_status_response(state, command, fh::FOLDER_UPDATE, "10", sync_key);
+    };
+
+    if is_non_mail_collection_id(server_id) || (parent_id != "0" && is_non_mail_collection_id(parent_id))
+    {
+        return folder_status_response(state, command, fh::FOLDER_UPDATE, "4", sync_key);
+    }
+    let jmap_parent_id = if parent_id == "0" {
+        None
+    } else {
+        Some(parent_id)
+    };
+
+    match state
+        .jmap
+        .update_mailbox(auth, server_id, jmap_parent_id, display_name)
+        .await
+    {
+        Ok(crate::jmap::client::UpdateMailboxOutcome::Updated) => {
+            folder_status_response(state, command, fh::FOLDER_UPDATE, "1", sync_key)
+        }
+        Ok(crate::jmap::client::UpdateMailboxOutcome::NotFound) => {
+            folder_status_response(state, command, fh::FOLDER_UPDATE, "4", sync_key)
+        }
+        Ok(crate::jmap::client::UpdateMailboxOutcome::Forbidden) => {
+            folder_status_response(state, command, fh::FOLDER_UPDATE, "2", sync_key)
+        }
+        Ok(crate::jmap::client::UpdateMailboxOutcome::NameExists) => {
+            folder_status_response(state, command, fh::FOLDER_UPDATE, "2", sync_key)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "FolderUpdate failed");
+            folder_status_response(state, command, fh::FOLDER_UPDATE, "6", sync_key)
+        }
+    }
+}
+
+/// Shared by FolderDelete/FolderUpdate -- both response shapes are
+/// identical (Status, SyncKey), differing only in the outer element name.
+fn folder_status_response(
+    state: &AppState,
+    command: &str,
+    outer: wbxml::token::Token,
+    status: &str,
+    sync_key: &str,
+) -> Response {
+    let mut builder = wbxml::eas::DocumentBuilder::new();
+    builder.start(outer);
+    builder.leaf(wbxml::eas::folder_hierarchy::STATUS, status);
+    builder.leaf(wbxml::eas::folder_hierarchy::SYNC_KEY, sync_key.to_owned());
+    builder.end();
+    let body = wbxml::encode_document(&builder.finish());
+    state
+        .metrics
+        .eas_requests_total
+        .with_label_values(&[command, "200"])
+        .inc();
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/vnd.ms-sync.wbxml")],
+        body,
+    )
+        .into_response()
+}
+
 fn next_sync_key(sync_key: &str) -> String {
     if sync_key == "0" {
         return "1".to_owned();
@@ -2798,7 +3024,7 @@ fn unauthorized() -> Response {
 mod tests {
     use super::{
         apply_body_preference, decode_entity_at, eas_datetime, eas_datetime_dashes,
-        plain_text_preview, write_email_fields, BodyPreference,
+        is_non_mail_collection_id, plain_text_preview, write_email_fields, BodyPreference,
     };
     use crate::model::{Email, EmailAttachment, EmailBody, EmailBodyType};
     use crate::wbxml::eas::{airsync_base as base, DocumentBuilder};
@@ -2807,6 +3033,18 @@ mod tests {
     #[test]
     fn eas_datetime_strips_dashes_and_colons() {
         assert_eq!(eas_datetime("2026-08-24T02:05:00Z"), "20260824T020500Z");
+    }
+
+    #[test]
+    fn is_non_mail_collection_id_rejects_the_synthetic_prefixes() {
+        // FolderCreate/Update/Delete are mail-only -- these prefixes are
+        // this gateway's own synthetic ids for Notes/Contacts/Calendar
+        // (see jmap::client::collections()), never a real Mailbox id.
+        assert!(is_non_mail_collection_id("note_q"));
+        assert!(is_non_mail_collection_id("ab_b"));
+        assert!(is_non_mail_collection_id("cal_b"));
+        assert!(!is_non_mail_collection_id("a"));
+        assert!(!is_non_mail_collection_id("0"));
     }
 
     #[test]

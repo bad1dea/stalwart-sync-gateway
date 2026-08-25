@@ -108,6 +108,37 @@ pub struct BasicAuthorization {
     password: String,
 }
 
+/// Outcome of a `Mailbox/set` create, mapped from Stalwart's real
+/// error `type` values -- confirmed live, not assumed from the JMAP
+/// spec's generic error vocabulary: `alreadyExists` on a name
+/// collision (with an `existingId`), `invalidProperties` (with a
+/// "Parent ID does not exist" description) on a bad `parentId`.
+pub enum CreateMailboxOutcome {
+    Created(String),
+    NameExists,
+    ParentNotFound,
+}
+
+/// Outcome of a `Mailbox/set` update, same live-confirmed error-type
+/// mapping approach as `CreateMailboxOutcome`. `forbidden` is
+/// Stalwart's real rejection for a protected folder (confirmed live
+/// against Inbox: "You are not allowed to delete Inbox, Junk or
+/// Trash folders." -- same wording/type for update).
+pub enum UpdateMailboxOutcome {
+    Updated,
+    NotFound,
+    Forbidden,
+    NameExists,
+}
+
+/// Outcome of a `Mailbox/set` destroy, backing `FolderDelete`. Same
+/// live-confirmed `notFound`/`forbidden` error types as update.
+pub enum DestroyMailboxOutcome {
+    Destroyed,
+    NotFound,
+    Forbidden,
+}
+
 impl JmapClient {
     pub fn new(config: Config) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder()
@@ -1012,6 +1043,207 @@ impl JmapClient {
             }),
         )
         .await
+    }
+
+    /// Mail-folder create, backing `FolderCreate`. `parent_id: None`
+    /// means the mailbox Root folder (EAS ParentId "0"), matching
+    /// [MS-ASCMD] section 2.2.1.3.
+    pub async fn create_mailbox(
+        &self,
+        auth: &AuthenticatedSession,
+        parent_id: Option<&str>,
+        name: &str,
+    ) -> anyhow::Result<CreateMailboxOutcome> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            anyhow::bail!("JMAP Mail capability is not available");
+        };
+        let mut create = serde_json::Map::new();
+        create.insert(
+            "name".to_owned(),
+            serde_json::Value::String(name.to_owned()),
+        );
+        if let Some(parent_id) = parent_id {
+            create.insert(
+                "parentId".to_owned(),
+                serde_json::Value::String(parent_id.to_owned()),
+            );
+        }
+        let mut create_map = serde_json::Map::new();
+        create_map.insert("c1".to_owned(), serde_json::Value::Object(create));
+
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Mailbox/set",
+                    serde_json::json!({ "accountId": account_id, "create": create_map }),
+                    "0",
+                )],
+            )
+            .await?;
+
+        for method in response.method_responses {
+            if method.0 == "Mailbox/set" {
+                if let Some(id) = method
+                    .1
+                    .get("created")
+                    .and_then(|c| c.get("c1"))
+                    .and_then(|m| m.get("id"))
+                    .and_then(|v| v.as_str())
+                {
+                    return Ok(CreateMailboxOutcome::Created(id.to_owned()));
+                }
+                // Don't key-match the notCreated map by our own "c1"
+                // client id -- take whatever single entry is there. Not
+                // just defensive: confirmed live that Stalwart's
+                // notUpdated/notDestroyed maps can echo back a
+                // TRUNCATED version of a long id we sent as the key
+                // (e.g. "doesnotexist999" came back as "esnotexist999"),
+                // so exact-matching the key we sent is not reliable.
+                let error_type = method
+                    .1
+                    .get("notCreated")
+                    .and_then(|nc| nc.as_object())
+                    .and_then(|nc| nc.values().next())
+                    .and_then(|e| e.get("type"))
+                    .and_then(|t| t.as_str());
+                return Ok(match error_type {
+                    Some("alreadyExists") => CreateMailboxOutcome::NameExists,
+                    Some("invalidProperties") => CreateMailboxOutcome::ParentNotFound,
+                    other => anyhow::bail!(
+                        "Mailbox/set create failed with unrecognized error type {other:?}: {:?}",
+                        method.1
+                    ),
+                });
+            } else if method.0 == "error" {
+                anyhow::bail!("JMAP method error in Mailbox/set create");
+            }
+        }
+        anyhow::bail!("JMAP Mailbox/set create response was missing")
+    }
+
+    /// Rename/reparent, backing `FolderUpdate`. `parent_id: None` means
+    /// move to Root (EAS ParentId "0").
+    pub async fn update_mailbox(
+        &self,
+        auth: &AuthenticatedSession,
+        mailbox_id: &str,
+        parent_id: Option<&str>,
+        name: &str,
+    ) -> anyhow::Result<UpdateMailboxOutcome> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            anyhow::bail!("JMAP Mail capability is not available");
+        };
+        let mut patch = serde_json::Map::new();
+        patch.insert(
+            "name".to_owned(),
+            serde_json::Value::String(name.to_owned()),
+        );
+        patch.insert(
+            "parentId".to_owned(),
+            parent_id
+                .map(|p| serde_json::Value::String(p.to_owned()))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        let mut update = serde_json::Map::new();
+        update.insert(mailbox_id.to_owned(), serde_json::Value::Object(patch));
+
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Mailbox/set",
+                    serde_json::json!({ "accountId": account_id, "update": update }),
+                    "0",
+                )],
+            )
+            .await?;
+
+        for method in response.method_responses {
+            if method.0 == "Mailbox/set" {
+                if method
+                    .1
+                    .get("updated")
+                    .and_then(|u| u.as_object())
+                    .is_some_and(|u| !u.is_empty())
+                {
+                    return Ok(UpdateMailboxOutcome::Updated);
+                }
+                let error_type = method
+                    .1
+                    .get("notUpdated")
+                    .and_then(|nu| nu.as_object())
+                    .and_then(|nu| nu.values().next())
+                    .and_then(|e| e.get("type"))
+                    .and_then(|t| t.as_str());
+                return Ok(match error_type {
+                    Some("notFound") => UpdateMailboxOutcome::NotFound,
+                    Some("forbidden") => UpdateMailboxOutcome::Forbidden,
+                    Some("alreadyExists") => UpdateMailboxOutcome::NameExists,
+                    other => anyhow::bail!(
+                        "Mailbox/set update failed with unrecognized error type {other:?}: {:?}",
+                        method.1
+                    ),
+                });
+            } else if method.0 == "error" {
+                anyhow::bail!("JMAP method error in Mailbox/set update");
+            }
+        }
+        anyhow::bail!("JMAP Mailbox/set update response was missing")
+    }
+
+    pub async fn destroy_mailbox(
+        &self,
+        auth: &AuthenticatedSession,
+        mailbox_id: &str,
+    ) -> anyhow::Result<DestroyMailboxOutcome> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            anyhow::bail!("JMAP Mail capability is not available");
+        };
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Mailbox/set",
+                    serde_json::json!({ "accountId": account_id, "destroy": [mailbox_id] }),
+                    "0",
+                )],
+            )
+            .await?;
+
+        for method in response.method_responses {
+            if method.0 == "Mailbox/set" {
+                let destroyed = method
+                    .1
+                    .get("destroyed")
+                    .and_then(|d| d.as_array())
+                    .is_some_and(|d| !d.is_empty());
+                if destroyed {
+                    return Ok(DestroyMailboxOutcome::Destroyed);
+                }
+                let error_type = method
+                    .1
+                    .get("notDestroyed")
+                    .and_then(|nd| nd.as_object())
+                    .and_then(|nd| nd.values().next())
+                    .and_then(|e| e.get("type"))
+                    .and_then(|t| t.as_str());
+                return Ok(match error_type {
+                    Some("notFound") => DestroyMailboxOutcome::NotFound,
+                    Some("forbidden") => DestroyMailboxOutcome::Forbidden,
+                    other => anyhow::bail!(
+                        "Mailbox/set destroy failed with unrecognized error type {other:?}: {:?}",
+                        method.1
+                    ),
+                });
+            } else if method.0 == "error" {
+                anyhow::bail!("JMAP method error in Mailbox/set destroy");
+            }
+        }
+        anyhow::bail!("JMAP Mailbox/set destroy response was missing")
     }
 
     pub async fn move_email(

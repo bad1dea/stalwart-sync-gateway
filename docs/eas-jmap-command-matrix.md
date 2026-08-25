@@ -24,10 +24,10 @@ own risk — not a prerequisite to implementing any single feature below).
 |---|---|---|---|---|---|
 | Autodiscover | 2.2.1.1 | 12.0 | ✅ | N/A (own endpoint) | Handled outside the `Cmd=` dispatch entirely, at `POST /Autodiscover/Autodiscover.xml` — not in the switch statement this table otherwise describes. Not independently re-verified this pass. |
 | Find | 2.2.1.2 | **16.1 only** (every tag in WBXML codepage 25 is 16.1-gated — confirmed in [MS-ASWBXML]'s own per-tag version column) | ⛔ *(today)* / 🟡 *(if 16.1 is ever re-enabled)* | `Email/query` (mailbox) — GAL half unclear, see Search below | Falsely advertised in `SUPPORTED_COMMANDS` (`activesync.rs:41`) despite having no handler — falls through to 501. Given the version gate, implementing this before deciding to re-advertise 16.1 is wasted effort; the version decision comes first. |
-| FolderCreate | 2.2.1.3 | 2.5 (all versions) | ⛔ *(today)* / 🟡 | `Mailbox/set` create (mail only) | Advertised, no handler, 501. Creates a folder as a child of a given parent; cannot create/subfolder a recipient-info cache. No create primitive obviously exists for the address-book/calendar listings this gateway heuristically derives (they aren't stored folder objects the way Mailbox is) — mail-only if built. |
-| FolderDelete | 2.2.1.4 | 2.5 | ⛔ *(today)* / 🟡 | `Mailbox/set` destroy | Same shape as FolderCreate. Advertised, 501. |
+| FolderCreate | 2.2.1.3 | 2.5 (all versions) | ✅ *(mail only)* | `Mailbox/set` create | `folder_create()` (`activesync.rs`). Mail-only, per the existing note here — no create primitive for the heuristically-derived address-book/calendar listings; a `note_`/`ab_`/`cal_`-prefixed ParentId is rejected (Status 5) before ever calling JMAP. Live-verified: success, name-collision (Status 2), and bad-parent (Status 5) paths all confirmed against the real account. |
+| FolderDelete | 2.2.1.4 | 2.5 | ✅ *(mail only)* | `Mailbox/set` destroy | `folder_delete()`. Same scoping as FolderCreate. Live-verified: success, protected-folder rejection (Status 3, confirmed against a real Inbox-destroy attempt), and not-found (Status 4) paths. |
 | FolderSync | 2.2.1.5 | 2.5 | ✅ | `Mailbox/get`, `AddressBook`-listing, `Calendar`-listing | `folder_sync()` (`activesync.rs:2406`). Always full-resync-as-Adds on key "0", fixed key "1" after — not a real incremental folder diff, functionally fine since the folder set rarely changes. |
-| FolderUpdate | 2.2.1.6 | 2.5 | ⛔ *(today)* / 🟡 | `Mailbox/set` update (rename/reparent) | Moves or renames a folder. Advertised, 501. Cannot target a recipient-info cache. |
+| FolderUpdate | 2.2.1.6 | 2.5 | ✅ *(mail only)* | `Mailbox/set` update (rename/reparent) | `folder_update()`. Same scoping as FolderCreate. Live-verified: rename+reparent success and not-found paths. |
 | GetAttachment | 2.2.1.7 | 2.5 | ✅ | `download_blob()` | Handled as the one plain-GET command outside the `Cmd=` POST scheme (`activesync.rs:62`, dispatched before the WBXML body is even parsed). `AttachmentName` is a synthetic `blobId\|\|name` string this gateway itself issues — no server-side state needed to resolve it. |
 | GetHierarchy | 2.2.1.8 | 2.5, legacy | ⛔ | N/A | **Not advertised in `SUPPORTED_COMMANDS` at all** — not even a 501 stub. Spec describes it as functionally superseded by FolderSync for any client that supports Sync-style folder hierarchy (email folders only, no sync state, no incremental updates) — genuinely low priority; FolderSync already covers everything GetHierarchy would for any modern client. |
 | GetItemEstimate | 2.2.1.9 | 2.5 | ✅ | Counts from `Email/query`/`ContactCard/query`/`CalendarEvent/query` | `get_item_estimate()` (`activesync.rs:573`). `FolderType` field bug fixed this session (commit `1d34644`). |
@@ -55,15 +55,15 @@ FolderDelete,FolderUpdate,MoveItems,GetItemEstimate,MeetingResponse,Search,
 Settings,Ping,ItemOperations,Provision,ResolveRecipients,ValidateCert,Find
 ```
 
-Real handlers exist for exactly 11 of these (Sync, SendMail, SmartForward,
-SmartReply, GetAttachment, FolderSync, MoveItems, GetItemEstimate, Settings, Ping,
-ItemOperations). The other 9 (FolderCreate, FolderDelete, FolderUpdate,
-MeetingResponse, Search, ResolveRecipients, ValidateCert, Find) fall through to a
-generic 501 — meaning a real client that checks `MS-ASProtocolCommands` before
-attempting one of these would see it listed as supported, then get a 501 when it
-actually tries. Whether any real client does that pre-check (vs. just trying and
-handling the error) is unverified; either way this is worth knowing before treating
-the advertised list as documentation of actual capability.
+Real handlers exist for 14 of these (Sync, SendMail, SmartForward, SmartReply,
+GetAttachment, FolderSync, FolderCreate, FolderDelete, FolderUpdate, MoveItems,
+GetItemEstimate, Settings, Ping, ItemOperations). The other 5 (MeetingResponse,
+Search, ResolveRecipients, ValidateCert, Find) fall through to a generic 501 —
+meaning a real client that checks `MS-ASProtocolCommands` before attempting one of
+these would see it listed as supported, then get a 501 when it actually tries.
+Whether any real client does that pre-check (vs. just trying and handling the
+error) is unverified; either way this is worth knowing before treating the
+advertised list as documentation of actual capability.
 
 ## Legacy commands confirmed absent from the current spec
 

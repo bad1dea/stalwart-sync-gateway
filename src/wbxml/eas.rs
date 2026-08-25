@@ -4,6 +4,14 @@ pub mod folder_hierarchy {
     use super::Token;
 
     pub const PAGE: u8 = 7;
+    // Full table verified directly against [MS-ASWBXML] v20250520 section
+    // 2.1.2.1.8 (Code Page 7: FolderHierarchy), not reconstructed from
+    // memory -- Folders/Folder (legacy GetHierarchy-only) and
+    // Delete/Update/FolderCreate/FolderDelete/FolderUpdate added this
+    // pass; everything else already present matched the primary source
+    // exactly (no corrections needed).
+    pub const FOLDERS: Token = tag(0x05, false);
+    pub const FOLDER: Token = tag(0x06, false);
     pub const DISPLAY_NAME: Token = tag(0x07, false);
     pub const SERVER_ID: Token = tag(0x08, false);
     pub const PARENT_ID: Token = tag(0x09, false);
@@ -11,7 +19,12 @@ pub mod folder_hierarchy {
     pub const STATUS: Token = tag(0x0c, false);
     pub const CHANGES: Token = tag(0x0e, false);
     pub const ADD: Token = tag(0x0f, false);
+    pub const DELETE: Token = tag(0x10, false);
+    pub const UPDATE: Token = tag(0x11, false);
     pub const SYNC_KEY: Token = tag(0x12, false);
+    pub const FOLDER_CREATE: Token = tag(0x13, false);
+    pub const FOLDER_DELETE: Token = tag(0x14, false);
+    pub const FOLDER_UPDATE: Token = tag(0x15, false);
     pub const FOLDER_SYNC: Token = tag(0x16, false);
     pub const COUNT: Token = tag(0x17, false);
 
