@@ -784,6 +784,14 @@ impl JmapClient {
     /// `duration` are converted to UTC EAS DateTimes here (not left for
     /// the WBXML writer) so the conversion has one call site to get
     /// right -- see `local_to_utc_eas`/`parse_iso8601_duration_seconds`.
+    /// Filters out `@type: "Task"` items -- `CalendarEvent/query` has no
+    /// server-side type filter (same as `tasks_in_calendar` already notes)
+    /// so this and the Tasks read path both list everything in the
+    /// calendar and split client-side. Without this, a Task with no
+    /// `start` (the common case today, since `save_task` never sets one)
+    /// happened to not visibly break anything -- iOS's Calendar app just
+    /// doesn't render a start-less event -- but that was luck, not a
+    /// guarantee, so filter explicitly rather than rely on it.
     pub async fn calendar_events_in_calendar(
         &self,
         auth: &AuthenticatedSession,
@@ -814,7 +822,7 @@ impl JmapClient {
                         "path": "/ids"
                     },
                     "properties": [
-                        "id", "title", "start", "timeZone", "duration",
+                        "id", "@type", "title", "start", "timeZone", "duration",
                         "locations", "showWithoutTime"
                     ]
                 }),
@@ -838,7 +846,12 @@ impl JmapClient {
                 "CalendarEvent/get" => {
                     let get: GetResponse<CalendarEventObject> = serde_json::from_value(method.1)
                         .context("invalid CalendarEvent/get response")?;
-                    return Ok(get.list.into_iter().map(CalendarEvent::from).collect());
+                    return Ok(get
+                        .list
+                        .into_iter()
+                        .filter(|item| item.kind != "Task")
+                        .map(CalendarEvent::from)
+                        .collect());
                 }
                 "error" => anyhow::bail!("JMAP method error in calendar sync"),
                 _ => {}
@@ -2331,6 +2344,8 @@ impl From<ContactCardObject> for Contact {
 #[serde(rename_all = "camelCase")]
 struct CalendarEventObject {
     id: String,
+    #[serde(rename = "@type", default)]
+    kind: String,
     #[serde(default)]
     title: String,
     #[serde(default)]
