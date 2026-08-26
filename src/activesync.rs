@@ -39,7 +39,14 @@ use crate::{
 // negotiate the SAME protocol version z-push does, so every class
 // collapses onto the single shape this gateway actually implements.
 const SUPPORTED_PROTOCOLS: &str = "12.0,12.1,14.0";
-const SUPPORTED_COMMANDS: &str = "Sync,SendMail,SmartForward,SmartReply,GetAttachment,FolderSync,FolderCreate,FolderDelete,FolderUpdate,MoveItems,GetItemEstimate,MeetingResponse,Search,Settings,Ping,ItemOperations,Provision,ResolveRecipients,ValidateCert,Find";
+// "Find" deliberately removed (was falsely advertised despite having no
+// handler): per the real MS-ASCMD spec text, every element in Find's own
+// WBXML codepage is gated to protocol 16.1 only, and this gateway
+// advertises 12.0/12.1/14.0 above -- a real device negotiating at those
+// versions would never send Find anyway, so dropping it from this list
+// just makes the advertisement honest. "Search" (now actually
+// implemented, see `search()`) stays.
+const SUPPORTED_COMMANDS: &str = "Sync,SendMail,SmartForward,SmartReply,GetAttachment,FolderSync,FolderCreate,FolderDelete,FolderUpdate,MoveItems,GetItemEstimate,MeetingResponse,Search,Settings,Ping,ItemOperations,Provision,ResolveRecipients,ValidateCert";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -242,6 +249,9 @@ pub async fn post_handler(
                 if command.eq_ignore_ascii_case("ItemOperations") {
                     return item_operations(&state, &auth, &document, command).await;
                 }
+                if command.eq_ignore_ascii_case("Search") {
+                    return search(&state, &auth, &document, command).await;
+                }
             }
             Err(error) => {
                 state
@@ -333,7 +343,7 @@ async fn item_operations(
             .inc();
         return (
             StatusCode::BAD_REQUEST,
-            "ItemOperations Fetch missing Store/CollectionId/ServerId\n",
+            "ItemOperations Fetch missing Store plus CollectionId+ServerId or LongId\n",
         )
             .into_response();
     };
@@ -353,37 +363,189 @@ async fn item_operations(
         builder.end();
         builder.end();
     } else {
-        match state.jmap.get_email_by_id(auth, &fetch.server_id).await {
-            Ok(Some(email)) => {
-                builder.leaf(ops::STATUS, "1");
-                builder.leaf(air::COLLECTION_ID, fetch.collection_id);
-                builder.leaf(air::SERVER_ID, fetch.server_id.clone());
-                builder.start(ops::PROPERTIES);
-                write_email_fields(&mut builder, &fetch.server_id, email, None);
-                builder.end();
-                builder.end();
-                builder.end();
-                builder.end();
-            }
-            Ok(None) => {
-                tracing::warn!(
-                    server_id = fetch.server_id.as_str(),
-                    "ItemOperations Fetch: email not found"
-                );
-                builder.leaf(ops::STATUS, "8");
+        // `long_id` (a Search-result fetch) and `server_id` (a Sync-result
+        // fetch) are the same underlying JMAP email id in this gateway --
+        // `Search`'s own Result writer sets LongId to that id precisely so
+        // this lookup works. Prefer long_id when both happen to be present
+        // (shouldn't occur from a real device, but long_id is the more
+        // specific request shape if it does).
+        let target_id = fetch.long_id.as_deref().or(fetch.server_id.as_deref());
+        match target_id {
+            None => {
+                // Parser already guarantees at least one of these is
+                // present, but stay defensive rather than panic/unwrap.
+                builder.leaf(ops::STATUS, "2");
                 builder.end();
                 builder.end();
                 builder.end();
             }
-            Err(error) => {
-                tracing::warn!(%error, server_id = fetch.server_id.as_str(), "ItemOperations Fetch failed");
-                builder.leaf(ops::STATUS, "3");
-                builder.end();
-                builder.end();
-                builder.end();
-            }
+            Some(target_id) => match state.jmap.get_email_by_id(auth, target_id).await {
+                Ok(Some(email)) => {
+                    builder.leaf(ops::STATUS, "1");
+                    if let Some(collection_id) = &fetch.collection_id {
+                        builder.leaf(air::COLLECTION_ID, collection_id.clone());
+                    }
+                    builder.leaf(air::SERVER_ID, target_id.to_owned());
+                    builder.start(ops::PROPERTIES);
+                    write_email_fields(&mut builder, target_id, email, None);
+                    builder.end();
+                    builder.end();
+                    builder.end();
+                    builder.end();
+                }
+                Ok(None) => {
+                    tracing::warn!(server_id = target_id, "ItemOperations Fetch: email not found");
+                    builder.leaf(ops::STATUS, "8");
+                    builder.end();
+                    builder.end();
+                    builder.end();
+                }
+                Err(error) => {
+                    tracing::warn!(%error, server_id = target_id, "ItemOperations Fetch failed");
+                    builder.leaf(ops::STATUS, "3");
+                    builder.end();
+                    builder.end();
+                    builder.end();
+                }
+            },
         }
     }
+
+    let body = wbxml::encode_document(&builder.finish());
+    state
+        .metrics
+        .eas_requests_total
+        .with_label_values(&[command, "200"])
+        .inc();
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/vnd.ms-sync.wbxml")],
+        body,
+    )
+        .into_response()
+}
+
+/// Handles `Search` (MS-ASCMD 2.2.1.16) -- was advertised in
+/// `SUPPORTED_COMMANDS` with no handler at all, falling through to the
+/// generic 501. Backs both `Store>Name == "Mailbox"` (full-text mail
+/// search, via `search_emails`/`Email/query`'s `text` filter, confirmed
+/// live to search body content too, not just subject) and
+/// `Store>Name == "GAL"` (directory search, via
+/// `search_principals`/`Principal/query`, confirmed live against the 7
+/// real principals on this instance). `Range`'s "m-n" is zero-based
+/// inclusive on both ends per the real schema; converted to JMAP's
+/// `position`/`limit` here since that's the one place this command
+/// needs the conversion. A Mailbox search restricted to any
+/// `airsync:Class` other than "Email" (Calendar/Contacts/Tasks/Notes/
+/// SMS) returns a clean empty-but-successful result for that store
+/// rather than erroring the whole command -- those classes have no
+/// search backing today, but a device asking for them shouldn't see a
+/// broken response, just zero matches.
+async fn search(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    document: &wbxml::Document,
+    command: &str,
+) -> Response {
+    use wbxml::eas::{airsync as air, gal, search as srch};
+
+    let Some(request) = wbxml::eas::search_request(document) else {
+        state
+            .metrics
+            .eas_requests_total
+            .with_label_values(&[command, "400"])
+            .inc();
+        return (
+            StatusCode::BAD_REQUEST,
+            "Search request missing Store/Name\n",
+        )
+            .into_response();
+    };
+
+    // (position, limit): default to the first 25 results (matching this
+    // gateway's own Sync WindowSize default) when the device omits Range
+    // entirely -- the schema marks it optional inside Options.
+    let (position, limit) = match request.range {
+        Some((start, end)) if end >= start => (start, (end - start + 1).clamp(1, 100) as usize),
+        _ => (0, 25),
+    };
+
+    let mut builder = wbxml::eas::DocumentBuilder::new();
+    builder.start(srch::SEARCH);
+    builder.leaf(srch::STATUS, "1");
+    builder.start(srch::RESPONSE);
+    builder.start(srch::STORE);
+
+    if request.store_name.eq_ignore_ascii_case("Mailbox") {
+        if request
+            .class
+            .as_deref()
+            .is_some_and(|class| !class.eq_ignore_ascii_case("Email"))
+        {
+            builder.leaf(srch::STATUS, "1");
+            builder.leaf(srch::TOTAL, "0");
+        } else {
+            let text = request.free_text.unwrap_or_default();
+            match state.jmap.search_emails(auth, &text, position, limit).await {
+                Ok((emails, total)) => {
+                    builder.leaf(srch::STATUS, "1");
+                    for email in emails {
+                        let email_id = email.id.clone();
+                        builder.start(srch::RESULT);
+                        builder.leaf(air::CLASS, "Email");
+                        builder.leaf(srch::LONG_ID, email_id.clone());
+                        if let Some(mailbox_id) = email.mailbox_ids.first() {
+                            builder.leaf(air::COLLECTION_ID, mailbox_id.clone());
+                        }
+                        builder.start(srch::PROPERTIES);
+                        write_email_fields(&mut builder, &email_id, email, None);
+                        builder.end();
+                        builder.end();
+                    }
+                    if let Some((start, end)) = request.range {
+                        builder.leaf(srch::RANGE, format!("{start}-{end}"));
+                    }
+                    builder.leaf(srch::TOTAL, total.to_string());
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Search mailbox query failed");
+                    builder.leaf(srch::STATUS, "3");
+                }
+            }
+        }
+    } else if request.store_name.eq_ignore_ascii_case("GAL") {
+        let text = request.free_text.unwrap_or_default();
+        match state.jmap.search_principals(auth, &text, limit).await {
+            Ok(principals) => {
+                builder.leaf(srch::STATUS, "1");
+                let total = principals.len();
+                for principal in principals {
+                    builder.start(srch::RESULT);
+                    builder.start(srch::PROPERTIES);
+                    builder.leaf(gal::DISPLAY_NAME, principal.display_name);
+                    if let Some(email) = principal.email {
+                        builder.leaf(gal::EMAIL_ADDRESS, email);
+                    }
+                    builder.end();
+                    builder.end();
+                }
+                builder.leaf(srch::TOTAL, total.to_string());
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Search GAL query failed");
+                builder.leaf(srch::STATUS, "3");
+            }
+        }
+    } else {
+        // DocumentLibrary or anything else -- no backing today, clean
+        // empty result rather than an error.
+        builder.leaf(srch::STATUS, "1");
+        builder.leaf(srch::TOTAL, "0");
+    }
+
+    builder.end();
+    builder.end();
+    builder.end();
 
     let body = wbxml::encode_document(&builder.finish());
     state

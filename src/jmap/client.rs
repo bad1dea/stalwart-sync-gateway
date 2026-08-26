@@ -428,6 +428,166 @@ impl JmapClient {
         Ok((Vec::new(), false))
     }
 
+    /// Backs EAS `Search` (MS-ASCMD 2.2.1.16) for `Store>Name == "Mailbox"`
+    /// with a `FreeText` query -- confirmed live 2026-08-26 that
+    /// Stalwart's `Email/query` `filter: {"text": ...}` does real
+    /// full-text matching (subject AND body, not just subject: a probe
+    /// search for a common word matched messages where it only appeared
+    /// in the body, not the subject line). `position`/`limit` implement
+    /// the EAS `Range` element's zero-based inclusive "m-n" semantics
+    /// directly via JMAP's own `position`/`limit` query params, so this
+    /// doesn't need to over-fetch and slice client-side. Returns
+    /// `(matches, total)` -- `total` is the full match count regardless
+    /// of the requested range, same shape as `emails_in_mailbox`.
+    pub async fn search_emails(
+        &self,
+        auth: &AuthenticatedSession,
+        text: &str,
+        position: i64,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<Email>, u64)> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            return Ok((Vec::new(), 0));
+        };
+        let limit = limit.clamp(1, 100);
+
+        let calls = vec![
+            MethodCall::new(
+                "Email/query",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "filter": { "text": text },
+                    "sort": [{ "property": "receivedAt", "isAscending": false }],
+                    "position": position,
+                    "limit": limit,
+                    "calculateTotal": true
+                }),
+                "q",
+            ),
+            MethodCall::new(
+                "Email/get",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "#ids": {
+                        "resultOf": "q",
+                        "name": "Email/query",
+                        "path": "/ids"
+                    },
+                    "properties": [
+                        "id", "blobId", "mailboxIds", "keywords", "receivedAt", "subject",
+                        "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments", "threadId"
+                    ],
+                    "fetchAllBodyValues": true,
+                    "maxBodyValueBytes": 65536
+                }),
+                "g",
+            ),
+        ];
+
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                calls,
+            )
+            .await?;
+
+        let mut total: u64 = 0;
+        for method in response.method_responses {
+            match method.0.as_str() {
+                "Email/query" => {
+                    let query: QueryResponse =
+                        serde_json::from_value(method.1).context("invalid Email/query response")?;
+                    total = query.total.unwrap_or(0);
+                }
+                "Email/get" => {
+                    let get: GetResponse<EmailObject> =
+                        serde_json::from_value(method.1).context("invalid Email/get response")?;
+                    let emails: Vec<Email> = get.list.into_iter().map(Email::from).collect();
+                    return Ok((emails, total));
+                }
+                "error" => anyhow::bail!("JMAP method error in email search"),
+                _ => {}
+            }
+        }
+
+        Ok((Vec::new(), total))
+    }
+
+    /// Backs EAS `Search` for `Store>Name == "GAL"` -- confirmed live
+    /// 2026-08-26 against Stalwart's `Principal/query`: `filter:
+    /// {"text": ...}` does real (if strict -- whole-token, not
+    /// substring/prefix like real Exchange GAL's ANR) matching against
+    /// name/email, checked by searching a real principal's first name
+    /// and getting exactly that principal back. There are 7 real
+    /// principals on this instance (not a placeholder/empty directory),
+    /// so this has something real to search. Stalwart's `Principal`
+    /// object has no separate first/last name fields -- `description` is
+    /// the closest thing to a human display name (e.g. "khuong", "System
+    /// administrator") and is used for `gal:DisplayName` when present,
+    /// falling back to the account name (its email) otherwise.
+    pub async fn search_principals(
+        &self,
+        auth: &AuthenticatedSession,
+        text: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<PrincipalResult>> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::PRINCIPALS) else {
+            return Ok(Vec::new());
+        };
+        let limit = limit.clamp(1, 100);
+
+        let calls = vec![
+            MethodCall::new(
+                "Principal/query",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "filter": { "text": text },
+                    "limit": limit
+                }),
+                "q",
+            ),
+            MethodCall::new(
+                "Principal/get",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "#ids": {
+                        "resultOf": "q",
+                        "name": "Principal/query",
+                        "path": "/ids"
+                    },
+                    "properties": ["id", "name", "email", "description"]
+                }),
+                "g",
+            ),
+        ];
+
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::PRINCIPALS.to_owned(),
+                ],
+                calls,
+            )
+            .await?;
+
+        for method in response.method_responses {
+            match method.0.as_str() {
+                "Principal/get" => {
+                    let get: GetResponse<PrincipalObject> = serde_json::from_value(method.1)
+                        .context("invalid Principal/get response")?;
+                    return Ok(get.list.into_iter().map(PrincipalResult::from).collect());
+                }
+                "error" => anyhow::bail!("JMAP method error in principal search"),
+                _ => {}
+            }
+        }
+
+        Ok(Vec::new())
+    }
+
     /// Real bug, found live while implementing mail deletion detection:
     /// `emails_in_mailbox` is sorted newest-first and capped at `limit`,
     /// so an OLD message that's still on the server but has simply been
@@ -2047,6 +2207,36 @@ pub(crate) struct QueryResponse {
 /// Minimal shape for `emails_still_in_mailbox`'s deletion-candidate
 /// check -- deliberately lighter than `EmailObject`, only the two
 /// properties that call actually requests.
+/// GAL search result, mapped from Stalwart's `Principal` object. See
+/// `search_principals`'s doc comment for why `display_name` prefers
+/// `description` over `name` (the account's own email, not a human
+/// name).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrincipalResult {
+    pub display_name: String,
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrincipalObject {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+impl From<PrincipalObject> for PrincipalResult {
+    fn from(value: PrincipalObject) -> Self {
+        Self {
+            display_name: value.description.filter(|d| !d.is_empty()).unwrap_or(value.name),
+            email: value.email,
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EmailMembership {

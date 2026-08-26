@@ -239,6 +239,11 @@ pub mod airsync {
     pub const SERVER_ID: Token = tag(0x0d, false);
     pub const STATUS: Token = tag(0x0e, false);
     pub const COLLECTION: Token = tag(0x0f, false);
+    // Per the same authoritative WBXML DTD table cited above for
+    // RESPONSES (z-push lib/wbxml/wbxmldefs.php, codepage 0): 0x10 =
+    // "Class" (0x11 = "Version", not currently used by this gateway).
+    // Needed for `Search`'s `airsync:Class` query filter/result element.
+    pub const CLASS: Token = tag(0x10, false);
     pub const COLLECTION_ID: Token = tag(0x12, false);
     pub const GET_CHANGES: Token = tag(0x13, false);
     // Empty-presence boolean flag (Start immediately followed by End, no
@@ -1163,23 +1168,82 @@ pub struct MoveItemRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemOperationsFetchRequest {
     pub store: String,
-    pub collection_id: String,
-    pub server_id: String,
+    pub collection_id: Option<String>,
+    pub server_id: Option<String>,
+    /// `search:LongId` (MS-ASCMD 2.2.3.98.3, WBXML codepage 15 token
+    /// `0x18` -- the SAME token already scaffolded as `search::LONG_ID`;
+    /// per the real schema this element is genuinely defined once in the
+    /// Search namespace and reused by reference in ItemOperations, not a
+    /// separate ItemOperations-local id) -- what a device sends to fetch
+    /// a specific `Search` result by the opaque id that result's own
+    /// `LongId` carried, instead of the CollectionId+ServerId shape.
+    pub long_id: Option<String>,
 }
 
-/// Parses an `ItemOperations > Fetch` request addressed the "Mailbox
-/// Store" way (Store/CollectionId/ServerId) -- the form iOS uses to fetch
-/// a message opened from a prior Sync result. Ignores `Options` (body
-/// preference/truncation) -- the gateway always returns the full body
-/// regardless, same as Sync does.
+/// Parses an `ItemOperations > Fetch` request, accepting EITHER the
+/// "Mailbox Store" shape (Store/CollectionId/ServerId -- what iOS sends
+/// to fetch a message opened from a prior Sync result) OR the
+/// Search-result shape (Store/`search:LongId` -- what a device sends to
+/// open a message found via `Search`, confirmed against the real
+/// [MS-ASCMD] Fetch (ItemOperations) schema: `search:LongId` is listed as
+/// an alternative to `airsync:CollectionId`+`airsync:ServerId`, not an
+/// addition to them). Requires Store plus at least one of
+/// (CollectionId+ServerId) or LongId; returns `None` otherwise. Ignores
+/// `Options` (body preference/truncation) -- the gateway always returns
+/// the full body regardless, same as Sync does.
 pub fn item_operations_fetch(document: &Document) -> Option<ItemOperationsFetchRequest> {
     let store = find_text_after(document, item_operations::STORE)?.to_owned();
-    let collection_id = find_text_after(document, airsync::COLLECTION_ID)?.to_owned();
-    let server_id = find_text_after(document, airsync::SERVER_ID)?.to_owned();
+    let collection_id = find_text_after(document, airsync::COLLECTION_ID).map(str::to_owned);
+    let server_id = find_text_after(document, airsync::SERVER_ID).map(str::to_owned);
+    let long_id = find_text_after(document, search::LONG_ID).map(str::to_owned);
+    if long_id.is_none() && (collection_id.is_none() || server_id.is_none()) {
+        return None;
+    }
     Some(ItemOperationsFetchRequest {
         store,
         collection_id,
         server_id,
+        long_id,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchRequest {
+    pub store_name: String,
+    /// `airsync:Class` inside `Query` -- present when a device restricts
+    /// a Mailbox-store search to one item class (e.g. "Email",
+    /// "Calendar"). Absent is treated as "Email" (the only class this
+    /// gateway actually searches), matching real-world Mailbox searches
+    /// which are overwhelmingly mail search from the device's own Mail
+    /// app.
+    pub class: Option<String>,
+    pub free_text: Option<String>,
+    /// The EAS `Range` element's two numbers, parsed as-is (zero-based,
+    /// inclusive on both ends per the real schema's own prose, e.g.
+    /// "0-9" = the first 10 results) -- NOT yet converted to a
+    /// position/limit pair, since that conversion is the caller's job.
+    pub range: Option<(i64, i64)>,
+}
+
+/// Parses a `Search` request. Real devices send exactly one `Store` per
+/// request (the schema technically allows `maxOccurs="unbounded"`, but
+/// no real client is known to search multiple stores in one call, same
+/// scoping call this codebase already makes elsewhere for similarly
+/// theoretical multi-occurrence request shapes) -- `find_text_after`
+/// naturally picks up the first (only) occurrence of each element.
+pub fn search_request(document: &Document) -> Option<SearchRequest> {
+    let store_name = find_text_after(document, search::NAME)?.to_owned();
+    let class = find_text_after(document, airsync::CLASS).map(str::to_owned);
+    let free_text = find_text_after(document, search::FREE_TEXT).map(str::to_owned);
+    let range = find_text_after(document, search::RANGE).and_then(|raw| {
+        let (start, end) = raw.split_once('-')?;
+        Some((start.parse().ok()?, end.parse().ok()?))
+    });
+    Some(SearchRequest {
+        store_name,
+        class,
+        free_text,
+        range,
     })
 }
 
@@ -1954,6 +2018,35 @@ mod tests {
         assert_eq!(command.calendar.attendees[1].email, "pat@fourthcoffee.com");
         assert_eq!(command.calendar.attendees[1].name, None);
         assert!(command.calendar.attendees[1].optional);
+    }
+
+    #[test]
+    fn parses_search_request_with_class_free_text_and_range() {
+        // Mirrors how a real device wraps FreeText in an And{} alongside
+        // a Class filter -- search_request() must still find both flat
+        // elements regardless of the surrounding And container, since it
+        // uses find_text_after rather than a strict nested parse.
+        let mut builder = DocumentBuilder::new();
+        builder.start(search::SEARCH);
+        builder.start(search::STORE);
+        builder.leaf(search::NAME, "Mailbox");
+        builder.start(search::QUERY);
+        builder.start(search::AND);
+        builder.leaf(airsync::CLASS, "Email");
+        builder.leaf(search::FREE_TEXT, "invite");
+        builder.end();
+        builder.end();
+        builder.start(search::OPTIONS);
+        builder.leaf(search::RANGE, "0-9");
+        builder.end();
+        builder.end();
+        builder.end();
+
+        let request = search_request(&builder.finish()).expect("search request should parse");
+        assert_eq!(request.store_name, "Mailbox");
+        assert_eq!(request.class.as_deref(), Some("Email"));
+        assert_eq!(request.free_text.as_deref(), Some("invite"));
+        assert_eq!(request.range, Some((0, 9)));
     }
 
     #[test]
