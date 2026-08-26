@@ -33,7 +33,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | GetAttachment (legacy) | **Done** | `download_blob()` | `AttachmentName` reference is a synthetic `blobId||name` string this gateway itself issues. |
 | GetItemEstimate | **Done** | Counts from the same `Email/query`/`ContactCard/query`/`CalendarEvent/query` paths used for Sync | FolderType field bug fixed this session. |
 | MoveItems | **Done (mail only), non-mail behavior confirmed safe** | `Email/set` (`mailboxIds`) | Mail only. Confirmed by direct code read (no longer unverified): a Notes/Contacts/Calendar item would fail cleanly with Status 5 (`Email/set` rejects the non-Email id as `notFound`), not silent corruption. Currently moot anyway — every non-mail collection has exactly one folder, so no real client has anywhere to offer moving an item to. See command-matrix doc for the full reasoning. |
-| Search / Find | **Missing** | Candidate: Stalwart's `Principal` object (`urn:ietf:params:jmap:principals`) for GAL/directory search; `Email/query` full-text filter for mailbox search | Both fall through to 501 despite `Find` being falsely advertised in `SUPPORTED_COMMANDS`. GAL search specifically needs checking whether Stalwart's Principal/query supports free-text search — unverified. |
+| Search (mailbox + GAL) | **Done, both halves (`deploy-2026-08-26n`)** | `Email/query` `filter:{text:...}` (mailbox); `Principal/query` `filter:{text:...}` (GAL) | Both live-tested BEFORE writing any handler code, not assumed: `Email/query`'s `text` filter does real full-text matching (a probe search matched a message only in its body, not the subject); `Principal/query`'s `text` filter matches against the 7 real principals on this instance (not an empty directory) by whole-token match (a short prefix of "khuo.ng" matched nothing; the full first name "karen"/"khuong" matched exactly that principal) -- weaker than real Exchange GAL's substring/prefix ANR, but genuinely working. `search()` (`activesync.rs`) dispatches `Store>Name` to the right one; a Mailbox search restricted to any `airsync:Class` other than "Email" returns a clean empty result rather than erroring. `EAS Range`'s zero-based-inclusive "m-n" converts directly to JMAP `position`/`limit`. Real bug caught during live verification, not left in: the first pass reused `write_email_fields`'s `body_pref=None` (its own doc comment: "always full body -- correct for ItemOperations Fetch"), so a 4-result search came back as a 132KB response with every match's full HTML body and attachment metadata inlined -- fixed by parsing Search's own `airsyncbase:BodyPreference` (the identical element Sync's Options carries) and defaulting to a 500-char plain-text preview when absent, confirmed live to shrink the same 4-result response to 2.9KB. `ItemOperations`'s Fetch parser was also extended to accept a bare `search:LongId` (confirmed against the real Fetch (ItemOperations) schema as a genuine alternative to CollectionId+ServerId, not an addition) so a device can open a search result's full body afterward -- live-verified: fetched the top mailbox-search result by its LongId and got the full email back via the same `get_email_by_id` path Sync-triggered Fetches use. `Find` (the OTHER command that could theoretically back a search UI) stays unimplemented and was removed from `SUPPORTED_COMMANDS` -- every WBXML tag in its codepage is spec-gated to protocol 16.1, which this gateway doesn't advertise, so it was dead advertising, not a real gap. |
 | SendMail | **Done** | `EmailSubmission/set` (blob-upload then submit) | Confirmed live and working. |
 | SmartReply / SmartForward | **Done, threading fidelity confirmed** | Same `EmailSubmission/set` path as SendMail | Live-tested this session with a self-addressed message carrying a real Message-ID/In-Reply-To/References triplet: byte-identical values confirmed on both the Sent Items copy and the delivered Inbox copy. See roadmap item 4 for the full test. |
 | ResolveRecipients / ValidateCert (S/MIME) | **Missing, low priority** | No obvious JMAP equivalent surveyed | Out of scope for a personal-account iPad daily driver; flag to user before investing. |
@@ -168,14 +168,13 @@ read/reply/send, plus calendar/contacts/notes sync.
 
 ### (c) Structurally hard — no direct JMAP equivalent, needs a workaround
 
-7. **GAL/directory search (Search/Find).** `Principal`
-   (`urn:ietf:params:jmap:principals`) is the only capability in
-   Stalwart's advertised list that looks like a plausible backing object,
-   but whether it supports the kind of free-text people-search GAL
-   implies is completely unchecked. Likely a multi-session research +
-   implementation effort, not a quick win — lowest priority of the
-   concretely-scoped items above unless the user specifically wants
-   directory search.
+7. ✅ **DONE (`deploy-2026-08-26n`) — turned out NOT to need a workaround
+   at all, wrong section.** `Principal/query`'s `text` filter genuinely
+   works, live-confirmed against the 7 real principals on this instance —
+   see the Search row in the status table above for the full build and
+   verification story (both mailbox and GAL halves, plus a real bug caught
+   and fixed live: search results were sending full bodies until Search's
+   own `BodyPreference` got parsed).
 
 ## What to verify before touching any of the above
 
