@@ -470,6 +470,22 @@ async fn search(
         _ => (0, 25),
     };
 
+    // Search results need a lightweight preview, NOT the full body/
+    // attachments an explicit ItemOperations Fetch returns (that's a
+    // different, later request the device makes once the user actually
+    // opens a result -- confirmed necessary live: the naive first pass
+    // reused `None` here the same way ItemOperations Fetch does, and a
+    // 4-result mailbox search came back as a 132KB response with every
+    // match's full HTML body and attachment metadata inlined). Defaults
+    // to plain text truncated to 500 chars (the same real-world preview
+    // size this gateway's own `apply_body_preference` tests are built
+    // around) when the device didn't send its own BodyPreference.
+    let body_pref = Some(BodyPreference {
+        body_type: Some(request.body_pref_type.unwrap_or(1)),
+        truncation_size: Some(request.body_pref_truncation_size.unwrap_or(500)),
+        mime_data: None,
+    });
+
     let mut builder = wbxml::eas::DocumentBuilder::new();
     builder.start(srch::SEARCH);
     builder.leaf(srch::STATUS, "1");
@@ -498,7 +514,7 @@ async fn search(
                             builder.leaf(air::COLLECTION_ID, mailbox_id.clone());
                         }
                         builder.start(srch::PROPERTIES);
-                        write_email_fields(&mut builder, &email_id, email, None);
+                        write_email_fields(&mut builder, &email_id, email, body_pref.clone());
                         builder.end();
                         builder.end();
                     }

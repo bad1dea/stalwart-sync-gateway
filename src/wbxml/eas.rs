@@ -1223,6 +1223,16 @@ pub struct SearchRequest {
     /// "0-9" = the first 10 results) -- NOT yet converted to a
     /// position/limit pair, since that conversion is the caller's job.
     pub range: Option<(i64, i64)>,
+    /// `airsyncbase:BodyPreference > Type`, if the client sent one inside
+    /// `Options` -- structurally the exact same element Sync's own
+    /// Options carries (see `SyncCollectionRequest::body_pref_type`'s own
+    /// doc comment), reused here rather than duplicated. Search results
+    /// must NOT default to full body the way an explicit
+    /// user-opened-this-message ItemOperations Fetch does -- a search
+    /// hit list needs a lightweight preview, not every matched message's
+    /// complete body/attachments inline.
+    pub body_pref_type: Option<u8>,
+    pub body_pref_truncation_size: Option<usize>,
 }
 
 /// Parses a `Search` request. Real devices send exactly one `Store` per
@@ -1239,11 +1249,16 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
         let (start, end) = raw.split_once('-')?;
         Some((start.parse().ok()?, end.parse().ok()?))
     });
+    let body_pref_type = find_text_after(document, airsync_base::TYPE).and_then(|t| t.parse().ok());
+    let body_pref_truncation_size =
+        find_text_after(document, airsync_base::TRUNCATION_SIZE).and_then(|t| t.parse().ok());
     Some(SearchRequest {
         store_name,
         class,
         free_text,
         range,
+        body_pref_type,
+        body_pref_truncation_size,
     })
 }
 
