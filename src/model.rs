@@ -116,6 +116,25 @@ pub struct Contact {
     pub job_title: Option<String>,
 }
 
+/// MS-ASCAL `Recurrence`, already reduced to the EAS field set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct Recurrence {
+    /// 0 daily, 1 weekly, 2 monthly (day of month), 3 monthly (nth weekday),
+    /// 5 yearly (day of month), 6 yearly (nth weekday).
+    pub kind: u8,
+    pub interval: u32,
+    /// Bitmask: Sunday 1, Monday 2, Tuesday 4, Wednesday 8, Thursday 16,
+    /// Friday 32, Saturday 64.
+    pub day_of_week: Option<u8>,
+    pub day_of_month: Option<u8>,
+    /// 1..=4, or 5 for "last".
+    pub week_of_month: Option<u8>,
+    pub month_of_year: Option<u8>,
+    /// Compact UTC EAS DateTime.
+    pub until: Option<String>,
+    pub occurrences: Option<u32>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CalendarEvent {
     pub id: String,
@@ -137,6 +156,13 @@ pub struct CalendarEvent {
     /// sets this explicitly after mapping. Drives MeetingStatus (1 vs 3) in
     /// `write_calendar_command`.
     pub is_organizer: bool,
+    pub recurrence: Option<Recurrence>,
+    /// Base64 `TIME_ZONE_INFORMATION` for a recurring event's IANA zone, so
+    /// the device applies DST to every occurrence.
+    pub timezone_blob: Option<String>,
+    /// Occurrences removed from the series (JSCalendar `excluded`
+    /// overrides), compact UTC start times.
+    pub deleted_instances: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

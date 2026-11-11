@@ -3064,6 +3064,9 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     event.organizer_name.hash(&mut hasher);
     event.is_organizer.hash(&mut hasher);
     event.attendees.hash(&mut hasher);
+    event.recurrence.hash(&mut hasher);
+    event.timezone_blob.hash(&mut hasher);
+    event.deleted_instances.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -3086,6 +3089,9 @@ fn write_calendar_command(
     builder.start(tag);
     builder.leaf(air::SERVER_ID, event.id.clone());
     builder.start(air::APPLICATION_DATA);
+    if let Some(blob) = &event.timezone_blob {
+        builder.leaf(cal::TIMEZONE, blob.clone());
+    }
     builder.leaf(
         cal::DTSTAMP,
         eas_datetime(&chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
@@ -3105,6 +3111,9 @@ fn write_calendar_command(
     }
     if let Some(end) = &event.end_utc {
         builder.leaf(cal::END_TIME, end.clone());
+    }
+    if let Some(rec) = &event.recurrence {
+        write_recurrence(builder, rec);
     }
     builder.leaf(cal::ALL_DAY_EVENT, if event.all_day { "1" } else { "0" });
     if !event.attendees.is_empty() {
@@ -3146,7 +3155,45 @@ fn write_calendar_command(
         }
         builder.end();
     }
+    if event.recurrence.is_some() && !event.deleted_instances.is_empty() {
+        builder.start(cal::EXCEPTIONS);
+        for start in &event.deleted_instances {
+            builder.start(cal::EXCEPTION);
+            builder.leaf(cal::DELETED, "1");
+            builder.leaf(cal::EXCEPTION_START_TIME, start.clone());
+            builder.end();
+        }
+        builder.end();
+    }
     builder.end();
+    builder.end();
+}
+
+/// `Calendar:Recurrence`, in z-push's field order (Type, Until or
+/// Occurrences, Interval, DayOfWeek, DayOfMonth, WeekOfMonth, MonthOfYear).
+fn write_recurrence(builder: &mut wbxml::eas::DocumentBuilder, rec: &crate::model::Recurrence) {
+    use wbxml::eas::calendar as cal;
+    builder.start(cal::RECURRENCE);
+    builder.leaf(cal::RECURRENCE_TYPE, rec.kind.to_string());
+    if let Some(until) = &rec.until {
+        builder.leaf(cal::RECURRENCE_UNTIL, until.clone());
+    }
+    if let Some(n) = rec.occurrences {
+        builder.leaf(cal::RECURRENCE_OCCURRENCES, n.to_string());
+    }
+    builder.leaf(cal::RECURRENCE_INTERVAL, rec.interval.to_string());
+    if let Some(mask) = rec.day_of_week {
+        builder.leaf(cal::RECURRENCE_DAY_OF_WEEK, mask.to_string());
+    }
+    if let Some(day) = rec.day_of_month {
+        builder.leaf(cal::RECURRENCE_DAY_OF_MONTH, day.to_string());
+    }
+    if let Some(week) = rec.week_of_month {
+        builder.leaf(cal::RECURRENCE_WEEK_OF_MONTH, week.to_string());
+    }
+    if let Some(month) = rec.month_of_year {
+        builder.leaf(cal::RECURRENCE_MONTH_OF_YEAR, month.to_string());
+    }
     builder.end();
 }
 

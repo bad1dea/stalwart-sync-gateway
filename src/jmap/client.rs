@@ -1128,7 +1128,8 @@ impl JmapClient {
                     },
                     "properties": [
                         "id", "@type", "title", "start", "timeZone", "duration",
-                        "locations", "showWithoutTime", "participants"
+                        "locations", "showWithoutTime", "participants",
+                        "recurrenceRules", "recurrenceOverrides"
                     ]
                 }),
                 "g",
@@ -2793,6 +2794,10 @@ struct CalendarEventObject {
     /// capability. See `save_calendar_event` for the write side.
     #[serde(default)]
     participants: Option<BTreeMap<String, ParticipantObject>>,
+    #[serde(default)]
+    recurrence_rules: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    recurrence_overrides: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2844,6 +2849,41 @@ impl From<CalendarEventObject> for CalendarEvent {
             .into_values()
             .find_map(|location| location.name);
 
+        let tz_name = value.time_zone.as_deref();
+        let recurrence = value
+            .recurrence_rules
+            .as_ref()
+            .and_then(|rules| rules.first())
+            .and_then(|rule| {
+                value
+                    .start
+                    .as_deref()
+                    .and_then(|start| recurrence_from_rule(rule, start, tz_name))
+            });
+        let timezone_blob = if recurrence.is_some() {
+            tz_name.and_then(|tz| {
+                let year = value
+                    .start
+                    .as_deref()
+                    .and_then(|s| s.get(..4))
+                    .and_then(|y| y.parse::<i32>().ok())?;
+                eas_timezone_blob(tz, year)
+            })
+        } else {
+            None
+        };
+        let deleted_instances: Vec<String> = if recurrence.is_some() {
+            value
+                .recurrence_overrides
+                .iter()
+                .flatten()
+                .filter(|(_, patch)| patch.get("excluded").and_then(|v| v.as_bool()) == Some(true))
+                .filter_map(|(key, _)| local_to_utc_eas(key, tz_name))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let mut organizer_email = None;
         let mut organizer_name = None;
         let mut attendees = Vec::new();
@@ -2876,6 +2916,9 @@ impl From<CalendarEventObject> for CalendarEvent {
             organizer_name,
             attendees,
             is_organizer: false,
+            recurrence,
+            timezone_blob,
+            deleted_instances,
         }
     }
 }
@@ -2915,6 +2958,295 @@ impl From<TaskObject> for Task {
 /// same "absent timeZone" convention `local_to_utc_eas` itself uses.
 fn local_to_utc_eas_no_tz(local_iso: &str) -> Option<String> {
     local_to_utc_eas(local_iso, None)
+}
+
+fn weekday_bit(day: &str) -> Option<u8> {
+    match day {
+        "su" => Some(1),
+        "mo" => Some(2),
+        "tu" => Some(4),
+        "we" => Some(8),
+        "th" => Some(16),
+        "fr" => Some(32),
+        "sa" => Some(64),
+        _ => None,
+    }
+}
+
+fn json_u32(value: Option<&serde_json::Value>) -> Option<u32> {
+    let value = value?;
+    value
+        .as_u64()
+        .map(|v| v as u32)
+        .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+}
+
+/// First JSCalendar `byDay` entry as (weekday bit, nthOfPeriod).
+fn first_by_day(rule: &serde_json::Value) -> Option<(u8, Option<i64>)> {
+    let entry = rule.get("byDay")?.as_array()?.first()?;
+    let bit = weekday_bit(entry.get("day")?.as_str()?)?;
+    Some((bit, entry.get("nthOfPeriod").and_then(|n| n.as_i64())))
+}
+
+fn by_day_mask(rule: &serde_json::Value) -> Option<u8> {
+    let list = rule.get("byDay")?.as_array()?;
+    let mut mask = 0u8;
+    for entry in list {
+        mask |= weekday_bit(entry.get("day")?.as_str()?)?;
+    }
+    (mask != 0).then_some(mask)
+}
+
+fn week_of_month(nth: i64) -> Option<u8> {
+    match nth {
+        1..=4 => Some(nth as u8),
+        -1 => Some(5),
+        _ => None,
+    }
+}
+
+/// JSCalendar `RecurrenceRule` (RFC 8984 §4.3.3) -> MS-ASCAL `Recurrence`,
+/// for the patterns ActiveSync can express. Anything else (bySetPosition,
+/// byYearDay, non-Gregorian calendars, ...) returns None, so the event is
+/// still delivered, as a single occurrence, instead of being dropped.
+pub(crate) fn recurrence_from_rule(
+    rule: &serde_json::Value,
+    start_local: &str,
+    tz: Option<&str>,
+) -> Option<crate::model::Recurrence> {
+    use chrono::Datelike;
+
+    for unsupported in [
+        "bySetPosition",
+        "byYearDay",
+        "byWeekNo",
+        "byHour",
+        "byMinute",
+    ] {
+        if rule.get(unsupported).is_some() {
+            return None;
+        }
+    }
+    if let Some(scale) = rule.get("rscale").and_then(|v| v.as_str()) {
+        if !scale.eq_ignore_ascii_case("gregorian") {
+            return None;
+        }
+    }
+    let start = chrono::NaiveDateTime::parse_from_str(start_local, "%Y-%m-%dT%H:%M:%S").ok()?;
+    let start_bit = 1u8 << start.weekday().num_days_from_sunday();
+    let interval = json_u32(rule.get("interval")).unwrap_or(1).max(1);
+    let mut out = crate::model::Recurrence {
+        interval,
+        ..Default::default()
+    };
+
+    match rule.get("frequency")?.as_str()? {
+        "daily" => match by_day_mask(rule) {
+            Some(mask) if interval == 1 => {
+                out.kind = 1;
+                out.day_of_week = Some(mask);
+            }
+            Some(_) => return None,
+            None => out.kind = 0,
+        },
+        "weekly" => {
+            out.kind = 1;
+            out.day_of_week = Some(by_day_mask(rule).unwrap_or(start_bit));
+        }
+        "monthly" => match first_by_day(rule) {
+            Some((bit, Some(nth))) => {
+                out.kind = 3;
+                out.day_of_week = Some(bit);
+                out.week_of_month = Some(week_of_month(nth)?);
+            }
+            Some((_, None)) => return None,
+            None => {
+                out.kind = 2;
+                let day = rule
+                    .get("byMonthDay")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(start.day() as i64);
+                if !(1..=31).contains(&day) {
+                    return None;
+                }
+                out.day_of_month = Some(day as u8);
+            }
+        },
+        "yearly" => {
+            let month = rule
+                .get("byMonth")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|v| {
+                    v.as_str()
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .or_else(|| v.as_u64().map(|n| n as u32))
+                })
+                .unwrap_or(start.month());
+            if !(1..=12).contains(&month) {
+                return None;
+            }
+            out.month_of_year = Some(month as u8);
+            match first_by_day(rule) {
+                Some((bit, Some(nth))) => {
+                    out.kind = 6;
+                    out.day_of_week = Some(bit);
+                    out.week_of_month = Some(week_of_month(nth)?);
+                }
+                Some((_, None)) => return None,
+                None => {
+                    out.kind = 5;
+                    let day = rule
+                        .get("byMonthDay")
+                        .and_then(|v| v.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(start.day() as i64);
+                    if !(1..=31).contains(&day) {
+                        return None;
+                    }
+                    out.day_of_month = Some(day as u8);
+                }
+            }
+        }
+        _ => return None,
+    }
+
+    if let Some(count) = json_u32(rule.get("count")) {
+        out.occurrences = Some(count);
+    } else if let Some(until) = rule.get("until").and_then(|v| v.as_str()) {
+        // JSCalendar `until` is a LocalDateTime in the event's zone.
+        let until = if until.len() == 10 {
+            format!("{until}T23:59:59")
+        } else {
+            until.to_owned()
+        };
+        out.until = Some(local_to_utc_eas(&until, tz)?);
+    }
+    Some(out)
+}
+
+/// Base64 EAS `TimeZone` (172-byte TIME_ZONE_INFORMATION) for an IANA zone,
+/// built from the zone's own DST transitions in `year`. Windows convention:
+/// StandardDate/DaylightDate are the local wall-clock moments (just before
+/// the switch) the zone changes to standard/daylight time, as month,
+/// weekday, week-of-month (5 = last). Zones without DST get zero dates.
+pub(crate) fn eas_timezone_blob(tz_name: &str, year: i32) -> Option<String> {
+    use base64::Engine;
+    use chrono::{Datelike, TimeZone, Timelike};
+    use chrono_tz::OffsetComponents;
+
+    let tz: chrono_tz::Tz = tz_name.parse().ok()?;
+    let start = chrono::Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).single()?;
+    let end = chrono::Utc
+        .with_ymd_and_hms(year + 1, 1, 1, 0, 0, 0)
+        .single()?;
+
+    let mut dst_minutes = 0i64;
+    let mut to_dst: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut from_dst: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut offset_before_to_dst = 0i64;
+    let mut offset_before_from_dst = 0i64;
+
+    let mut prev_dst = tz.offset_from_utc_datetime(&start.naive_utc()).dst_offset();
+    let mut prev_total = tz
+        .offset_from_utc_datetime(&start.naive_utc())
+        .base_utc_offset()
+        + prev_dst;
+    let base_minutes = tz
+        .offset_from_utc_datetime(&start.naive_utc())
+        .base_utc_offset()
+        .num_minutes();
+    let mut t = start;
+    while t < end {
+        t += chrono::Duration::hours(1);
+        let off = tz.offset_from_utc_datetime(&t.naive_utc());
+        let dst = off.dst_offset();
+        if dst != prev_dst {
+            if dst > prev_dst {
+                to_dst.get_or_insert(t);
+                if offset_before_to_dst == 0 {
+                    offset_before_to_dst = prev_total.num_minutes();
+                }
+                dst_minutes = dst.num_minutes();
+            } else {
+                from_dst.get_or_insert(t);
+                if offset_before_from_dst == 0 {
+                    offset_before_from_dst = prev_total.num_minutes();
+                }
+            }
+        }
+        prev_dst = dst;
+        prev_total = off.base_utc_offset() + dst;
+    }
+
+    fn systemtime(
+        out: &mut Vec<u8>,
+        instant: Option<chrono::DateTime<chrono::Utc>>,
+        offset_before_minutes: i64,
+    ) {
+        let mut fields = [0u16; 8];
+        if let Some(instant) = instant {
+            let local = instant.naive_utc() + chrono::Duration::minutes(offset_before_minutes);
+            let day = local.day();
+            let days_in_month = {
+                let (y, m) = (local.year(), local.month());
+                let next = if m == 12 {
+                    chrono::NaiveDate::from_ymd_opt(y + 1, 1, 1)
+                } else {
+                    chrono::NaiveDate::from_ymd_opt(y, m + 1, 1)
+                };
+                next.and_then(|n| n.pred_opt())
+                    .map(|d| d.day())
+                    .unwrap_or(31)
+            };
+            let week = if day + 7 > days_in_month {
+                5
+            } else {
+                (day - 1) / 7 + 1
+            };
+            fields[1] = local.month() as u16;
+            fields[2] = local.weekday().num_days_from_sunday() as u16;
+            fields[3] = week as u16;
+            fields[4] = local.hour() as u16;
+            fields[5] = local.minute() as u16;
+            fields[6] = local.second() as u16;
+        }
+        for f in fields {
+            out.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+
+    fn name(out: &mut Vec<u8>, label: &str) {
+        let mut buf = [0u8; 64];
+        for (i, unit) in label.encode_utf16().take(31).enumerate() {
+            buf[i * 2..i * 2 + 2].copy_from_slice(&unit.to_le_bytes());
+        }
+        out.extend_from_slice(&buf);
+    }
+
+    let has_dst = to_dst.is_some() && from_dst.is_some();
+    let mut blob = Vec::with_capacity(172);
+    blob.extend_from_slice(&((-base_minutes) as i32).to_le_bytes());
+    name(&mut blob, "Standard Time");
+    systemtime(
+        &mut blob,
+        if has_dst { from_dst } else { None },
+        offset_before_from_dst,
+    );
+    blob.extend_from_slice(&0i32.to_le_bytes());
+    name(&mut blob, "Daylight Time");
+    systemtime(
+        &mut blob,
+        if has_dst { to_dst } else { None },
+        offset_before_to_dst,
+    );
+    let daylight_bias = if has_dst { -(dst_minutes as i32) } else { 0 };
+    blob.extend_from_slice(&daylight_bias.to_le_bytes());
+    debug_assert_eq!(blob.len(), 172);
+    Some(base64::engine::general_purpose::STANDARD.encode(blob))
 }
 
 /// Converts a JSCalendar LocalDateTime (`2026-08-25T14:00:00`, no offset)
@@ -3081,9 +3413,150 @@ impl From<CalendarObject> for Collection {
 #[cfg(test)]
 mod tests {
     use super::{
-        eas_compact_duration, eas_compact_to_local_iso, local_to_utc_eas,
-        parse_iso8601_duration_seconds,
+        eas_compact_duration, eas_compact_to_local_iso, eas_timezone_blob, local_to_utc_eas,
+        parse_iso8601_duration_seconds, recurrence_from_rule,
     };
+
+    fn decode_tz(blob: &str) -> (i32, [u16; 8], i32, [u16; 8], i32) {
+        use base64::Engine;
+        let b = base64::engine::general_purpose::STANDARD
+            .decode(blob)
+            .unwrap();
+        assert_eq!(b.len(), 172);
+        let i32_at = |o: usize| i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let st = |o: usize| {
+            let mut f = [0u16; 8];
+            for (i, v) in f.iter_mut().enumerate() {
+                *v = u16::from_le_bytes(b[o + i * 2..o + i * 2 + 2].try_into().unwrap());
+            }
+            f
+        };
+        (i32_at(0), st(68), i32_at(84), st(152), i32_at(168))
+    }
+
+    #[test]
+    fn timezone_blob_for_toronto_has_us_dst_rules() {
+        let (bias, std_date, std_bias, dst_date, dst_bias) =
+            decode_tz(&eas_timezone_blob("America/Toronto", 2026).unwrap());
+        assert_eq!(bias, 300);
+        assert_eq!(std_bias, 0);
+        assert_eq!(dst_bias, -60);
+        // DST ends first Sunday of November at 02:00 local (daylight) time.
+        assert_eq!(
+            (std_date[1], std_date[2], std_date[3], std_date[4]),
+            (11, 0, 1, 2)
+        );
+        // DST starts second Sunday of March at 02:00 local (standard) time.
+        assert_eq!(
+            (dst_date[1], dst_date[2], dst_date[3], dst_date[4]),
+            (3, 0, 2, 2)
+        );
+    }
+
+    #[test]
+    fn timezone_blob_for_europe_uses_last_sunday_rules() {
+        let (bias, std_date, _, dst_date, dst_bias) =
+            decode_tz(&eas_timezone_blob("Europe/Berlin", 2026).unwrap());
+        assert_eq!(bias, -60);
+        assert_eq!(dst_bias, -60);
+        assert_eq!((std_date[1], std_date[2], std_date[3]), (10, 0, 5));
+        assert_eq!((dst_date[1], dst_date[2], dst_date[3]), (3, 0, 5));
+    }
+
+    #[test]
+    fn timezone_blob_without_dst_has_zero_dates() {
+        let (bias, std_date, _, dst_date, dst_bias) =
+            decode_tz(&eas_timezone_blob("Asia/Kolkata", 2026).unwrap());
+        assert_eq!(bias, -330);
+        assert_eq!(std_date, [0; 8]);
+        assert_eq!(dst_date, [0; 8]);
+        assert_eq!(dst_bias, 0);
+        assert!(eas_timezone_blob("Not/AZone", 2026).is_none());
+    }
+
+    #[test]
+    fn recurrence_weekly_with_days_and_count() {
+        let rule = serde_json::json!({"@type":"RecurrenceRule","frequency":"weekly","interval":2,
+            "byDay":[{"day":"mo"},{"day":"we"}],"count":10});
+        let r =
+            recurrence_from_rule(&rule, "2026-11-09T09:00:00", Some("America/Toronto")).unwrap();
+        assert_eq!(
+            (r.kind, r.interval, r.day_of_week, r.occurrences),
+            (1, 2, Some(2 | 8), Some(10))
+        );
+        assert!(r.until.is_none());
+    }
+
+    #[test]
+    fn recurrence_weekly_defaults_to_start_weekday() {
+        let rule = serde_json::json!({"frequency":"weekly"});
+        // 2026-11-11 is a Wednesday
+        let r = recurrence_from_rule(&rule, "2026-11-11T09:00:00", None).unwrap();
+        assert_eq!((r.kind, r.interval, r.day_of_week), (1, 1, Some(8)));
+    }
+
+    #[test]
+    fn recurrence_daily_weekdays_becomes_weekly_mask() {
+        let rule = serde_json::json!({"frequency":"daily",
+            "byDay":[{"day":"mo"},{"day":"tu"},{"day":"we"},{"day":"th"},{"day":"fr"}]});
+        let r = recurrence_from_rule(&rule, "2026-11-09T09:00:00", None).unwrap();
+        assert_eq!((r.kind, r.day_of_week), (1, Some(2 | 4 | 8 | 16 | 32)));
+    }
+
+    #[test]
+    fn recurrence_monthly_day_and_nth_weekday() {
+        let by_date = serde_json::json!({"frequency":"monthly","byMonthDay":[15]});
+        let r = recurrence_from_rule(&by_date, "2026-11-15T09:00:00", None).unwrap();
+        assert_eq!((r.kind, r.day_of_month), (2, Some(15)));
+        let nth =
+            serde_json::json!({"frequency":"monthly","byDay":[{"day":"fr","nthOfPeriod":-1}]});
+        let r = recurrence_from_rule(&nth, "2026-11-27T09:00:00", None).unwrap();
+        assert_eq!(
+            (r.kind, r.day_of_week, r.week_of_month),
+            (3, Some(32), Some(5))
+        );
+        let second =
+            serde_json::json!({"frequency":"monthly","byDay":[{"day":"tu","nthOfPeriod":2}]});
+        let r = recurrence_from_rule(&second, "2026-11-10T09:00:00", None).unwrap();
+        assert_eq!(
+            (r.kind, r.day_of_week, r.week_of_month),
+            (3, Some(4), Some(2))
+        );
+    }
+
+    #[test]
+    fn recurrence_yearly_defaults_to_start_date() {
+        let rule = serde_json::json!({"frequency":"yearly"});
+        let r = recurrence_from_rule(&rule, "2026-03-14T00:00:00", None).unwrap();
+        assert_eq!(
+            (r.kind, r.month_of_year, r.day_of_month),
+            (5, Some(3), Some(14))
+        );
+    }
+
+    #[test]
+    fn recurrence_until_is_converted_to_utc() {
+        let rule = serde_json::json!({"frequency":"daily","until":"2026-12-31T09:00:00"});
+        let r =
+            recurrence_from_rule(&rule, "2026-11-09T09:00:00", Some("America/Toronto")).unwrap();
+        assert_eq!(r.until.as_deref(), Some("20261231T140000Z"));
+        assert!(r.occurrences.is_none());
+    }
+
+    #[test]
+    fn recurrence_unsupported_shapes_are_not_mangled() {
+        for rule in [
+            serde_json::json!({"frequency":"hourly"}),
+            serde_json::json!({"frequency":"monthly","bySetPosition":[1],"byDay":[{"day":"mo"}]}),
+            serde_json::json!({"frequency":"daily","interval":2,"byDay":[{"day":"mo"}]}),
+            serde_json::json!({"frequency":"yearly","rscale":"hebrew"}),
+        ] {
+            assert!(
+                recurrence_from_rule(&rule, "2026-11-09T09:00:00", None).is_none(),
+                "{rule}"
+            );
+        }
+    }
 
     #[test]
     fn eas_compact_to_local_iso_reformats_without_offset() {
