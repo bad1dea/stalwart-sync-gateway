@@ -673,22 +673,37 @@ impl JmapClient {
         auth: &AuthenticatedSession,
         mailbox_id: &str,
         seen_ids: &[String],
+        read_states: &BTreeMap<String, String>,
     ) -> anyhow::Result<bool> {
         const NEWEST: usize = 100;
         const SEEN_CHECK: usize = 200;
+        // Read-flag changes are only compared for the newest few messages,
+        // the part of the mailbox every device's Sync window covers.
+        const READ_WINDOW: usize = 25;
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
             return Ok(false);
         };
-        let mut calls = vec![MethodCall::new(
-            "Email/query",
-            serde_json::json!({
-                "accountId": account_id,
-                "filter": { "inMailbox": mailbox_id },
-                "sort": [{ "property": "receivedAt", "isAscending": false }],
-                "limit": NEWEST
-            }),
-            "q",
-        )];
+        let mut calls = vec![
+            MethodCall::new(
+                "Email/query",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "filter": { "inMailbox": mailbox_id },
+                    "sort": [{ "property": "receivedAt", "isAscending": false }],
+                    "limit": NEWEST
+                }),
+                "q",
+            ),
+            MethodCall::new(
+                "Email/get",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "#ids": { "resultOf": "q", "name": "Email/query", "path": "/ids" },
+                    "properties": ["id", "keywords"]
+                }),
+                "n",
+            ),
+        ];
         let check: Vec<&String> = seen_ids.iter().rev().take(SEEN_CHECK).collect();
         if !check.is_empty() {
             calls.push(MethodCall::new(
@@ -711,13 +726,22 @@ impl JmapClient {
 
         let seen: BTreeSet<&str> = seen_ids.iter().map(String::as_str).collect();
         let mut query_ids: Vec<String> = Vec::new();
+        let mut newest_read: BTreeMap<String, bool> = BTreeMap::new();
         let mut still_here: Option<BTreeSet<String>> = None;
         for method in response.method_responses {
+            let call_id = method.2.clone();
             match method.0.as_str() {
                 "Email/query" => {
                     let q: QueryResponse =
                         serde_json::from_value(method.1).context("invalid Email/query response")?;
                     query_ids = q.ids;
+                }
+                "Email/get" if call_id == "n" => {
+                    let g: GetResponse<EmailMembership> =
+                        serde_json::from_value(method.1).context("invalid Email/get response")?;
+                    for e in g.list {
+                        newest_read.insert(e.id, e.keywords.get("$seen").copied().unwrap_or(false));
+                    }
                 }
                 "Email/get" => {
                     let g: GetResponse<EmailMembership> =
@@ -743,9 +767,18 @@ impl JmapClient {
                 .rev()
                 .take(SEEN_CHECK)
                 .any(|id| !still_here.contains(id));
-            return Ok(gone);
+            if gone {
+                return Ok(true);
+            }
         }
-        Ok(false)
+        // Read-state drift on a message the device already has.
+        let drift = query_ids.iter().take(READ_WINDOW).any(|id| {
+            let Some(read) = newest_read.get(id) else {
+                return false;
+            };
+            read_states.get(id).map(String::as_str) != Some(if *read { "1" } else { "0" })
+        });
+        Ok(drift)
     }
 
     /// Lists contacts in a JSContact address book, newest-touched first.
@@ -2373,6 +2406,8 @@ struct EmailMembership {
     id: String,
     #[serde(default)]
     mailbox_ids: BTreeMap<String, bool>,
+    #[serde(default)]
+    keywords: BTreeMap<String, bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]

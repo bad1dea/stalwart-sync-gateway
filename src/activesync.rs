@@ -367,9 +367,15 @@ async fn changed_mail_folders(
                 continue;
             }
         };
+        let read_states: BTreeMap<String, String> = state
+            .state
+            .item_states(eas_user, device, id)
+            .await
+            .map(|items| items.into_iter().map(|i| (i.item_id, i.hash)).collect())
+            .unwrap_or_default();
         match state
             .jmap
-            .mailbox_has_sync_changes(auth, id, &record.seen_ids)
+            .mailbox_has_sync_changes(auth, id, &record.seen_ids, &read_states)
             .await
         {
             Ok(true) => changed.push(id.clone()),
@@ -1445,33 +1451,34 @@ async fn sync_mail(
             && !collection.collection_id.starts_with("cal_")
             && !collection.collection_id.starts_with("note_")
             && !collection.collection_id.starts_with("task_");
-        let client_commands_applied = if is_mail_collection && !collection.commands.is_empty() {
-            match apply_mail_client_commands(
-                state,
-                auth,
-                &collection.collection_id,
-                &collection.commands,
-            )
-            .await
-            {
-                Ok(applied) => applied,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        collection = collection.collection_id,
-                        "failed to apply client Sync commands"
-                    );
-                    builder.start(air::COLLECTION);
-                    builder.leaf(air::SYNC_KEY, collection.sync_key);
-                    builder.leaf(air::COLLECTION_ID, collection.collection_id);
-                    builder.leaf(air::STATUS, "5");
-                    builder.end();
-                    continue;
+        let (client_commands_applied, client_read_changes) =
+            if is_mail_collection && !collection.commands.is_empty() {
+                match apply_mail_client_commands(
+                    state,
+                    auth,
+                    &collection.collection_id,
+                    &collection.commands,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            collection = collection.collection_id,
+                            "failed to apply client Sync commands"
+                        );
+                        builder.start(air::COLLECTION);
+                        builder.leaf(air::SYNC_KEY, collection.sync_key);
+                        builder.leaf(air::COLLECTION_ID, collection.collection_id);
+                        builder.leaf(air::STATUS, "5");
+                        builder.end();
+                        continue;
+                    }
                 }
-            }
-        } else {
-            false
-        };
+            } else {
+                (false, Vec::new())
+            };
         let fetch_responses = if is_mail_collection && !collection.commands.is_empty() {
             resolve_fetch_commands(state, auth, &collection.commands, collection.body_pref_type)
                 .await
@@ -1552,6 +1559,60 @@ async fn sync_mail(
                 }
             };
 
+            // Read-state sync: tell this device about messages read/unread
+            // elsewhere (another device, webmail). `item_states` holds what
+            // this device was last told; a message with no stored state (a
+            // device that predates this) gets one catch-up Change.
+            let stored_read: BTreeMap<String, String> = match state
+                .state
+                .item_states(user, device_id, &collection.collection_id)
+                .await
+            {
+                Ok(items) => items.into_iter().map(|i| (i.item_id, i.hash)).collect(),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to load mail read states");
+                    BTreeMap::new()
+                }
+            };
+            let mut prev_read = stored_read.clone();
+            // What this device itself just set is already known to it.
+            for (id, read) in &client_read_changes {
+                prev_read.insert(id.clone(), read_hash(*read).to_owned());
+            }
+            let read_changes: Vec<(String, bool)> = if collection.sync_key == "0" {
+                Vec::new()
+            } else {
+                emails
+                    .iter()
+                    .filter(|email| previous_seen.contains(&email.id))
+                    .filter(|email| {
+                        prev_read.get(&email.id).map(String::as_str) != Some(read_hash(email.read))
+                    })
+                    .map(|email| (email.id.clone(), email.read))
+                    .collect()
+            };
+            let mut new_read = prev_read;
+            for email in &emails {
+                new_read.insert(email.id.clone(), read_hash(email.read).to_owned());
+            }
+            new_read.retain(|id, _| !to_remove.contains(id.as_str()));
+            if new_read != stored_read {
+                let items = new_read
+                    .iter()
+                    .map(|(id, hash)| crate::state::ItemState {
+                        item_id: id.clone(),
+                        hash: hash.clone(),
+                    })
+                    .collect();
+                if let Err(error) = state
+                    .state
+                    .put_item_states(user, device_id, &collection.collection_id, items)
+                    .await
+                {
+                    tracing::warn!(%error, "failed to persist mail read states");
+                }
+            }
+
             let emails_to_send: Vec<_> = if collection.sync_key == "0" {
                 emails
             } else {
@@ -1563,6 +1624,7 @@ async fn sync_mail(
             let new_sync_key = if collection.sync_key == "0"
                 || !emails_to_send.is_empty()
                 || !to_remove.is_empty()
+                || !read_changes.is_empty()
                 || client_commands_applied
             {
                 next_sync_key(&collection.sync_key)
@@ -1624,7 +1686,7 @@ async fn sync_mail(
                 builder.end();
             }
 
-            if !emails_to_send.is_empty() || !to_remove.is_empty() {
+            if !emails_to_send.is_empty() || !to_remove.is_empty() || !read_changes.is_empty() {
                 let body_pref = BodyPreference {
                     body_type: collection.body_pref_type,
                     truncation_size: collection.body_pref_truncation_size,
@@ -1642,6 +1704,9 @@ async fn sync_mail(
                     builder.start(air::DELETE);
                     builder.leaf(air::SERVER_ID, id.clone());
                     builder.end();
+                }
+                for (id, read) in &read_changes {
+                    write_email_read_change(&mut builder, id, *read);
                 }
                 builder.end();
             }
@@ -1728,8 +1793,9 @@ async fn apply_mail_client_commands(
     auth: &crate::jmap::client::AuthenticatedSession,
     collection_id: &str,
     commands: &[wbxml::eas::SyncClientCommand],
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<(bool, Vec<(String, bool)>)> {
     let mut applied = false;
+    let mut read_changes = Vec::new();
     for command in commands {
         match command.kind {
             wbxml::eas::SyncClientCommandKind::Change => {
@@ -1739,6 +1805,7 @@ async fn apply_mail_client_commands(
                         .set_email_seen(auth, &command.server_id, read)
                         .await?;
                     applied = true;
+                    read_changes.push((command.server_id.clone(), read));
                 }
             }
             wbxml::eas::SyncClientCommandKind::Delete => {
@@ -1759,7 +1826,28 @@ async fn apply_mail_client_commands(
             wbxml::eas::SyncClientCommandKind::Fetch => {}
         }
     }
-    Ok(applied)
+    Ok((applied, read_changes))
+}
+
+/// Opaque per-message read-state token kept in `item_states` for mail.
+fn read_hash(read: bool) -> &'static str {
+    if read {
+        "1"
+    } else {
+        "0"
+    }
+}
+
+/// `<Change>` carrying only the Read flag, how a server tells a device that
+/// a message was read or unread elsewhere.
+fn write_email_read_change(builder: &mut wbxml::eas::DocumentBuilder, id: &str, read: bool) {
+    use wbxml::eas::{airsync as air, email as mail};
+    builder.start(air::CHANGE);
+    builder.leaf(air::SERVER_ID, id.to_owned());
+    builder.start(air::APPLICATION_DATA);
+    builder.leaf(mail::READ, read_hash(read));
+    builder.end();
+    builder.end();
 }
 
 /// Resolves each Sync-embedded `<Fetch>` command (inside `<Commands>`,

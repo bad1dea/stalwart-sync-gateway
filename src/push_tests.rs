@@ -39,6 +39,7 @@ struct Mock {
     es_tx: broadcast::Sender<String>,
     es_conns: AtomicUsize,
     counter: AtomicUsize,
+    read: Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl Mock {
@@ -49,6 +50,15 @@ impl Mock {
             .entry(mailbox.to_owned())
             .or_default()
             .push(id.to_owned());
+    }
+
+    fn set_read(&self, id: &str, read: bool) {
+        let mut set = self.read.lock().unwrap();
+        if read {
+            set.insert(id.to_owned());
+        } else {
+            set.remove(id);
+        }
     }
 
     fn remove_mail(&self, mailbox: &str, id: &str) {
@@ -94,10 +104,11 @@ async fn mock_session(State(m): State<Arc<Mock>>) -> impl IntoResponse {
     }))
 }
 
-fn email_json(id: &str, mailbox: &str) -> serde_json::Value {
+fn email_json(id: &str, mailbox: &str, read: bool) -> serde_json::Value {
     serde_json::json!({
         "id": id, "blobId": format!("b-{id}"), "threadId": format!("t-{id}"),
-        "mailboxIds": { mailbox: true }, "keywords": {},
+        "mailboxIds": { mailbox: true },
+        "keywords": if read { serde_json::json!({"$seen": true}) } else { serde_json::json!({}) },
         "receivedAt": "2026-11-10T10:00:00Z", "subject": format!("subject {id}"),
         "from": [{"name": "A", "email": "a@x.test"}], "to": null, "cc": null,
         "textBody": [{"partId": "1"}], "htmlBody": [],
@@ -110,6 +121,7 @@ async fn mock_api(
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let boxes = m.boxes.lock().unwrap().clone();
+    let read_set = m.read.lock().unwrap().clone();
     let mut responses = Vec::new();
     let mut last_query: Vec<String> = Vec::new();
     for call in req["methodCalls"].as_array().unwrap() {
@@ -141,7 +153,7 @@ async fn mock_api(
                 for id in ids {
                     for (mb, items) in &boxes {
                         if items.contains(&id) {
-                            list.push(email_json(&id, mb));
+                            list.push(email_json(&id, mb, read_set.contains(&id)));
                         }
                     }
                 }
@@ -182,6 +194,7 @@ async fn start_mock() -> Arc<Mock> {
         es_tx,
         es_conns: AtomicUsize::new(0),
         counter: AtomicUsize::new(1),
+        read: Mutex::new(Default::default()),
     });
     let app = Router::new()
         .route("/.well-known/jmap", get(mock_session))
@@ -368,6 +381,51 @@ impl Env {
         }
         self.keys.lock().unwrap().insert(device.to_owned(), key);
         delivered
+    }
+
+    /// One Sync round with an explicit key: (new key, adds, changes).
+    async fn sync_detail(
+        &self,
+        device: &str,
+        key: &str,
+    ) -> (String, Vec<String>, Vec<(String, String)>) {
+        use eas::airsync as air;
+        let resp = self
+            .req("Sync", device)
+            .body(sync_body(key, "inbox"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+        let new_key = eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap();
+        let mut adds = Vec::new();
+        let mut changes = Vec::new();
+        let mut mode = 0u8; // 1 add, 2 change
+        let mut pending: Option<String> = None;
+        let mut iter = doc.nodes.iter().peekable();
+        while let Some(node) = iter.next() {
+            if let wbxml::Node::Start(t) = node {
+                if t.code_page == air::PAGE && t.token == air::ADD.token {
+                    mode = 1;
+                } else if t.code_page == air::PAGE && t.token == air::CHANGE.token {
+                    mode = 2;
+                } else if t.code_page == air::PAGE && t.token == air::SERVER_ID.token {
+                    if let Some(wbxml::Node::Text(id)) = iter.peek() {
+                        match mode {
+                            1 => adds.push(id.clone()),
+                            2 => pending = Some(id.clone()),
+                            _ => {}
+                        }
+                    }
+                } else if t.code_page == eas::email::PAGE && t.token == eas::email::READ.token {
+                    if let (Some(wbxml::Node::Text(v)), Some(id)) = (iter.peek(), pending.take()) {
+                        changes.push((id, v.clone()));
+                    }
+                }
+            }
+        }
+        (new_key, adds, changes)
     }
 
     async fn wait_connected(&self, n: usize) {
@@ -693,22 +751,33 @@ async fn existing_sqlite_device_state_is_honoured() {
         })
         .await,
     );
-    // Existing partnership, nothing new: Status 1 (not a spurious wake).
+    // Existing partnership with no stored read states: one catch-up wake so
+    // the device learns the current read flags, driven by its old SyncKey 7.
+    let r = env.ping("oldphone", Some(ping_body(5, INBOX))).await;
+    assert_eq!(r.status, "2");
+    let (key, adds, changes) = env.sync_detail("oldphone", "7").await;
+    assert_eq!(key, "8");
+    assert!(adds.is_empty());
+    assert_eq!(
+        changes.len(),
+        2,
+        "catch-up Change for the two known messages"
+    );
+    // Caught up: quiet again.
     let r = env.ping("oldphone", Some(ping_body(1, INBOX))).await;
     assert_eq!(r.status, "1");
-    // New mail: the old SyncKey/seen-ids drive a Status 2.
+    // New mail: the old seen-ids still drive a Status 2.
     env.mock.add_mail("inbox", "m3");
     let r = env.ping("oldphone", Some(ping_body(5, INBOX))).await;
     assert_eq!(r.status, "2");
-    assert_eq!(
-        env.state
-            .get("u@test", "oldphone", "inbox")
-            .await
-            .unwrap()
-            .unwrap()
-            .sync_key,
-        "7"
-    );
+    let (_, adds, _) = env.sync_detail("oldphone", &key).await;
+    assert_eq!(adds, vec!["m3"]);
+    assert!(env
+        .state
+        .get("u@test", "oldphone", "inbox")
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]
@@ -745,4 +814,43 @@ async fn newer_ping_from_same_device_supersedes_the_older_one() {
     env.mock.emit_email_change();
     let (reply, _) = newer.await.unwrap();
     assert_eq!(reply.status, "2");
+}
+
+#[tokio::test]
+async fn read_on_one_device_reaches_the_other_without_looping() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("phone").await;
+    env.sync_all("ipad").await;
+    let key = env.keys.lock().unwrap().get("ipad").cloned().unwrap();
+
+    // Phone reads m1 (another client sets $seen on the server).
+    let ping = env.spawn_ping("ipad", 10, INBOX);
+    env.wait_connected(1).await;
+    env.mock.set_read("m1", true);
+    env.mock.emit_email_change();
+    let (reply, elapsed) = ping.await.unwrap();
+    assert_eq!(
+        reply.status, "2",
+        "read-state change wakes the other device"
+    );
+    assert!(elapsed < Duration::from_secs(2));
+
+    let (key2, adds, changes) = env.sync_detail("ipad", &key).await;
+    assert!(adds.is_empty());
+    assert_eq!(changes, vec![("m1".to_owned(), "1".to_owned())]);
+    assert_ne!(key2, key);
+
+    // Delivered once: next Sync is empty and Ping goes back to waiting.
+    let (key3, adds, changes) = env.sync_detail("ipad", &key2).await;
+    assert!(adds.is_empty() && changes.is_empty());
+    assert_eq!(key3, key2);
+    let r = env.ping("ipad", Some(ping_body(2, INBOX))).await;
+    assert_eq!(r.status, "1");
+
+    // Unread again.
+    env.mock.set_read("m1", false);
+    let r = env.ping("ipad", Some(ping_body(5, INBOX))).await;
+    assert_eq!(r.status, "2");
+    let (_, _, changes) = env.sync_detail("ipad", &key3).await;
+    assert_eq!(changes, vec![("m1".to_owned(), "0".to_owned())]);
 }
