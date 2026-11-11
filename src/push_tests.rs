@@ -1,0 +1,661 @@
+//! End-to-end push tests: the real gateway router over real HTTP against a
+//! mock Stalwart (JMAP session + API + EventSource). No production access.
+
+use std::{
+    convert::Infallible,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
+};
+
+use axum::{
+    body::{Body, Bytes},
+    extract::State,
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
+use tokio::sync::broadcast;
+use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+
+use crate::{
+    config::{Config, StateBackend},
+    http_server::{build_router, AppState},
+    metrics::Metrics,
+    push::PushHub,
+    state::{self, SyncRecord},
+    wbxml::{self, eas},
+};
+
+const MAIL_CAP: &str = "urn:ietf:params:jmap:mail";
+
+// ---------------------------------------------------------------- mock
+
+struct Mock {
+    port: u16,
+    boxes: Mutex<std::collections::BTreeMap<String, Vec<String>>>,
+    es_tx: broadcast::Sender<String>,
+    es_conns: AtomicUsize,
+    counter: AtomicUsize,
+}
+
+impl Mock {
+    fn add_mail(&self, mailbox: &str, id: &str) {
+        self.boxes
+            .lock()
+            .unwrap()
+            .entry(mailbox.to_owned())
+            .or_default()
+            .push(id.to_owned());
+    }
+
+    fn remove_mail(&self, mailbox: &str, id: &str) {
+        if let Some(v) = self.boxes.lock().unwrap().get_mut(mailbox) {
+            v.retain(|x| x != id);
+        }
+    }
+
+    fn emit(&self, data: String) {
+        let _ = self.es_tx.send(format!("event: state\ndata: {data}\n\n"));
+    }
+
+    /// A fresh Email+Mailbox state change (new state strings each call).
+    fn emit_email_change(&self) {
+        let n = self.counter.fetch_add(1, Ordering::SeqCst);
+        self.emit(format!(
+            r#"{{"@type":"StateChange","changed":{{"a1":{{"Email":"e{n}","Mailbox":"m{n}","Thread":"t{n}"}}}}}}"#
+        ));
+    }
+
+    fn close_streams(&self) {
+        let _ = self.es_tx.send("CLOSE".to_owned());
+    }
+
+    fn connections(&self) -> usize {
+        self.es_conns.load(Ordering::SeqCst)
+    }
+}
+
+async fn mock_session(State(m): State<Arc<Mock>>) -> impl IntoResponse {
+    let base = format!("http://127.0.0.1:{}", m.port);
+    Json(serde_json::json!({
+        "capabilities": { "urn:ietf:params:jmap:core": {}, MAIL_CAP: {} },
+        "accounts": { "a1": { "name": "u@test", "isPersonal": true, "isReadOnly": false,
+                              "accountCapabilities": { MAIL_CAP: {} } } },
+        "primaryAccounts": { MAIL_CAP: "a1" },
+        "username": "u@test",
+        "apiUrl": format!("{base}/api"),
+        "downloadUrl": format!("{base}/dl/{{accountId}}/{{blobId}}/{{name}}"),
+        "uploadUrl": format!("{base}/ul/{{accountId}}/"),
+        "eventSourceUrl": format!("{base}/es/?types={{types}}&closeafter={{closeafter}}&ping={{ping}}"),
+        "state": "s"
+    }))
+}
+
+fn email_json(id: &str, mailbox: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id, "blobId": format!("b-{id}"), "threadId": format!("t-{id}"),
+        "mailboxIds": { mailbox: true }, "keywords": {},
+        "receivedAt": "2026-11-10T10:00:00Z", "subject": format!("subject {id}"),
+        "from": [{"name": "A", "email": "a@x.test"}], "to": null, "cc": null,
+        "textBody": [{"partId": "1"}], "htmlBody": [],
+        "bodyValues": { "1": { "value": "body" } }, "attachments": []
+    })
+}
+
+async fn mock_api(
+    State(m): State<Arc<Mock>>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let boxes = m.boxes.lock().unwrap().clone();
+    let mut responses = Vec::new();
+    let mut last_query: Vec<String> = Vec::new();
+    for call in req["methodCalls"].as_array().unwrap() {
+        let name = call[0].as_str().unwrap();
+        let args = &call[1];
+        let cid = call[2].clone();
+        let body = match name {
+            "Mailbox/get" => serde_json::json!({ "list": [
+                {"id":"inbox","name":"Inbox","parentId":null,"role":"inbox"},
+                {"id":"other","name":"Archive","parentId":null,"role":null}
+            ]}),
+            "Email/query" => {
+                let mb = args["filter"]["inMailbox"].as_str().unwrap_or("inbox");
+                let mut ids = boxes.get(mb).cloned().unwrap_or_default();
+                ids.reverse();
+                let limit = args["limit"].as_u64().unwrap_or(100) as usize;
+                let total = ids.len();
+                ids.truncate(limit);
+                last_query = ids.clone();
+                serde_json::json!({ "ids": ids, "total": total })
+            }
+            "Email/get" => {
+                let ids: Vec<String> = if let Some(arr) = args["ids"].as_array() {
+                    arr.iter().map(|v| v.as_str().unwrap().to_owned()).collect()
+                } else {
+                    last_query.clone()
+                };
+                let mut list = Vec::new();
+                for id in ids {
+                    for (mb, items) in &boxes {
+                        if items.contains(&id) {
+                            list.push(email_json(&id, mb));
+                        }
+                    }
+                }
+                serde_json::json!({ "list": list })
+            }
+            other => serde_json::json!({ "type": "unknownMethod", "description": other }),
+        };
+        responses.push(serde_json::json!([name, body, cid]));
+    }
+    Json(serde_json::json!({ "methodResponses": responses, "sessionState": "s" }))
+}
+
+async fn mock_es(State(m): State<Arc<Mock>>) -> impl IntoResponse {
+    m.es_conns.fetch_add(1, Ordering::SeqCst);
+    let rx = m.es_tx.subscribe();
+    let first = tokio_stream::once(Ok::<String, tokio_stream::wrappers::errors::BroadcastStreamRecvError>(
+        ": connected\n\n".to_owned(),
+    ));
+    let events = first
+        .chain(BroadcastStream::new(rx))
+        .take_while(|item| !matches!(item, Ok(s) if s == "CLOSE"))
+        .filter_map(|item| item.ok())
+        .map(|s| Ok::<Bytes, Infallible>(Bytes::from(s)));
+    (
+        [("Content-Type", "text/event-stream")],
+        Body::from_stream(events),
+    )
+}
+
+async fn start_mock() -> Arc<Mock> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (es_tx, _) = broadcast::channel(64);
+    let mock = Arc::new(Mock {
+        port,
+        boxes: Mutex::new(Default::default()),
+        es_tx,
+        es_conns: AtomicUsize::new(0),
+        counter: AtomicUsize::new(1),
+    });
+    let app = Router::new()
+        .route("/.well-known/jmap", get(mock_session))
+        .route("/api", post(mock_api))
+        .route("/es/", get(mock_es))
+        .with_state(mock.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    mock
+}
+
+// ------------------------------------------------------------- gateway
+
+struct Env {
+    mock: Arc<Mock>,
+    gw: String,
+    http: reqwest::Client,
+    push: PushHub,
+    state: state::SharedStateStore,
+    keys: Mutex<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, PartialEq)]
+struct PingReply {
+    status: String,
+    folders: Vec<String>,
+    limit: Option<String>,
+}
+
+struct Opts {
+    max_concurrent: usize,
+    sqlite: Option<String>,
+}
+
+impl Default for Opts {
+    fn default() -> Self {
+        Self {
+            max_concurrent: 200,
+            sqlite: None,
+        }
+    }
+}
+
+async fn start_env(opts: Opts) -> Env {
+    let mock = start_mock().await;
+    mock.add_mail("inbox", "m1");
+    mock.add_mail("inbox", "m2");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw_addr = listener.local_addr().unwrap();
+    let config = Config {
+        listen_addr: gw_addr,
+        stalwart_jmap_url: format!("http://127.0.0.1:{}/.well-known/jmap", mock.port)
+            .parse()
+            .unwrap(),
+        stalwart_tls_verify: true,
+        eas_public_url: "http://localhost/Microsoft-Server-ActiveSync".parse().unwrap(),
+        state_backend: if opts.sqlite.is_some() {
+            StateBackend::Sqlite
+        } else {
+            StateBackend::Memory
+        },
+        state_sqlite_path: opts.sqlite.clone().unwrap_or_default(),
+        log_level: "info".into(),
+        max_wbxml_bytes: 1 << 20,
+        ping_max_seconds: 30,
+        ping_min_seconds: 1,
+        ping_max_concurrent: opts.max_concurrent,
+        push_idle_seconds: 60,
+    };
+    let state = state::new_store(&config).await.unwrap();
+    let push = PushHub::new(&config).unwrap();
+    let app_state = AppState {
+        config: config.clone(),
+        jmap: crate::jmap::client::JmapClient::new(config.clone()).unwrap(),
+        metrics: Metrics::new().unwrap(),
+        state: state.clone(),
+        push: push.clone(),
+    };
+    let app = build_router(app_state);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    Env {
+        mock,
+        gw: format!("http://{gw_addr}/Microsoft-Server-ActiveSync"),
+        http: reqwest::Client::new(),
+        push,
+        state,
+        keys: Mutex::new(Default::default()),
+    }
+}
+
+fn ping_body(heartbeat: u64, folders: &[(&str, &str)]) -> Vec<u8> {
+    let mut b = eas::DocumentBuilder::new();
+    b.start(eas::ping::PING);
+    b.leaf(eas::ping::LIFETIME, heartbeat.to_string());
+    b.start(eas::ping::FOLDERS);
+    for (id, class) in folders {
+        b.start(eas::ping::FOLDER);
+        b.leaf(eas::ping::SERVER_ENTRY_ID, *id);
+        b.leaf(eas::ping::FOLDER_TYPE, *class);
+        b.end();
+    }
+    b.end();
+    b.end();
+    wbxml::encode_document(&b.finish())
+}
+
+fn sync_body(key: &str, collection: &str) -> Vec<u8> {
+    use eas::airsync as air;
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, key);
+    b.leaf(air::COLLECTION_ID, collection);
+    b.empty_tag(air::GET_CHANGES);
+    b.leaf(air::WINDOW_SIZE, "100");
+    b.end();
+    b.end();
+    b.end();
+    wbxml::encode_document(&b.finish())
+}
+
+impl Env {
+    fn req(&self, cmd: &str, device: &str) -> reqwest::RequestBuilder {
+        self.http
+            .post(format!(
+                "{}?Cmd={cmd}&User=u%40test&DeviceId={device}&DeviceType=iPhone",
+                self.gw
+            ))
+            .basic_auth("u@test", Some("pw"))
+    }
+
+    async fn ping(&self, device: &str, body: Option<Vec<u8>>) -> PingReply {
+        let resp = self
+            .req("Ping", device)
+            .body(body.unwrap_or_default())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "Ping HTTP status");
+        let bytes = resp.bytes().await.unwrap();
+        let doc = wbxml::decode_document(&bytes).unwrap();
+        PingReply {
+            status: eas::find_text_after(&doc, eas::ping::STATUS)
+                .unwrap_or("<none>")
+                .to_owned(),
+            folders: eas::find_all_text_after(&doc, eas::ping::FOLDER),
+            limit: eas::find_text_after(&doc, eas::ping::LIFETIME).map(str::to_owned),
+        }
+    }
+
+    /// Run Sync until the device is caught up; returns every id delivered.
+    async fn sync_all(&self, device: &str) -> Vec<String> {
+        use eas::airsync as air;
+        let mut key = self
+            .keys
+            .lock()
+            .unwrap()
+            .get(device)
+            .cloned()
+            .unwrap_or_else(|| "0".to_owned());
+        let mut delivered = Vec::new();
+        for _ in 0..4 {
+            let resp = self
+                .req("Sync", device)
+                .body(sync_body(&key, "inbox"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+            let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+            let new_key = eas::find_all_text_after(&doc, air::SYNC_KEY)
+                .pop()
+                .expect("response SyncKey");
+            let adds = eas::find_all_text_after(&doc, air::SERVER_ID);
+            let more = eas::contains_token(&doc, air::MORE_AVAILABLE);
+            delivered.extend(adds);
+            let progressed = new_key != key;
+            key = new_key;
+            if !more && !progressed {
+                break;
+            }
+        }
+        self.keys.lock().unwrap().insert(device.to_owned(), key);
+        delivered
+    }
+
+    async fn wait_connected(&self, n: usize) {
+        let start = Instant::now();
+        while self.mock.connections() < n {
+            assert!(start.elapsed() < Duration::from_secs(5), "EventSource never connected");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        // let the subscriber finish its post-connect bump before the test acts
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    fn spawn_ping(
+        self: &Arc<Self>,
+        device: &'static str,
+        hb: u64,
+        folders: &'static [(&'static str, &'static str)],
+    ) -> tokio::task::JoinHandle<(PingReply, Duration)> {
+        let env = self.clone();
+        tokio::spawn(async move {
+            let t = Instant::now();
+            let reply = env.ping(device, Some(ping_body(hb, folders))).await;
+            (reply, t.elapsed())
+        })
+    }
+}
+
+const INBOX: &[(&str, &str)] = &[("inbox", "Email")];
+
+// --------------------------------------------------------------- tests
+
+#[tokio::test]
+async fn new_email_during_active_ping_then_sync_then_idle() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    assert_eq!(env.sync_all("devA").await, vec!["m2", "m1"]);
+
+    let ping = env.spawn_ping("devA", 10, INBOX);
+    env.wait_connected(1).await;
+    env.mock.add_mail("inbox", "m3");
+    let sent = Instant::now();
+    env.mock.emit_email_change();
+
+    let (reply, elapsed) = ping.await.unwrap();
+    assert_eq!(reply.status, "2");
+    assert_eq!(reply.folders, vec!["inbox"]);
+    assert!(sent.elapsed() < Duration::from_secs(2), "latency {elapsed:?}");
+
+    // Follow-up Sync delivers exactly the new message.
+    assert_eq!(env.sync_all("devA").await, vec!["m3"]);
+
+    // Ready for the next Ping: no change -> no loop, Status 1 at heartbeat.
+    let t = Instant::now();
+    let reply = env.ping("devA", Some(ping_body(2, INBOX))).await;
+    assert_eq!(reply.status, "1");
+    assert!(t.elapsed() >= Duration::from_millis(1900));
+}
+
+#[tokio::test]
+async fn no_changes_until_heartbeat_expiry() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("devA").await;
+    let t = Instant::now();
+    let reply = env.ping("devA", Some(ping_body(2, INBOX))).await;
+    assert_eq!(reply, PingReply { status: "1".into(), folders: vec![], limit: None });
+    assert!(t.elapsed() >= Duration::from_millis(1900));
+}
+
+#[tokio::test]
+async fn change_right_before_waiter_registration_is_not_lost() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("devA").await;
+    // Mail lands while no Ping and no EventSource exist: the event is lost.
+    env.mock.add_mail("inbox", "m3");
+    let t = Instant::now();
+    let reply = env.ping("devA", Some(ping_body(10, INBOX))).await;
+    assert_eq!(reply.status, "2");
+    assert_eq!(reply.folders, vec!["inbox"]);
+    assert!(t.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn multiple_devices_share_one_subscription_and_all_wake() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("devA").await;
+    env.sync_all("devB").await;
+    let a = env.spawn_ping("devA", 10, INBOX);
+    let b = env.spawn_ping("devB", 10, INBOX);
+    env.wait_connected(1).await;
+    env.mock.add_mail("inbox", "m3");
+    env.mock.emit_email_change();
+    let (ra, _) = a.await.unwrap();
+    let (rb, _) = b.await.unwrap();
+    assert_eq!((ra.status.as_str(), rb.status.as_str()), ("2", "2"));
+    assert_eq!(env.mock.connections(), 1, "one EventSource per account, not per Ping/device");
+    // Each device still gets the message through its own Sync state.
+    assert_eq!(env.sync_all("devA").await, vec!["m3"]);
+    assert_eq!(env.sync_all("devB").await, vec!["m3"]);
+}
+
+#[tokio::test]
+async fn unmonitored_folder_change_does_not_wake() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("devA").await;
+    let ping = env.spawn_ping("devA", 2, INBOX);
+    env.wait_connected(1).await;
+    env.mock.add_mail("other", "x1");
+    env.mock.emit_email_change();
+    let (reply, elapsed) = ping.await.unwrap();
+    assert_eq!(reply.status, "1", "Email event for another folder is not a change");
+    assert!(elapsed >= Duration::from_millis(1800));
+}
+
+#[tokio::test]
+async fn burst_is_coalesced_into_one_wakeup_and_one_sync() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("devA").await;
+    let ping = env.spawn_ping("devA", 10, INBOX);
+    env.wait_connected(1).await;
+    for id in ["b1", "b2", "b3"] {
+        env.mock.add_mail("inbox", id);
+        env.mock.emit_email_change();
+    }
+    let (reply, _) = ping.await.unwrap();
+    assert_eq!(reply.status, "2");
+    let mut got = env.sync_all("devA").await;
+    got.sort();
+    assert_eq!(got, vec!["b1", "b2", "b3"]);
+    let reply = env.ping("devA", Some(ping_body(2, INBOX))).await;
+    assert_eq!(reply.status, "1", "no repeat notification after the burst was synced");
+}
+
+#[tokio::test]
+async fn eventsource_reconnect_reconciles_missed_changes() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("devA").await;
+    let ping = env.spawn_ping("devA", 15, INBOX);
+    env.wait_connected(1).await;
+    env.mock.close_streams();
+    // Delivered while the stream is down: no event will ever announce it.
+    env.mock.add_mail("inbox", "m3");
+    let (reply, elapsed) = ping.await.unwrap();
+    assert_eq!(reply.status, "2");
+    assert!(env.mock.connections() >= 2, "subscriber reconnected");
+    assert!(elapsed < Duration::from_secs(8), "recovered via reconnect, took {elapsed:?}");
+}
+
+#[tokio::test]
+async fn duplicate_state_events_do_not_wake_or_loop() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("devA").await;
+    let ping = env.spawn_ping("devA", 2, INBOX);
+    env.wait_connected(1).await;
+    let same = r#"{"changed":{"a1":{"Email":"same","Mailbox":"same"}}}"#.to_owned();
+    for _ in 0..5 {
+        env.mock.emit(same.clone());
+    }
+    let (reply, _) = ping.await.unwrap();
+    assert_eq!(reply.status, "1");
+}
+
+#[tokio::test]
+async fn ping_status_codes_and_cached_parameters() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("devA").await;
+
+    // Nothing cached yet and an empty body: required parameters missing.
+    assert_eq!(env.ping("devA", None).await.status, "3");
+    // Heartbeat outside [1, 30]: Status 5 with the limit, not silent truncation.
+    let r = env.ping("devA", Some(ping_body(100, INBOX))).await;
+    assert_eq!((r.status.as_str(), r.limit.as_deref()), ("5", Some("30")));
+    let r = env.ping("devA", Some(ping_body(0, INBOX))).await;
+    assert_eq!((r.status.as_str(), r.limit.as_deref()), ("5", Some("1")));
+    // Unknown folder: folder hierarchy out of date.
+    let r = env.ping("devA", Some(ping_body(2, &[("nope", "Email")]))).await;
+    assert_eq!(r.status, "7");
+
+    // Valid Ping caches heartbeat+folders; a later empty-body Ping reuses them.
+    let r = env.ping("devA", Some(ping_body(2, INBOX))).await;
+    assert_eq!(r.status, "1");
+    env.mock.add_mail("inbox", "m3");
+    let r = env.ping("devA", None).await;
+    assert_eq!((r.status.as_str(), r.folders), ("2", vec!["inbox".to_owned()]));
+}
+
+#[tokio::test]
+async fn unsynced_status2_does_not_cause_an_immediate_ping_loop() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("devA").await;
+    env.mock.add_mail("inbox", "m3");
+    assert_eq!(env.ping("devA", Some(ping_body(10, INBOX))).await.status, "2");
+    // Client re-pings without syncing: must wait, not spin on Status 2.
+    let t = Instant::now();
+    let r = env.ping("devA", Some(ping_body(2, INBOX))).await;
+    assert_eq!(r.status, "1");
+    assert!(t.elapsed() >= Duration::from_millis(1900));
+}
+
+#[tokio::test]
+async fn client_cancellation_releases_waiter_and_slot() {
+    let env = Arc::new(start_env(Opts { max_concurrent: 1, sqlite: None }).await);
+    env.sync_all("devA").await;
+
+    // Client gives up after 600 ms (connection drop while Ping pending).
+    let res = env
+        .req("Ping", "devA")
+        .body(ping_body(20, INBOX))
+        .timeout(Duration::from_millis(600))
+        .send()
+        .await;
+    assert!(res.is_err());
+    let user = env.push.user("u@test");
+    let start = Instant::now();
+    while user.waiter_count() != 0 {
+        assert!(start.elapsed() < Duration::from_secs(3), "waiter leaked");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Slot is free again (limit is 1): this must not be a 503.
+    let r = env.ping("devA", Some(ping_body(1, INBOX))).await;
+    assert_eq!(r.status, "1");
+}
+
+#[tokio::test]
+async fn concurrent_ping_limit_returns_503() {
+    let env = Arc::new(start_env(Opts { max_concurrent: 1, sqlite: None }).await);
+    env.sync_all("devA").await;
+    let first = env.spawn_ping("devA", 3, INBOX);
+    env.wait_connected(1).await;
+    let resp = env
+        .req("Ping", "devB")
+        .body(ping_body(1, INBOX))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+    assert_eq!(resp.headers().get("Retry-After").unwrap(), "60");
+    first.abort();
+}
+
+#[tokio::test]
+async fn existing_sqlite_device_state_is_honoured() {
+    let dir = std::env::temp_dir().join(format!("ssg-push-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("state.db").to_string_lossy().into_owned();
+    {
+        // A device partnership written the way the deployed gateway wrote it.
+        let cfg = Config {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            stalwart_jmap_url: "http://127.0.0.1:1/".parse().unwrap(),
+            stalwart_tls_verify: true,
+            eas_public_url: "http://x/".parse().unwrap(),
+            state_backend: StateBackend::Sqlite,
+            state_sqlite_path: path.clone(),
+            log_level: "info".into(),
+            max_wbxml_bytes: 1,
+            ping_max_seconds: 30,
+            ping_min_seconds: 1,
+            ping_max_concurrent: 1,
+            push_idle_seconds: 1,
+        };
+        let store = state::new_store(&cfg).await.unwrap();
+        store
+            .put(SyncRecord {
+                user: "u@test".into(),
+                device_id: "oldphone".into(),
+                collection_id: "inbox".into(),
+                sync_key: "7".into(),
+                jmap_state: String::new(),
+                seen_ids: vec!["m1".into(), "m2".into()],
+            })
+            .await
+            .unwrap();
+    }
+    let env = Arc::new(start_env(Opts { max_concurrent: 10, sqlite: Some(path) }).await);
+    // Existing partnership, nothing new: Status 1 (not a spurious wake).
+    let r = env.ping("oldphone", Some(ping_body(1, INBOX))).await;
+    assert_eq!(r.status, "1");
+    // New mail: the old SyncKey/seen-ids drive a Status 2.
+    env.mock.add_mail("inbox", "m3");
+    let r = env.ping("oldphone", Some(ping_body(5, INBOX))).await;
+    assert_eq!(r.status, "2");
+    assert_eq!(env.state.get("u@test", "oldphone", "inbox").await.unwrap().unwrap().sync_key, "7");
+}
+
+#[tokio::test]
+async fn server_side_delete_wakes_ping() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("devA").await;
+    let ping = env.spawn_ping("devA", 10, INBOX);
+    env.wait_connected(1).await;
+    env.mock.remove_mail("inbox", "m1");
+    env.mock.emit_email_change();
+    let (reply, _) = ping.await.unwrap();
+    assert_eq!(reply.status, "2");
+}

@@ -108,6 +108,16 @@ pub struct BasicAuthorization {
     password: String,
 }
 
+impl BasicAuthorization {
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    pub fn password(&self) -> &str {
+        &self.password
+    }
+}
+
 /// Outcome of a `Mailbox/set` create, mapped from Stalwart's real
 /// error `type` values -- confirmed live, not assumed from the JMAP
 /// spec's generic error vocabulary: `alreadyExists` on a name
@@ -649,6 +659,92 @@ impl JmapClient {
             }
         }
         anyhow::bail!("JMAP Email/get response was missing while checking mail deletion candidates")
+    }
+
+    /// Cheap "would Sync send anything for this mailbox?" probe used by Ping
+    /// after a push wakeup. Mirrors what mail Sync actually delivers with its
+    /// seen-id diff: a message among the newest `NEWEST` that the device has
+    /// not been sent yet (arrival or move-in), or a message the device was
+    /// sent that is no longer in the mailbox (delete or move-out). Server-side
+    /// read-flag changes are NOT reported, because Sync cannot deliver them.
+    pub async fn mailbox_has_sync_changes(
+        &self,
+        auth: &AuthenticatedSession,
+        mailbox_id: &str,
+        seen_ids: &[String],
+    ) -> anyhow::Result<bool> {
+        const NEWEST: usize = 100;
+        const SEEN_CHECK: usize = 200;
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            return Ok(false);
+        };
+        let mut calls = vec![MethodCall::new(
+            "Email/query",
+            serde_json::json!({
+                "accountId": account_id,
+                "filter": { "inMailbox": mailbox_id },
+                "sort": [{ "property": "receivedAt", "isAscending": false }],
+                "limit": NEWEST
+            }),
+            "q",
+        )];
+        let check: Vec<&String> = seen_ids.iter().rev().take(SEEN_CHECK).collect();
+        if !check.is_empty() {
+            calls.push(MethodCall::new(
+                "Email/get",
+                serde_json::json!({
+                    "accountId": account_id,
+                    "ids": check,
+                    "properties": ["id", "mailboxIds"]
+                }),
+                "g",
+            ));
+        }
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                calls,
+            )
+            .await?;
+
+        let seen: BTreeSet<&str> = seen_ids.iter().map(String::as_str).collect();
+        let mut query_ids: Vec<String> = Vec::new();
+        let mut still_here: Option<BTreeSet<String>> = None;
+        for method in response.method_responses {
+            match method.0.as_str() {
+                "Email/query" => {
+                    let q: QueryResponse =
+                        serde_json::from_value(method.1).context("invalid Email/query response")?;
+                    query_ids = q.ids;
+                }
+                "Email/get" => {
+                    let g: GetResponse<EmailMembership> =
+                        serde_json::from_value(method.1).context("invalid Email/get response")?;
+                    still_here = Some(
+                        g.list
+                            .into_iter()
+                            .filter(|e| e.mailbox_ids.get(mailbox_id).copied().unwrap_or(false))
+                            .map(|e| e.id)
+                            .collect(),
+                    );
+                }
+                "error" => anyhow::bail!("JMAP method error while probing mailbox changes"),
+                _ => {}
+            }
+        }
+        if query_ids.iter().any(|id| !seen.contains(id.as_str())) {
+            return Ok(true);
+        }
+        if let Some(still_here) = still_here {
+            let gone = seen_ids
+                .iter()
+                .rev()
+                .take(SEEN_CHECK)
+                .any(|id| !still_here.contains(id));
+            return Ok(gone);
+        }
+        Ok(false)
     }
 
     /// Lists contacts in a JSContact address book, newest-touched first.
@@ -2202,6 +2298,8 @@ pub(crate) struct GetResponse<T> {
 pub(crate) struct QueryResponse {
     #[serde(default)]
     total: Option<u64>,
+    #[serde(default)]
+    ids: Vec<String>,
 }
 
 /// Minimal shape for `emails_still_in_mailbox`'s deletion-candidate

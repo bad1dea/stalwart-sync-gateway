@@ -13,6 +13,12 @@ pub struct Config {
     pub state_sqlite_path: String,
     pub log_level: String,
     pub max_wbxml_bytes: usize,
+    /// Heartbeat limits advertised via Ping Status 5, seconds.
+    pub ping_max_seconds: u64,
+    pub ping_min_seconds: u64,
+    pub ping_max_concurrent: usize,
+    /// How long a per-user JMAP EventSource stays open with no Ping activity.
+    pub push_idle_seconds: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,6 +65,18 @@ impl Config {
             max_wbxml_bytes: env_or("MAX_WBXML_BYTES", "1048576")
                 .parse()
                 .context("MAX_WBXML_BYTES must be an integer")?,
+            ping_max_seconds: env_or("PING_MAX_SECONDS", "1800")
+                .parse()
+                .context("PING_MAX_SECONDS must be an integer")?,
+            ping_min_seconds: env_or("PING_MIN_SECONDS", "60")
+                .parse()
+                .context("PING_MIN_SECONDS must be an integer")?,
+            ping_max_concurrent: env_or("PING_MAX_CONCURRENT", "200")
+                .parse()
+                .context("PING_MAX_CONCURRENT must be an integer")?,
+            push_idle_seconds: env_or("PUSH_IDLE_SECONDS", "1800")
+                .parse()
+                .context("PUSH_IDLE_SECONDS must be an integer")?,
         })
     }
 }

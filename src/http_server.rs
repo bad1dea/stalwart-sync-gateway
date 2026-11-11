@@ -12,6 +12,7 @@ use crate::{
     config::Config,
     jmap::client::JmapClient,
     metrics::{self, Metrics},
+    push::PushHub,
     state,
 };
 
@@ -21,20 +22,33 @@ pub struct AppState {
     pub jmap: JmapClient,
     pub metrics: Metrics,
     pub state: state::SharedStateStore,
+    pub push: PushHub,
 }
 
 pub async fn serve(config: Config) -> anyhow::Result<()> {
     let metrics = Metrics::new()?;
     let jmap = JmapClient::new(config.clone())?;
     let state = state::new_store(&config).await?;
+    let push = PushHub::new(&config)?;
     let app_state = AppState {
         config: config.clone(),
+        push,
         jmap,
         metrics,
         state,
     };
 
-    let app = Router::new()
+    let app = build_router(app_state);
+
+    let listener = TcpListener::bind(config.listen_addr).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    Ok(())
+}
+
+pub fn build_router(app_state: AppState) -> Router {
+    Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics::handler))
@@ -57,13 +71,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
                     path = %request.uri().path()
                 )
             }),
-        );
-
-    let listener = TcpListener::bind(config.listen_addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-    Ok(())
+        )
 }
 
 async fn healthz() -> &'static str {

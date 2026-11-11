@@ -7,6 +7,9 @@ mod http_server;
 mod jmap;
 mod metrics;
 mod model;
+mod push;
+#[cfg(test)]
+mod push_tests;
 mod state;
 mod wbxml;
 

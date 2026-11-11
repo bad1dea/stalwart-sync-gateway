@@ -30,3 +30,4 @@ uuid = { version = "1", features = ["v4", "v5"] }
 
 [dev-dependencies]
 pretty_assertions = "1"
+tokio-stream = { version = "0.1", features = ["sync"] }

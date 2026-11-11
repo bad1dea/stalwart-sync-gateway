@@ -425,15 +425,19 @@ pub mod provision {
 pub mod ping {
     use super::Token;
 
+    // Token values verified against Z-Push's lib/wbxml/wbxmldefs.php (page 0x0d).
+    // The previous table was shifted down by one (STATUS was 0x06, which is the
+    // unused AutdState tag), so no Ping response ever carried a real Status.
     pub const PAGE: u8 = 13;
     pub const PING: Token = tag(0x05, false);
-    pub const STATUS: Token = tag(0x06, false);
-    pub const LIFETIME: Token = tag(0x07, false);
-    pub const FOLDERS: Token = tag(0x08, false);
-    pub const FOLDER: Token = tag(0x09, false);
-    pub const SERVER_ENTRY_ID: Token = tag(0x0a, false);
-    pub const FOLDER_TYPE: Token = tag(0x0b, false);
-    pub const MAX_FOLDERS: Token = tag(0x0c, false);
+    pub const AUTD_STATE: Token = tag(0x06, false);
+    pub const STATUS: Token = tag(0x07, false);
+    pub const LIFETIME: Token = tag(0x08, false);
+    pub const FOLDERS: Token = tag(0x09, false);
+    pub const FOLDER: Token = tag(0x0a, false);
+    pub const SERVER_ENTRY_ID: Token = tag(0x0b, false);
+    pub const FOLDER_TYPE: Token = tag(0x0c, false);
+    pub const MAX_FOLDERS: Token = tag(0x0d, false);
 
     pub const fn tag(token: u8, has_content: bool) -> Token {
         Token {
@@ -1308,6 +1312,63 @@ pub fn find_text_after(document: &Document, token: Token) -> Option<&str> {
         }
         _ => None,
     })
+}
+
+/// Parsed Ping request: heartbeat in seconds (if sent) and the watched
+/// folders as (collection id, class) pairs, class being "Email",
+/// "Calendar", "Contacts", ... or empty when the client omitted it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PingRequest {
+    pub heartbeat: Option<u64>,
+    pub folders: Vec<(String, String)>,
+}
+
+pub fn ping_request(document: &Document) -> PingRequest {
+    let heartbeat = find_text_after(document, ping::LIFETIME).and_then(|v| v.trim().parse().ok());
+    let mut folders: Vec<(String, String)> = Vec::new();
+    let mut in_folder = false;
+    let mut current: Option<&'static str> = None;
+    let mut open: Vec<(u8, u8)> = Vec::new();
+    for node in &document.nodes {
+        match node {
+            Node::Start(t) => {
+                if t.has_content {
+                    open.push((t.code_page, t.token));
+                }
+                if t.code_page == ping::PAGE {
+                    if t.token == ping::FOLDER.token {
+                        in_folder = true;
+                        folders.push((String::new(), String::new()));
+                    } else if in_folder && t.token == ping::SERVER_ENTRY_ID.token {
+                        current = Some("id");
+                    } else if in_folder && t.token == ping::FOLDER_TYPE.token {
+                        current = Some("class");
+                    }
+                }
+            }
+            Node::Text(text) => {
+                if let (Some(field), Some(last)) = (current, folders.last_mut()) {
+                    match field {
+                        "id" => last.0 = text.clone(),
+                        _ => last.1 = text.clone(),
+                    }
+                }
+            }
+            Node::End => {
+                if let Some((page, token)) = open.pop() {
+                    if page == ping::PAGE {
+                        if token == ping::FOLDER.token {
+                            in_folder = false;
+                        }
+                        current = None;
+                    }
+                }
+            }
+            Node::Opaque(_) => {}
+        }
+    }
+    folders.retain(|(id, _)| !id.is_empty());
+    PingRequest { heartbeat, folders }
 }
 
 pub fn find_all_text_after(document: &Document, token: Token) -> Vec<String> {

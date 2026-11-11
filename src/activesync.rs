@@ -7,7 +7,7 @@ use axum::{
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 
 use crate::{
     http_server::AppState,
@@ -208,6 +208,12 @@ pub async fn post_handler(
         return send_mail(&state, &auth, &query, &body, command).await;
     }
 
+    // ActiveSync lets a client send Ping with an empty body to reuse the
+    // heartbeat and folder list from its previous Ping.
+    if body.is_empty() && command.eq_ignore_ascii_case("Ping") {
+        return ping(&state, &auth, &query, None, command).await;
+    }
+
     if !body.is_empty() {
         match wbxml::decode_document(&body) {
             Ok(document) => {
@@ -244,7 +250,7 @@ pub async fn post_handler(
                     return settings(&state, &auth, &document, command).await;
                 }
                 if command.eq_ignore_ascii_case("Ping") {
-                    return ping(&state, &document, command).await;
+                    return ping(&state, &auth, &query, Some(&document), command).await;
                 }
                 if command.eq_ignore_ascii_case("ItemOperations") {
                     return item_operations(&state, &auth, &document, command).await;
@@ -290,21 +296,22 @@ pub async fn post_handler(
         .into_response()
 }
 
-async fn ping(state: &AppState, document: &wbxml::Document, command: &str) -> Response {
-    let lifetime = wbxml::eas::find_text_after(document, wbxml::eas::ping::LIFETIME)
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(30)
-        .clamp(1, 60);
-
-    sleep(Duration::from_secs(lifetime)).await;
-
-    let mut builder = wbxml::eas::DocumentBuilder::new();
+fn ping_response(state: &AppState, command: &str, status: u8, folders: &[String], limit: Option<u64>) -> Response {
     use wbxml::eas::ping;
-
+    let mut builder = wbxml::eas::DocumentBuilder::new();
     builder.start(ping::PING);
-    builder.leaf(ping::STATUS, "1");
+    builder.leaf(ping::STATUS, status.to_string());
+    if let Some(limit) = limit {
+        builder.leaf(ping::LIFETIME, limit.to_string());
+    }
+    if !folders.is_empty() {
+        builder.start(ping::FOLDERS);
+        for id in folders {
+            builder.leaf(ping::FOLDER, id.clone());
+        }
+        builder.end();
+    }
     builder.end();
-
     let body = wbxml::encode_document(&builder.finish());
     state
         .metrics
@@ -317,6 +324,205 @@ async fn ping(state: &AppState, document: &wbxml::Document, command: &str) -> Re
         body,
     )
         .into_response()
+}
+
+/// Mail folder ids (real Mailbox ids) among the watched folders; Notes,
+/// Contacts, Calendar and Tasks use synthetic prefixed ids and are not
+/// push-woken (their Sync keeps working on the client's own schedule).
+fn watched_mail_ids(folders: &[(String, String)]) -> Vec<String> {
+    folders
+        .iter()
+        .filter(|(id, class)| {
+            !is_non_mail_collection_id(id)
+                && crate::push::Class::from_eas(class) == Some(crate::push::Class::Mail)
+        })
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// Which of `mail_ids` would Sync actually send something for right now.
+async fn changed_mail_folders(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    eas_user: &str,
+    device: &str,
+    mail_ids: &[String],
+) -> Vec<String> {
+    let mut changed = Vec::new();
+    for id in mail_ids {
+        let record = match state.state.get(eas_user, device, id).await {
+            Ok(Some(record)) => record,
+            // Never synced (or state unreadable): nothing to compare against;
+            // the client starts with a Sync anyway. Not reporting avoids a
+            // Ping/Sync loop.
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(%error, "push: sync state unreadable");
+                continue;
+            }
+        };
+        match state
+            .jmap
+            .mailbox_has_sync_changes(auth, id, &record.seen_ids)
+            .await
+        {
+            Ok(true) => changed.push(id.clone()),
+            Ok(false) => {}
+            Err(error) => {
+                // Be conservative on a probe failure: let the client sync.
+                tracing::warn!(%error, collection = %id, "push: change probe failed");
+                changed.push(id.clone());
+            }
+        }
+    }
+    changed
+}
+
+async fn ping(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    query: &EasQuery,
+    document: Option<&wbxml::Document>,
+    command: &str,
+) -> Response {
+    use crate::push::Class;
+    use std::time::Instant;
+
+    let started = Instant::now();
+    let user_key = auth.username().to_ascii_lowercase();
+    let eas_user = query.user.clone().unwrap_or_else(|| auth.username().to_owned());
+    let device = query.device_id.clone().unwrap_or_else(|| "unknown".to_owned());
+
+    let Some(_slot) = state.push.try_ping_slot() else {
+        tracing::warn!(device_id = %device, "ping: concurrent Ping limit reached");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Retry-After", "60")],
+            "too many pending Ping requests\n",
+        )
+            .into_response();
+    };
+
+    let push = state.push.ensure_subscriber(
+        &user_key,
+        auth.session.event_source_url.as_deref(),
+        auth.username(),
+        auth.authorization.password(),
+    );
+
+    // Heartbeat and folders: from the request, else the device's last Ping.
+    let request = document.map(wbxml::eas::ping_request).unwrap_or_default();
+    let cached = push.device(&device);
+    let folders_supplied = !request.folders.is_empty();
+    let heartbeat = request.heartbeat.or(cached.heartbeat);
+    let folders = if folders_supplied {
+        request.folders.clone()
+    } else {
+        cached.folders.clone()
+    };
+    let (Some(heartbeat), false) = (heartbeat, folders.is_empty()) else {
+        tracing::info!(device_id = %device, "ping: missing parameters, Status 3");
+        return ping_response(state, command, 3, &[], None);
+    };
+
+    let min = state.config.ping_min_seconds;
+    let max = state.config.ping_max_seconds;
+    if heartbeat < min || heartbeat > max {
+        let limit = heartbeat.clamp(min, max);
+        tracing::info!(device_id = %device, heartbeat, limit, "ping: heartbeat out of range, Status 5");
+        return ping_response(state, command, 5, &[], Some(limit));
+    }
+
+    if folders_supplied {
+        match state.jmap.collections(auth).await {
+            Ok(known) => {
+                let known: BTreeSet<&str> = known.iter().map(|c| c.id.as_str()).collect();
+                if folders.iter().any(|(id, _)| !known.contains(id.as_str())) {
+                    tracing::info!(device_id = %device, "ping: unknown folder id, Status 7");
+                    return ping_response(state, command, 7, &[], None);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "ping: folder validation skipped, folder list unavailable");
+            }
+        }
+        push.set_device_params(&device, heartbeat, folders.clone());
+    } else if request.heartbeat.is_some() {
+        push.set_device_params(&device, heartbeat, folders.clone());
+    }
+
+    let mail_ids = watched_mail_ids(&folders);
+    tracing::info!(
+        device_id = %device,
+        heartbeat_requested = request.heartbeat,
+        heartbeat_effective = heartbeat,
+        folders = folders.len(),
+        mail_folders = mail_ids.len(),
+        params_cached = !folders_supplied,
+        "ping: started"
+    );
+
+    let _waiter = push.waiter();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(heartbeat);
+    let mut rx = push.subscribe();
+    let mut first = true;
+    loop {
+        // Snapshot BEFORE probing: an event arriving after this point is
+        // seen by rx.changed() below, so nothing slips between the probe and
+        // the wait.
+        let seen_generation = *rx.borrow_and_update();
+
+        if !mail_ids.is_empty() {
+            let changed = changed_mail_folders(state, auth, &eas_user, &device, &mail_ids).await;
+            let loop_guard = first && push.status2_pending_sync(&device, Duration::from_secs(15));
+            if !changed.is_empty() && !loop_guard {
+                let event_latency = push.note_status2(&device);
+                tracing::info!(
+                    device_id = %device,
+                    status = 2,
+                    changed_folders = changed.len(),
+                    waited_ms = started.elapsed().as_millis() as u64,
+                    event_to_ping_ms = event_latency.map(|d| d.as_millis() as u64),
+                    "ping: completed"
+                );
+                return ping_response(state, command, 2, &changed, None);
+            }
+            if loop_guard {
+                tracing::info!(device_id = %device, "ping: pending change not yet synced, waiting instead of re-answering");
+            }
+        }
+        first = false;
+
+        // Wait for a mail-relevant event or the heartbeat.
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    tracing::info!(
+                        device_id = %device,
+                        status = 1,
+                        waited_ms = started.elapsed().as_millis() as u64,
+                        "ping: completed"
+                    );
+                    return ping_response(state, command, 1, &[], None);
+                }
+                woke = rx.changed() => {
+                    if woke.is_err() {
+                        // Sender gone (cannot happen while the hub lives).
+                        tokio::time::sleep_until(deadline).await;
+                        return ping_response(state, command, 1, &[], None);
+                    }
+                    // Coalesce bursts (a multi-message delivery fires several events).
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    if push.changed_since(seen_generation).contains(&Class::Mail) {
+                        break;
+                    }
+                    // Unrelated type changed: keep waiting, but advance our
+                    // snapshot so we do not re-test the same generation.
+                    let _ = rx.borrow_and_update();
+                }
+            }
+        }
+    }
 }
 
 /// Handles `ItemOperations > Fetch` addressed the "Mailbox Store" way
@@ -1122,6 +1328,17 @@ async fn sync_mail(
             .with_label_values(&[command, "400"])
             .inc();
         return (StatusCode::BAD_REQUEST, "Sync missing Collections\n").into_response();
+    }
+
+    if let Some(device) = query.device_id.as_deref() {
+        let push = state.push.user(&auth.username().to_ascii_lowercase());
+        if let Some(latency) = push.mark_synced(device) {
+            tracing::info!(
+                device_id = device,
+                ping_to_sync_ms = latency.as_millis() as u64,
+                "push: follow-up Sync after Ping Status 2"
+            );
+        }
     }
 
     let mut builder = wbxml::eas::DocumentBuilder::new();
