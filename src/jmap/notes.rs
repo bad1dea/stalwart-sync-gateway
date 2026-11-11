@@ -864,7 +864,8 @@ mod tests {
 
     #[test]
     fn collapse_duplicate_html_wrapper_removes_only_the_repeated_outer_tag() {
-        let doubled = r#"<html><html><head></head><body>Notes<div>Test edit one</div></body></html></html>"#;
+        let doubled =
+            r#"<html><html><head></head><body>Notes<div>Test edit one</div></body></html></html>"#;
         assert_eq!(
             collapse_duplicate_html_wrapper(doubled),
             "<html><head></head><body>Notes<div>Test edit one</div></body></html>"

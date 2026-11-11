@@ -157,9 +157,10 @@ async fn mock_api(
 async fn mock_es(State(m): State<Arc<Mock>>) -> impl IntoResponse {
     m.es_conns.fetch_add(1, Ordering::SeqCst);
     let rx = m.es_tx.subscribe();
-    let first = tokio_stream::once(Ok::<String, tokio_stream::wrappers::errors::BroadcastStreamRecvError>(
-        ": connected\n\n".to_owned(),
-    ));
+    let first = tokio_stream::once(Ok::<
+        String,
+        tokio_stream::wrappers::errors::BroadcastStreamRecvError,
+    >(": connected\n\n".to_owned()));
     let events = first
         .chain(BroadcastStream::new(rx))
         .take_while(|item| !matches!(item, Ok(s) if s == "CLOSE"))
@@ -235,7 +236,9 @@ async fn start_env(opts: Opts) -> Env {
             .parse()
             .unwrap(),
         stalwart_tls_verify: true,
-        eas_public_url: "http://localhost/Microsoft-Server-ActiveSync".parse().unwrap(),
+        eas_public_url: "http://localhost/Microsoft-Server-ActiveSync"
+            .parse()
+            .unwrap(),
         state_backend: if opts.sqlite.is_some() {
             StateBackend::Sqlite
         } else {
@@ -370,7 +373,10 @@ impl Env {
     async fn wait_connected(&self, n: usize) {
         let start = Instant::now();
         while self.mock.connections() < n {
-            assert!(start.elapsed() < Duration::from_secs(5), "EventSource never connected");
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "EventSource never connected"
+            );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         // let the subscriber finish its post-connect bump before the test acts
@@ -410,7 +416,10 @@ async fn new_email_during_active_ping_then_sync_then_idle() {
     let (reply, elapsed) = ping.await.unwrap();
     assert_eq!(reply.status, "2");
     assert_eq!(reply.folders, vec!["inbox"]);
-    assert!(sent.elapsed() < Duration::from_secs(2), "latency {elapsed:?}");
+    assert!(
+        sent.elapsed() < Duration::from_secs(2),
+        "latency {elapsed:?}"
+    );
 
     // Follow-up Sync delivers exactly the new message.
     assert_eq!(env.sync_all("devA").await, vec!["m3"]);
@@ -428,7 +437,14 @@ async fn no_changes_until_heartbeat_expiry() {
     env.sync_all("devA").await;
     let t = Instant::now();
     let reply = env.ping("devA", Some(ping_body(2, INBOX))).await;
-    assert_eq!(reply, PingReply { status: "1".into(), folders: vec![], limit: None });
+    assert_eq!(
+        reply,
+        PingReply {
+            status: "1".into(),
+            folders: vec![],
+            limit: None
+        }
+    );
     assert!(t.elapsed() >= Duration::from_millis(1900));
 }
 
@@ -458,7 +474,11 @@ async fn multiple_devices_share_one_subscription_and_all_wake() {
     let (ra, _) = a.await.unwrap();
     let (rb, _) = b.await.unwrap();
     assert_eq!((ra.status.as_str(), rb.status.as_str()), ("2", "2"));
-    assert_eq!(env.mock.connections(), 1, "one EventSource per account, not per Ping/device");
+    assert_eq!(
+        env.mock.connections(),
+        1,
+        "one EventSource per account, not per Ping/device"
+    );
     // Each device still gets the message through its own Sync state.
     assert_eq!(env.sync_all("devA").await, vec!["m3"]);
     assert_eq!(env.sync_all("devB").await, vec!["m3"]);
@@ -473,7 +493,10 @@ async fn unmonitored_folder_change_does_not_wake() {
     env.mock.add_mail("other", "x1");
     env.mock.emit_email_change();
     let (reply, elapsed) = ping.await.unwrap();
-    assert_eq!(reply.status, "1", "Email event for another folder is not a change");
+    assert_eq!(
+        reply.status, "1",
+        "Email event for another folder is not a change"
+    );
     assert!(elapsed >= Duration::from_millis(1800));
 }
 
@@ -493,7 +516,10 @@ async fn burst_is_coalesced_into_one_wakeup_and_one_sync() {
     got.sort();
     assert_eq!(got, vec!["b1", "b2", "b3"]);
     let reply = env.ping("devA", Some(ping_body(2, INBOX))).await;
-    assert_eq!(reply.status, "1", "no repeat notification after the burst was synced");
+    assert_eq!(
+        reply.status, "1",
+        "no repeat notification after the burst was synced"
+    );
 }
 
 #[tokio::test]
@@ -508,7 +534,10 @@ async fn eventsource_reconnect_reconciles_missed_changes() {
     let (reply, elapsed) = ping.await.unwrap();
     assert_eq!(reply.status, "2");
     assert!(env.mock.connections() >= 2, "subscriber reconnected");
-    assert!(elapsed < Duration::from_secs(8), "recovered via reconnect, took {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "recovered via reconnect, took {elapsed:?}"
+    );
 }
 
 #[tokio::test]
@@ -538,7 +567,9 @@ async fn ping_status_codes_and_cached_parameters() {
     let r = env.ping("devA", Some(ping_body(0, INBOX))).await;
     assert_eq!((r.status.as_str(), r.limit.as_deref()), ("5", Some("1")));
     // Unknown folder: folder hierarchy out of date.
-    let r = env.ping("devA", Some(ping_body(2, &[("nope", "Email")]))).await;
+    let r = env
+        .ping("devA", Some(ping_body(2, &[("nope", "Email")])))
+        .await;
     assert_eq!(r.status, "7");
 
     // Valid Ping caches heartbeat+folders; a later empty-body Ping reuses them.
@@ -546,7 +577,10 @@ async fn ping_status_codes_and_cached_parameters() {
     assert_eq!(r.status, "1");
     env.mock.add_mail("inbox", "m3");
     let r = env.ping("devA", None).await;
-    assert_eq!((r.status.as_str(), r.folders), ("2", vec!["inbox".to_owned()]));
+    assert_eq!(
+        (r.status.as_str(), r.folders),
+        ("2", vec!["inbox".to_owned()])
+    );
 }
 
 #[tokio::test]
@@ -554,7 +588,10 @@ async fn unsynced_status2_does_not_cause_an_immediate_ping_loop() {
     let env = Arc::new(start_env(Opts::default()).await);
     env.sync_all("devA").await;
     env.mock.add_mail("inbox", "m3");
-    assert_eq!(env.ping("devA", Some(ping_body(10, INBOX))).await.status, "2");
+    assert_eq!(
+        env.ping("devA", Some(ping_body(10, INBOX))).await.status,
+        "2"
+    );
     // Client re-pings without syncing: must wait, not spin on Status 2.
     let t = Instant::now();
     let r = env.ping("devA", Some(ping_body(2, INBOX))).await;
@@ -564,7 +601,13 @@ async fn unsynced_status2_does_not_cause_an_immediate_ping_loop() {
 
 #[tokio::test]
 async fn client_cancellation_releases_waiter_and_slot() {
-    let env = Arc::new(start_env(Opts { max_concurrent: 1, sqlite: None }).await);
+    let env = Arc::new(
+        start_env(Opts {
+            max_concurrent: 1,
+            sqlite: None,
+        })
+        .await,
+    );
     env.sync_all("devA").await;
 
     // Client gives up after 600 ms (connection drop while Ping pending).
@@ -588,7 +631,13 @@ async fn client_cancellation_releases_waiter_and_slot() {
 
 #[tokio::test]
 async fn concurrent_ping_limit_returns_503() {
-    let env = Arc::new(start_env(Opts { max_concurrent: 1, sqlite: None }).await);
+    let env = Arc::new(
+        start_env(Opts {
+            max_concurrent: 1,
+            sqlite: None,
+        })
+        .await,
+    );
     env.sync_all("devA").await;
     let first = env.spawn_ping("devA", 3, INBOX);
     env.wait_connected(1).await;
@@ -637,7 +686,13 @@ async fn existing_sqlite_device_state_is_honoured() {
             .await
             .unwrap();
     }
-    let env = Arc::new(start_env(Opts { max_concurrent: 10, sqlite: Some(path) }).await);
+    let env = Arc::new(
+        start_env(Opts {
+            max_concurrent: 10,
+            sqlite: Some(path),
+        })
+        .await,
+    );
     // Existing partnership, nothing new: Status 1 (not a spurious wake).
     let r = env.ping("oldphone", Some(ping_body(1, INBOX))).await;
     assert_eq!(r.status, "1");
@@ -645,7 +700,15 @@ async fn existing_sqlite_device_state_is_honoured() {
     env.mock.add_mail("inbox", "m3");
     let r = env.ping("oldphone", Some(ping_body(5, INBOX))).await;
     assert_eq!(r.status, "2");
-    assert_eq!(env.state.get("u@test", "oldphone", "inbox").await.unwrap().unwrap().sync_key, "7");
+    assert_eq!(
+        env.state
+            .get("u@test", "oldphone", "inbox")
+            .await
+            .unwrap()
+            .unwrap()
+            .sync_key,
+        "7"
+    );
 }
 
 #[tokio::test]
@@ -672,7 +735,10 @@ async fn newer_ping_from_same_device_supersedes_the_older_one() {
     let newer = env.spawn_ping("devA", 20, INBOX);
     let (reply, elapsed) = old.await.unwrap();
     assert_eq!(reply.status, "1");
-    assert!(elapsed < Duration::from_secs(3), "old Ping freed late: {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "old Ping freed late: {elapsed:?}"
+    );
     assert_eq!(user.waiter_count(), 1, "only the newest Ping still waits");
     // The newest one still gets the real wakeup.
     env.mock.add_mail("inbox", "m3");

@@ -646,8 +646,9 @@ impl JmapClient {
 
         for method in response.method_responses {
             if method.0 == "Email/get" {
-                let get: GetResponse<EmailMembership> = serde_json::from_value(method.1)
-                    .context("invalid Email/get response while checking mail deletion candidates")?;
+                let get: GetResponse<EmailMembership> = serde_json::from_value(method.1).context(
+                    "invalid Email/get response while checking mail deletion candidates",
+                )?;
                 return Ok(get
                     .list
                     .into_iter()
@@ -844,7 +845,10 @@ impl JmapClient {
         }
         let mut name = serde_json::Map::new();
         if let Some(file_as) = &fields.file_as {
-            name.insert("full".to_owned(), serde_json::Value::String(file_as.clone()));
+            name.insert(
+                "full".to_owned(),
+                serde_json::Value::String(file_as.clone()),
+            );
         }
         if !components.is_empty() {
             name.insert(
@@ -908,8 +912,14 @@ impl JmapClient {
 
         let call = match id {
             Some(existing_id) => {
-                card.insert("@type".to_owned(), serde_json::Value::String("Card".to_owned()));
-                card.insert("version".to_owned(), serde_json::Value::String("1.0".to_owned()));
+                card.insert(
+                    "@type".to_owned(),
+                    serde_json::Value::String("Card".to_owned()),
+                );
+                card.insert(
+                    "version".to_owned(),
+                    serde_json::Value::String("1.0".to_owned()),
+                );
                 MethodCall::new(
                     "ContactCard/set",
                     serde_json::json!({
@@ -920,8 +930,14 @@ impl JmapClient {
                 )
             }
             None => {
-                card.insert("@type".to_owned(), serde_json::Value::String("Card".to_owned()));
-                card.insert("version".to_owned(), serde_json::Value::String("1.0".to_owned()));
+                card.insert(
+                    "@type".to_owned(),
+                    serde_json::Value::String("Card".to_owned()),
+                );
+                card.insert(
+                    "version".to_owned(),
+                    serde_json::Value::String("1.0".to_owned()),
+                );
                 card.insert(
                     "addressBookIds".to_owned(),
                     serde_json::json!({ address_book_id: true }),
@@ -1173,7 +1189,11 @@ impl JmapClient {
                 serde_json::json!({ "loc1": { "name": location } }),
             );
         }
-        if let Some(start) = fields.start_time.as_deref().and_then(eas_compact_to_local_iso) {
+        if let Some(start) = fields
+            .start_time
+            .as_deref()
+            .and_then(eas_compact_to_local_iso)
+        {
             event.insert("start".to_owned(), serde_json::Value::String(start));
         }
         if let (Some(start), Some(end)) = (&fields.start_time, &fields.end_time) {
@@ -1473,14 +1493,23 @@ impl JmapClient {
                 serde_json::Value::String(subject.clone()),
             );
         }
-        if let Some(due) = fields.due_date.as_deref().and_then(eas_compact_to_local_iso) {
+        if let Some(due) = fields
+            .due_date
+            .as_deref()
+            .and_then(eas_compact_to_local_iso)
+        {
             task.insert("due".to_owned(), serde_json::Value::String(due));
         }
         if let Some(complete) = fields.complete {
             task.insert(
                 "progress".to_owned(),
                 serde_json::Value::String(
-                    if complete { "completed" } else { "needs-action" }.to_owned(),
+                    if complete {
+                        "completed"
+                    } else {
+                        "needs-action"
+                    }
+                    .to_owned(),
                 ),
             );
         }
@@ -2329,7 +2358,10 @@ struct PrincipalObject {
 impl From<PrincipalObject> for PrincipalResult {
     fn from(value: PrincipalObject) -> Self {
         Self {
-            display_name: value.description.filter(|d| !d.is_empty()).unwrap_or(value.name),
+            display_name: value
+                .description
+                .filter(|d| !d.is_empty())
+                .unwrap_or(value.name),
             email: value.email,
         }
     }
@@ -2879,8 +2911,7 @@ fn local_to_utc_eas(local_iso: &str, timezone: Option<&str>) -> Option<String> {
 /// trailing `Z`) ISO 8601 shape JSCalendar's `start` wants when no
 /// `timeZone` property is sent alongside it.
 fn eas_compact_to_local_iso(compact: &str) -> Option<String> {
-    let parsed =
-        chrono::NaiveDateTime::parse_from_str(compact, "%Y%m%dT%H%M%SZ").ok()?;
+    let parsed = chrono::NaiveDateTime::parse_from_str(compact, "%Y%m%dT%H%M%SZ").ok()?;
     Some(parsed.format("%Y-%m-%dT%H:%M:%S").to_string())
 }
 

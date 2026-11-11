@@ -1500,10 +1500,8 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                         // -- extract Notes fields from it regardless of
                         // command kind (Delete/Fetch simply won't have any).
                         command.note = extract_note_fields(&document.nodes[start + 1..idx]);
-                        command.contact =
-                            extract_contact_fields(&document.nodes[start + 1..idx]);
-                        command.calendar =
-                            extract_calendar_fields(&document.nodes[start + 1..idx]);
+                        command.contact = extract_contact_fields(&document.nodes[start + 1..idx]);
+                        command.calendar = extract_calendar_fields(&document.nodes[start + 1..idx]);
                         command.task = extract_task_fields(&document.nodes[start + 1..idx]);
                         let has_identity =
                             !command.server_id.is_empty() || !command.client_id.is_empty();
@@ -1665,7 +1663,10 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                 }
             }
             Node::End => {
-                if path.last().is_some_and(|&t| same_token(t, calendar::ATTENDEE)) {
+                if path
+                    .last()
+                    .is_some_and(|&t| same_token(t, calendar::ATTENDEE))
+                {
                     if let Some(attendee) = current_attendee.take() {
                         if !attendee.email.is_empty() {
                             fields.attendees.push(attendee);
@@ -2085,7 +2086,10 @@ mod tests {
         let command = &collections[0].commands[0];
         assert_eq!(command.calendar.subject.as_deref(), Some("Standup"));
         assert_eq!(command.calendar.attendees.len(), 2);
-        assert_eq!(command.calendar.attendees[0].email, "chris@fourthcoffee.com");
+        assert_eq!(
+            command.calendar.attendees[0].email,
+            "chris@fourthcoffee.com"
+        );
         assert_eq!(
             command.calendar.attendees[0].name.as_deref(),
             Some("Chris Gray")

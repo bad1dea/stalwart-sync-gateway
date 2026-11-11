@@ -296,7 +296,13 @@ pub async fn post_handler(
         .into_response()
 }
 
-fn ping_response(state: &AppState, command: &str, status: u8, folders: &[String], limit: Option<u64>) -> Response {
+fn ping_response(
+    state: &AppState,
+    command: &str,
+    status: u8,
+    folders: &[String],
+    limit: Option<u64>,
+) -> Response {
     use wbxml::eas::ping;
     let mut builder = wbxml::eas::DocumentBuilder::new();
     builder.start(ping::PING);
@@ -397,8 +403,14 @@ async fn ping(
 
     let started = Instant::now();
     let user_key = auth.username().to_ascii_lowercase();
-    let eas_user = query.user.clone().unwrap_or_else(|| auth.username().to_owned());
-    let device = query.device_id.clone().unwrap_or_else(|| "unknown".to_owned());
+    let eas_user = query
+        .user
+        .clone()
+        .unwrap_or_else(|| auth.username().to_owned());
+    let device = query
+        .device_id
+        .clone()
+        .unwrap_or_else(|| "unknown".to_owned());
 
     let Some(_slot) = state.push.try_ping_slot() else {
         tracing::warn!(device_id = %device, "ping: concurrent Ping limit reached");
@@ -617,7 +629,10 @@ async fn item_operations(
                     builder.end();
                 }
                 Ok(None) => {
-                    tracing::warn!(server_id = target_id, "ItemOperations Fetch: email not found");
+                    tracing::warn!(
+                        server_id = target_id,
+                        "ItemOperations Fetch: email not found"
+                    );
                     builder.leaf(ops::STATUS, "8");
                     builder.end();
                     builder.end();
@@ -1090,12 +1105,11 @@ async fn settings(
             let is_enabled = oof_state.is_some_and(|state| state != "0");
             let subject = wbxml::eas::find_text_after(document, set::REPLY_MESSAGE)
                 .map(|s| s.lines().next().unwrap_or(s).to_owned());
-            let text_body = wbxml::eas::find_text_after(document, set::REPLY_MESSAGE)
-                .map(str::to_owned);
-            let from_date = wbxml::eas::find_text_after(document, set::START_TIME)
-                .map(str::to_owned);
-            let to_date =
-                wbxml::eas::find_text_after(document, set::END_TIME).map(str::to_owned);
+            let text_body =
+                wbxml::eas::find_text_after(document, set::REPLY_MESSAGE).map(str::to_owned);
+            let from_date =
+                wbxml::eas::find_text_after(document, set::START_TIME).map(str::to_owned);
+            let to_date = wbxml::eas::find_text_after(document, set::END_TIME).map(str::to_owned);
 
             let update = crate::jmap::vacation::VacationResponseUpdate {
                 is_enabled,
@@ -1413,14 +1427,12 @@ async fn sync_mail(
         }
 
         if collection.collection_id.starts_with("ab_") {
-            sync_contacts_collection(state, auth, &mut builder, user, device_id, &collection)
-                .await;
+            sync_contacts_collection(state, auth, &mut builder, user, device_id, &collection).await;
             continue;
         }
 
         if collection.collection_id.starts_with("cal_") {
-            sync_calendar_collection(state, auth, &mut builder, user, device_id, &collection)
-                .await;
+            sync_calendar_collection(state, auth, &mut builder, user, device_id, &collection).await;
             continue;
         }
 
@@ -1509,10 +1521,7 @@ async fn sync_mail(
             let candidate_missing: Vec<String> = if collection.sync_key == "0" {
                 Vec::new()
             } else {
-                previous_seen
-                    .difference(&fetched_ids)
-                    .cloned()
-                    .collect()
+                previous_seen.difference(&fetched_ids).cloned().collect()
             };
             let to_remove: BTreeSet<String> = if candidate_missing.is_empty() {
                 BTreeSet::new()
@@ -1768,7 +1777,10 @@ async fn resolve_fetch_commands(
     auth: &crate::jmap::client::AuthenticatedSession,
     commands: &[wbxml::eas::SyncClientCommand],
     body_pref_type: Option<u8>,
-) -> Vec<(String, anyhow::Result<Option<(crate::model::Email, Option<String>)>>)> {
+) -> Vec<(
+    String,
+    anyhow::Result<Option<(crate::model::Email, Option<String>)>>,
+)> {
     let mut results = Vec::new();
     for command in commands {
         if command.kind == wbxml::eas::SyncClientCommandKind::Fetch {
@@ -1794,11 +1806,7 @@ async fn resolve_fetch_commands(
                     let mime = if body_pref_type == Some(4) {
                         match &email.blob_id {
                             Some(blob_id) => {
-                                match state
-                                    .jmap
-                                    .download_blob(auth, blob_id, "message.eml")
-                                    .await
-                                {
+                                match state.jmap.download_blob(auth, blob_id, "message.eml").await {
                                     Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
                                     Err(error) => {
                                         tracing::warn!(
@@ -1829,10 +1837,12 @@ async fn resolve_fetch_commands(
 /// Writes the `<Responses>` block answering any Sync-embedded Fetch
 /// commands, reusing the same field writer as a normal Add so the two
 /// can't drift.
-fn write_fetch_responses(
-    builder: &mut wbxml::eas::DocumentBuilder,
-    results: Vec<(String, anyhow::Result<Option<(crate::model::Email, Option<String>)>>)>,
-) {
+type FetchResult = (
+    String,
+    anyhow::Result<Option<(crate::model::Email, Option<String>)>>,
+);
+
+fn write_fetch_responses(builder: &mut wbxml::eas::DocumentBuilder, results: Vec<FetchResult>) {
     use wbxml::eas::airsync as air;
 
     if results.is_empty() {
@@ -2022,8 +2032,7 @@ fn write_email_fields(
             builder.leaf(base::PREVIEW, preview_text);
             builder.end();
         } else {
-            let (out_type, out_value, full_len, truncated) =
-                apply_body_preference(body, body_pref);
+            let (out_type, out_value, full_len, truncated) = apply_body_preference(body, body_pref);
             builder.start(base::BODY);
             builder.leaf(base::TYPE, out_type.eas_value());
             // Full untruncated size, even when Data below is cut short --
@@ -2173,7 +2182,10 @@ fn apply_body_preference(
             // source's leading indentation/blank lines (from a <head>,
             // template formatting, etc.) otherwise eats most of a small
             // TruncationSize budget before any real text appears.
-            (EmailBodyType::Plain, collapse_whitespace(&strip_html_tags(&body.value)))
+            (
+                EmailBodyType::Plain,
+                collapse_whitespace(&strip_html_tags(&body.value)),
+            )
         }
         _ => (body.body_type, body.value),
     };
@@ -2203,7 +2215,10 @@ fn plain_text_preview(body: &crate::model::EmailBody) -> String {
         crate::model::EmailBodyType::Html => strip_html_tags(&body.value),
         crate::model::EmailBodyType::Plain => body.value.clone(),
     };
-    collapse_whitespace(&text).chars().take(PREVIEW_CHARS).collect()
+    collapse_whitespace(&text)
+        .chars()
+        .take(PREVIEW_CHARS)
+        .collect()
 }
 
 /// Collapses any run of whitespace (including the blank lines an HTML
@@ -2311,8 +2326,13 @@ fn decode_entity_at(chars: &[char]) -> Option<(char, usize)> {
 }
 
 fn decode_named_or_numeric_entity(entity: &str) -> Option<char> {
-    if let Some(digits) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
-        return u32::from_str_radix(digits, 16).ok().and_then(char::from_u32);
+    if let Some(digits) = entity
+        .strip_prefix("#x")
+        .or_else(|| entity.strip_prefix("#X"))
+    {
+        return u32::from_str_radix(digits, 16)
+            .ok()
+            .and_then(char::from_u32);
     }
     if let Some(digits) = entity.strip_prefix('#') {
         return digits.parse::<u32>().ok().and_then(char::from_u32);
@@ -3079,12 +3099,7 @@ async fn sync_tasks_collection(
             wbxml::eas::SyncClientCommandKind::Change => {
                 match state
                     .jmap
-                    .save_task(
-                        auth,
-                        &calendar_id,
-                        Some(&command.server_id),
-                        &command.task,
-                    )
+                    .save_task(auth, &calendar_id, Some(&command.server_id), &command.task)
                     .await
                 {
                     Ok(id) => change_responses.push((id, "1")),
@@ -3899,7 +3914,8 @@ async fn folder_update(
         return folder_status_response(state, command, fh::FOLDER_UPDATE, "10", sync_key);
     };
 
-    if is_non_mail_collection_id(server_id) || (parent_id != "0" && is_non_mail_collection_id(parent_id))
+    if is_non_mail_collection_id(server_id)
+        || (parent_id != "0" && is_non_mail_collection_id(parent_id))
     {
         return folder_status_response(state, command, fh::FOLDER_UPDATE, "4", sync_key);
     }
@@ -4154,7 +4170,10 @@ mod tests {
             decode_entity_at(&"&whatever;".chars().collect::<Vec<_>>()),
             None
         );
-        assert_eq!(decode_entity_at(&"& rest".chars().collect::<Vec<_>>()), None);
+        assert_eq!(
+            decode_entity_at(&"& rest".chars().collect::<Vec<_>>()),
+            None
+        );
     }
 
     #[test]
@@ -4210,7 +4229,8 @@ mod tests {
         // literally "\n\n\n\n    \n    \n    \n    \n    \n\n    \n\n\n\n\n    \n ...".
         let body = EmailBody {
             body_type: EmailBodyType::Html,
-            value: "<html>\n<head>\n    \n    \n</head>\n<body>\n\n\nHello world\n</body>\n</html>".to_owned(),
+            value: "<html>\n<head>\n    \n    \n</head>\n<body>\n\n\nHello world\n</body>\n</html>"
+                .to_owned(),
         };
         let pref = BodyPreference {
             body_type: Some(1),
@@ -4297,7 +4317,10 @@ mod tests {
             (mail::MESSAGE_CLASS.code_page, mail::MESSAGE_CLASS.token),
             (base::BODY.code_page, base::BODY.token),
             (base::ATTACHMENTS.code_page, base::ATTACHMENTS.token),
-            (base::NATIVE_BODY_TYPE.code_page, base::NATIVE_BODY_TYPE.token),
+            (
+                base::NATIVE_BODY_TYPE.code_page,
+                base::NATIVE_BODY_TYPE.token,
+            ),
         ];
         let actual_order: Vec<_> = doc
             .nodes
@@ -4324,12 +4347,16 @@ mod tests {
         let id_a_again = eas_conversation_id("p");
         let id_b = eas_conversation_id("q");
         assert_eq!(id_a.len(), 16);
-        assert_eq!(id_a, id_a_again, "same thread id must hash identically every time");
+        assert_eq!(
+            id_a, id_a_again,
+            "same thread id must hash identically every time"
+        );
         assert_ne!(id_a, id_b, "different thread ids must not collide");
     }
 
     #[test]
-    fn write_email_fields_emits_conversation_id_after_native_body_type_only_when_thread_id_present() {
+    fn write_email_fields_emits_conversation_id_after_native_body_type_only_when_thread_id_present()
+    {
         use crate::wbxml::eas::email2;
 
         let email_with_thread = Email {
@@ -4528,14 +4555,18 @@ mod tests {
             .filter_map(|n| match n {
                 Node::Start(t)
                     if t.code_page == base::PAGE
-                        && (expected_order.contains(&t.token) || t.token == base::CONTENT_TYPE.token) =>
+                        && (expected_order.contains(&t.token)
+                            || t.token == base::CONTENT_TYPE.token) =>
                 {
                     Some(t.token)
                 }
                 _ => None,
             })
             .collect();
-        assert_eq!(actual_order, expected_order, "ContentType must not appear at all");
+        assert_eq!(
+            actual_order, expected_order,
+            "ContentType must not appear at all"
+        );
     }
 
     #[test]
