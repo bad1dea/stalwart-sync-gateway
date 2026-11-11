@@ -378,6 +378,13 @@ async fn changed_mail_folders(
     changed
 }
 
+/// A newer Ping from the same device replaced this one: answer it quietly
+/// (the client has already moved on) so its resources free up now.
+fn ping_superseded(state: &AppState, command: &str, device: &str) -> Response {
+    tracing::info!(device_id = %device, "ping: superseded by a newer Ping from the same device");
+    ping_response(state, command, 1, &[], None)
+}
+
 async fn ping(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
@@ -463,10 +470,15 @@ async fn ping(
     );
 
     let _waiter = push.waiter();
+    let epoch = push.begin_ping(&device);
+    let mut superseded_rx = push.subscribe_supersede();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(heartbeat);
     let mut rx = push.subscribe();
     let mut first = true;
     loop {
+        if push.is_superseded(&device, epoch) {
+            return ping_superseded(state, command, &device);
+        }
         // Snapshot BEFORE probing: an event arriving after this point is
         // seen by rx.changed() below, so nothing slips between the probe and
         // the wait.
@@ -504,6 +516,11 @@ async fn ping(
                         "ping: completed"
                     );
                     return ping_response(state, command, 1, &[], None);
+                }
+                _ = superseded_rx.changed() => {
+                    if push.is_superseded(&device, epoch) {
+                        return ping_superseded(state, command, &device);
+                    }
                 }
                 woke = rx.changed() => {
                     if woke.is_err() {

@@ -659,3 +659,24 @@ async fn server_side_delete_wakes_ping() {
     let (reply, _) = ping.await.unwrap();
     assert_eq!(reply.status, "2");
 }
+
+#[tokio::test]
+async fn newer_ping_from_same_device_supersedes_the_older_one() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("devA").await;
+    let old = env.spawn_ping("devA", 20, INBOX);
+    env.wait_connected(1).await;
+    let user = env.push.user("u@test");
+    assert_eq!(user.waiter_count(), 1);
+    // The device opens a new Ping without the old connection ever closing.
+    let newer = env.spawn_ping("devA", 20, INBOX);
+    let (reply, elapsed) = old.await.unwrap();
+    assert_eq!(reply.status, "1");
+    assert!(elapsed < Duration::from_secs(3), "old Ping freed late: {elapsed:?}");
+    assert_eq!(user.waiter_count(), 1, "only the newest Ping still waits");
+    // The newest one still gets the real wakeup.
+    env.mock.add_mail("inbox", "m3");
+    env.mock.emit_email_change();
+    let (reply, _) = newer.await.unwrap();
+    assert_eq!(reply.status, "2");
+}

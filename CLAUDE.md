@@ -71,7 +71,7 @@ Implemented:
   always reports disabled (no backend wired up), `Set` is accepted but inert
   (doesn't hang/error, doesn't persist either) -- stops the client hang; real
   fix is wiring to Stalwart's ManageSieve vacation extension.
-- `GetItemEstimate`, bounded `Ping`.
+- `GetItemEstimate`, real push `Ping` (JMAP EventSource wakeups; see docs/PUSH_ARCHITECTURE.md).
 
 Not yet implemented:
 
@@ -88,7 +88,7 @@ Not yet implemented:
   client) -- download works, upload (part of SendMail's MIME) is whatever the
   client's own MIME construction already includes, untested with a real
   client-attached file.
-- Real JMAP EventSource/WebSocket push wakeups.
+- Push wakeups for Notes/Contacts/Calendar/Tasks (mail push is done, see docs/PUSH_ARCHITECTURE.md).
 - Tasks.
 - Folder create/update/delete (other than the Notes mailbox auto-create).
 - `MeetingResponse`, `Search`, `ResolveRecipients`, `ValidateCert`, `Find` --

@@ -63,6 +63,8 @@ pub struct DeviceState {
     pub folders: Vec<(String, String)>,
     last_status2: Option<Instant>,
     synced_since_status2: bool,
+    /// Newest Ping request number for this device; older ones are stale.
+    ping_epoch: u64,
 }
 
 #[derive(Default)]
@@ -82,6 +84,7 @@ struct Inner {
 pub struct UserPush {
     inner: Mutex<Inner>,
     tx: watch::Sender<u64>,
+    supersede_tx: watch::Sender<u64>,
     waiters: AtomicUsize,
 }
 
@@ -199,6 +202,34 @@ impl UserPush {
             .collect()
     }
 
+    /// Register a new Ping for `device`; any older pending Ping of the same
+    /// device is stale (ActiveSync allows one outstanding Ping per device,
+    /// and a client that opens a new one has abandoned the old, though a
+    /// reverse proxy may not have told us).
+    pub fn begin_ping(&self, device: &str) -> u64 {
+        let epoch = {
+            let mut inner = self.inner.lock().unwrap();
+            let d = inner.devices.entry(device.to_owned()).or_default();
+            d.ping_epoch += 1;
+            d.ping_epoch
+        };
+        self.supersede_tx.send_modify(|n| *n += 1);
+        epoch
+    }
+
+    pub fn is_superseded(&self, device: &str, epoch: u64) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .devices
+            .get(device)
+            .is_some_and(|d| d.ping_epoch != epoch)
+    }
+
+    pub fn subscribe_supersede(&self) -> watch::Receiver<u64> {
+        self.supersede_tx.subscribe()
+    }
+
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.tx.subscribe()
     }
@@ -244,9 +275,11 @@ impl PushHub {
             .entry(key.to_owned())
             .or_insert_with(|| {
                 let (tx, _) = watch::channel(0);
+                let (supersede_tx, _) = watch::channel(0);
                 Arc::new(UserPush {
                     inner: Mutex::new(Inner::default()),
                     tx,
+                    supersede_tx,
                     waiters: AtomicUsize::new(0),
                 })
             })
@@ -467,9 +500,11 @@ mod tests {
 
     fn user() -> Arc<UserPush> {
         let (tx, _) = watch::channel(0);
+        let (supersede_tx, _) = watch::channel(0);
         Arc::new(UserPush {
             inner: Mutex::new(Inner::default()),
             tx,
+            supersede_tx,
             waiters: AtomicUsize::new(0),
         })
     }
