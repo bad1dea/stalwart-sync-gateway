@@ -445,9 +445,34 @@ async fn ping(
     } else {
         cached.folders.clone()
     };
-    let (Some(heartbeat), false) = (heartbeat, folders.is_empty()) else {
-        tracing::info!(device_id = %device, "ping: missing parameters, Status 3");
-        return ping_response(state, command, 3, &[], None);
+    // A client may send an empty Ping reusing its last parameters, and after
+    // a gateway restart those are gone. Answering Status 3 leaves some iOS
+    // builds without a Ping for a long time, so fall back to watching the
+    // Inbox with a default heartbeat; the client's next full Ping replaces it.
+    let (heartbeat, folders) = match (heartbeat, folders.is_empty()) {
+        (Some(heartbeat), false) => (heartbeat, folders),
+        _ => {
+            let inbox: Vec<(String, String)> = match state.jmap.collections(auth).await {
+                Ok(all) => all
+                    .iter()
+                    .filter(|c| {
+                        c.kind == crate::model::CollectionKind::Mail
+                            && c.folder_type == crate::model::eas_folder_type::INBOX
+                    })
+                    .map(|c| (c.id.clone(), "Email".to_owned()))
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            if inbox.is_empty() {
+                tracing::info!(device_id = %device, "ping: missing parameters, Status 3");
+                return ping_response(state, command, 3, &[], None);
+            }
+            tracing::info!(device_id = %device, "ping: no parameters known, watching Inbox with default heartbeat");
+            let fallback = heartbeat
+                .unwrap_or(900)
+                .clamp(state.config.ping_min_seconds, state.config.ping_max_seconds);
+            (fallback, inbox)
+        }
     };
 
     let min = state.config.ping_min_seconds;

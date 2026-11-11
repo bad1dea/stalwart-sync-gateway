@@ -617,8 +617,6 @@ async fn ping_status_codes_and_cached_parameters() {
     let env = Arc::new(start_env(Opts::default()).await);
     env.sync_all("devA").await;
 
-    // Nothing cached yet and an empty body: required parameters missing.
-    assert_eq!(env.ping("devA", None).await.status, "3");
     // Heartbeat outside [1, 30]: Status 5 with the limit, not silent truncation.
     let r = env.ping("devA", Some(ping_body(100, INBOX))).await;
     assert_eq!((r.status.as_str(), r.limit.as_deref()), ("5", Some("30")));
@@ -853,4 +851,17 @@ async fn read_on_one_device_reaches_the_other_without_looping() {
     assert_eq!(r.status, "2");
     let (_, _, changes) = env.sync_detail("ipad", &key3).await;
     assert_eq!(changes, vec![("m1".to_owned(), "0".to_owned())]);
+}
+
+#[tokio::test]
+async fn empty_ping_after_restart_falls_back_to_inbox() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("devA").await;
+    // No cached parameters (as after a gateway restart) and an empty body.
+    env.mock.add_mail("inbox", "m3");
+    let r = env.ping("devA", None).await;
+    assert_eq!(
+        (r.status.as_str(), r.folders),
+        ("2", vec!["inbox".to_owned()])
+    );
 }
