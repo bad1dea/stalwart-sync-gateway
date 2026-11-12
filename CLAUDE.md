@@ -6,13 +6,46 @@
 
 Do not reframe this as a Z-Push clone. Z-Push and PR #187 are reference implementations and compatibility oracles only.
 
-## Current Status (2026-08-24)
+## Current Status (2026-11-12)
 
 Live in production on hermes (`compose/hermes/services/stalwart-sync-gateway.yml`
 in the homelab repo), fronting `eas.khuo.ng` / `autodiscover.khuo.ng`, replacing
 the earlier PHP z-push trial. Mail, Notes, Contacts, and Calendar all sync real
 data; sending, replying, forwarding, and attachments all work. Contacts/
 Calendar/attachments are read-only (see Not Yet Implemented).
+
+### Push and sync state (2026-11-11/12)
+
+- **Mail push is real.** One JMAP EventSource connection per account wakes pending
+  `Ping` requests (`src/push.rs`, `ping()` in `src/activesync.rs`). Events are only
+  wake-ups; `mailbox_has_sync_changes` decides whether Sync would send anything.
+  Design and rules: `docs/PUSH_ARCHITECTURE.md`. Tunables: `PING_MIN_SECONDS` (60),
+  `PING_MAX_SECONDS` (1800), `PING_MAX_CONCURRENT` (200), `PUSH_IDLE_SECONDS` (1800).
+- **Ping WBXML tokens were off by one** until 2026-11-10 (Status was sent as
+  AutdState). Corrected against z-push `wbxmldefs.php` page 0x0d.
+- **Read/unread changes sync across devices.** Mail Sync sends `<Change>` with `Read`
+  for the newest window; per-device state is `item_states` for the mail collection
+  (hash `"1"` read, `"0"` unread). A device with no stored state gets a one-time
+  catch-up Change.
+- **Empty-body Ping after a restart** watches the Inbox with a default heartbeat
+  instead of answering Status 3 (some iOS builds stall on Status 3).
+- Known gaps: Notes/Contacts/Calendar/Tasks are not push-woken; server-side flag
+  changes beyond read/unread do not sync; each folder syncs only its newest ~100
+  messages (no paging into older mail); Sync is still a seen-id diff, not
+  `Email/changes`.
+- **Calendar recurrence is in progress** on branch `calendar-recurrence` (not
+  merged): server -> device direction is done (Recurrence, TimeZone blob, deleted
+  occurrences), device -> server (creating/editing a recurring event, mapping the
+  EAS TimeZone back to an IANA zone, storing `timeZone` instead of bare UTC) is
+  not. Reminders and the extra Contact fields are also not done. Do not merge the
+  branch until the write direction exists, or phone-created recurring events lose
+  their repeat.
+
+### Testing
+
+`src/push_tests.rs` runs the real router against a mock Stalwart (session, API,
+EventSource) over HTTP. Run `cargo fmt --check`, `cargo clippy --all-targets -- -D
+warnings` and `cargo test` via the Docker one-liner under "Build And Test".
 
 Implemented:
 
