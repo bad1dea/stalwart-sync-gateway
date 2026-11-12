@@ -483,6 +483,12 @@ fn ping_superseded(state: &AppState, command: &str, device: &str) -> Response {
     ping_response(state, command, 1, &[], None)
 }
 
+/// Heartbeat for an empty Ping whose parameters are unknown. It must end
+/// before the client's own timer: an iPad on a 600 s heartbeat hung up after
+/// 630 s on the old 900 s fallback (prod 2026-11-12), which iOS counts as a
+/// failed Ping. Answering Status 1 early only makes the client Ping again.
+const FALLBACK_PING_HEARTBEAT: u64 = 480;
+
 /// Logs a Ping the client hung up on before the gateway answered (the
 /// handler future is dropped, so nothing else would record it).
 struct PingHangupLog {
@@ -611,7 +617,7 @@ async fn ping_inner(
             }
             tracing::info!(device_id = %device, "ping: no parameters known, watching synced mail folders with default heartbeat");
             let fallback = heartbeat
-                .unwrap_or(900)
+                .unwrap_or(FALLBACK_PING_HEARTBEAT)
                 .clamp(state.config.ping_min_seconds, state.config.ping_max_seconds);
             (fallback, inbox)
         }
@@ -1628,6 +1634,9 @@ async fn move_items(
     )
         .into_response()
 }
+
+#[cfg(test)]
+pub(crate) const FALLBACK_PING_HEARTBEAT_FOR_TESTS: u64 = FALLBACK_PING_HEARTBEAT;
 
 #[cfg(test)]
 pub(crate) fn wbxml_outline_for_tests(doc: &wbxml::Document) -> String {

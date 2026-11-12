@@ -1088,6 +1088,13 @@ async fn ping_parameters_survive_a_gateway_restart() {
     );
 }
 
+#[test]
+fn fallback_heartbeat_ends_before_an_ios_600s_ping_times_out() {
+    // Prod: the iPad (600 s heartbeat) hung up after 630 s while the
+    // fallback held its empty Ping for 900 s.
+    assert!(crate::activesync::FALLBACK_PING_HEARTBEAT_FOR_TESTS < 600);
+}
+
 #[tokio::test]
 async fn empty_ping_with_nothing_stored_watches_every_synced_mail_folder() {
     let env = Arc::new(start_env(Opts::default()).await);
