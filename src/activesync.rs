@@ -2038,8 +2038,8 @@ async fn sync_mail(
             // remain ([MS-ASCMD] 2.2.3.116).
             // FilterType limits which messages are sent; deletion and read
             // checks still use the whole folder, so a message that ages out of
-            // the range is never reported deleted (no SoftDelete is sent: the
-            // client drops aged-out mail from its own copy).
+            // the range is never reported deleted. It is removed from the
+            // device with a SoftDelete instead (see `aged_out` below).
             let filter = collection
                 .filter_type
                 .or_else(|| previous_options.as_ref().map(|o| o.filter))
@@ -2177,6 +2177,40 @@ async fn sync_mail(
                 }
             };
 
+            // Held messages that have aged out of the device's FilterType
+            // window: still in the folder (so not deleted), received before the
+            // cutoff. [MS-ASCMD] SoftDelete removes them from the device only;
+            // Z-Push's generic backends send an ordinary Delete for the same
+            // case (MAIL_AGED_OUT picks). Never touches Stalwart. Each is sent
+            // once: it leaves `seen_ids`, and comes back as an Add if the
+            // window widens again.
+            let aged_mode = state.config.mail_aged_out;
+            let aged_out: Vec<String> = match &in_range {
+                Some(range)
+                    if aged_mode != crate::config::AgedOut::Keep
+                        && collection.sync_key != "0" =>
+                {
+                    let range: BTreeSet<&str> = range.iter().map(String::as_str).collect();
+                    seen_by_date
+                        .iter()
+                        .filter(|id| !range.contains(id.as_str()) && !to_remove.contains(id.as_str()))
+                        .map(|id| (*id).clone())
+                        .collect()
+                }
+                _ => Vec::new(),
+            };
+            // Adds and cleanup share the window; the rest follows with
+            // MoreAvailable.
+            let aged_budget = collection
+                .window_size
+                .clamp(1, 100)
+                .saturating_sub(page.len());
+            let aged_sent: Vec<String> = aged_out.iter().take(aged_budget).cloned().collect();
+            if aged_out.len() > aged_sent.len() {
+                has_more = true;
+            }
+            let aged_set: BTreeSet<String> = aged_sent.iter().cloned().collect();
+
             // Read-state sync: tell this device about messages read/unread
             // elsewhere (another device, webmail). `item_states` holds what
             // this device was last told; a message with no stored state (a
@@ -2285,6 +2319,9 @@ async fn sync_mail(
                     outside_updates.push((id, read));
                 }
             }
+            // No Change for a message removed in this same reply.
+            read_changes.retain(|(id, _)| !aged_set.contains(id));
+            outside_updates.retain(|(id, _)| !aged_set.contains(id));
             if !read_changes.is_empty() {
                 tracing::info!(
                     device_id,
@@ -2304,7 +2341,7 @@ async fn sync_mail(
                     new_read.insert(email.id.clone(), read_hash(email.read).to_owned());
                 }
             }
-            new_read.retain(|id, _| !to_remove.contains(id.as_str()));
+            new_read.retain(|id, _| !to_remove.contains(id.as_str()) && !aged_set.contains(id));
             if new_read != stored_read {
                 let items = new_read
                     .iter()
@@ -2337,6 +2374,7 @@ async fn sync_mail(
             let new_sync_key = if collection.sync_key == "0"
                 || !emails_to_send.is_empty()
                 || !to_remove.is_empty()
+                || !aged_sent.is_empty()
                 || !read_changes.is_empty()
                 || client_commands_applied
             {
@@ -2367,6 +2405,7 @@ async fn sync_mail(
                         let keep = |id: &String| {
                             (previous_seen.contains(id) || fetched_ids.contains(id))
                                 && !to_remove.contains(id)
+                                && !aged_set.contains(id)
                         };
                         let mut order: Vec<String> =
                             scan.iter().filter(|id| keep(id)).cloned().collect();
@@ -2406,6 +2445,7 @@ async fn sync_mail(
                 new_key = %new_sync_key,
                 adds = emails_to_send.len(),
                 deletes = to_remove.len(),
+                aged_out = aged_sent.len(),
                 read_changes = read_changes.len(),
                 more_available = has_more,
                 "mail Sync reply"
@@ -2444,7 +2484,11 @@ async fn sync_mail(
                 builder.empty_tag(air::MORE_AVAILABLE);
             }
 
-            if !emails_to_send.is_empty() || !to_remove.is_empty() || !read_changes.is_empty() {
+            if !emails_to_send.is_empty()
+                || !to_remove.is_empty()
+                || !aged_sent.is_empty()
+                || !read_changes.is_empty()
+            {
                 let body_pref = BodyPreference {
                     body_type: collection.body_pref_type,
                     truncation_size: collection.body_pref_truncation_size,
@@ -2460,6 +2504,16 @@ async fn sync_mail(
                 }
                 for id in &to_remove {
                     builder.start(air::DELETE);
+                    builder.leaf(air::SERVER_ID, id.clone());
+                    builder.end();
+                }
+                let aged_tag = if aged_mode == crate::config::AgedOut::Delete {
+                    air::DELETE
+                } else {
+                    air::SOFT_DELETE
+                };
+                for id in &aged_sent {
+                    builder.start(aged_tag);
                     builder.leaf(air::SERVER_ID, id.clone());
                     builder.end();
                 }
