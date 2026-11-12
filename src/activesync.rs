@@ -483,12 +483,6 @@ fn ping_superseded(state: &AppState, command: &str, device: &str) -> Response {
     ping_response(state, command, 1, &[], None)
 }
 
-/// Heartbeat for an empty Ping whose parameters are unknown. It must end
-/// before the client's own timer: an iPad on a 600 s heartbeat hung up after
-/// 630 s on the old 900 s fallback (prod 2026-11-12), which iOS counts as a
-/// failed Ping. Answering Status 1 early only makes the client Ping again.
-const FALLBACK_PING_HEARTBEAT: u64 = 480;
-
 /// Logs a Ping the client hung up on before the gateway answered (the
 /// handler future is dropped, so nothing else would record it).
 struct PingHangupLog {
@@ -582,45 +576,19 @@ async fn ping_inner(
     } else {
         cached.folders.clone()
     };
-    // A client may send an empty Ping reusing its last parameters, and after
-    // a gateway restart those are gone. Answering Status 3 leaves some iOS
-    // builds without a Ping for a long time, so fall back to watching the
-    // Inbox with a default heartbeat; the client's next full Ping replaces it.
-    let (heartbeat, folders) = match (heartbeat, folders.is_empty()) {
-        (Some(heartbeat), false) => (heartbeat, folders),
-        _ => {
-            // Watch every mail folder this device has a Sync state for (the
-            // folders it actually keeps in step), else just the Inbox.
-            let mail: Vec<crate::model::Collection> = match state.jmap.collections(auth).await {
-                Ok(all) => all
-                    .into_iter()
-                    .filter(|c| c.kind == crate::model::CollectionKind::Mail)
-                    .collect(),
-                Err(_) => Vec::new(),
-            };
-            let mut inbox: Vec<(String, String)> = Vec::new();
-            for c in &mail {
-                if matches!(state.state.get(&eas_user, &device, &c.id).await, Ok(Some(_))) {
-                    inbox.push((c.id.clone(), "Email".to_owned()));
-                }
-            }
-            if inbox.is_empty() {
-                inbox = mail
-                    .iter()
-                    .filter(|c| c.folder_type == crate::model::eas_folder_type::INBOX)
-                    .map(|c| (c.id.clone(), "Email".to_owned()))
-                    .collect();
-            }
-            if inbox.is_empty() {
-                tracing::info!(device_id = %device, "ping: missing parameters, Status 3");
-                return ping_response(state, command, 3, &[], None);
-            }
-            tracing::info!(device_id = %device, "ping: no parameters known, watching synced mail folders with default heartbeat");
-            let fallback = heartbeat
-                .unwrap_or(FALLBACK_PING_HEARTBEAT)
-                .clamp(state.config.ping_min_seconds, state.config.ping_max_seconds);
-            (fallback, inbox)
-        }
+    // An empty Ping reuses the device's last parameters (kept in the state
+    // store, so they survive restarts). With none known the answer is Status
+    // 3 ([MS-ASCMD] Ping Status 3, missing parameters): the client resends a
+    // full Ping. Z-Push does the same (ping.php). Seen on iOS 2026-11-11: the
+    // iPhone came back with a new Ping 17.5 min later, on its own timer.
+    let (Some(heartbeat), false) = (heartbeat, folders.is_empty()) else {
+        tracing::info!(
+            device_id = %device,
+            heartbeat_known = heartbeat.is_some(),
+            folders_known = !folders.is_empty(),
+            "ping: parameters missing and none stored, Status 3"
+        );
+        return ping_response(state, command, 3, &[], None);
     };
 
     let min = state.config.ping_min_seconds;
@@ -1634,9 +1602,6 @@ async fn move_items(
     )
         .into_response()
 }
-
-#[cfg(test)]
-pub(crate) const FALLBACK_PING_HEARTBEAT_FOR_TESTS: u64 = FALLBACK_PING_HEARTBEAT;
 
 #[cfg(test)]
 pub(crate) fn wbxml_outline_for_tests(doc: &wbxml::Document) -> String {

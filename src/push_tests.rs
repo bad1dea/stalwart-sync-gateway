@@ -1054,16 +1054,44 @@ async fn read_on_one_device_reaches_the_other_without_looping() {
 }
 
 #[tokio::test]
-async fn empty_ping_after_restart_falls_back_to_inbox() {
+async fn empty_ping_with_nothing_stored_gets_status_3_then_a_full_ping_works() {
+    // [MS-ASCMD] Ping Status 3: required parameters missing and none stored.
+    // The device resends a full Ping, which is stored for later empty ones.
     let env = Arc::new(start_env(Opts::default()).await);
-    env.sync_all("devA").await;
-    // No cached parameters (as after a gateway restart) and an empty body.
+    env.sync_all("ipad").await;
     env.mock.add_mail("inbox", "m3");
-    let r = env.ping("devA", None).await;
+    let r = env.ping("ipad", None).await;
+    assert_eq!((r.status.as_str(), r.folders.len()), ("3", 0));
+    // Status 3 does not count as an announcement or eat the change.
+    let r = env.ping("ipad", Some(ping_body(3, INBOX))).await;
+    assert_eq!((r.status.as_str(), r.folders), ("2", vec!["inbox".to_owned()]));
+    env.sync_all("ipad").await;
+    env.mock.add_mail("inbox", "m4");
+    let r = env.ping("ipad", None).await;
     assert_eq!(
         (r.status.as_str(), r.folders),
-        ("2", vec!["inbox".to_owned()])
+        ("2", vec!["inbox".to_owned()]),
+        "parameters from the full Ping are reused"
     );
+}
+
+#[tokio::test]
+async fn heartbeat_alone_without_folders_and_nothing_stored_gets_status_3() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("ipad").await;
+    let r = env.ping("ipad", Some(ping_body(3, &[]))).await;
+    assert_eq!(r.status, "3");
+}
+
+#[tokio::test]
+async fn status_3_is_not_sent_after_a_restart_when_parameters_are_stored() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("iphone").await;
+    let r = env.ping("iphone", Some(ping_body(2, INBOX))).await;
+    assert_eq!(r.status, "1");
+    let env2 = Arc::new(env.restarted().await);
+    let r = env2.ping("iphone", None).await;
+    assert_eq!(r.status, "1", "stored parameters used, no Status 3");
 }
 
 #[tokio::test]
@@ -1085,26 +1113,6 @@ async fn ping_parameters_survive_a_gateway_restart() {
         (r.status.as_str(), r.folders),
         ("2", vec!["other".to_owned()]),
         "empty Ping after restart still watches the Archive"
-    );
-}
-
-#[test]
-fn fallback_heartbeat_ends_before_an_ios_600s_ping_times_out() {
-    // Prod: the iPad (600 s heartbeat) hung up after 630 s while the
-    // fallback held its empty Ping for 900 s.
-    assert!(crate::activesync::FALLBACK_PING_HEARTBEAT_FOR_TESTS < 600);
-}
-
-#[tokio::test]
-async fn empty_ping_with_nothing_stored_watches_every_synced_mail_folder() {
-    let env = Arc::new(start_env(Opts::default()).await);
-    env.sync_all("ipad").await;
-    env.sync_folder("ipad", "other").await;
-    env.mock.add_mail("other", "o1");
-    let r = env.ping("ipad", None).await;
-    assert_eq!(
-        (r.status.as_str(), r.folders),
-        ("2", vec!["other".to_owned()])
     );
 }
 
