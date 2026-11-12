@@ -961,9 +961,10 @@ async fn ping_ignores_messages_outside_the_devices_sync_window() {
     for n in 0..30 {
         env.mock.add_mail("inbox", &format!("x{n:02}"));
     }
-    let (key, adds, _) = env.sync_detail_window("phone", "0", "5").await;
-    assert_eq!(adds.len(), 5, "first Sync delivers only the newest 5");
-    assert_ne!(key, "0");
+    let (key0, adds, _) = env.sync_detail_window("phone", "0", "5").await;
+    assert!(adds.is_empty(), "a SyncKey 0 reply carries no items");
+    let (key, adds, _) = env.sync_detail_window("phone", &key0, "5").await;
+    assert_eq!(adds.len(), 5, "first real Sync delivers only the newest 5");
     for _ in 0..3 {
         let r = env.ping("phone", Some(ping_body(1, INBOX))).await;
         assert_eq!(
@@ -1007,9 +1008,38 @@ async fn a_fresh_sync_forgets_messages_the_device_no_longer_has() {
     env.sync_all("phone").await;
     env.mock.remove_mail("inbox", "m1");
     // The phone restarts the folder from scratch (SyncKey 0).
-    let (_, adds, _) = env.sync_detail("phone", "0").await;
+    let (key0, adds, _) = env.sync_detail("phone", "0").await;
+    assert!(adds.is_empty());
+    let (_, adds, _) = env.sync_detail("phone", &key0).await;
     assert_eq!(adds, vec!["m2"]);
     // m1 is gone from the server and from the phone: nothing to report.
     let r = env.ping("phone", Some(ping_body(1, INBOX))).await;
     assert_eq!(r.status, "1");
+}
+
+#[tokio::test]
+async fn initial_sync_reply_has_no_commands_block() {
+    // iOS 27 fails the whole folder sync if the SyncKey 0 reply has <Commands>.
+    use eas::airsync as air;
+    let env = Arc::new(start_env(Opts::default()).await);
+    let resp = env
+        .req("Sync", "fresh")
+        .body(sync_body("0", "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+    assert!(
+        !eas::contains_token(&doc, air::COMMANDS),
+        "no <Commands> on SyncKey 0"
+    );
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SYNC_KEY)
+            .pop()
+            .as_deref(),
+        Some("1")
+    );
+    // The next request gets the messages.
+    let (_, adds, _) = env.sync_detail("fresh", "1").await;
+    assert_eq!(adds, vec!["m2", "m1"]);
 }

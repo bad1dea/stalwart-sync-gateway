@@ -1755,8 +1755,11 @@ async fn sync_mail(
             for (id, read) in &outside_updates {
                 new_read.insert(id.clone(), read_hash(*read).to_owned());
             }
-            for email in &emails {
-                new_read.insert(email.id.clone(), read_hash(email.read).to_owned());
+            // Nothing is sent on a SyncKey 0 reply, so nothing is recorded.
+            if collection.sync_key != "0" {
+                for email in &emails {
+                    new_read.insert(email.id.clone(), read_hash(email.read).to_owned());
+                }
             }
             new_read.retain(|id, _| !to_remove.contains(id.as_str()));
             if new_read != stored_read {
@@ -1776,8 +1779,12 @@ async fn sync_mail(
                 }
             }
 
+            // [MS-ASCMD] initial Sync: the reply to SyncKey 0 carries only the
+            // new SyncKey; items come on the next request. iOS 27 rejects a
+            // <Commands> block here ("No parse rule ... codePage 0x0 token
+            // 0x16") and fails the whole folder sync.
             let emails_to_send: Vec<_> = if collection.sync_key == "0" {
-                emails
+                Vec::new()
             } else {
                 emails
                     .into_iter()
@@ -1810,7 +1817,7 @@ async fn sync_mail(
                     // sends. Merging the old list kept messages it no longer
                     // has (moved/deleted), so Ping kept reporting them gone.
                     seen_ids: if collection.sync_key == "0" {
-                        fetched_ids.iter().cloned().collect()
+                        Vec::new()
                     } else {
                         previous_seen
                             .union(&fetched_ids)
@@ -1854,10 +1861,8 @@ async fn sync_mail(
             // unseen-since-last-time diff, not itself windowed by
             // `limit`, so `has_more` (from the raw unfiltered query)
             // doesn't describe it.
-            if collection.sync_key == "0" && has_more {
-                builder.start(air::MORE_AVAILABLE);
-                builder.end();
-            }
+            // Never on a SyncKey 0 reply (it carries no items).
+            let _ = has_more;
 
             if !emails_to_send.is_empty() || !to_remove.is_empty() || !read_changes.is_empty() {
                 let body_pref = BodyPreference {
