@@ -1604,7 +1604,7 @@ async fn sync_mail(
             for (id, read) in &client_read_changes {
                 prev_read.insert(id.clone(), read_hash(*read).to_owned());
             }
-            let read_changes: Vec<(String, bool)> = if collection.sync_key == "0" {
+            let mut read_changes: Vec<(String, bool)> = if collection.sync_key == "0" {
                 Vec::new()
             } else {
                 emails
@@ -1616,7 +1616,51 @@ async fn sync_mail(
                     .map(|email| (email.id.clone(), email.read))
                     .collect()
             };
+            // Messages older than this device's Sync window never show up in
+            // `emails`, so their read state would stay frozen at whatever the
+            // device was last told. Refresh the stored ones directly.
+            let mut outside_updates: Vec<(String, bool)> = Vec::new();
+            if collection.sync_key != "0" {
+                let outside: Vec<String> = prev_read
+                    .keys()
+                    .rev()
+                    .filter(|id| {
+                        !fetched_ids.contains(id.as_str())
+                            && previous_seen.contains(id.as_str())
+                            && !to_remove.contains(id.as_str())
+                    })
+                    .take(300)
+                    .cloned()
+                    .collect();
+                if !outside.is_empty() {
+                    match state.jmap.email_read_states(auth, &outside).await {
+                        Ok(current) => {
+                            for (id, read) in current {
+                                if prev_read.get(&id).map(String::as_str) != Some(read_hash(read)) {
+                                    read_changes.push((id.clone(), read));
+                                    outside_updates.push((id, read));
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to refresh older message read states");
+                        }
+                    }
+                }
+            }
+            if !read_changes.is_empty() {
+                tracing::info!(
+                    device_id,
+                    collection = %collection.collection_id,
+                    read_changes = read_changes.len(),
+                    older_than_window = outside_updates.len(),
+                    "mail Sync: sending read-state changes"
+                );
+            }
             let mut new_read = prev_read;
+            for (id, read) in &outside_updates {
+                new_read.insert(id.clone(), read_hash(*read).to_owned());
+            }
             for email in &emails {
                 new_read.insert(email.id.clone(), read_hash(email.read).to_owned());
             }

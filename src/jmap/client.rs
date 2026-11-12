@@ -711,7 +711,7 @@ impl JmapClient {
                 serde_json::json!({
                     "accountId": account_id,
                     "ids": check,
-                    "properties": ["id", "mailboxIds"]
+                    "properties": ["id", "mailboxIds", "keywords"]
                 }),
                 "g",
             ));
@@ -728,6 +728,7 @@ impl JmapClient {
         let mut query_ids: Vec<String> = Vec::new();
         let mut newest_read: BTreeMap<String, bool> = BTreeMap::new();
         let mut still_here: Option<BTreeSet<String>> = None;
+        let mut seen_read: BTreeMap<String, bool> = BTreeMap::new();
         for method in response.method_responses {
             let call_id = method.2.clone();
             match method.0.as_str() {
@@ -746,6 +747,12 @@ impl JmapClient {
                 "Email/get" => {
                     let g: GetResponse<EmailMembership> =
                         serde_json::from_value(method.1).context("invalid Email/get response")?;
+                    for e in &g.list {
+                        seen_read.insert(
+                            e.id.clone(),
+                            e.keywords.get("$seen").copied().unwrap_or(false),
+                        );
+                    }
                     still_here = Some(
                         g.list
                             .into_iter()
@@ -771,6 +778,16 @@ impl JmapClient {
                 return Ok(true);
             }
         }
+        // Read-state drift on older messages the device already has (outside
+        // the newest-25 check below): only ids with a stored state count.
+        let older_drift = seen_read.iter().any(|(id, read)| {
+            read_states
+                .get(id)
+                .is_some_and(|stored| stored != if *read { "1" } else { "0" })
+        });
+        if older_drift {
+            return Ok(true);
+        }
         // Read-state drift on a message the device already has.
         let drift = query_ids.iter().take(READ_WINDOW).any(|id| {
             let Some(read) = newest_read.get(id) else {
@@ -779,6 +796,53 @@ impl JmapClient {
             read_states.get(id).map(String::as_str) != Some(if *read { "1" } else { "0" })
         });
         Ok(drift)
+    }
+
+    /// Current read flag (`$seen`) of the given messages, for the ones that
+    /// still exist. Used to refresh read state of messages older than a
+    /// device's Sync window.
+    pub async fn email_read_states(
+        &self,
+        auth: &AuthenticatedSession,
+        ids: &[String],
+    ) -> anyhow::Result<BTreeMap<String, bool>> {
+        let mut out = BTreeMap::new();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            return Ok(out);
+        };
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Email/get",
+                    serde_json::json!({
+                        "accountId": account_id,
+                        "ids": ids,
+                        "properties": ["id", "keywords"]
+                    }),
+                    "0",
+                )],
+            )
+            .await?;
+        for method in response.method_responses {
+            match method.0.as_str() {
+                "Email/get" => {
+                    let get: GetResponse<EmailMembership> = serde_json::from_value(method.1)
+                        .context("invalid Email/get response for read states")?;
+                    for email in get.list {
+                        let read = email.keywords.get("$seen").copied().unwrap_or(false);
+                        out.insert(email.id, read);
+                    }
+                }
+                "error" => anyhow::bail!("JMAP method error reading message read states"),
+                _ => {}
+            }
+        }
+        Ok(out)
     }
 
     /// Lists contacts in a JSContact address book, newest-touched first.

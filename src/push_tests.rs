@@ -303,6 +303,10 @@ fn ping_body(heartbeat: u64, folders: &[(&str, &str)]) -> Vec<u8> {
 }
 
 fn sync_body(key: &str, collection: &str) -> Vec<u8> {
+    sync_body_window(key, collection, "100")
+}
+
+fn sync_body_window(key: &str, collection: &str, window: &str) -> Vec<u8> {
     use eas::airsync as air;
     let mut b = eas::DocumentBuilder::new();
     b.start(air::SYNC);
@@ -311,7 +315,7 @@ fn sync_body(key: &str, collection: &str) -> Vec<u8> {
     b.leaf(air::SYNC_KEY, key);
     b.leaf(air::COLLECTION_ID, collection);
     b.empty_tag(air::GET_CHANGES);
-    b.leaf(air::WINDOW_SIZE, "100");
+    b.leaf(air::WINDOW_SIZE, window);
     b.end();
     b.end();
     b.end();
@@ -389,10 +393,19 @@ impl Env {
         device: &str,
         key: &str,
     ) -> (String, Vec<String>, Vec<(String, String)>) {
+        self.sync_detail_window(device, key, "100").await
+    }
+
+    async fn sync_detail_window(
+        &self,
+        device: &str,
+        key: &str,
+        window: &str,
+    ) -> (String, Vec<String>, Vec<(String, String)>) {
         use eas::airsync as air;
         let resp = self
             .req("Sync", device)
-            .body(sync_body(key, "inbox"))
+            .body(sync_body_window(key, "inbox", window))
             .send()
             .await
             .unwrap();
@@ -864,4 +877,31 @@ async fn empty_ping_after_restart_falls_back_to_inbox() {
         (r.status.as_str(), r.folders),
         ("2", vec!["inbox".to_owned()])
     );
+}
+
+#[tokio::test]
+async fn read_change_on_message_older_than_the_window_still_reaches_the_device() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    for n in 0..30 {
+        env.mock.add_mail("inbox", &format!("x{n:02}"));
+    }
+    env.sync_all("ipad").await;
+    let key = env.keys.lock().unwrap().get("ipad").cloned().unwrap();
+
+    // m1 is the oldest message: far outside a 5-message window and outside
+    // the newest-25 the Ping probe compares.
+    env.mock.set_read("m1", true);
+    let r = env.ping("ipad", Some(ping_body(10, INBOX))).await;
+    assert_eq!(r.status, "2", "older read change wakes the device");
+
+    let (key2, adds, changes) = env.sync_detail_window("ipad", &key, "5").await;
+    assert!(adds.is_empty());
+    assert_eq!(changes, vec![("m1".to_owned(), "1".to_owned())]);
+    assert_ne!(key2, key);
+
+    // Delivered once; quiet afterwards.
+    let (_, adds, changes) = env.sync_detail_window("ipad", &key2, "5").await;
+    assert!(adds.is_empty() && changes.is_empty());
+    let r = env.ping("ipad", Some(ping_body(2, INBOX))).await;
+    assert_eq!(r.status, "1");
 }
