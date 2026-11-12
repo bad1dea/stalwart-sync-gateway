@@ -74,6 +74,10 @@ Calendar/attachments are read-only (see Not Yet Implemented).
   back); the Ping probe asks the same when its window checks find nothing. So changes to held
   mail of any age are announced and delivered. Window checks stay as the fallback when the
   server can't calculate changes.
+- **deploy-2026-11-12o:** Ping parameters (heartbeat, folders) are kept in the state store under
+  the reserved item-state collection `__ping__`, so an empty Ping after a restart watches what the
+  device last asked for. With nothing stored, the fallback watches every mail folder the device
+  has a Sync state for (it used to watch only the Inbox; an iPad did that all night).
 - **Open compliance items:** Partial/Truncation per Options; Ping Status 6/MaxFolders;
   ItemOperations EmptyFolderContents/Move; new-mail detection is still a listing diff (Email/changes
   covers changes to held mail).
