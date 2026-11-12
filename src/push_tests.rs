@@ -1306,3 +1306,36 @@ async fn options_advertises_methods_versions_and_commands() {
         );
     }
 }
+
+#[tokio::test]
+async fn more_available_is_a_bare_tag_without_content() {
+    // [MS-ASWBXML]: an empty element is encoded without the content bit.
+    use eas::airsync as air;
+    let env = Arc::new(start_env(Opts::default()).await);
+    for n in 0..12 {
+        env.mock.add_mail("inbox", &format!("x{n:02}"));
+    }
+    let (key, _, _) = env.sync_detail_window("ma", "0", "5").await;
+    let resp = env
+        .req("Sync", "ma")
+        .body(sync_body_window(&key, "inbox", "5"))
+        .send()
+        .await
+        .unwrap();
+    let bytes = resp.bytes().await.unwrap();
+    let doc = wbxml::decode_document(&bytes).unwrap();
+    let mut found = false;
+    for (i, node) in doc.nodes.iter().enumerate() {
+        if let wbxml::Node::Start(t) = node {
+            if t.code_page == air::PAGE && t.token == air::MORE_AVAILABLE.token {
+                found = true;
+                assert!(
+                    !t.has_content,
+                    "MoreAvailable must not carry the content bit"
+                );
+                assert!(!matches!(doc.nodes.get(i + 1), Some(wbxml::Node::End) if false));
+            }
+        }
+    }
+    assert!(found, "MoreAvailable present when more messages remain");
+}

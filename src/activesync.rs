@@ -1967,8 +1967,10 @@ async fn sync_mail(
             // doesn't describe it.
             // Never on a SyncKey 0 reply (it carries no items).
             if has_more {
-                builder.start(air::MORE_AVAILABLE);
-                builder.end();
+                // Presence-only element: a bare tag with no content and no END.
+                // Written as start+end (content bit set) iOS 27 rejects the
+                // whole reply, so the page never lands and the device retries.
+                builder.empty_tag(air::MORE_AVAILABLE);
             }
 
             if !emails_to_send.is_empty() || !to_remove.is_empty() || !read_changes.is_empty() {
