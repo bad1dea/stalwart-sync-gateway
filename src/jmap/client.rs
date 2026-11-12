@@ -438,6 +438,101 @@ impl JmapClient {
         Ok((Vec::new(), false))
     }
 
+    /// Ids of the newest `limit` messages in a mailbox, newest first. Sync
+    /// pages through these: each response sends the next `WindowSize` ids
+    /// the device has not been sent, with MoreAvailable while any remain.
+    pub async fn email_ids_in_mailbox(
+        &self,
+        auth: &AuthenticatedSession,
+        mailbox_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            return Ok(Vec::new());
+        };
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Email/query",
+                    serde_json::json!({
+                        "accountId": account_id,
+                        "filter": { "inMailbox": mailbox_id },
+                        "sort": [{ "property": "receivedAt", "isAscending": false }],
+                        "limit": limit
+                    }),
+                    "q",
+                )],
+            )
+            .await?;
+        for method in response.method_responses {
+            match method.0.as_str() {
+                "Email/query" => {
+                    let q: QueryResponse =
+                        serde_json::from_value(method.1).context("invalid Email/query response")?;
+                    return Ok(q.ids);
+                }
+                "error" => anyhow::bail!("JMAP method error listing mailbox"),
+                _ => {}
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    /// Full message objects for `ids`, in the order given (missing ids are
+    /// skipped).
+    pub async fn emails_by_ids(
+        &self,
+        auth: &AuthenticatedSession,
+        ids: &[String],
+    ) -> anyhow::Result<Vec<Email>> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            return Ok(Vec::new());
+        };
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Email/get",
+                    serde_json::json!({
+                        "accountId": account_id,
+                        "ids": ids,
+                        "properties": [
+                            "id", "blobId", "mailboxIds", "keywords", "receivedAt", "subject",
+                            "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments", "threadId"
+                        ],
+                        "fetchAllBodyValues": true,
+                        "maxBodyValueBytes": 65536
+                    }),
+                    "g",
+                )],
+            )
+            .await?;
+        for method in response.method_responses {
+            match method.0.as_str() {
+                "Email/get" => {
+                    let get: GetResponse<EmailObject> =
+                        serde_json::from_value(method.1).context("invalid Email/get response")?;
+                    let mut by_id: BTreeMap<String, Email> = get
+                        .list
+                        .into_iter()
+                        .map(Email::from)
+                        .map(|e| (e.id.clone(), e))
+                        .collect();
+                    return Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect());
+                }
+                "error" => anyhow::bail!("JMAP method error fetching messages"),
+                _ => {}
+            }
+        }
+        Ok(Vec::new())
+    }
+
     /// Backs EAS `Search` (MS-ASCMD 2.2.1.16) for `Store>Name == "Mailbox"`
     /// with a `FreeText` query -- confirmed live 2026-08-26 that
     /// Stalwart's `Email/query` `filter: {"text": ...}` does real

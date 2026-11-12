@@ -40,6 +40,7 @@ struct Mock {
     es_conns: AtomicUsize,
     counter: AtomicUsize,
     read: Mutex<std::collections::BTreeSet<String>>,
+    extra_folders: Mutex<Vec<String>>,
 }
 
 impl Mock {
@@ -129,10 +130,16 @@ async fn mock_api(
         let args = &call[1];
         let cid = call[2].clone();
         let body = match name {
-            "Mailbox/get" => serde_json::json!({ "list": [
-                {"id":"inbox","name":"Inbox","parentId":null,"role":"inbox"},
-                {"id":"other","name":"Archive","parentId":null,"role":null}
-            ]}),
+            "Mailbox/get" => {
+                let mut list = vec![
+                    serde_json::json!({"id":"inbox","name":"Inbox","parentId":null,"role":"inbox"}),
+                    serde_json::json!({"id":"other","name":"Archive","parentId":null,"role":null}),
+                ];
+                for f in m.extra_folders.lock().unwrap().iter() {
+                    list.push(serde_json::json!({"id":f,"name":f,"parentId":null,"role":null}));
+                }
+                serde_json::json!({ "list": list })
+            }
             "Email/query" => {
                 let mb = args["filter"]["inMailbox"].as_str().unwrap_or("inbox");
                 let mut ids = boxes.get(mb).cloned().unwrap_or_default();
@@ -195,6 +202,7 @@ async fn start_mock() -> Arc<Mock> {
         es_conns: AtomicUsize::new(0),
         counter: AtomicUsize::new(1),
         read: Mutex::new(Default::default()),
+        extra_folders: Mutex::new(Vec::new()),
     });
     let app = Router::new()
         .route("/.well-known/jmap", get(mock_session))
@@ -954,25 +962,34 @@ async fn ignored_status2_is_answered_again_when_the_guard_window_ends() {
 
 #[tokio::test]
 async fn ping_ignores_messages_outside_the_devices_sync_window() {
-    // A device syncing with a small window must not be told about the
-    // older messages its Sync will never send: iOS blacklists a folder from
-    // push after more than 5 Status 2 answers with no real change.
+    // A device syncing with a small window is only told about changes its
+    // next Sync can deliver: iOS blacklists a folder from push after more
+    // than 5 Status 2 answers with no real change.
+    use eas::airsync as air;
     let env = Arc::new(start_env(Opts::default()).await);
     for n in 0..30 {
         env.mock.add_mail("inbox", &format!("x{n:02}"));
     }
-    let (key0, adds, _) = env.sync_detail_window("phone", "0", "5").await;
-    assert!(adds.is_empty(), "a SyncKey 0 reply carries no items");
-    let (key, adds, _) = env.sync_detail_window("phone", &key0, "5").await;
-    assert_eq!(adds.len(), 5, "first real Sync delivers only the newest 5");
+    // Full initial sync with WindowSize 5, following MoreAvailable.
+    let mut key = "0".to_owned();
+    loop {
+        let resp = env
+            .req("Sync", "phone")
+            .body(sync_body_window(&key, "inbox", "5"))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+        key = eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap();
+        if key != "1" && !eas::contains_token(&doc, air::MORE_AVAILABLE) {
+            break;
+        }
+    }
     for _ in 0..3 {
         let r = env.ping("phone", Some(ping_body(1, INBOX))).await;
-        assert_eq!(
-            r.status, "1",
-            "older, undeliverable messages are not a change"
-        );
+        assert_eq!(r.status, "1", "fully synced: nothing to announce");
     }
-    // A genuinely new message still is.
+    // A genuinely new message is announced and delivered on its own.
     env.mock.add_mail("inbox", "fresh");
     let r = env.ping("phone", Some(ping_body(5, INBOX))).await;
     assert_eq!(r.status, "2");
@@ -1042,4 +1059,238 @@ async fn initial_sync_reply_has_no_commands_block() {
     // The next request gets the messages.
     let (_, adds, _) = env.sync_detail("fresh", "1").await;
     assert_eq!(adds, vec!["m2", "m1"]);
+}
+
+#[tokio::test]
+async fn sync_pages_through_the_whole_folder_with_more_available() {
+    use eas::airsync as air;
+    let env = Arc::new(start_env(Opts::default()).await);
+    for n in 0..30 {
+        env.mock.add_mail("inbox", &format!("x{n:02}"));
+    }
+    // Prime (SyncKey 0): no items, no MoreAvailable.
+    let resp = env
+        .req("Sync", "pager")
+        .body(sync_body_window("0", "inbox", "10"))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+    assert!(!eas::contains_token(&doc, air::MORE_AVAILABLE));
+    let mut key = eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap();
+    let mut all = Vec::new();
+    let mut rounds = 0;
+    loop {
+        rounds += 1;
+        let resp = env
+            .req("Sync", "pager")
+            .body(sync_body_window(&key, "inbox", "10"))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+        key = eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap();
+        let adds = eas::find_all_text_after(&doc, air::SERVER_ID);
+        assert!(adds.len() <= 10, "never more than WindowSize per reply");
+        all.extend(adds);
+        if !eas::contains_token(&doc, air::MORE_AVAILABLE) {
+            break;
+        }
+        assert!(rounds < 10, "paging must terminate");
+    }
+    assert_eq!(rounds, 4, "32 messages at 10 per reply");
+    all.sort();
+    all.dedup();
+    assert_eq!(all.len(), 32, "every message delivered exactly once");
+    // Newest first: the first page started with the newest message.
+    let r = env.ping("pager", Some(ping_body(1, INBOX))).await;
+    assert_eq!(r.status, "1", "fully synced folder is quiet");
+}
+
+fn folder_sync_body(key: &str) -> Vec<u8> {
+    use eas::folder_hierarchy as fh;
+    let mut b = eas::DocumentBuilder::new();
+    b.start(fh::FOLDER_SYNC);
+    b.leaf(fh::SYNC_KEY, key);
+    b.end();
+    wbxml::encode_document(&b.finish())
+}
+
+/// (status, new key, count, added ids, deleted ids)
+async fn folder_sync(
+    env: &Env,
+    device: &str,
+    key: &str,
+) -> (String, Option<String>, Option<String>, Vec<String>) {
+    use eas::folder_hierarchy as fh;
+    let resp = env
+        .req("FolderSync", device)
+        .body(folder_sync_body(key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+    (
+        eas::find_text_after(&doc, fh::STATUS).unwrap().to_owned(),
+        eas::find_text_after(&doc, fh::SYNC_KEY).map(str::to_owned),
+        eas::find_text_after(&doc, fh::COUNT).map(str::to_owned),
+        eas::find_all_text_after(&doc, fh::SERVER_ID),
+    )
+}
+
+#[tokio::test]
+async fn folder_sync_is_incremental_and_checks_its_key() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    // SyncKey 0: whole hierarchy.
+    let (st, key, count, ids) = folder_sync(&env, "fs", "0").await;
+    assert_eq!(
+        (st.as_str(), key.as_deref(), count.as_deref()),
+        ("1", Some("1"), Some("2"))
+    );
+    assert_eq!(ids, vec!["inbox", "other"]);
+    // Same key, nothing changed: Count 0, key unchanged, no re-sent folders.
+    let (st, key, count, ids) = folder_sync(&env, "fs", "1").await;
+    assert_eq!(
+        (st.as_str(), key.as_deref(), count.as_deref()),
+        ("1", Some("1"), Some("0"))
+    );
+    assert!(ids.is_empty());
+    // A folder appears on the server: only it is sent, as an Add.
+    env.mock
+        .extra_folders
+        .lock()
+        .unwrap()
+        .push("Receipts".into());
+    let (st, key, count, ids) = folder_sync(&env, "fs", "1").await;
+    assert_eq!(
+        (st.as_str(), key.as_deref(), count.as_deref()),
+        ("1", Some("2"), Some("1"))
+    );
+    assert_eq!(ids, vec!["Receipts"]);
+    // It disappears: sent as a Delete.
+    env.mock.extra_folders.lock().unwrap().clear();
+    let (st, key, count, ids) = folder_sync(&env, "fs", "2").await;
+    assert_eq!(
+        (st.as_str(), key.as_deref(), count.as_deref()),
+        ("1", Some("3"), Some("1"))
+    );
+    assert_eq!(ids, vec!["Receipts"]);
+    // A key the server never issued: Status 9, client must start over.
+    let (st, key, _, _) = folder_sync(&env, "fs", "17").await;
+    assert_eq!((st.as_str(), key), ("9", None));
+}
+
+#[tokio::test]
+async fn folder_sync_for_a_device_partnered_earlier_does_not_force_a_reset() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    // No stored hierarchy (device set up before this was tracked) and key 5.
+    let (st, key, count, ids) = folder_sync(&env, "old", "5").await;
+    assert_eq!(
+        (st.as_str(), key.as_deref(), count.as_deref()),
+        ("1", Some("5"), Some("0"))
+    );
+    assert!(ids.is_empty());
+}
+
+#[tokio::test]
+async fn get_item_estimate_reports_real_counts_and_statuses() {
+    use eas::{airsync as air, get_item_estimate as gie};
+    let env = Arc::new(start_env(Opts::default()).await);
+    let gie_body = |key: &str| {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(gie::GET_ITEM_ESTIMATE);
+        b.start(gie::FOLDERS);
+        b.start(gie::FOLDER);
+        b.leaf(air::SYNC_KEY, key);
+        b.leaf(gie::FOLDER_ID, "inbox");
+        b.end();
+        b.end();
+        b.end();
+        wbxml::encode_document(&b.finish())
+    };
+    let estimate = |key: &'static str| {
+        let env = env.clone();
+        let body = gie_body(key);
+        async move {
+            let resp = env
+                .req("GetItemEstimate", "est")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+            assert!(
+                !eas::contains_token(&doc, gie::FOLDER_TYPE),
+                "no 12.1-only Class element"
+            );
+            (
+                eas::find_text_after(&doc, gie::STATUS).unwrap().to_owned(),
+                eas::find_text_after(&doc, gie::ESTIMATE)
+                    .unwrap()
+                    .to_owned(),
+            )
+        }
+    };
+    assert_eq!(estimate("0").await.0, "3", "not primed");
+    // Prime the folder: both messages are still pending.
+    let (key1, _, _) = env.sync_detail("est", "0").await;
+    assert_eq!(key1, "1");
+    assert_eq!(estimate("1").await, ("1".to_owned(), "2".to_owned()));
+    let (key2, adds, _) = env.sync_detail("est", "1").await;
+    assert_eq!(adds.len(), 2);
+    assert_eq!(key2, "2");
+    assert_eq!(estimate("2").await, ("1".to_owned(), "0".to_owned()));
+    assert_eq!(estimate("9").await.0, "4", "mismatched key");
+}
+
+#[tokio::test]
+async fn empty_sync_replays_the_cached_request_or_returns_status_13() {
+    use eas::airsync as air;
+    let env = Arc::new(start_env(Opts::default()).await);
+    // Nothing cached yet: Status 13, resend a full request.
+    let resp = env.req("Sync", "e1").send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("13"));
+    // Full Sync (prime), then an empty Sync re-executes it: since the cached
+    // request carries SyncKey 0 the reply is a fresh prime again.
+    let (key, _, _) = env.sync_detail("e1", "0").await;
+    assert_eq!(key, "1");
+    let resp = env.req("Sync", "e1").send().await.unwrap();
+    let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        eas::find_text_after(&doc, air::COLLECTION_ID),
+        Some("inbox")
+    );
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::STATUS)
+            .first()
+            .map(String::as_str),
+        Some("1")
+    );
+}
+
+#[tokio::test]
+async fn options_advertises_methods_versions_and_commands() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    let resp = env
+        .http
+        .request(reqwest::Method::OPTIONS, &env.gw)
+        .basic_auth("u@test", Some("pw"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let h = resp.headers();
+    for name in [
+        "Allow",
+        "Public",
+        "MS-ASProtocolVersions",
+        "MS-ASProtocolCommands",
+        "MS-Server-ActiveSync",
+    ] {
+        assert!(h.get(name).is_some(), "missing {name}");
+    }
+    assert_eq!(h.get("Allow").unwrap(), "OPTIONS,POST");
 }

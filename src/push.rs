@@ -68,6 +68,9 @@ pub struct DeviceState {
     /// Folder id -> Status 2 answers naming it since the device last synced
     /// that folder. iOS blacklists a folder from push after more than 5.
     announced: HashMap<String, u32>,
+    /// Body of the device's last full Sync request, re-executed when it
+    /// sends an empty Sync ([MS-ASCMD] 2.2.1.21).
+    last_sync_body: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -183,6 +186,24 @@ impl UserPush {
         d.last_status2 = Some(Instant::now());
         d.synced_since_status2 = false;
         latency
+    }
+
+    pub fn remember_sync_body(&self, device: &str, body: &[u8]) {
+        let mut inner = self.inner.lock().unwrap();
+        inner
+            .devices
+            .entry(device.to_owned())
+            .or_default()
+            .last_sync_body = Some(body.to_vec());
+    }
+
+    pub fn last_sync_body(&self, device: &str) -> Option<Vec<u8>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .devices
+            .get(device)
+            .and_then(|d| d.last_sync_body.clone())
     }
 
     /// Count a Status 2 answer for each of `folders`.

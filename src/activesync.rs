@@ -208,6 +208,46 @@ pub async fn post_handler(
         return send_mail(&state, &auth, &query, &body, command).await;
     }
 
+    // [MS-ASCMD] 2.2.1.21: an empty Sync re-executes the device's previous
+    // (cached) Sync request; with nothing cached the answer is Status 13.
+    // A full Sync is remembered for that purpose.
+    let push_user = state.push.user(&auth.username().to_ascii_lowercase());
+    let device_key = query.device_id.clone().unwrap_or_default();
+    let replayed;
+    let body: &[u8] = if command.eq_ignore_ascii_case("Sync") {
+        if body.is_empty() {
+            match push_user.last_sync_body(&device_key) {
+                Some(cached) => {
+                    replayed = cached;
+                    &replayed
+                }
+                None => {
+                    use wbxml::eas::airsync as air;
+                    let mut builder = wbxml::eas::DocumentBuilder::new();
+                    builder.start(air::SYNC);
+                    builder.leaf(air::STATUS, "13");
+                    builder.end();
+                    state
+                        .metrics
+                        .eas_requests_total
+                        .with_label_values(&[command, "200"])
+                        .inc();
+                    return (
+                        StatusCode::OK,
+                        [("Content-Type", "application/vnd.ms-sync.wbxml")],
+                        wbxml::encode_document(&builder.finish()),
+                    )
+                        .into_response();
+                }
+            }
+        } else {
+            push_user.remember_sync_body(&device_key, &body);
+            &body
+        }
+    } else {
+        &body
+    };
+
     // ActiveSync lets a client send Ping with an empty body to reuse the
     // heartbeat and folder list from its previous Ping.
     if body.is_empty() && command.eq_ignore_ascii_case("Ping") {
@@ -215,7 +255,7 @@ pub async fn post_handler(
     }
 
     if !body.is_empty() {
-        match wbxml::decode_document(&body) {
+        match wbxml::decode_document(body) {
             Ok(document) => {
                 tracing::debug!(
                     eas_command = command,
@@ -223,7 +263,7 @@ pub async fn post_handler(
                     "decoded WBXML request"
                 );
                 if command.eq_ignore_ascii_case("FolderSync") {
-                    return folder_sync(&state, &auth, &document, command).await;
+                    return folder_sync(&state, &auth, &query, &document, command).await;
                 }
                 if command.eq_ignore_ascii_case("FolderCreate") {
                     return folder_create(&state, &auth, &document, command).await;
@@ -244,7 +284,7 @@ pub async fn post_handler(
                     return provision(&state, &document, command).await;
                 }
                 if command.eq_ignore_ascii_case("GetItemEstimate") {
-                    return get_item_estimate(&state, &document, command).await;
+                    return get_item_estimate(&state, &auth, &query, &document, command).await;
                 }
                 if command.eq_ignore_ascii_case("Settings") {
                     return settings(&state, &auth, &document, command).await;
@@ -273,12 +313,6 @@ pub async fn post_handler(
         return (
             StatusCode::BAD_REQUEST,
             "FolderSync requires a WBXML request body\n",
-        )
-            .into_response();
-    } else if command.eq_ignore_ascii_case("Sync") {
-        return (
-            StatusCode::BAD_REQUEST,
-            "Sync requires a WBXML request body\n",
         )
             .into_response();
     }
@@ -1236,6 +1270,8 @@ async fn settings(
 
 async fn get_item_estimate(
     state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    query: &EasQuery,
     document: &wbxml::Document,
     command: &str,
 ) -> Response {
@@ -1253,23 +1289,50 @@ async fn get_item_estimate(
         )
             .into_response();
     }
+    // 12.1+: each Collection carries an AirSync SyncKey, in request order.
+    let sync_keys = wbxml::eas::find_all_text_after(document, wbxml::eas::airsync::SYNC_KEY);
+    let user = query.user.as_deref().unwrap_or_else(|| auth.username());
+    let device = query.device_id.as_deref().unwrap_or("unknown");
 
     let mut builder = wbxml::eas::DocumentBuilder::new();
     use wbxml::eas::get_item_estimate as gie;
 
     builder.start(gie::GET_ITEM_ESTIMATE);
-    for folder_id in folder_ids {
+    for (i, folder_id) in folder_ids.into_iter().enumerate() {
+        let key = sync_keys.get(i).map(String::as_str);
+        let record = state
+            .state
+            .get(user, device, &folder_id)
+            .await
+            .ok()
+            .flatten();
+        // [MS-ASCMD] GetItemEstimate Status: 3 = folder not primed (SyncKey 0),
+        // 4 = SyncKey does not match. Estimate counts what Sync would send.
+        let (status, estimate) = match (key, &record) {
+            (Some("0"), _) => ("3", 0usize),
+            (Some(k), Some(r)) if r.sync_key != k => ("4", 0),
+            _ if is_non_mail_collection_id(&folder_id) => ("1", 0),
+            _ => {
+                let seen: BTreeSet<&str> = record
+                    .as_ref()
+                    .map(|r| r.seen_ids.iter().map(String::as_str).collect())
+                    .unwrap_or_default();
+                let unseen = state
+                    .jmap
+                    .email_ids_in_mailbox(auth, &folder_id, 1000)
+                    .await
+                    .map(|ids| ids.iter().filter(|id| !seen.contains(id.as_str())).count())
+                    .unwrap_or(0);
+                ("1", unseen)
+            }
+        };
         builder.start(gie::RESPONSE);
-        builder.leaf(gie::STATUS, "1");
+        builder.leaf(gie::STATUS, status);
         builder.start(gie::FOLDER);
-        // Real gap, found via the full z-push-stalwart-jmap source (PR
-        // #187): src/lib/request/getitemestimate.php's Folder response
-        // writes FolderType before FolderId; this gateway never sent
-        // FolderType at all. The token was already defined
-        // (get_item_estimate::FOLDER_TYPE) but unused.
-        builder.leaf(gie::FOLDER_TYPE, "Email");
+        // Class (FolderType token) is only valid up to protocol 12.1; this
+        // gateway speaks 14.0, so it is not sent.
         builder.leaf(gie::FOLDER_ID, folder_id);
-        builder.leaf(gie::ESTIMATE, "0");
+        builder.leaf(gie::ESTIMATE, estimate.to_string());
         builder.end();
         builder.end();
     }
@@ -1600,12 +1663,18 @@ async fn sync_mail(
         };
 
         if collection.get_changes && is_mail_collection {
-            let (emails, has_more) = match state
+            // How many of the newest messages Sync will page through.
+            const SCAN_LIMIT: usize = 1000;
+            let previous_seen: BTreeSet<String> = previous_record
+                .as_ref()
+                .map(|record| record.seen_ids.iter().cloned().collect())
+                .unwrap_or_default();
+            let scan = match state
                 .jmap
-                .emails_in_mailbox(auth, &collection.collection_id, collection.window_size)
+                .email_ids_in_mailbox(auth, &collection.collection_id, SCAN_LIMIT)
                 .await
             {
-                Ok(result) => result,
+                Ok(ids) => ids,
                 Err(error) => {
                     tracing::warn!(
                         %error,
@@ -1620,11 +1689,42 @@ async fn sync_mail(
                     continue;
                 }
             };
-
-            let previous_seen: BTreeSet<String> = previous_record
-                .as_ref()
-                .map(|record| record.seen_ids.iter().cloned().collect())
-                .unwrap_or_default();
+            let scan_set: BTreeSet<String> = scan.iter().cloned().collect();
+            // Messages the device does not have yet, newest first. A SyncKey 0
+            // reply sends none ([MS-ASCMD] initial Sync); afterwards each reply
+            // sends up to WindowSize of them, with MoreAvailable while any
+            // remain ([MS-ASCMD] 2.2.3.116).
+            let unseen: Vec<String> = scan
+                .iter()
+                .filter(|id| !previous_seen.contains(id.as_str()))
+                .cloned()
+                .collect();
+            let page: Vec<String> = if collection.sync_key == "0" {
+                Vec::new()
+            } else {
+                unseen
+                    .iter()
+                    .take(collection.window_size.clamp(1, 100))
+                    .cloned()
+                    .collect()
+            };
+            let has_more = collection.sync_key != "0" && unseen.len() > page.len();
+            let emails = match state.jmap.emails_by_ids(auth, &page).await {
+                Ok(emails) => emails,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        collection = collection.collection_id,
+                        "Sync mail fetch failed"
+                    );
+                    builder.start(air::COLLECTION);
+                    builder.leaf(air::SYNC_KEY, collection.sync_key);
+                    builder.leaf(air::COLLECTION_ID, collection.collection_id);
+                    builder.leaf(air::STATUS, "5");
+                    builder.end();
+                    continue;
+                }
+            };
             let fetched_ids: BTreeSet<String> =
                 emails.iter().map(|email| email.id.clone()).collect();
 
@@ -1641,7 +1741,7 @@ async fn sync_mail(
             let candidate_missing: Vec<String> = if collection.sync_key == "0" {
                 Vec::new()
             } else {
-                previous_seen.difference(&fetched_ids).cloned().collect()
+                previous_seen.difference(&scan_set).cloned().collect()
             };
             let to_remove: BTreeSet<String> = if candidate_missing.is_empty() {
                 BTreeSet::new()
@@ -1715,13 +1815,14 @@ async fn sync_mail(
             // device was last told. Refresh the stored ones directly.
             let mut outside_updates: Vec<(String, bool)> = Vec::new();
             if collection.sync_key != "0" {
-                let outside: Vec<String> = prev_read
-                    .keys()
+                // Every message the device already has (newest ids first),
+                // including ones with no stored read state yet: those get a
+                // one-time catch-up Change.
+                let outside: Vec<String> = previous_seen
+                    .iter()
                     .rev()
                     .filter(|id| {
-                        !fetched_ids.contains(id.as_str())
-                            && previous_seen.contains(id.as_str())
-                            && !to_remove.contains(id.as_str())
+                        !fetched_ids.contains(id.as_str()) && !to_remove.contains(id.as_str())
                     })
                     .take(300)
                     .cloned()
@@ -1862,7 +1963,10 @@ async fn sync_mail(
             // `limit`, so `has_more` (from the raw unfiltered query)
             // doesn't describe it.
             // Never on a SyncKey 0 reply (it carries no items).
-            let _ = has_more;
+            if has_more {
+                builder.start(air::MORE_AVAILABLE);
+                builder.end();
+            }
 
             if !emails_to_send.is_empty() || !to_remove.is_empty() || !read_changes.is_empty() {
                 let body_pref = BodyPreference {
@@ -3947,9 +4051,25 @@ fn eas_datetime_dashes(jmap_datetime: &str) -> String {
     }
 }
 
+/// Per-device folder hierarchy state for FolderSync, kept as a SyncRecord
+/// under this reserved collection id. `seen_ids` holds one fingerprint per
+/// folder: id, parent, name and type joined by U+001F.
+const FOLDER_STATE_ID: &str = "__folders__";
+
+fn folder_fingerprint(c: &crate::model::Collection) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        c.id,
+        c.parent_id.clone().unwrap_or_else(|| "0".to_owned()),
+        c.name,
+        c.folder_type
+    )
+}
+
 async fn folder_sync(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
+    query: &EasQuery,
     document: &wbxml::Document,
     command: &str,
 ) -> Response {
@@ -3981,28 +4101,143 @@ async fn folder_sync(
         }
     };
 
-    let new_sync_key = next_sync_key(sync_key);
-    let mut builder = wbxml::eas::DocumentBuilder::new();
-    use wbxml::eas::folder_hierarchy as fh;
+    // [MS-ASCMD] FolderSync: SyncKey 0 returns the whole hierarchy; any
+    // other key returns only what changed since that key (Count 0 when
+    // nothing did); an unknown key is Status 9 and the client starts over.
+    let user = query.user.as_deref().unwrap_or_else(|| auth.username());
+    let device = query.device_id.as_deref().unwrap_or("unknown");
+    let stored = state
+        .state
+        .get(user, device, FOLDER_STATE_ID)
+        .await
+        .ok()
+        .flatten();
+    let current: BTreeMap<String, (String, &crate::model::Collection)> = collections
+        .iter()
+        .map(|c| (c.id.clone(), (folder_fingerprint(c), c)))
+        .collect();
 
+    use wbxml::eas::folder_hierarchy as fh;
+    let mut builder = wbxml::eas::DocumentBuilder::new();
     builder.start(fh::FOLDER_SYNC);
+
+    let previous: Option<BTreeMap<String, String>> = if sync_key == "0" {
+        Some(BTreeMap::new())
+    } else {
+        match &stored {
+            Some(record) if record.sync_key == sync_key => Some(
+                record
+                    .seen_ids
+                    .iter()
+                    .map(|fp| {
+                        (
+                            fp.split('\u{1f}').next().unwrap_or("").to_owned(),
+                            fp.clone(),
+                        )
+                    })
+                    .collect(),
+            ),
+            // No stored hierarchy yet (device partnered before this was
+            // tracked): accept its key as the baseline instead of forcing a
+            // full reset of every folder on the device.
+            None => Some(
+                current
+                    .iter()
+                    .map(|(id, (fp, _))| (id.clone(), fp.clone()))
+                    .collect(),
+            ),
+            Some(_) => None,
+        }
+    };
+
+    let Some(previous) = previous else {
+        builder.leaf(fh::STATUS, "9");
+        builder.end();
+        let body = wbxml::encode_document(&builder.finish());
+        state
+            .metrics
+            .eas_requests_total
+            .with_label_values(&[command, "200"])
+            .inc();
+        return (
+            StatusCode::OK,
+            [("Content-Type", "application/vnd.ms-sync.wbxml")],
+            body,
+        )
+            .into_response();
+    };
+
+    let mut adds = Vec::new();
+    let mut updates = Vec::new();
+    for (id, (fp, c)) in &current {
+        match previous.get(id) {
+            None => adds.push(*c),
+            Some(old) if old != fp => updates.push(*c),
+            _ => {}
+        }
+    }
+    let deletes: Vec<&String> = previous
+        .keys()
+        .filter(|id| !current.contains_key(*id))
+        .collect();
+    let changed = !(adds.is_empty() && updates.is_empty() && deletes.is_empty());
+    let new_sync_key = if sync_key == "0" || changed {
+        next_sync_key(sync_key)
+    } else {
+        sync_key.to_owned()
+    };
+
     builder.leaf(fh::STATUS, "1");
-    builder.leaf(fh::SYNC_KEY, new_sync_key);
+    builder.leaf(fh::SYNC_KEY, new_sync_key.clone());
     builder.start(fh::CHANGES);
-    builder.leaf(fh::COUNT, collections.len().to_string());
-    for collection in collections {
-        builder.start(fh::ADD);
-        builder.leaf(fh::SERVER_ID, collection.id);
+    builder.leaf(
+        fh::COUNT,
+        (adds.len() + updates.len() + deletes.len()).to_string(),
+    );
+    for c in &updates {
+        builder.start(fh::UPDATE);
+        builder.leaf(fh::SERVER_ID, c.id.clone());
         builder.leaf(
             fh::PARENT_ID,
-            collection.parent_id.unwrap_or_else(|| "0".to_owned()),
+            c.parent_id.clone().unwrap_or_else(|| "0".to_owned()),
         );
-        builder.leaf(fh::DISPLAY_NAME, collection.name);
-        builder.leaf(fh::TYPE, collection.folder_type.to_string());
+        builder.leaf(fh::DISPLAY_NAME, c.name.clone());
+        builder.leaf(fh::TYPE, c.folder_type.to_string());
+        builder.end();
+    }
+    for id in &deletes {
+        builder.start(fh::DELETE);
+        builder.leaf(fh::SERVER_ID, (*id).clone());
+        builder.end();
+    }
+    for c in &adds {
+        builder.start(fh::ADD);
+        builder.leaf(fh::SERVER_ID, c.id.clone());
+        builder.leaf(
+            fh::PARENT_ID,
+            c.parent_id.clone().unwrap_or_else(|| "0".to_owned()),
+        );
+        builder.leaf(fh::DISPLAY_NAME, c.name.clone());
+        builder.leaf(fh::TYPE, c.folder_type.to_string());
         builder.end();
     }
     builder.end();
     builder.end();
+
+    if let Err(error) = state
+        .state
+        .put(SyncRecord {
+            user: user.to_owned(),
+            device_id: device.to_owned(),
+            collection_id: FOLDER_STATE_ID.to_owned(),
+            sync_key: new_sync_key,
+            jmap_state: String::new(),
+            seen_ids: current.values().map(|(fp, _)| fp.clone()).collect(),
+        })
+        .await
+    {
+        tracing::warn!(%error, "failed to persist FolderSync state");
+    }
 
     let body = wbxml::encode_document(&builder.finish());
     state
@@ -4276,6 +4511,9 @@ fn eas_options_response(status: StatusCode) -> Response {
     // too -- this gateway never did. Matches the protocol ceiling above.
     headers.insert("MS-Server-ActiveSync", HeaderValue::from_static("14.0"));
     headers.insert("X-AspNet-Version", HeaderValue::from_static("4.0.30319"));
+    // [MS-ASHTTP] OPTIONS response: the HTTP methods the endpoint accepts.
+    headers.insert("Allow", HeaderValue::from_static("OPTIONS,POST"));
+    headers.insert("Public", HeaderValue::from_static("OPTIONS,POST"));
     headers.insert("Content-Length", HeaderValue::from_static("0"));
     response
 }
