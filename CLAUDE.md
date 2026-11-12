@@ -82,6 +82,13 @@ Calendar/attachments are read-only (see Not Yet Implemented).
   before the answer", waited_ms). That showed the iPad (600 s heartbeat) dropping the 900 s fallback
   Ping at 630 s, so the fallback heartbeat is now 480 s (`FALLBACK_PING_HEARTBEAT`); seen answered
   at 480 s on the iPad. Komodo is slow or skips rebuilding on a pin push; deploy by hand if needed.
+- **deploy-2026-11-12s:** (1) an empty Ping with no stored parameters gets Status 3 (spec, Z-Push);
+  the 12o fallback and `FALLBACK_PING_HEARTBEAT` are gone. iOS answered a Status 3 on 2026-11-11 with
+  a new Ping 17.5 min later. (2) Held mail that ages out of the device's FilterType window is sent
+  once as SoftDelete (0x21), sharing WindowSize with Adds, then dropped from seen_ids/read states;
+  a wider window re-adds it. Never touches Stalwart. `MAIL_AGED_OUT=softdelete|delete|keep`
+  (default softdelete; `keep` = old behaviour, the no-rebuild rollback). Branches
+  `fix/ping-status3`, `fix/aged-out`.
 - **Open compliance items:** Partial/Truncation per Options; Ping Status 6/MaxFolders;
   ItemOperations EmptyFolderContents/Move; new-mail detection is still a listing diff (Email/changes
   covers changes to held mail).
