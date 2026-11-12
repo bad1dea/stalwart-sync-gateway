@@ -255,6 +255,7 @@ pub mod airsync {
     /// [MS-ASCMD] 2.2.3.68.2 Options > FilterType: 0 all, 1 one day, 2 three
     /// days, 3 one week, 4 two weeks, 5 one month (mail).
     pub const FILTER_TYPE: Token = tag(0x18, false);
+    pub const SOFT_DELETE: Token = tag(0x21, false);
     pub const COMMANDS: Token = tag(0x16, false);
     pub const COLLECTIONS: Token = tag(0x1c, false);
     pub const APPLICATION_DATA: Token = tag(0x1d, false);

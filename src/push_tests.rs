@@ -326,6 +326,7 @@ struct PingReply {
 struct Opts {
     max_concurrent: usize,
     sqlite: Option<String>,
+    aged_out: crate::config::AgedOut,
 }
 
 impl Default for Opts {
@@ -333,6 +334,7 @@ impl Default for Opts {
         Self {
             max_concurrent: 200,
             sqlite: None,
+            aged_out: crate::config::AgedOut::SoftDelete,
         }
     }
 }
@@ -398,6 +400,7 @@ async fn spawn_gateway(
         ping_max_concurrent: opts.max_concurrent,
         ping_resend_guard_seconds: 1,
         push_idle_seconds: 60,
+        mail_aged_out: opts.aged_out,
     };
     let state = match store {
         Some(store) => store,
@@ -858,6 +861,7 @@ async fn client_cancellation_releases_waiter_and_slot() {
         start_env(Opts {
             max_concurrent: 1,
             sqlite: None,
+            ..Opts::default()
         })
         .await,
     );
@@ -888,6 +892,7 @@ async fn concurrent_ping_limit_returns_503() {
         start_env(Opts {
             max_concurrent: 1,
             sqlite: None,
+            ..Opts::default()
         })
         .await,
     );
@@ -926,6 +931,7 @@ async fn existing_sqlite_device_state_is_honoured() {
             ping_max_concurrent: 1,
             ping_resend_guard_seconds: 1,
             push_idle_seconds: 1,
+            mail_aged_out: crate::config::AgedOut::SoftDelete,
         };
         let store = state::new_store(&cfg).await.unwrap();
         store
@@ -944,6 +950,7 @@ async fn existing_sqlite_device_state_is_honoured() {
         start_env(Opts {
             max_concurrent: 10,
             sqlite: Some(path),
+            ..Opts::default()
         })
         .await,
     );
@@ -2073,6 +2080,90 @@ mod e2e {
         format!("{name}{}", std::process::id())
     }
 
+    impl Live {
+        /// Create messages with given receivedAt dates; returns their ids.
+        async fn seed_dated(&self, items: &[(&str, String)]) -> Vec<String> {
+            let mut batch = serde_json::Map::new();
+            for (n, (tag, at)) in items.iter().enumerate() {
+                batch.insert(format!("k{n}"), serde_json::json!({
+                    "mailboxIds": {self.inbox.clone(): true},
+                    "keywords": {},
+                    "receivedAt": at,
+                    "from": [{"email": "e2e@e2e.test"}],
+                    "to": [{"email": self.user}],
+                    "subject": format!("{tag}"),
+                    "bodyValues": {"b": {"value": "body"}},
+                    "textBody": [{"partId": "b", "type": "text/plain"}]
+                }));
+            }
+            let r = self
+                .call(serde_json::json!([["Email/set", {"accountId": self.account, "create": batch}, "0"]]))
+                .await;
+            (0..items.len())
+                .map(|n| r[0][1]["created"][format!("k{n}")]["id"].as_str().expect("created").to_owned())
+                .collect()
+        }
+
+        async fn in_inbox(&self, id: &str) -> bool {
+            let r = self
+                .call(serde_json::json!([["Email/get", {"accountId": self.account, "ids": [id], "properties": ["mailboxIds"]}, "0"]]))
+                .await;
+            r[0][1]["list"][0]["mailboxIds"][self.inbox.as_str()].as_bool() == Some(true)
+        }
+
+        /// One Sync with a FilterType: (key, SoftDelete ids, Delete ids, Add ids).
+        async fn sync_filter(&self, device: &str, key: &str, filter: &str) -> (String, Vec<String>, Vec<String>, Vec<String>) {
+            let doc = self
+                .wbxml("Sync", device, sync_body_options(key, &self.inbox, "100", Some(filter)))
+                .await;
+            let outline = crate::activesync::wbxml_outline_for_tests(&doc);
+            (
+                eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap(),
+                super::ids_after(&outline, "<0:21>"),
+                super::ids_after(&outline, "<0:09>"),
+                super::ids_after(&outline, "<0:07>"),
+            )
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_mail_older_than_the_filter_window_leaves_the_device_not_the_server() {
+        let live = Live::new("E2E_USER2").await;
+        let ids = live
+            .seed_dated(&[
+                ("aged 45d", super::days_ago(45)),
+                ("aged 400d", super::days_ago(400)),
+                ("recent 2d", super::days_ago(2)),
+            ])
+            .await;
+        let (old45, old400, recent) = (&ids[0], &ids[1], &ids[2]);
+        let d = dev("aged");
+        // Held from an all-mail Sync, as the iPad's pre-12m copy is.
+        let (k0, _, _, _) = live.sync_filter(&d, "0", "0").await;
+        let mut key = k0;
+        loop {
+            let (k, _, _, _) = live.sync_filter(&d, &key, "0").await;
+            if k == key { break; }
+            key = k;
+        }
+        let (k1, soft, del, adds) = live.sync_filter(&d, &key, "5").await;
+        assert!(soft.contains(old45) && soft.contains(old400), "{soft:?}");
+        assert!(!soft.contains(recent) && del.is_empty() && adds.is_empty(), "{soft:?} {del:?} {adds:?}");
+        assert!(live.in_inbox(old45).await && live.in_inbox(old400).await, "still on the server");
+        let (k2, soft2, del2, _) = live.sync_filter(&d, &k1, "5").await;
+        assert!(soft2.is_empty() && del2.is_empty() && k2 == k1, "not repeated");
+        if let Ok(cmd) = std::env::var("E2E_RESTART_CMD") {
+            assert!(std::process::Command::new(cmd).status().unwrap().success());
+            let live = Live::new("E2E_USER2").await;
+            let (k3, soft3, del3, _) = live.sync_filter(&d, &k2, "5").await;
+            assert!(soft3.is_empty() && del3.is_empty() && k3 == k2, "not repeated after restart");
+        }
+        // Widening the window brings them back.
+        let (_, _, _, adds) = live.sync_filter(&d, &k2, "0").await;
+        assert!(adds.contains(old45) && adds.contains(old400), "{adds:?}");
+    }
+
     #[tokio::test]
     #[ignore]
     async fn e2e_empty_mailbox() {
@@ -2609,4 +2700,284 @@ mod e2e {
             })
             .collect()
     }
+}
+
+// ------------------------------------------------- FilterType aged-out cleanup
+
+#[derive(Debug, Default)]
+struct Cmds {
+    key: String,
+    adds: Vec<String>,
+    deletes: Vec<String>,
+    soft: Vec<String>,
+    changes: Vec<String>,
+    more: bool,
+}
+
+fn ids_after(outline: &str, open: &str) -> Vec<String> {
+    let pat = format!("{open}<0:0d>");
+    let mut out = Vec::new();
+    let mut rest = outline;
+    while let Some(at) = rest.find(&pat) {
+        rest = &rest[at + pat.len()..];
+        out.push(rest[..rest.find("</>").unwrap()].to_owned());
+    }
+    out
+}
+
+/// One mail Sync of the Inbox with an optional FilterType.
+async fn sync_cmds(env: &Env, device: &str, key: &str, filter: Option<&str>, window: &str) -> Cmds {
+    use eas::airsync as air;
+    let resp = env
+        .req("Sync", device)
+        .body(sync_body_options(key, "inbox", window, filter))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+    let outline = crate::activesync::wbxml_outline_for_tests(&doc);
+    Cmds {
+        key: eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap(),
+        adds: ids_after(&outline, "<0:07>"),
+        deletes: ids_after(&outline, "<0:09>"),
+        soft: ids_after(&outline, "<0:21>"),
+        changes: ids_after(&outline, "<0:08>"),
+        more: outline.contains("<0:14/>"),
+    }
+}
+
+/// SyncKey 0 then pages until done; returns the final key and every Add.
+async fn initial_sync(env: &Env, device: &str, filter: Option<&str>) -> (String, Vec<String>) {
+    let mut key = sync_cmds(env, device, "0", filter, "25").await.key;
+    let mut adds = Vec::new();
+    loop {
+        let r = sync_cmds(env, device, &key, filter, "25").await;
+        adds.extend(r.adds);
+        let done = !r.more && r.key == key;
+        key = r.key;
+        if done {
+            return (key, adds);
+        }
+    }
+}
+
+fn still_on_server(env: &Env, id: &str) -> bool {
+    env.mock.boxes.lock().unwrap().get("inbox").is_some_and(|b| b.iter().any(|i| i == id))
+}
+
+#[tokio::test]
+async fn no_filter_never_removes_old_mail() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.mock.add_mail("inbox", "old");
+    env.mock.set_date("old", &days_ago(400));
+    let (key, adds) = initial_sync(&env, "iphone", Some("0")).await;
+    assert!(adds.contains(&"old".to_owned()));
+    for filter in [Some("0"), None] {
+        let r = sync_cmds(&env, "iphone", &key, filter, "25").await;
+        assert!(r.soft.is_empty() && r.deletes.is_empty(), "{r:?}");
+        assert_eq!(r.key, key);
+    }
+}
+
+#[tokio::test]
+async fn previously_synced_mail_older_than_one_month_is_soft_deleted_once_and_kept_on_the_server() {
+    // The iPad case: messages it got before FilterType was honoured (12m)
+    // are older than its one-month window.
+    let env = Arc::new(start_env(Opts::default()).await);
+    for (id, days) in [("old40", 40), ("old90", 90)] {
+        env.mock.add_mail("inbox", id);
+        env.mock.set_date(id, &days_ago(days));
+    }
+    let (key, adds) = initial_sync(&env, "ipad", Some("0")).await;
+    assert_eq!(adds.len(), 4);
+    let r = sync_cmds(&env, "ipad", &key, Some("5"), "25").await;
+    let mut soft = r.soft.clone();
+    soft.sort();
+    assert_eq!(soft, vec!["old40", "old90"]);
+    assert!(r.deletes.is_empty() && r.adds.is_empty() && r.changes.is_empty(), "{r:?}");
+    assert_ne!(r.key, key, "SyncKey advances");
+    assert!(still_on_server(&env, "old40") && still_on_server(&env, "old90"));
+    // Repeated Syncs (with and without Options): nothing again.
+    for filter in [Some("5"), None, Some("5")] {
+        let again = sync_cmds(&env, "ipad", &r.key, filter, "25").await;
+        assert!(again.soft.is_empty() && again.deletes.is_empty(), "{again:?}");
+        assert_eq!(again.key, r.key);
+    }
+    // Ping has nothing to announce about them.
+    let p = env.ping("ipad", Some(ping_body(1, INBOX))).await;
+    assert_eq!(p.status, "1");
+}
+
+#[tokio::test]
+async fn mail_that_ages_past_the_cutoff_while_held_is_soft_deleted_without_waking_ping() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    let (key, adds) = initial_sync(&env, "iphone", Some("5")).await;
+    assert_eq!(adds.len(), 2);
+    // Time passes: m1 is now older than one month.
+    env.mock.set_date("m1", &days_ago(32));
+    let p = env.ping("iphone", Some(ping_body(1, INBOX))).await;
+    assert_eq!(p.status, "1", "ageing alone does not wake the device");
+    let r = sync_cmds(&env, "iphone", &key, Some("5"), "25").await;
+    assert_eq!(r.soft, vec!["m1"]);
+    assert!(still_on_server(&env, "m1"));
+}
+
+#[tokio::test]
+async fn one_month_boundary_keeps_mail_just_inside_and_removes_mail_just_outside() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    let cutoff = chrono::Utc::now()
+        .checked_sub_months(chrono::Months::new(1))
+        .unwrap();
+    let fmt = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    env.mock.add_mail("inbox", "inside");
+    env.mock.set_date("inside", &fmt(cutoff + chrono::Duration::minutes(10)));
+    env.mock.add_mail("inbox", "outside");
+    env.mock.set_date("outside", &fmt(cutoff - chrono::Duration::minutes(10)));
+    let (key, _) = initial_sync(&env, "ipad", Some("0")).await;
+    let r = sync_cmds(&env, "ipad", &key, Some("5"), "25").await;
+    assert_eq!(r.soft, vec!["outside"]);
+    // And an initial one-month Sync sends only the inside one.
+    let (_, adds) = initial_sync(&env, "iphone", Some("5")).await;
+    assert!(adds.contains(&"inside".to_owned()) && !adds.contains(&"outside".to_owned()));
+}
+
+#[tokio::test]
+async fn widening_the_window_brings_soft_deleted_mail_back_as_adds() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.mock.add_mail("inbox", "old");
+    env.mock.set_date("old", &days_ago(45));
+    let (key, _) = initial_sync(&env, "ipad", Some("0")).await;
+    let r = sync_cmds(&env, "ipad", &key, Some("5"), "25").await;
+    assert_eq!(r.soft, vec!["old"]);
+    // Narrow to one week: m1/m2 are recent, nothing more.
+    let r2 = sync_cmds(&env, "ipad", &r.key, Some("3"), "25").await;
+    assert!(r2.soft.is_empty(), "{r2:?}");
+    // Back to all mail: it returns, once.
+    let r3 = sync_cmds(&env, "ipad", &r2.key, Some("0"), "25").await;
+    assert_eq!(r3.adds, vec!["old"]);
+    let r4 = sync_cmds(&env, "ipad", &r3.key, Some("0"), "25").await;
+    assert!(r4.adds.is_empty() && r4.soft.is_empty(), "{r4:?}");
+}
+
+#[tokio::test]
+async fn iphone_and_ipad_windows_are_reconciled_independently() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.mock.add_mail("inbox", "d10");
+    env.mock.set_date("d10", &days_ago(10));
+    env.mock.add_mail("inbox", "d40");
+    env.mock.set_date("d40", &days_ago(40));
+    let (kp, _) = initial_sync(&env, "iphone", Some("0")).await;
+    let (ka, _) = initial_sync(&env, "ipad", Some("0")).await;
+    // iPhone: one month. iPad: one week.
+    let p = sync_cmds(&env, "iphone", &kp, Some("5"), "25").await;
+    let a = sync_cmds(&env, "ipad", &ka, Some("3"), "25").await;
+    assert_eq!(p.soft, vec!["d40"]);
+    let mut a_soft = a.soft.clone();
+    a_soft.sort();
+    assert_eq!(a_soft, vec!["d10", "d40"]);
+    // Neither affects the other's record.
+    let p2 = sync_cmds(&env, "iphone", &p.key, Some("5"), "25").await;
+    assert!(p2.soft.is_empty() && p2.adds.is_empty(), "{p2:?}");
+    let a2 = sync_cmds(&env, "ipad", &a.key, Some("3"), "25").await;
+    assert!(a2.soft.is_empty() && a2.adds.is_empty(), "{a2:?}");
+}
+
+#[tokio::test]
+async fn cleanup_shares_the_window_with_more_available() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    for n in 0..30 {
+        let id = format!("o{n:02}");
+        env.mock.add_mail("inbox", &id);
+        env.mock.set_date(&id, &days_ago(60));
+    }
+    let (key, _) = initial_sync(&env, "ipad", Some("0")).await;
+    let r = sync_cmds(&env, "ipad", &key, Some("5"), "25").await;
+    assert_eq!((r.soft.len(), r.more), (25, true));
+    let r2 = sync_cmds(&env, "ipad", &r.key, Some("5"), "25").await;
+    assert_eq!((r2.soft.len(), r2.more), (5, false));
+    let mut all: Vec<String> = r.soft.iter().chain(&r2.soft).cloned().collect();
+    all.sort();
+    all.dedup();
+    assert_eq!(all.len(), 30, "each exactly once");
+}
+
+#[tokio::test]
+async fn an_unread_aged_message_is_removed_without_a_read_change_and_its_state_dropped() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.mock.add_mail("inbox", "oldunread");
+    env.mock.set_date("oldunread", &days_ago(50));
+    let (key, _) = initial_sync(&env, "ipad", Some("0")).await;
+    // Read elsewhere at the same time it is outside the window.
+    env.mock.set_read("oldunread", true);
+    let p = env.ping("ipad", Some(ping_body(2, INBOX))).await;
+    let r = sync_cmds(&env, "ipad", &key, Some("5"), "25").await;
+    assert_eq!(r.soft, vec!["oldunread"]);
+    assert!(r.changes.is_empty(), "no Change for a removed message: {r:?}");
+    // Ping announced the read flip on a held message (Email/changes); the
+    // Sync it triggers carries the cleanup, so that Status 2 was deliverable.
+    assert_eq!(p.status, "2");
+    let states = env.state.item_states("u@test", "ipad", "inbox").await.unwrap();
+    assert!(!states.iter().any(|s| s.item_id == "oldunread"));
+    let rec = env.state.get("u@test", "ipad", "inbox").await.unwrap().unwrap();
+    assert!(!rec.seen_ids.contains(&"oldunread".to_owned()));
+}
+
+#[tokio::test]
+async fn cleanup_is_not_repeated_after_a_gateway_restart() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.mock.add_mail("inbox", "old");
+    env.mock.set_date("old", &days_ago(45));
+    let (key, _) = initial_sync(&env, "ipad", Some("0")).await;
+    let r = sync_cmds(&env, "ipad", &key, Some("5"), "25").await;
+    assert_eq!(r.soft, vec!["old"]);
+    let env2 = Arc::new(env.restarted().await);
+    let r2 = sync_cmds(&env2, "ipad", &r.key, Some("5"), "25").await;
+    assert!(r2.soft.is_empty() && r2.deletes.is_empty(), "{r2:?}");
+    assert_eq!(r2.key, r.key);
+}
+
+#[tokio::test]
+async fn delete_mode_sends_an_ordinary_delete_and_keep_mode_sends_nothing() {
+    for (mode, want_soft, want_del) in [
+        (crate::config::AgedOut::Delete, false, true),
+        (crate::config::AgedOut::Keep, false, false),
+        (crate::config::AgedOut::SoftDelete, true, false),
+    ] {
+        let env = Arc::new(start_env(Opts { aged_out: mode, ..Opts::default() }).await);
+        env.mock.add_mail("inbox", "old");
+        env.mock.set_date("old", &days_ago(45));
+        let (key, _) = initial_sync(&env, "ipad", Some("0")).await;
+        let r = sync_cmds(&env, "ipad", &key, Some("5"), "25").await;
+        assert_eq!(r.soft == vec!["old"], want_soft, "{mode:?} {r:?}");
+        assert_eq!(r.deletes == vec!["old"], want_del, "{mode:?} {r:?}");
+        assert!(still_on_server(&env, "old"));
+        let again = sync_cmds(&env, "ipad", &r.key, Some("5"), "25").await;
+        assert!(again.soft.is_empty() && again.deletes.is_empty(), "{mode:?} {again:?}");
+    }
+}
+
+#[tokio::test]
+async fn soft_delete_reply_has_the_spec_shape() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.mock.add_mail("inbox", "old");
+    env.mock.set_date("old", &days_ago(45));
+    let (key, _) = initial_sync(&env, "ipad", Some("0")).await;
+    let (outline, key2) = sync_outline(&env, "ipad", &key).await;
+    assert_eq!(
+        outline,
+        format!(
+            "<0:05><0:1c><0:0f><0:0b>{key2}</><0:12>inbox</><0:0e>1</>\
+             <0:16><0:21><0:0d>old</></></></></></>"
+        )
+    );
+}
+
+#[tokio::test]
+async fn cross_device_delete_is_still_an_ordinary_delete_inside_the_window() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    let (key, _) = initial_sync(&env, "iphone", Some("5")).await;
+    env.mock.remove_mail("inbox", "m1");
+    let r = sync_cmds(&env, "iphone", &key, Some("5"), "25").await;
+    assert_eq!((r.deletes.clone(), r.soft.clone()), (vec!["m1".to_owned()], vec![]));
 }

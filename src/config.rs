@@ -23,6 +23,20 @@ pub struct Config {
     pub ping_resend_guard_seconds: u64,
     /// How long a per-user JMAP EventSource stays open with no Ping activity.
     pub push_idle_seconds: u64,
+    /// What a mail Sync sends for a held message that has aged out of the
+    /// device's FilterType window (the message stays on the server).
+    pub mail_aged_out: AgedOut,
+}
+
+/// Cleanup of held mail older than the device's FilterType window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgedOut {
+    /// [MS-ASCMD] SoftDelete: remove from the device, not from the server.
+    SoftDelete,
+    /// An ordinary Delete, as Z-Push's generic backends send.
+    Delete,
+    /// Leave it on the device (behaviour before this option existed).
+    Keep,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +98,15 @@ impl Config {
             push_idle_seconds: env_or("PUSH_IDLE_SECONDS", "1800")
                 .parse()
                 .context("PUSH_IDLE_SECONDS must be an integer")?,
+            mail_aged_out: match env_or("MAIL_AGED_OUT", "softdelete")
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "softdelete" => AgedOut::SoftDelete,
+                "delete" => AgedOut::Delete,
+                "keep" => AgedOut::Keep,
+                other => bail!("MAIL_AGED_OUT must be softdelete, delete or keep, not {other:?}"),
+            },
         })
     }
 }
