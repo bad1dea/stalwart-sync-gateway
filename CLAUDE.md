@@ -36,6 +36,14 @@ Calendar/attachments are read-only (see Not Yet Implemented).
 - **Ping loop guard**: a device that pings again without having synced after a Status 2 is
   not re-answered for `PING_RESEND_GUARD_SECONDS` (15), then the Ping re-checks on its own
   (it used to wait for the next event, which left an ignored Status 2 undelivered).
+- **Never send Ping Status 2 that the next Sync cannot deliver.** iOS counts it: after more
+  than 5 Status 2 answers for a folder "without a successful sync" exchangesyncd
+  blacklists the folder from push ("User must manually refresh to get it to push
+  again") and Mail can show "Cannot Get Mail". The probe therefore judges new mail only
+  within the device's last Sync window (stored in the mail SyncRecord's `jmap_state`,
+  default 25) and ignores messages the device never received. Found 2026-11-12 from the
+  iPhone's own log (`idevicesyslog` over USB, grep `ping history`). Deploy
+  `deploy-2026-11-12c`.
 - Known gaps: Notes/Contacts/Calendar/Tasks are not push-woken; server-side flag
   changes beyond read/unread do not sync; each folder syncs only its newest ~100
   messages (no paging into older mail); Sync is still a seen-id diff, not
