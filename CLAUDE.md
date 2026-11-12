@@ -68,14 +68,20 @@ Calendar/attachments are read-only (see Not Yet Implemented).
   no SoftDelete); only protocol 14.0 is advertised; seen ids are stored newest first so the Ping
   probe and Sync check the same slice (id-sorted order made a recent read change in a large
   folder an undeliverable Status 2). End-to-end suite against a real Stalwart: docs/TESTING.md.
+- **deploy-2026-11-12n:** the mail record's `jmap_state` is `"<window>;<filter>;<emailState>"`.
+  Sync asks `Email/changes` since that state first (destroyed/moved held messages -> deletion
+  candidates, read drift -> Changes, max 500 per reply with MoreAvailable and the state held
+  back); the Ping probe asks the same when its window checks find nothing. So changes to held
+  mail of any age are announced and delivered. Window checks stay as the fallback when the
+  server can't calculate changes.
 - **Open compliance items:** Partial/Truncation per Options; Ping Status 6/MaxFolders;
-  ItemOperations EmptyFolderContents/Move; `Email/changes` instead of the seen-id diff.
+  ItemOperations EmptyFolderContents/Move; new-mail detection is still a listing diff (Email/changes
+  covers changes to held mail).
 - **Open device issue:** after a delete on one device, the other receives a valid Delete for the
   exact stored ServerId and accepts the new SyncKey, but iOS Mail sometimes keeps showing the
   message until a manual refresh. Needs the receiving phone's own log during the delete.
 - Known gaps: Notes/Contacts/Calendar/Tasks are not push-woken; server-side flag
-  changes beyond read/unread do not sync; Sync is still a seen-id diff, not
-  `Email/changes`.
+  changes beyond read/unread do not sync.
 - **Calendar recurrence is in progress** on branch `calendar-recurrence` (not
   merged): server -> device direction is done (Recurrence, TimeZone blob, deleted
   occurrences), device -> server (creating/editing a recurring event, mapping the

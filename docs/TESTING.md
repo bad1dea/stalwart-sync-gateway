@@ -77,7 +77,8 @@ returns once `/healthz` answers.
 | `e2e_attachment_download` | FileReference + GetAttachment bytes |
 | `e2e_gateway_restart_keeps_device_state` | no re-download, no false Status 2, push resumes |
 | `e2e_long_ping_is_held_for_the_heartbeat` | quiet Ping answered Status 1 at the heartbeat, not before |
+| `e2e_random_changes_every_status2_is_delivered_and_none_missed` | random new mail, read flips, moves, destroys (server side) and read flips, deletes, MoveItems (device side) on two devices, messages of any age: every Status 2 is deliverable, every change is announced, the acting device is not echoed, both devices end up identical (`E2E_STEPS`, `E2E_SEED`) |
 
-Last full run (2026-11-12): all 8 pass at `E2E_N=5000` (5000 messages in 50
+Last full run (2026-11-12, 1:30 am ET): all 9 pass, random test at 100 steps; at `E2E_N=5000` (5000 messages in 50
 rounds, ~4 s; new mail -> both Pings answered in ~0.28 s; 120 s Ping held
 120.0 s). These are protocol results, not real-device verification.
