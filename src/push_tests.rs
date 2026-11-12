@@ -341,6 +341,39 @@ async fn start_env(opts: Opts) -> Env {
     let mock = start_mock().await;
     mock.add_mail("inbox", "m1");
     mock.add_mail("inbox", "m2");
+    let (gw, push, state) = spawn_gateway(&mock, &opts, None).await;
+    Env {
+        mock,
+        gw,
+        http: reqwest::Client::new(),
+        push,
+        state,
+        keys: Mutex::new(Default::default()),
+    }
+}
+
+impl Env {
+    /// A fresh gateway process on the same Stalwart and state store: what a
+    /// container restart looks like (in-memory push state is gone).
+    async fn restarted(&self) -> Env {
+        let (gw, push, state) =
+            spawn_gateway(&self.mock, &Opts::default(), Some(self.state.clone())).await;
+        Env {
+            mock: self.mock.clone(),
+            gw,
+            http: reqwest::Client::new(),
+            push,
+            state,
+            keys: Mutex::new(self.keys.lock().unwrap().clone()),
+        }
+    }
+}
+
+async fn spawn_gateway(
+    mock: &Arc<Mock>,
+    opts: &Opts,
+    store: Option<state::SharedStateStore>,
+) -> (String, PushHub, state::SharedStateStore) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let gw_addr = listener.local_addr().unwrap();
     let config = Config {
@@ -366,7 +399,10 @@ async fn start_env(opts: Opts) -> Env {
         ping_resend_guard_seconds: 1,
         push_idle_seconds: 60,
     };
-    let state = state::new_store(&config).await.unwrap();
+    let state = match store {
+        Some(store) => store,
+        None => state::new_store(&config).await.unwrap(),
+    };
     let push = PushHub::new(&config).unwrap();
     let app_state = AppState {
         config: config.clone(),
@@ -377,14 +413,11 @@ async fn start_env(opts: Opts) -> Env {
     };
     let app = build_router(app_state);
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Env {
-        mock,
-        gw: format!("http://{gw_addr}/Microsoft-Server-ActiveSync"),
-        http: reqwest::Client::new(),
+    (
+        format!("http://{gw_addr}/Microsoft-Server-ActiveSync"),
         push,
         state,
-        keys: Mutex::new(Default::default()),
-    }
+    )
 }
 
 fn ping_body(heartbeat: u64, folders: &[(&str, &str)]) -> Vec<u8> {
@@ -495,6 +528,30 @@ impl Env {
         }
         self.keys.lock().unwrap().insert(device.to_owned(), key);
         delivered
+    }
+
+    /// Brings another folder of the device in step (its key is not kept).
+    async fn sync_folder(&self, device: &str, collection: &str) {
+        use eas::airsync as air;
+        let mut key = "0".to_owned();
+        for _ in 0..20 {
+            let resp = self
+                .req("Sync", device)
+                .body(sync_body(&key, collection))
+                .send()
+                .await
+                .unwrap();
+            let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+            let new_key = eas::find_all_text_after(&doc, air::SYNC_KEY)
+                .pop()
+                .expect("response SyncKey");
+            let more = eas::contains_token(&doc, air::MORE_AVAILABLE);
+            let progressed = new_key != key;
+            key = new_key;
+            if !more && !progressed {
+                break;
+            }
+        }
     }
 
     /// One Sync round with an explicit key: (new key, adds, changes).
@@ -1006,6 +1063,41 @@ async fn empty_ping_after_restart_falls_back_to_inbox() {
     assert_eq!(
         (r.status.as_str(), r.folders),
         ("2", vec!["inbox".to_owned()])
+    );
+}
+
+#[tokio::test]
+async fn ping_parameters_survive_a_gateway_restart() {
+    // Prod 2026-11-12: after a restart the iPad kept sending empty Pings and
+    // the gateway, with its parameters lost, watched only the Inbox all
+    // night. They are now kept in the state store.
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("ipad").await;
+    env.sync_folder("ipad", "other").await;
+    let folders = &[("inbox", "Email"), ("other", "Email")];
+    let r = env.ping("ipad", Some(ping_body(3, folders))).await;
+    assert_eq!(r.status, "1");
+
+    let env2 = Arc::new(env.restarted().await);
+    env2.mock.add_mail("other", "o1");
+    let r = env2.ping("ipad", None).await;
+    assert_eq!(
+        (r.status.as_str(), r.folders),
+        ("2", vec!["other".to_owned()]),
+        "empty Ping after restart still watches the Archive"
+    );
+}
+
+#[tokio::test]
+async fn empty_ping_with_nothing_stored_watches_every_synced_mail_folder() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("ipad").await;
+    env.sync_folder("ipad", "other").await;
+    env.mock.add_mail("other", "o1");
+    let r = env.ping("ipad", None).await;
+    assert_eq!(
+        (r.status.as_str(), r.folders),
+        ("2", vec!["other".to_owned()])
     );
 }
 

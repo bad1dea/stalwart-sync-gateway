@@ -523,7 +523,15 @@ async fn ping(
 
     // Heartbeat and folders: from the request, else the device's last Ping.
     let request = document.map(wbxml::eas::ping_request).unwrap_or_default();
-    let cached = push.device(&device);
+    let mut cached = push.device(&device);
+    if cached.folders.is_empty() || cached.heartbeat.is_none() {
+        if let Some((heartbeat, folders)) = load_ping_params(state, &eas_user, &device).await {
+            tracing::info!(device_id = %device, heartbeat, folders = folders.len(), "ping: parameters restored from state store");
+            push.set_device_params(&device, heartbeat, folders.clone());
+            cached.heartbeat = Some(heartbeat);
+            cached.folders = folders;
+        }
+    }
     let folders_supplied = !request.folders.is_empty();
     let heartbeat = request.heartbeat.or(cached.heartbeat);
     let folders = if folders_supplied {
@@ -538,22 +546,33 @@ async fn ping(
     let (heartbeat, folders) = match (heartbeat, folders.is_empty()) {
         (Some(heartbeat), false) => (heartbeat, folders),
         _ => {
-            let inbox: Vec<(String, String)> = match state.jmap.collections(auth).await {
+            // Watch every mail folder this device has a Sync state for (the
+            // folders it actually keeps in step), else just the Inbox.
+            let mail: Vec<crate::model::Collection> = match state.jmap.collections(auth).await {
                 Ok(all) => all
-                    .iter()
-                    .filter(|c| {
-                        c.kind == crate::model::CollectionKind::Mail
-                            && c.folder_type == crate::model::eas_folder_type::INBOX
-                    })
-                    .map(|c| (c.id.clone(), "Email".to_owned()))
+                    .into_iter()
+                    .filter(|c| c.kind == crate::model::CollectionKind::Mail)
                     .collect(),
                 Err(_) => Vec::new(),
             };
+            let mut inbox: Vec<(String, String)> = Vec::new();
+            for c in &mail {
+                if matches!(state.state.get(&eas_user, &device, &c.id).await, Ok(Some(_))) {
+                    inbox.push((c.id.clone(), "Email".to_owned()));
+                }
+            }
+            if inbox.is_empty() {
+                inbox = mail
+                    .iter()
+                    .filter(|c| c.folder_type == crate::model::eas_folder_type::INBOX)
+                    .map(|c| (c.id.clone(), "Email".to_owned()))
+                    .collect();
+            }
             if inbox.is_empty() {
                 tracing::info!(device_id = %device, "ping: missing parameters, Status 3");
                 return ping_response(state, command, 3, &[], None);
             }
-            tracing::info!(device_id = %device, "ping: no parameters known, watching Inbox with default heartbeat");
+            tracing::info!(device_id = %device, "ping: no parameters known, watching synced mail folders with default heartbeat");
             let fallback = heartbeat
                 .unwrap_or(900)
                 .clamp(state.config.ping_min_seconds, state.config.ping_max_seconds);
@@ -585,6 +604,11 @@ async fn ping(
         push.set_device_params(&device, heartbeat, folders.clone());
     } else if request.heartbeat.is_some() {
         push.set_device_params(&device, heartbeat, folders.clone());
+    }
+    if (folders_supplied || request.heartbeat.is_some())
+        && (cached.heartbeat != Some(heartbeat) || cached.folders != folders)
+    {
+        store_ping_params(state, &eas_user, &device, heartbeat, &folders).await;
     }
 
     let mail_ids = watched_mail_ids(&folders);
@@ -1635,6 +1659,50 @@ fn wbxml_outline(doc: &wbxml::Document) -> String {
 /// reply again instead of a full resync. Stored as one ItemState under a
 /// reserved collection id: item_id "<request key>><new key>", hash = base64
 /// WBXML of the reply's Collection element.
+/// Reserved item-state collection holding a device's last Ping parameters,
+/// so an empty Ping after a gateway restart still watches every folder the
+/// device asked for ([MS-ASCMD] 2.2.1.13: the server keeps them).
+const PING_PARAMS_COLLECTION: &str = "__ping__";
+
+async fn store_ping_params(
+    state: &AppState,
+    user: &str,
+    device: &str,
+    heartbeat: u64,
+    folders: &[(String, String)],
+) {
+    let Ok(json) = serde_json::to_string(folders) else {
+        return;
+    };
+    let item = ItemState {
+        item_id: heartbeat.to_string(),
+        hash: json,
+    };
+    if let Err(error) = state
+        .state
+        .put_item_states(user, device, PING_PARAMS_COLLECTION, vec![item])
+        .await
+    {
+        tracing::warn!(%error, "failed to store Ping parameters");
+    }
+}
+
+async fn load_ping_params(
+    state: &AppState,
+    user: &str,
+    device: &str,
+) -> Option<(u64, Vec<(String, String)>)> {
+    let items = state
+        .state
+        .item_states(user, device, PING_PARAMS_COLLECTION)
+        .await
+        .ok()?;
+    let item = items.into_iter().next()?;
+    let heartbeat = item.item_id.parse().ok()?;
+    let folders: Vec<(String, String)> = serde_json::from_str(&item.hash).ok()?;
+    (!folders.is_empty()).then_some((heartbeat, folders))
+}
+
 fn replay_collection_id(collection_id: &str) -> String {
     format!("__replay__:{collection_id}")
 }
