@@ -452,8 +452,25 @@ impl JmapClient {
         mailbox_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<String>> {
+        self.email_ids_in_mailbox_since(auth, mailbox_id, None, limit)
+            .await
+    }
+
+    /// Like `email_ids_in_mailbox`, limited to messages received at or after
+    /// `after` (UTC, RFC 3339) when given: the EAS FilterType date range.
+    pub async fn email_ids_in_mailbox_since(
+        &self,
+        auth: &AuthenticatedSession,
+        mailbox_id: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
         // `limit` 0 = the whole mailbox. Paged through Email/query positions
         // so a large mailbox is never silently cut off.
+        let filter = match after {
+            Some(after) => serde_json::json!({ "inMailbox": mailbox_id, "after": after }),
+            None => serde_json::json!({ "inMailbox": mailbox_id }),
+        };
         const PAGE: usize = 5000;
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
             return Ok(Vec::new());
@@ -476,7 +493,7 @@ impl JmapClient {
                         "Email/query",
                         serde_json::json!({
                             "accountId": account_id,
-                            "filter": { "inMailbox": mailbox_id },
+                            "filter": filter,
                             "sort": [{ "property": "receivedAt", "isAscending": false }],
                             "position": ids.len(),
                             "limit": want
@@ -804,6 +821,7 @@ impl JmapClient {
         seen_ids: &[String],
         read_states: &BTreeMap<String, String>,
         window: usize,
+        after: Option<&str>,
     ) -> anyhow::Result<Option<&'static str>> {
         const NEWEST: usize = 100;
         const SEEN_CHECK: usize = PROBE_SEEN_CHECK;
@@ -818,7 +836,12 @@ impl JmapClient {
                 "Email/query",
                 serde_json::json!({
                     "accountId": account_id,
-                    "filter": { "inMailbox": mailbox_id },
+                    // Same FilterType range as the device's Sync: a message
+                    // Sync would not send is not news.
+                    "filter": match after {
+                        Some(after) => serde_json::json!({ "inMailbox": mailbox_id, "after": after }),
+                        None => serde_json::json!({ "inMailbox": mailbox_id }),
+                    },
                     "sort": [{ "property": "receivedAt", "isAscending": false }],
                     "limit": NEWEST
                 }),

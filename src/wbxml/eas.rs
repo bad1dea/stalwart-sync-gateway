@@ -252,6 +252,9 @@ pub mod airsync {
     pub const MORE_AVAILABLE: Token = tag(0x14, false);
     pub const WINDOW_SIZE: Token = tag(0x15, false);
     pub const OPTIONS: Token = tag(0x17, true);
+    /// [MS-ASCMD] 2.2.3.68.2 Options > FilterType: 0 all, 1 one day, 2 three
+    /// days, 3 one week, 4 two weeks, 5 one month (mail).
+    pub const FILTER_TYPE: Token = tag(0x18, false);
     pub const COMMANDS: Token = tag(0x16, false);
     pub const COLLECTIONS: Token = tag(0x1c, false);
     pub const APPLICATION_DATA: Token = tag(0x1d, false);
@@ -563,7 +566,7 @@ pub mod compose_mail {
 /// core fields (through UserResponse) are "All" protocol versions; the
 /// rest are 14.1+ (InstanceId) or 16.0/16.1 (ProposedStartTime/
 /// ProposedEndTime/SendResponse) -- this gateway currently advertises
-/// SUPPORTED_PROTOCOLS "12.0,12.1,14.0" only (see activesync.rs), so a
+/// SUPPORTED_PROTOCOLS "14.0" only (12.0/12.1 until 2026-11-12) (see activesync.rs), so a
 /// real device would never send those three fields against this gateway
 /// as it stands today.
 pub mod meeting_response {
@@ -987,7 +990,7 @@ pub mod rights_management {
 /// EVERY tag in this codepage is gated to protocol version 16.1 ONLY
 /// (confirmed directly in the spec's own per-tag version column, not
 /// inferred) -- and this gateway currently advertises
-/// `SUPPORTED_PROTOCOLS = "12.0,12.1,14.0"` (see activesync.rs), a
+/// `SUPPORTED_PROTOCOLS = "14.0"` (12.0/12.1 until 2026-11-12) (see activesync.rs), a
 /// deliberate cap put in place this session after the whole
 /// over-advertisement root-cause saga. A real device will never invoke
 /// Find against this gateway as it stands today no matter how complete
@@ -1044,6 +1047,9 @@ pub struct SyncCollectionRequest {
     pub body_pref_type: Option<u8>,
     /// AirSyncBase:BodyPreference > TruncationSize, in characters.
     pub body_pref_truncation_size: Option<usize>,
+    /// Options > FilterType, if sent this request. Absent means "same as the
+    /// previous Sync" ([MS-ASCMD] 2.2.3.125: Options persist).
+    pub filter_type: Option<u8>,
 }
 
 impl Default for SyncCollectionRequest {
@@ -1056,6 +1062,7 @@ impl Default for SyncCollectionRequest {
             commands: Vec::new(),
             body_pref_type: None,
             body_pref_truncation_size: None,
+            filter_type: None,
         }
     }
 }
@@ -1470,6 +1477,10 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             && token.token == airsync::GET_CHANGES.token
                         {
                             collection.get_changes = text != "0";
+                        } else if token.code_page == airsync::PAGE
+                            && token.token == airsync::FILTER_TYPE.token
+                        {
+                            collection.filter_type = text.parse().ok();
                         } else if token.code_page == airsync_base::PAGE
                             && token.token == airsync_base::TYPE.token
                         {

@@ -38,7 +38,11 @@ use crate::{
 // against a live z-push OPTIONS response: "12.0,12.1,14.0") makes iOS
 // negotiate the SAME protocol version z-push does, so every class
 // collapses onto the single shape this gateway actually implements.
-const SUPPORTED_PROTOCOLS: &str = "12.0,12.1,14.0";
+// 2026-11-12: narrowed to 14.0 only. Every response is shaped for 14.0
+// (GetItemEstimate without the 12.x Class element, 14.0 Sync/Ping forms), so
+// advertising 12.x promised behaviour that isn't implemented. Both live iOS
+// devices already negotiate 14.0 (`protocol_version` in the request log).
+const SUPPORTED_PROTOCOLS: &str = "14.0";
 // "Find" deliberately removed (was falsely advertised despite having no
 // handler): per the real MS-ASCMD spec text, every element in Find's own
 // WBXML codepage is gated to protocol 16.1 only, and this gateway
@@ -207,6 +211,21 @@ pub async fn post_handler(
             .unwrap_or(""),
         "received ActiveSync command"
     );
+    if let Some(version) = headers
+        .get("MS-ASProtocolVersion")
+        .and_then(|v| v.to_str().ok())
+    {
+        if !SUPPORTED_PROTOCOLS.split(',').any(|v| v == version) {
+            // Answered in the 14.0 shape anyway; the log says why a client of
+            // another version might misread it.
+            tracing::warn!(
+                device_id = query.device_id.as_deref().unwrap_or(""),
+                version,
+                supported = SUPPORTED_PROTOCOLS,
+                "client uses a protocol version this gateway does not implement"
+            );
+        }
+    }
 
     if command.eq_ignore_ascii_case("SendMail")
         || command.eq_ignore_ascii_case("SmartForward")
@@ -414,17 +433,20 @@ async fn changed_mail_folders(
             .await
             .map(|items| items.into_iter().map(|i| (i.item_id, i.hash)).collect())
             .unwrap_or_default();
-        // The device's last Sync window for this folder (kept in `jmap_state`
-        // for mail records); 25 is the usual EAS default.
-        let window = record
-            .jmap_state
-            .parse::<usize>()
-            .ok()
-            .filter(|w| *w > 0)
-            .unwrap_or(25);
+        // The device's last Sync window and FilterType for this folder (kept
+        // in `jmap_state` for mail records).
+        let (window, filter) = mail_record_options(&record.jmap_state);
+        let after = mail_filter_cutoff(filter, chrono::Utc::now());
         match state
             .jmap
-            .mailbox_has_sync_changes(auth, id, &record.seen_ids, &read_states, window)
+            .mailbox_has_sync_changes(
+                auth,
+                id,
+                &record.seen_ids,
+                &read_states,
+                window,
+                after.as_deref(),
+            )
             .await
         {
             Ok(Some(reason)) => {
@@ -1298,6 +1320,8 @@ async fn get_item_estimate(
     }
     // 12.1+: each Collection carries an AirSync SyncKey, in request order.
     let sync_keys = wbxml::eas::find_all_text_after(document, wbxml::eas::airsync::SYNC_KEY);
+    let request_filters =
+        wbxml::eas::find_all_text_after(document, wbxml::eas::airsync::FILTER_TYPE);
     let user = query.user.as_deref().unwrap_or_else(|| auth.username());
     let device = query.device_id.as_deref().unwrap_or("unknown");
 
@@ -1324,9 +1348,21 @@ async fn get_item_estimate(
                     .as_ref()
                     .map(|r| r.seen_ids.iter().map(String::as_str).collect())
                     .unwrap_or_default();
+                // FilterType from this request, else the one the folder's
+                // last Sync used.
+                let filter = request_filters
+                    .get(i)
+                    .and_then(|f| f.parse::<u8>().ok())
+                    .or_else(|| {
+                        record
+                            .as_ref()
+                            .map(|r| mail_record_options(&r.jmap_state).1)
+                    })
+                    .unwrap_or(0);
+                let after = mail_filter_cutoff(filter, chrono::Utc::now());
                 let unseen = state
                     .jmap
-                    .email_ids_in_mailbox(auth, &folder_id, 0)
+                    .email_ids_in_mailbox_since(auth, &folder_id, after.as_deref(), 0)
                     .await
                     .map(|ids| ids.iter().filter(|id| !seen.contains(id.as_str())).count())
                     .unwrap_or(0);
@@ -1879,7 +1915,50 @@ async fn sync_mail(
             // reply sends none ([MS-ASCMD] initial Sync); afterwards each reply
             // sends up to WindowSize of them, with MoreAvailable while any
             // remain ([MS-ASCMD] 2.2.3.116).
-            let unseen: Vec<String> = scan
+            // FilterType limits which messages are sent; deletion and read
+            // checks still use the whole folder, so a message that ages out of
+            // the range is never reported deleted (no SoftDelete is sent: the
+            // client drops aged-out mail from its own copy).
+            let filter = collection
+                .filter_type
+                .or_else(|| {
+                    previous_record
+                        .as_ref()
+                        .map(|r| mail_record_options(&r.jmap_state).1)
+                })
+                .unwrap_or(0);
+            let in_range: Option<Vec<String>> = match mail_filter_cutoff(filter, chrono::Utc::now())
+            {
+                None => None,
+                Some(after) => match state
+                    .jmap
+                    .email_ids_in_mailbox_since(
+                        auth,
+                        &collection.collection_id,
+                        Some(&after),
+                        SCAN_LIMIT,
+                    )
+                    .await
+                {
+                    Ok(ids) => Some(ids),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            collection = collection.collection_id,
+                            "Sync mail discovery (FilterType range) failed"
+                        );
+                        builder.start(air::COLLECTION);
+                        builder.leaf(air::SYNC_KEY, collection.sync_key);
+                        builder.leaf(air::COLLECTION_ID, collection.collection_id);
+                        builder.leaf(air::STATUS, "5");
+                        builder.end();
+                        continue;
+                    }
+                },
+            };
+            let unseen: Vec<String> = in_range
+                .as_ref()
+                .unwrap_or(&scan)
                 .iter()
                 .filter(|id| !previous_seen.contains(id.as_str()))
                 .cloned()
@@ -2111,7 +2190,7 @@ async fn sync_mail(
                     sync_key: new_sync_key.clone(),
                     // Mail records keep the device's Sync window here so Ping
                     // can judge "new" the same way Sync does.
-                    jmap_state: collection.window_size.to_string(),
+                    jmap_state: mail_record_state(collection.window_size, filter),
                     // SyncKey 0 means the device threw its copy of the folder
                     // away: what it has now is exactly what this response
                     // sends. Merging the old list kept messages it no longer
@@ -4731,6 +4810,42 @@ fn folder_status_response(
         body,
     )
         .into_response()
+}
+
+/// Mail SyncRecords keep the device's Sync window and FilterType in
+/// `jmap_state` as `"<window>"` or `"<window>;<filter>"`, so Ping judges
+/// "new" exactly as the next Sync will. Unparseable -> (25, 0).
+fn mail_record_options(jmap_state: &str) -> (usize, u8) {
+    let mut parts = jmap_state.split(';');
+    let window = parts
+        .next()
+        .and_then(|w| w.parse::<usize>().ok())
+        .filter(|w| *w > 0)
+        .unwrap_or(25);
+    let filter = parts.next().and_then(|f| f.parse().ok()).unwrap_or(0);
+    (window, filter)
+}
+
+fn mail_record_state(window: usize, filter: u8) -> String {
+    if filter == 0 {
+        window.to_string()
+    } else {
+        format!("{window};{filter}")
+    }
+}
+
+/// Oldest receivedAt (UTC, RFC 3339) a mail FilterType admits, or None for
+/// "all" (0) and values not defined for mail ([MS-ASCMD] 2.2.3.68.2).
+fn mail_filter_cutoff(filter: u8, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let since = match filter {
+        1 => now - chrono::Duration::days(1),
+        2 => now - chrono::Duration::days(3),
+        3 => now - chrono::Duration::weeks(1),
+        4 => now - chrono::Duration::weeks(2),
+        5 => now.checked_sub_months(chrono::Months::new(1))?,
+        _ => return None,
+    };
+    Some(since.format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }
 
 fn next_sync_key(sync_key: &str) -> String {

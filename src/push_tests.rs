@@ -31,6 +31,13 @@ use crate::{
 
 const MAIL_CAP: &str = "urn:ietf:params:jmap:mail";
 
+/// RFC 3339 UTC time `days` days ago.
+fn days_ago(days: i64) -> String {
+    (chrono::Utc::now() - chrono::Duration::days(days))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
 // ---------------------------------------------------------------- mock
 
 struct Mock {
@@ -45,9 +52,28 @@ struct Mock {
     /// (simulates the listing trailing a move).
     stale_listing: Mutex<Vec<(String, String)>>,
     hidden_folders: Mutex<Vec<String>>,
+    /// receivedAt per id (RFC 3339); unset ids use a fixed recent date.
+    dates: Mutex<std::collections::BTreeMap<String, String>>,
 }
 
 impl Mock {
+    fn set_date(&self, id: &str, received_at: &str) {
+        self.dates
+            .lock()
+            .unwrap()
+            .insert(id.to_owned(), received_at.to_owned());
+    }
+
+    fn date_of(&self, id: &str) -> String {
+        self.dates
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            // Default: recent enough for every FilterType.
+            .unwrap_or_else(|| days_ago(0))
+    }
+
     fn add_mail(&self, mailbox: &str, id: &str) {
         self.boxes
             .lock()
@@ -109,12 +135,12 @@ async fn mock_session(State(m): State<Arc<Mock>>) -> impl IntoResponse {
     }))
 }
 
-fn email_json(id: &str, mailbox: &str, read: bool) -> serde_json::Value {
+fn email_json(id: &str, mailbox: &str, read: bool, received_at: &str) -> serde_json::Value {
     serde_json::json!({
         "id": id, "blobId": format!("b-{id}"), "threadId": format!("t-{id}"),
         "mailboxIds": { mailbox: true },
         "keywords": if read { serde_json::json!({"$seen": true}) } else { serde_json::json!({}) },
-        "receivedAt": "2026-11-10T10:00:00Z", "subject": format!("subject {id}"),
+        "receivedAt": received_at, "subject": format!("subject {id}"),
         "from": [{"name": "A", "email": "a@x.test"}], "to": null, "cc": null,
         "textBody": [{"partId": "1"}], "htmlBody": [],
         "bodyValues": { "1": { "value": "body" } }, "attachments": []
@@ -157,6 +183,10 @@ async fn mock_api(
                     }
                 }
                 ids.reverse();
+                if let Some(after) = args["filter"]["after"].as_str() {
+                    // RFC 3339 UTC strings of one format compare as dates.
+                    ids.retain(|id| m.date_of(id).as_str() >= after);
+                }
                 let limit = args["limit"].as_u64().unwrap_or(100) as usize;
                 let total = ids.len();
                 ids.truncate(limit);
@@ -173,7 +203,7 @@ async fn mock_api(
                 for id in ids {
                     for (mb, items) in &boxes {
                         if items.contains(&id) {
-                            list.push(email_json(&id, mb, read_set.contains(&id)));
+                            list.push(email_json(&id, mb, read_set.contains(&id), &m.date_of(&id)));
                         }
                     }
                 }
@@ -218,6 +248,7 @@ async fn start_mock() -> Arc<Mock> {
         extra_folders: Mutex::new(Vec::new()),
         stale_listing: Mutex::new(Vec::new()),
         hidden_folders: Mutex::new(Vec::new()),
+        dates: Mutex::new(Default::default()),
     });
     let app = Router::new()
         .route("/.well-known/jmap", get(mock_session))
@@ -331,6 +362,10 @@ fn sync_body(key: &str, collection: &str) -> Vec<u8> {
 }
 
 fn sync_body_window(key: &str, collection: &str, window: &str) -> Vec<u8> {
+    sync_body_options(key, collection, window, None)
+}
+
+fn sync_body_options(key: &str, collection: &str, window: &str, filter: Option<&str>) -> Vec<u8> {
     use eas::airsync as air;
     let mut b = eas::DocumentBuilder::new();
     b.start(air::SYNC);
@@ -340,6 +375,11 @@ fn sync_body_window(key: &str, collection: &str, window: &str) -> Vec<u8> {
     b.leaf(air::COLLECTION_ID, collection);
     b.empty_tag(air::GET_CHANGES);
     b.leaf(air::WINDOW_SIZE, window);
+    if let Some(filter) = filter {
+        b.start(air::OPTIONS);
+        b.leaf(air::FILTER_TYPE, filter);
+        b.end();
+    }
     b.end();
     b.end();
     b.end();
@@ -986,6 +1026,64 @@ async fn read_change_on_newest_message_is_delivered_in_a_large_mailbox() {
 }
 
 #[tokio::test]
+async fn filter_type_limits_what_is_sent_and_what_ping_announces() {
+    // [MS-ASCMD] Options > FilterType 3 = one week. Messages older than that
+    // are not sent; Ping must not announce them either (an announcement Sync
+    // won't deliver counts toward the iOS push blacklist), and Options
+    // persist when a later Sync omits them.
+    use eas::airsync as air;
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.mock.add_mail("inbox", "old1");
+    env.mock.set_date("old1", &days_ago(30));
+    env.mock.add_mail("inbox", "new1");
+
+    let sync = |key: String, filter: Option<&'static str>| {
+        let env = env.clone();
+        async move {
+            let resp = env
+                .req("Sync", "ipad")
+                .body(sync_body_options(&key, "inbox", "100", filter))
+                .send()
+                .await
+                .unwrap();
+            let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+            (
+                eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap(),
+                eas::find_all_text_after(&doc, air::SERVER_ID),
+            )
+        }
+    };
+    let (k1, _) = sync("0".into(), Some("3")).await;
+    let (k2, ids) = sync(k1, Some("3")).await;
+    let mut ids = ids;
+    ids.sort();
+    assert_eq!(ids, vec!["m1", "m2", "new1"], "old1 is outside one week");
+    // A later Sync without Options keeps FilterType 3.
+    let (k3, ids) = sync(k2.clone(), None).await;
+    assert!(ids.is_empty(), "nothing more: {ids:?}");
+    assert_eq!(k3, k2);
+
+    // An old message moved into the Inbox: outside the range, so Ping stays
+    // quiet and Sync sends nothing.
+    env.mock.add_mail("inbox", "old2");
+    env.mock.set_date("old2", &days_ago(20));
+    let r = env.ping("ipad", Some(ping_body(2, INBOX))).await;
+    assert_eq!(r.status, "1", "out-of-range mail is not announced");
+
+    // A recent one is announced and delivered.
+    env.mock.add_mail("inbox", "new2");
+    let r = env.ping("ipad", Some(ping_body(5, INBOX))).await;
+    assert_eq!(r.status, "2");
+    let (_, ids) = sync(k3, None).await;
+    assert_eq!(ids, vec!["new2"]);
+
+    // FilterType 0 (all) brings the older messages in.
+    let (k4, _) = sync("0".into(), Some("0")).await;
+    let (_, ids) = sync(k4, Some("0")).await;
+    assert!(ids.contains(&"old1".to_owned()) && ids.contains(&"old2".to_owned()));
+}
+
+#[tokio::test]
 async fn ignored_status2_is_answered_again_when_the_guard_window_ends() {
     let env = Arc::new(start_env(Opts::default()).await);
     env.sync_all("ipad").await;
@@ -1343,6 +1441,8 @@ async fn options_advertises_methods_versions_and_commands() {
         assert!(h.get(name).is_some(), "missing {name}");
     }
     assert_eq!(h.get("Allow").unwrap(), "OPTIONS,POST");
+    // Only the version every response is actually shaped for.
+    assert_eq!(h.get("MS-ASProtocolVersions").unwrap(), "14.0");
     let commands = h.get("MS-ASProtocolCommands").unwrap().to_str().unwrap();
     for unhandled in [
         "MeetingResponse",
@@ -1906,6 +2006,84 @@ mod e2e {
             resp.bytes().await.unwrap().as_ref(),
             &[0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9]
         );
+    }
+
+    /// Restarts the real gateway via `E2E_RESTART_CMD` (a shell command that
+    /// returns once the new process answers /healthz). Device state must
+    /// survive: no re-download, no false Status 2, replay still works.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_gateway_restart_keeps_device_state() {
+        let live = Live::new("E2E_USER").await;
+        let d = dev("restart");
+        let (key, _, _) = live.initial_sync(&d, "100").await;
+        assert_eq!(live.ping(&d, 1).await.0, "1");
+
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(env("E2E_RESTART_CMD"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "restart command failed: {out:?}");
+        // Fresh client: pooled connections died with the old process (a real
+        // device sees the same and reconnects).
+        let live = Live::new("E2E_USER").await;
+
+        // First Ping after the restart: the gateway lost its cached Ping
+        // parameters and the EventSource; nothing changed, so no Status 2.
+        assert_eq!(
+            live.ping(&d, 2).await.0,
+            "1",
+            "no false change after restart"
+        );
+        let doc = live.wbxml("Sync", &d, sync_body(&key, &live.inbox)).await;
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::STATUS)
+                .first()
+                .map(String::as_str),
+            Some("1")
+        );
+        assert!(
+            eas::find_all_text_after(&doc, air::SERVER_ID).is_empty(),
+            "nothing re-sent"
+        );
+
+        // New mail after the restart: woken and delivered once.
+        let la = Arc::new(Live::new("E2E_USER").await);
+        let dd = d.clone();
+        let p = tokio::spawn(async move { la.ping(&dd, 30).await });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let new_id = live
+            .seed(&live.inbox, 1, "after-restart", false)
+            .await
+            .remove(0);
+        assert_eq!(p.await.unwrap().0, "2");
+        let doc = live.wbxml("Sync", &d, sync_body(&key, &live.inbox)).await;
+        assert_eq!(eas::find_all_text_after(&doc, air::SERVER_ID), vec![new_id]);
+    }
+
+    /// A quiet Ping is held for its whole heartbeat and answered Status 1,
+    /// not earlier. `E2E_LONG_PING` seconds (default 120).
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_long_ping_is_held_for_the_heartbeat() {
+        let live = Live::new("E2E_USER").await;
+        let d = dev("long");
+        live.initial_sync(&d, "100").await;
+        let hb: u64 = std::env::var("E2E_LONG_PING")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(120);
+        let t = Instant::now();
+        let (status, _) = live.ping(&d, hb).await;
+        let held = t.elapsed();
+        assert_eq!(status, "1");
+        assert!(
+            held >= Duration::from_secs(hb.saturating_sub(2))
+                && held <= Duration::from_secs(hb + 10),
+            "held {held:?} for a {hb}s heartbeat"
+        );
+        eprintln!("long Ping: {hb}s heartbeat held {held:?}");
     }
 
     fn urlencode(s: &str) -> String {
