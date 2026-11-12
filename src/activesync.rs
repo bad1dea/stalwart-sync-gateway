@@ -435,9 +435,10 @@ async fn changed_mail_folders(
             .unwrap_or_default();
         // The device's last Sync window and FilterType for this folder (kept
         // in `jmap_state` for mail records).
-        let (window, filter) = mail_record_options(&record.jmap_state);
-        let after = mail_filter_cutoff(filter, chrono::Utc::now());
-        match state
+        let options = mail_record_options(&record.jmap_state);
+        let window = options.window;
+        let after = mail_filter_cutoff(options.filter, chrono::Utc::now());
+        let mut found = state
             .jmap
             .mailbox_has_sync_changes(
                 auth,
@@ -447,8 +448,19 @@ async fn changed_mail_folders(
                 window,
                 after.as_deref(),
             )
-            .await
-        {
+            .await;
+        if matches!(found, Ok(None)) && !options.email_state.is_empty() {
+            // Anything else since the device's last Sync, at any age: Sync
+            // asks Email/changes from the same state, so it will deliver it.
+            found = state
+                .jmap
+                .email_changes_since(auth, &options.email_state, id)
+                .await
+                .map(|changes| {
+                    changes.and_then(|c| mail_changes_reason(&c, &record.seen_ids, &read_states))
+                });
+        }
+        match found {
             Ok(Some(reason)) => {
                 tracing::info!(device_id = device, collection = %id, reason, window, seen = record.seen_ids.len(), "push: probe found a change");
                 changed.push(id.clone())
@@ -1356,7 +1368,7 @@ async fn get_item_estimate(
                     .or_else(|| {
                         record
                             .as_ref()
-                            .map(|r| mail_record_options(&r.jmap_state).1)
+                            .map(|r| mail_record_options(&r.jmap_state).filter)
                     })
                     .unwrap_or(0);
                 let after = mail_filter_cutoff(filter, chrono::Utc::now());
@@ -1858,6 +1870,36 @@ async fn sync_mail(
                 .map(|record| record.seen_ids.clone())
                 .unwrap_or_default();
             let previous_seen: BTreeSet<String> = previous_order.iter().cloned().collect();
+            let previous_options = previous_record
+                .as_ref()
+                .map(|record| mail_record_options(&record.jmap_state));
+            // Email/changes since this device's last Sync, asked before anything
+            // else is read: a change made meanwhile is reported again next time
+            // rather than lost. Covers held messages of any age (read flags,
+            // moves, destroys); the date-window checks below stay as a fallback
+            // for when the server can't calculate changes.
+            let since_state = previous_options
+                .as_ref()
+                .map(|o| o.email_state.clone())
+                .filter(|s| !s.is_empty() && collection.sync_key != "0");
+            let changes = match &since_state {
+                Some(since) => state
+                    .jmap
+                    .email_changes_since(auth, since, &collection.collection_id)
+                    .await
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(%error, "mail Sync: Email/changes failed");
+                        None
+                    }),
+                None => None,
+            };
+            let mut new_email_state = match &changes {
+                Some(c) => c.new_state.clone(),
+                None => state.jmap.email_state(auth).await.unwrap_or_else(|error| {
+                    tracing::warn!(%error, "mail Sync: reading Email state failed");
+                    String::new()
+                }),
+            };
             let scan = match state
                 .jmap
                 .email_ids_in_mailbox(auth, &collection.collection_id, SCAN_LIMIT)
@@ -1921,11 +1963,7 @@ async fn sync_mail(
             // client drops aged-out mail from its own copy).
             let filter = collection
                 .filter_type
-                .or_else(|| {
-                    previous_record
-                        .as_ref()
-                        .map(|r| mail_record_options(&r.jmap_state).1)
-                })
+                .or_else(|| previous_options.as_ref().map(|o| o.filter))
                 .unwrap_or(0);
             let in_range: Option<Vec<String>> = match mail_filter_cutoff(filter, chrono::Utc::now())
             {
@@ -1972,7 +2010,7 @@ async fn sync_mail(
                     .cloned()
                     .collect()
             };
-            let has_more = collection.sync_key != "0" && unseen.len() > page.len();
+            let mut has_more = collection.sync_key != "0" && unseen.len() > page.len();
             let emails = match state.jmap.emails_by_ids(auth, &page).await {
                 Ok(emails) => emails,
                 Err(error) => {
@@ -2015,6 +2053,20 @@ async fn sync_mail(
                     previous_seen.difference(&scan_set).cloned().collect();
                 ids.extend(probe_slice.clone().cloned());
                 ids.extend(seen_by_date.iter().take(200).map(|id| (*id).clone()));
+                if let Some(c) = &changes {
+                    ids.extend(
+                        c.destroyed
+                            .iter()
+                            .filter(|id| previous_seen.contains(id.as_str()))
+                            .cloned(),
+                    );
+                    ids.extend(
+                        c.touched
+                            .iter()
+                            .filter(|(id, (_, here))| !here && previous_seen.contains(id.as_str()))
+                            .map(|(id, _)| id.clone()),
+                    );
+                }
                 ids.into_iter().collect()
             };
             let to_remove: BTreeSet<String> = if candidate_missing.is_empty() {
@@ -2121,6 +2173,39 @@ async fn sync_mail(
                     }
                 }
             }
+            // Read flags changed since the last Sync on held messages of any
+            // age (Email/changes). Capped per reply; past the cap the stored
+            // Email state is not advanced, so the rest comes next round.
+            if let Some(c) = &changes {
+                const CHANGES_CAP: usize = 500;
+                let already: BTreeSet<String> =
+                    read_changes.iter().map(|(id, _)| id.clone()).collect();
+                let drift: Vec<(String, bool)> = c
+                    .touched
+                    .iter()
+                    .filter(|(id, (_, here))| {
+                        *here
+                            && previous_seen.contains(id.as_str())
+                            && !fetched_ids.contains(id.as_str())
+                            && !to_remove.contains(id.as_str())
+                            && !already.contains(id.as_str())
+                    })
+                    .filter(|(id, (read, _))| {
+                        prev_read.get(id.as_str()).map(String::as_str) != Some(read_hash(*read))
+                    })
+                    .map(|(id, (read, _))| (id.clone(), *read))
+                    .collect();
+                if drift.len() > CHANGES_CAP {
+                    has_more = true;
+                    if let Some(since) = &since_state {
+                        new_email_state = since.clone();
+                    }
+                }
+                for (id, read) in drift.into_iter().take(CHANGES_CAP) {
+                    read_changes.push((id.clone(), read));
+                    outside_updates.push((id, read));
+                }
+            }
             if !read_changes.is_empty() {
                 tracing::info!(
                     device_id,
@@ -2190,7 +2275,7 @@ async fn sync_mail(
                     sync_key: new_sync_key.clone(),
                     // Mail records keep the device's Sync window here so Ping
                     // can judge "new" the same way Sync does.
-                    jmap_state: mail_record_state(collection.window_size, filter),
+                    jmap_state: mail_record_state(collection.window_size, filter, &new_email_state),
                     // SyncKey 0 means the device threw its copy of the folder
                     // away: what it has now is exactly what this response
                     // sends. Merging the old list kept messages it no longer
@@ -4812,26 +4897,73 @@ fn folder_status_response(
         .into_response()
 }
 
-/// Mail SyncRecords keep the device's Sync window and FilterType in
-/// `jmap_state` as `"<window>"` or `"<window>;<filter>"`, so Ping judges
-/// "new" exactly as the next Sync will. Unparseable -> (25, 0).
-fn mail_record_options(jmap_state: &str) -> (usize, u8) {
-    let mut parts = jmap_state.split(';');
+/// What a mail SyncRecord keeps in `jmap_state`: the device's Sync window
+/// and FilterType (so Ping judges "new" exactly as the next Sync will) and
+/// the account's JMAP Email state at that Sync (so both can ask Email/changes
+/// what happened since). Stored as `"<window>"`, `"<window>;<filter>"` or
+/// `"<window>;<filter>;<state>"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MailRecordOptions {
+    window: usize,
+    filter: u8,
+    email_state: String,
+}
+
+fn mail_record_options(jmap_state: &str) -> MailRecordOptions {
+    let mut parts = jmap_state.splitn(3, ';');
     let window = parts
         .next()
         .and_then(|w| w.parse::<usize>().ok())
         .filter(|w| *w > 0)
         .unwrap_or(25);
     let filter = parts.next().and_then(|f| f.parse().ok()).unwrap_or(0);
-    (window, filter)
+    let email_state = parts.next().unwrap_or_default().to_owned();
+    MailRecordOptions {
+        window,
+        filter,
+        email_state,
+    }
 }
 
-fn mail_record_state(window: usize, filter: u8) -> String {
-    if filter == 0 {
-        window.to_string()
-    } else {
-        format!("{window};{filter}")
+fn mail_record_state(window: usize, filter: u8, email_state: &str) -> String {
+    match (filter, email_state.is_empty()) {
+        (0, true) => window.to_string(),
+        (_, true) => format!("{window};{filter}"),
+        _ => format!("{window};{filter};{email_state}"),
     }
+}
+
+/// Whether Email/changes since a device's last Sync holds something its next
+/// Sync will send: a held message that left the folder or was destroyed, or
+/// a read flag that differs from what the device was told.
+fn mail_changes_reason(
+    changes: &crate::jmap::client::EmailChangesSince,
+    seen_ids: &[String],
+    read_states: &BTreeMap<String, String>,
+) -> Option<&'static str> {
+    let seen: BTreeSet<&str> = seen_ids.iter().map(String::as_str).collect();
+    if changes
+        .destroyed
+        .iter()
+        .any(|id| seen.contains(id.as_str()))
+    {
+        return Some("sent message destroyed (changes)");
+    }
+    for (id, (read, here)) in &changes.touched {
+        if !seen.contains(id.as_str()) {
+            continue;
+        }
+        if !here {
+            return Some("sent message left the folder (changes)");
+        }
+        if read_states
+            .get(id)
+            .is_some_and(|stored| stored != read_hash(*read))
+        {
+            return Some("read state changed (changes)");
+        }
+    }
+    None
 }
 
 /// Oldest receivedAt (UTC, RFC 3339) a mail FilterType admits, or None for

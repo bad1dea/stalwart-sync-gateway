@@ -108,6 +108,15 @@ pub struct BasicAuthorization {
     password: String,
 }
 
+/// Mail changes since a stored JMAP Email state (see `email_changes_since`).
+#[derive(Debug, Default)]
+pub struct EmailChangesSince {
+    pub new_state: String,
+    /// Created or updated message id -> (read, in the mailbox asked about).
+    pub touched: BTreeMap<String, (bool, bool)>,
+    pub destroyed: Vec<String>,
+}
+
 /// How many of a device's stored mail ids (newest first) the Ping probe checks
 /// for moves and read-state drift. Sync always re-checks at least this slice,
 /// so a probe hit is always deliverable.
@@ -962,6 +971,131 @@ impl JmapClient {
                 .is_some_and(|stored| stored != if *read { "1" } else { "0" })
         });
         Ok(drift.then_some("read state changed (newest messages)"))
+    }
+
+    /// The account's current JMAP Email state (`Email/get` with no ids).
+    pub async fn email_state(&self, auth: &AuthenticatedSession) -> anyhow::Result<String> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            return Ok(String::new());
+        };
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Email/get",
+                    serde_json::json!({ "accountId": account_id, "ids": [], "properties": ["id"] }),
+                    "0",
+                )],
+            )
+            .await?;
+        for method in response.method_responses {
+            match method.0.as_str() {
+                "Email/get" => {
+                    return Ok(method.1["state"].as_str().unwrap_or_default().to_owned());
+                }
+                "error" => anyhow::bail!("JMAP method error reading Email state"),
+                _ => {}
+            }
+        }
+        anyhow::bail!("no Email/get response reading Email state")
+    }
+
+    /// Every message created or updated since `since_state` (JMAP
+    /// Email/changes), with its read flag and whether it is in `mailbox_id`,
+    /// plus destroyed ids. `None` when the server cannot calculate changes
+    /// from that state (too old) or there are too many: the caller falls back
+    /// to its own checks.
+    pub async fn email_changes_since(
+        &self,
+        auth: &AuthenticatedSession,
+        since_state: &str,
+        mailbox_id: &str,
+    ) -> anyhow::Result<Option<EmailChangesSince>> {
+        // Each page's created/updated lists feed one Email/get each, which
+        // Stalwart caps at 500 ids.
+        const PAGE: usize = 400;
+        const MAX_PAGES: usize = 25;
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            return Ok(None);
+        };
+        let mut out = EmailChangesSince {
+            new_state: since_state.to_owned(),
+            touched: BTreeMap::new(),
+            destroyed: Vec::new(),
+        };
+        for _ in 0..MAX_PAGES {
+            let get = |path: &str, id: &str| {
+                MethodCall::new(
+                    "Email/get",
+                    serde_json::json!({
+                        "accountId": account_id,
+                        "#ids": { "resultOf": "c", "name": "Email/changes", "path": path },
+                        "properties": ["id", "mailboxIds", "keywords"]
+                    }),
+                    id,
+                )
+            };
+            let response: JmapResponse<serde_json::Value> = self
+                .api_call(
+                    auth,
+                    &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                    vec![
+                        MethodCall::new(
+                            "Email/changes",
+                            serde_json::json!({
+                                "accountId": account_id,
+                                "sinceState": out.new_state,
+                                "maxChanges": PAGE
+                            }),
+                            "c",
+                        ),
+                        get("/created", "gc"),
+                        get("/updated", "gu"),
+                    ],
+                )
+                .await?;
+            let mut more = false;
+            for method in response.method_responses {
+                match (method.0.as_str(), method.2.as_str()) {
+                    ("Email/changes", _) => {
+                        out.new_state = method.1["newState"]
+                            .as_str()
+                            .context("Email/changes without newState")?
+                            .to_owned();
+                        more = method.1["hasMoreChanges"].as_bool().unwrap_or(false);
+                        if let Some(ids) = method.1["destroyed"].as_array() {
+                            out.destroyed
+                                .extend(ids.iter().filter_map(|v| v.as_str().map(str::to_owned)));
+                        }
+                    }
+                    ("Email/get", _) => {
+                        let get: GetResponse<EmailMembership> = serde_json::from_value(method.1)
+                            .context("invalid Email/get response for changes")?;
+                        for e in get.list {
+                            let read = e.keywords.get("$seen").copied().unwrap_or(false);
+                            let here = e.mailbox_ids.get(mailbox_id).copied().unwrap_or(false);
+                            out.touched.insert(e.id, (read, here));
+                        }
+                    }
+                    ("error", "c") => {
+                        // cannotCalculateChanges and friends: fall back.
+                        return Ok(None);
+                    }
+                    ("error", _) => anyhow::bail!("JMAP method error reading Email changes"),
+                    _ => {}
+                }
+            }
+            if !more {
+                // A destroyed id may also have been listed as touched on an
+                // earlier page.
+                for id in &out.destroyed {
+                    out.touched.remove(id);
+                }
+                return Ok(Some(out));
+            }
+        }
+        Ok(None)
     }
 
     /// Current read flag (`$seen`) of the given messages, for the ones that

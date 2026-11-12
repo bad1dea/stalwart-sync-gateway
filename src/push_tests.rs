@@ -54,9 +54,16 @@ struct Mock {
     hidden_folders: Mutex<Vec<String>>,
     /// receivedAt per id (RFC 3339); unset ids use a fixed recent date.
     dates: Mutex<std::collections::BTreeMap<String, String>>,
+    /// Every mutation's message id, in order; the JMAP Email state is its
+    /// length (for Email/changes).
+    change_log: Mutex<Vec<String>>,
 }
 
 impl Mock {
+    fn log_change(&self, id: &str) {
+        self.change_log.lock().unwrap().push(id.to_owned());
+    }
+
     fn set_date(&self, id: &str, received_at: &str) {
         self.dates
             .lock()
@@ -75,6 +82,7 @@ impl Mock {
     }
 
     fn add_mail(&self, mailbox: &str, id: &str) {
+        self.log_change(id);
         self.boxes
             .lock()
             .unwrap()
@@ -84,6 +92,7 @@ impl Mock {
     }
 
     fn set_read(&self, id: &str, read: bool) {
+        self.log_change(id);
         let mut set = self.read.lock().unwrap();
         if read {
             set.insert(id.to_owned());
@@ -93,6 +102,7 @@ impl Mock {
     }
 
     fn remove_mail(&self, mailbox: &str, id: &str) {
+        self.log_change(id);
         if let Some(v) = self.boxes.lock().unwrap().get_mut(mailbox) {
             v.retain(|x| x != id);
         }
@@ -155,6 +165,7 @@ async fn mock_api(
     let read_set = m.read.lock().unwrap().clone();
     let mut responses = Vec::new();
     let mut last_query: Vec<String> = Vec::new();
+    let mut last_changes: Vec<String> = Vec::new();
     for call in req["methodCalls"].as_array().unwrap() {
         let name = call[0].as_str().unwrap();
         let args = &call[1];
@@ -193,9 +204,42 @@ async fn mock_api(
                 last_query = ids.clone();
                 serde_json::json!({ "ids": ids, "total": total })
             }
+            "Email/changes" => {
+                let log = m.change_log.lock().unwrap().clone();
+                let since: usize = args["sinceState"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(usize::MAX);
+                if since > log.len() {
+                    responses.push(
+                        serde_json::json!(["error", {"type": "cannotCalculateChanges"}, cid]),
+                    );
+                    continue;
+                }
+                let mut updated = Vec::new();
+                let mut destroyed = Vec::new();
+                for id in &log[since..] {
+                    let exists = boxes.values().any(|v| v.contains(id));
+                    let list = if exists { &mut updated } else { &mut destroyed };
+                    if !list.contains(id) {
+                        list.push(id.clone());
+                    }
+                }
+                last_changes = updated.clone();
+                serde_json::json!({
+                    "oldState": since.to_string(), "newState": log.len().to_string(),
+                    "hasMoreChanges": false, "created": [], "updated": updated, "destroyed": destroyed
+                })
+            }
             "Email/get" => {
                 let ids: Vec<String> = if let Some(arr) = args["ids"].as_array() {
                     arr.iter().map(|v| v.as_str().unwrap().to_owned()).collect()
+                } else if args["#ids"]["resultOf"] == "c" {
+                    if args["#ids"]["path"] == "/updated" {
+                        last_changes.clone()
+                    } else {
+                        Vec::new()
+                    }
                 } else {
                     last_query.clone()
                 };
@@ -207,7 +251,8 @@ async fn mock_api(
                         }
                     }
                 }
-                serde_json::json!({ "list": list })
+                let state = m.change_log.lock().unwrap().len().to_string();
+                serde_json::json!({ "list": list, "state": state })
             }
             other => serde_json::json!({ "type": "unknownMethod", "description": other }),
         };
@@ -249,6 +294,7 @@ async fn start_mock() -> Arc<Mock> {
         stale_listing: Mutex::new(Vec::new()),
         hidden_folders: Mutex::new(Vec::new()),
         dates: Mutex::new(Default::default()),
+        change_log: Mutex::new(Vec::new()),
     });
     let app = Router::new()
         .route("/.well-known/jmap", get(mock_session))
@@ -1021,6 +1067,38 @@ async fn read_change_on_newest_message_is_delivered_in_a_large_mailbox() {
     assert_eq!(r.status, "2");
     let (key3, _, _) = env.sync_detail("ipad", &key2).await;
     assert_ne!(key3, key2, "the move was delivered");
+    let r = env.ping("ipad", Some(ping_body(2, INBOX))).await;
+    assert_eq!(r.status, "1");
+}
+
+#[tokio::test]
+async fn changes_on_a_message_older_than_every_window_still_reach_the_device() {
+    // m1 is the oldest of 402 messages: outside the newest 300 Sync refreshes,
+    // the 200-id slice Ping checks and the newest 25. Only Email/changes since
+    // the device's last Sync sees a read flip or move on it.
+    let env = Arc::new(start_env(Opts::default()).await);
+    for n in 0..400 {
+        env.mock.add_mail("inbox", &format!("x{n:03}"));
+    }
+    env.sync_all("ipad").await;
+    let key = env.keys.lock().unwrap().get("ipad").cloned().unwrap();
+
+    env.mock.set_read("m1", true);
+    let r = env.ping("ipad", Some(ping_body(10, INBOX))).await;
+    assert_eq!(r.status, "2", "old read change announced");
+    let (key2, adds, changes) = env.sync_detail("ipad", &key).await;
+    assert!(adds.is_empty());
+    assert_eq!(changes, vec![("m1".to_owned(), "1".to_owned())]);
+    let r = env.ping("ipad", Some(ping_body(2, INBOX))).await;
+    assert_eq!(r.status, "1", "delivered once");
+
+    // m2 (second oldest) moves out: Delete.
+    env.mock.remove_mail("inbox", "m2");
+    env.mock.add_mail("other", "m2");
+    let r = env.ping("ipad", Some(ping_body(10, INBOX))).await;
+    assert_eq!(r.status, "2", "old move announced");
+    let (key3, _, _) = env.sync_detail("ipad", &key2).await;
+    assert_ne!(key3, key2, "Delete delivered");
     let r = env.ping("ipad", Some(ping_body(2, INBOX))).await;
     assert_eq!(r.status, "1");
 }
@@ -1816,6 +1894,15 @@ mod e2e {
             )
         }
 
+        async fn is_read(&self, id: &str) -> bool {
+            let r = self
+                .call(serde_json::json!([["Email/get", {"accountId": self.account, "ids": [id], "properties": ["keywords"]}, "0"]]))
+                .await;
+            r[0][1]["list"][0]["keywords"]["$seen"]
+                .as_bool()
+                .unwrap_or(false)
+        }
+
         async fn inbox_count(&self) -> usize {
             let r = self
                 .call(serde_json::json!([["Email/query", {"accountId": self.account, "filter": {"inMailbox": self.inbox}, "calculateTotal": true, "limit": 1}, "0"]]))
@@ -2084,6 +2171,274 @@ mod e2e {
             "held {held:?} for a {hb}s heartbeat"
         );
         eprintln!("long Ping: {hb}s heartbeat held {held:?}");
+    }
+
+    /// Sync with one client command for `id`: a read flag change, or a Delete.
+    fn sync_command_body(key: &str, collection: &str, id: &str, read: Option<bool>) -> Vec<u8> {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, key);
+        b.leaf(air::COLLECTION_ID, collection);
+        b.empty_tag(air::GET_CHANGES);
+        b.leaf(air::WINDOW_SIZE, "100");
+        b.start(air::COMMANDS);
+        match read {
+            Some(read) => {
+                b.start(air::CHANGE);
+                b.leaf(air::SERVER_ID, id);
+                b.start(air::APPLICATION_DATA);
+                b.leaf(eas::email::READ, if read { "1" } else { "0" });
+                b.end();
+                b.end();
+            }
+            None => {
+                b.start(air::DELETE);
+                b.leaf(air::SERVER_ID, id);
+                b.end();
+            }
+        }
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        wbxml::encode_document(&b.finish())
+    }
+
+    fn move_items_body(id: &str, src: &str, dst: &str) -> Vec<u8> {
+        use eas::move_items as mv;
+        let mut b = eas::DocumentBuilder::new();
+        b.start(mv::MOVES);
+        b.start(mv::MOVE);
+        b.leaf(mv::SRC_MSG_ID, id);
+        b.leaf(mv::SRC_FLD_ID, src);
+        b.leaf(mv::DST_FLD_ID, dst);
+        b.end();
+        b.end();
+        wbxml::encode_document(&b.finish())
+    }
+
+    /// One simulated device: its SyncKey and the ServerIds it holds.
+    struct Device {
+        id: String,
+        key: String,
+        held: Vec<String>,
+    }
+
+    impl Device {
+        /// Sync until quiet; returns how many rounds changed the key.
+        async fn drain(&mut self, live: &Live) -> usize {
+            let mut changed = 0;
+            for _ in 0..20 {
+                let doc = live
+                    .wbxml("Sync", &self.id, sync_body(&self.key, &live.inbox))
+                    .await;
+                assert_eq!(
+                    eas::find_all_text_after(&doc, air::STATUS)
+                        .first()
+                        .map(String::as_str),
+                    Some("1"),
+                    "{} Sync status",
+                    self.id
+                );
+                let new_key = eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap();
+                apply_reply(&doc, &mut self.held);
+                let more = eas::contains_token(&doc, air::MORE_AVAILABLE);
+                let progressed = new_key != self.key;
+                self.key = new_key;
+                if progressed {
+                    changed += 1;
+                }
+                if !progressed && !more {
+                    break;
+                }
+            }
+            changed
+        }
+    }
+
+    /// Applies a Sync reply's Adds and Deletes to a device's held ids.
+    fn apply_reply(doc: &wbxml::Document, held: &mut Vec<String>) {
+        let mut mode = 0u8;
+        let mut it = doc.nodes.iter().peekable();
+        while let Some(node) = it.next() {
+            if let wbxml::Node::Start(t) = node {
+                if t.code_page != air::PAGE {
+                    continue;
+                }
+                if t.token == air::ADD.token {
+                    mode = 1;
+                } else if t.token == air::DELETE.token {
+                    mode = 2;
+                } else if t.token == air::CHANGE.token {
+                    mode = 3;
+                } else if t.token == air::SERVER_ID.token {
+                    if let Some(wbxml::Node::Text(id)) = it.peek() {
+                        match mode {
+                            1 => held.insert(0, id.clone()),
+                            2 => held.retain(|h| h != id),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Randomized check of the push contract on two devices against a real
+    /// Stalwart: after every change (made on the server or by one device),
+    /// each device that should hear of it gets Ping Status 2 and the next
+    /// Sync delivers something; a device whose own change it was, and every
+    /// device once caught up, gets Status 1. `E2E_STEPS` (default 30) and
+    /// `E2E_SEED` select the sequence. Targets are messages of any age the
+    /// devices hold (old ones are reached through Email/changes).
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_random_changes_every_status2_is_delivered_and_none_missed() {
+        let live = Live::new("E2E_USER").await;
+        let steps: usize = std::env::var("E2E_STEPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+        let mut seed: u64 = std::env::var("E2E_SEED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| std::process::id() as u64);
+        eprintln!("E2E_SEED={seed}");
+        let mut rnd = move |n: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % n
+        };
+        let other = live
+            .call(serde_json::json!([["Mailbox/set", {"accountId": live.account, "create": {"m": {"name": format!("E2E random {}", std::process::id())}}}, "0"]]))
+            .await;
+        let other_id = other[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let mut devs = Vec::new();
+        for name in ["ra", "rb"] {
+            let id = dev(name);
+            // initial_sync returns ids newest first (each round is newest
+            // first and rounds go back in time), like apply_reply's inserts.
+            let (key, held, _) = live.initial_sync(&id, "100").await;
+            devs.push(Device { id, key, held });
+        }
+
+        for step in 0..steps {
+            // Pick a target among the newest messages both devices hold.
+            let held_b: std::collections::HashSet<&String> = devs[1].held.iter().collect();
+            let common: Vec<String> = devs[0]
+                .held
+                .iter()
+                .filter(|id| held_b.contains(id))
+                .cloned()
+                .collect();
+            // Half the time one of the newest 25, otherwise any age.
+            let target = if rnd(2) == 0 {
+                common[rnd(common.len().min(25))].clone()
+            } else {
+                common[rnd(common.len())].clone()
+            };
+            let actor = rnd(2); // for device-originated ops
+            let op = rnd(7);
+            // Which devices must hear about it (false = the actor itself).
+            let mut expect = [true, true];
+            let label = match op {
+                0 => {
+                    live.seed(&live.inbox, 1, &format!("rnd{step}"), false)
+                        .await;
+                    "server: new mail"
+                }
+                1 => {
+                    let r = !live.is_read(&target).await;
+                    live.call(serde_json::json!([["Email/set", {"accountId": live.account, "update": {&target: {"keywords/$seen": r}}}, "0"]])).await;
+                    "server: read flip"
+                }
+                2 => {
+                    live.call(serde_json::json!([["Email/set", {"accountId": live.account, "update": {&target: {"mailboxIds": {&other_id: true}}}}, "0"]])).await;
+                    "server: move out"
+                }
+                3 => {
+                    live.call(serde_json::json!([["Email/set", {"accountId": live.account, "destroy": [&target]}, "0"]])).await;
+                    "server: destroy"
+                }
+                4 => {
+                    let r = !live.is_read(&target).await;
+                    let d = &mut devs[actor];
+                    let doc = live
+                        .wbxml(
+                            "Sync",
+                            &d.id,
+                            sync_command_body(&d.key, &live.inbox, &target, Some(r)),
+                        )
+                        .await;
+                    d.key = eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap();
+                    apply_reply(&doc, &mut d.held);
+                    expect[actor] = false;
+                    "device: read flip"
+                }
+                5 => {
+                    let d = &mut devs[actor];
+                    let doc = live
+                        .wbxml(
+                            "Sync",
+                            &d.id,
+                            sync_command_body(&d.key, &live.inbox, &target, None),
+                        )
+                        .await;
+                    d.key = eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap();
+                    apply_reply(&doc, &mut d.held);
+                    d.held.retain(|h| h != &target);
+                    expect[actor] = false;
+                    "device: delete"
+                }
+                _ => {
+                    let d = &mut devs[actor];
+                    let resp = live
+                        .req("MoveItems", &d.id)
+                        .body(move_items_body(&target, &live.inbox, &other_id))
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(resp.status(), 200);
+                    d.held.retain(|h| h != &target);
+                    expect[actor] = false;
+                    "device: MoveItems"
+                }
+            };
+            let ctx = format!("step {step} {label} target {target} actor {actor}");
+            for (i, d) in devs.iter_mut().enumerate() {
+                if expect[i] {
+                    let (status, _) = live.ping(&d.id, 10).await;
+                    assert_eq!(status, "2", "{ctx}: device {i} must be told");
+                    assert!(
+                        d.drain(&live).await > 0,
+                        "{ctx}: device {i} Status 2 was not deliverable"
+                    );
+                } else {
+                    // The actor caught up on anything its own reply did not carry.
+                    d.drain(&live).await;
+                }
+            }
+            for (i, d) in devs.iter().enumerate() {
+                let (status, _) = live.ping(&d.id, 1).await;
+                assert_eq!(
+                    status, "1",
+                    "{ctx}: device {i} must be quiet once caught up"
+                );
+            }
+            // Both devices hold the same messages.
+            let (mut a, mut b) = (devs[0].held.clone(), devs[1].held.clone());
+            a.sort();
+            b.sort();
+            assert_eq!(a, b, "{ctx}: devices diverged");
+        }
+        eprintln!("{steps} random steps passed");
     }
 
     fn urlencode(s: &str) -> String {
