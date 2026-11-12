@@ -978,3 +978,25 @@ async fn ping_ignores_messages_outside_the_devices_sync_window() {
     let (_, adds, _) = env.sync_detail_window("phone", &key, "5").await;
     assert_eq!(adds, vec!["fresh"]);
 }
+
+#[tokio::test]
+async fn a_folder_is_not_announced_more_than_three_times_without_a_sync() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("phone").await;
+    // A message the phone has leaves the Inbox; the phone never syncs it.
+    env.mock.remove_mail("inbox", "m1");
+    for round in 1..=3 {
+        let r = env.ping("phone", Some(ping_body(10, INBOX))).await;
+        assert_eq!(r.status, "2", "announcement {round}");
+    }
+    let t = Instant::now();
+    let r = env.ping("phone", Some(ping_body(2, INBOX))).await;
+    assert_eq!(r.status, "1", "fourth announcement is held back");
+    assert!(t.elapsed() >= Duration::from_millis(1800));
+    // Once the phone syncs the folder, the change is delivered and it is quiet.
+    env.sync_all("phone").await;
+    assert_eq!(
+        env.ping("phone", Some(ping_body(1, INBOX))).await.status,
+        "1"
+    );
+}

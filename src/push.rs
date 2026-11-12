@@ -65,6 +65,9 @@ pub struct DeviceState {
     synced_since_status2: bool,
     /// Newest Ping request number for this device; older ones are stale.
     ping_epoch: u64,
+    /// Folder id -> Status 2 answers naming it since the device last synced
+    /// that folder. iOS blacklists a folder from push after more than 5.
+    announced: HashMap<String, u32>,
 }
 
 #[derive(Default)]
@@ -180,6 +183,33 @@ impl UserPush {
         d.last_status2 = Some(Instant::now());
         d.synced_since_status2 = false;
         latency
+    }
+
+    /// Count a Status 2 answer for each of `folders`.
+    pub fn note_announced(&self, device: &str, folders: &[String]) {
+        let mut inner = self.inner.lock().unwrap();
+        let d = inner.devices.entry(device.to_owned()).or_default();
+        for f in folders {
+            *d.announced.entry(f.clone()).or_default() += 1;
+        }
+    }
+
+    /// The device synced `folder`: it may be told about it again.
+    pub fn folder_synced(&self, device: &str, folder: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(d) = inner.devices.get_mut(device) {
+            d.announced.remove(folder);
+        }
+    }
+
+    /// False once `folder` was announced `cap` times without being synced.
+    pub fn announce_allowed(&self, device: &str, folder: &str, cap: u32) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .devices
+            .get(device)
+            .and_then(|d| d.announced.get(folder))
+            .is_none_or(|n| *n < cap)
     }
 
     /// Time left in the loop-protection window, if a Status 2 went to this

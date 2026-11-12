@@ -238,7 +238,7 @@ pub async fn post_handler(
                     return sync_mail(&state, &auth, &query, &document, command).await;
                 }
                 if command.eq_ignore_ascii_case("MoveItems") {
-                    return move_items(&state, &auth, &document, command).await;
+                    return move_items(&state, &auth, &query, &document, command).await;
                 }
                 if command.eq_ignore_ascii_case("Provision") {
                     return provision(&state, &document, command).await;
@@ -541,10 +541,21 @@ async fn ping(
         let seen_generation = *rx.borrow_and_update();
 
         if !mail_ids.is_empty() {
-            let changed = changed_mail_folders(state, auth, &eas_user, &device, &mail_ids).await;
+            let found = changed_mail_folders(state, auth, &eas_user, &device, &mail_ids).await;
+            // Never name a folder more than 3 times without the device syncing
+            // it: iOS blacklists the folder from push after more than 5.
+            let mut changed = Vec::new();
+            for folder in found {
+                if push.announce_allowed(&device, &folder, 3) {
+                    changed.push(folder);
+                } else {
+                    tracing::info!(device_id = %device, collection = %folder, "ping: holding back folder already announced 3 times without a sync");
+                }
+            }
             let loop_guard = first && push.status2_pending_sync(&device, guard_window);
             if !changed.is_empty() && !loop_guard {
                 let event_latency = push.note_status2(&device);
+                push.note_announced(&device, &changed);
                 tracing::info!(
                     device_id = %device,
                     status = 2,
@@ -1319,9 +1330,48 @@ async fn provision(state: &AppState, document: &wbxml::Document, command: &str) 
         .into_response()
 }
 
+/// The device moved this message itself, so it already knows it left the
+/// source folder: drop it from that device's record so Ping does not report
+/// "a message left the folder" back to it.
+async fn forget_moved_item(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    query: &EasQuery,
+    folder: &str,
+    item: &str,
+) {
+    let user = query.user.as_deref().unwrap_or_else(|| auth.username());
+    let Some(device) = query.device_id.as_deref() else {
+        return;
+    };
+    if let Ok(Some(mut record)) = state.state.get(user, device, folder).await {
+        let before = record.seen_ids.len();
+        record.seen_ids.retain(|id| id != item);
+        if record.seen_ids.len() != before {
+            if let Err(error) = state.state.put(record).await {
+                tracing::warn!(%error, "failed to update Sync state after MoveItems");
+            }
+        }
+    }
+    if let Ok(items) = state.state.item_states(user, device, folder).await {
+        let before = items.len();
+        let kept: Vec<_> = items.into_iter().filter(|i| i.item_id != item).collect();
+        if kept.len() != before {
+            if let Err(error) = state
+                .state
+                .put_item_states(user, device, folder, kept)
+                .await
+            {
+                tracing::warn!(%error, "failed to update read state after MoveItems");
+            }
+        }
+    }
+}
+
 async fn move_items(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
+    query: &EasQuery,
     document: &wbxml::Document,
     command: &str,
 ) -> Response {
@@ -1356,7 +1406,17 @@ async fn move_items(
                 )
                 .await
             {
-                Ok(()) => "3",
+                Ok(()) => {
+                    forget_moved_item(
+                        state,
+                        auth,
+                        query,
+                        &move_request.src_fld_id,
+                        &move_request.src_msg_id,
+                    )
+                    .await;
+                    "3"
+                }
                 Err(error) => {
                     tracing::warn!(
                         %error,
@@ -1419,6 +1479,9 @@ async fn sync_mail(
 
     if let Some(device) = query.device_id.as_deref() {
         let push = state.push.user(&auth.username().to_ascii_lowercase());
+        for c in &collections {
+            push.folder_synced(device, &c.collection_id);
+        }
         if let Some(latency) = push.mark_synced(device) {
             tracing::info!(
                 device_id = device,
