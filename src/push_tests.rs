@@ -781,10 +781,12 @@ async fn existing_sqlite_device_state_is_honoured() {
         })
         .await,
     );
-    // Existing partnership with no stored read states: one catch-up wake so
-    // the device learns the current read flags, driven by its old SyncKey 7.
-    let r = env.ping("oldphone", Some(ping_body(5, INBOX))).await;
-    assert_eq!(r.status, "2");
+    // Existing partnership with no stored read states: no wake for that alone
+    // (a Ping answer the next Sync could not act on gets the folder
+    // blacklisted on iOS), but its next Sync, on the old SyncKey 7, carries
+    // a catch-up Change for every message it already has.
+    let r = env.ping("oldphone", Some(ping_body(1, INBOX))).await;
+    assert_eq!(r.status, "1");
     let (key, adds, changes) = env.sync_detail("oldphone", "7").await;
     assert_eq!(key, "8");
     assert!(adds.is_empty());
@@ -948,4 +950,31 @@ async fn ignored_status2_is_answered_again_when_the_guard_window_ends() {
         "took {:?}",
         t.elapsed()
     );
+}
+
+#[tokio::test]
+async fn ping_ignores_messages_outside_the_devices_sync_window() {
+    // A device syncing with a small window must not be told about the
+    // older messages its Sync will never send: iOS blacklists a folder from
+    // push after more than 5 Status 2 answers with no real change.
+    let env = Arc::new(start_env(Opts::default()).await);
+    for n in 0..30 {
+        env.mock.add_mail("inbox", &format!("x{n:02}"));
+    }
+    let (key, adds, _) = env.sync_detail_window("phone", "0", "5").await;
+    assert_eq!(adds.len(), 5, "first Sync delivers only the newest 5");
+    assert_ne!(key, "0");
+    for _ in 0..3 {
+        let r = env.ping("phone", Some(ping_body(1, INBOX))).await;
+        assert_eq!(
+            r.status, "1",
+            "older, undeliverable messages are not a change"
+        );
+    }
+    // A genuinely new message still is.
+    env.mock.add_mail("inbox", "fresh");
+    let r = env.ping("phone", Some(ping_body(5, INBOX))).await;
+    assert_eq!(r.status, "2");
+    let (_, adds, _) = env.sync_detail_window("phone", &key, "5").await;
+    assert_eq!(adds, vec!["fresh"]);
 }

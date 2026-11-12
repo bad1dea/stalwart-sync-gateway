@@ -373,9 +373,17 @@ async fn changed_mail_folders(
             .await
             .map(|items| items.into_iter().map(|i| (i.item_id, i.hash)).collect())
             .unwrap_or_default();
+        // The device's last Sync window for this folder (kept in `jmap_state`
+        // for mail records); 25 is the usual EAS default.
+        let window = record
+            .jmap_state
+            .parse::<usize>()
+            .ok()
+            .filter(|w| *w > 0)
+            .unwrap_or(25);
         match state
             .jmap
-            .mailbox_has_sync_changes(auth, id, &record.seen_ids, &read_states)
+            .mailbox_has_sync_changes(auth, id, &record.seen_ids, &read_states, window)
             .await
         {
             Ok(true) => changed.push(id.clone()),
@@ -1722,7 +1730,9 @@ async fn sync_mail(
                     device_id: device_id.to_owned(),
                     collection_id: collection.collection_id.clone(),
                     sync_key: new_sync_key.clone(),
-                    jmap_state: String::new(),
+                    // Mail records keep the device's Sync window here so Ping
+                    // can judge "new" the same way Sync does.
+                    jmap_state: collection.window_size.to_string(),
                     seen_ids: previous_seen
                         .union(&fetched_ids)
                         .filter(|id| !to_remove.contains(id.as_str()))

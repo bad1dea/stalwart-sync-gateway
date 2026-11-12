@@ -674,6 +674,7 @@ impl JmapClient {
         mailbox_id: &str,
         seen_ids: &[String],
         read_states: &BTreeMap<String, String>,
+        window: usize,
     ) -> anyhow::Result<bool> {
         const NEWEST: usize = 100;
         const SEEN_CHECK: usize = 200;
@@ -765,7 +766,15 @@ impl JmapClient {
                 _ => {}
             }
         }
-        if query_ids.iter().any(|id| !seen.contains(id.as_str())) {
+        // Only the newest `window` messages count as "new": that is all a
+        // device with that Sync window will ever be sent. Looking further
+        // makes Ping announce changes the following Sync cannot deliver, and
+        // iOS then blacklists the folder from push.
+        if query_ids
+            .iter()
+            .take(window.clamp(1, NEWEST))
+            .any(|id| !seen.contains(id.as_str()))
+        {
             return Ok(true);
         }
         if let Some(still_here) = still_here {
@@ -793,7 +802,11 @@ impl JmapClient {
             let Some(read) = newest_read.get(id) else {
                 return false;
             };
-            read_states.get(id).map(String::as_str) != Some(if *read { "1" } else { "0" })
+            // Only messages the device was actually sent (stored state) count;
+            // a message outside its window is not a change it can receive.
+            read_states
+                .get(id)
+                .is_some_and(|stored| stored != if *read { "1" } else { "0" })
         });
         Ok(drift)
     }
