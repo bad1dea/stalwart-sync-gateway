@@ -29,6 +29,13 @@ Calendar/attachments are read-only (see Not Yet Implemented).
   catch-up Change.
 - **Empty-body Ping after a restart** watches the Inbox with a default heartbeat
   instead of answering Status 3 (some iOS builds stall on Status 3).
+- **Read state also covers messages older than a device's Sync window**: Sync refreshes
+  up to 300 stored older messages via `Email/get`, and the Ping probe checks them, so a
+  stale unread count on a device heals (verified live 2026-11-12, iPhone read -> iPad
+  updated in ~0.4 s server-side).
+- **Ping loop guard**: a device that pings again without having synced after a Status 2 is
+  not re-answered for `PING_RESEND_GUARD_SECONDS` (15), then the Ping re-checks on its own
+  (it used to wait for the next event, which left an ignored Status 2 undelivered).
 - Known gaps: Notes/Contacts/Calendar/Tasks are not push-woken; server-side flag
   changes beyond read/unread do not sync; each folder syncs only its newest ~100
   messages (no paging into older mail); Sync is still a seen-id diff, not
