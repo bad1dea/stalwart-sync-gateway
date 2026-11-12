@@ -1516,6 +1516,62 @@ async fn move_items(
         .into_response()
 }
 
+#[cfg(test)]
+pub(crate) fn wbxml_outline_for_tests(doc: &wbxml::Document) -> String {
+    wbxml_outline(doc)
+}
+
+/// Device ids whose Sync traffic is traced (env `TRACE_DEVICE_IDS`, comma
+/// separated). Diagnostic only.
+fn trace_enabled(device: Option<&str>) -> bool {
+    let Some(device) = device else { return false };
+    std::env::var("TRACE_DEVICE_IDS")
+        .map(|v| v.split(',').any(|d| d.trim() == device))
+        .unwrap_or(false)
+}
+
+/// Structure of a WBXML document without content: every tag as
+/// `page:token` (`/` marks an empty tag), text only for protocol fields
+/// (SyncKey, ServerId, Status, CollectionId, ClientId, WindowSize, Read),
+/// everything else reduced to its length.
+fn wbxml_outline(doc: &wbxml::Document) -> String {
+    use wbxml::Node;
+    const SHOWN: &[(u8, u8)] = &[
+        (0, 0x0b),
+        (0, 0x0c),
+        (0, 0x0d),
+        (0, 0x0e),
+        (0, 0x12),
+        (0, 0x15),
+        (2, 0x15),
+    ];
+    let mut out = String::new();
+    let mut stack: Vec<(u8, u8)> = Vec::new();
+    for node in &doc.nodes {
+        match node {
+            Node::Start(t) => {
+                out.push_str(&format!("<{}:{:02x}", t.code_page, t.token));
+                if t.has_content {
+                    out.push('>');
+                    stack.push((t.code_page, t.token));
+                } else {
+                    out.push_str("/>");
+                }
+            }
+            Node::Text(text) => match stack.last() {
+                Some(top) if SHOWN.contains(top) => out.push_str(text),
+                _ => out.push_str(&format!("[{}]", text.len())),
+            },
+            Node::Opaque(b) => out.push_str(&format!("[opaque {}]", b.len())),
+            Node::End => {
+                stack.pop();
+                out.push_str("</>");
+            }
+        }
+    }
+    out
+}
+
 async fn sync_mail(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
@@ -1741,10 +1797,19 @@ async fn sync_mail(
             // full story) rather than assuming absence-from-window means
             // deleted; see the else-branch below for the empty-window
             // shortcut that skips this call entirely.
+            // Candidates: sent messages missing from the folder listing, plus
+            // the newest 200 sent ones checked directly. The listing
+            // (Email/query) can trail a move by a moment while the message
+            // itself (Email/get) already shows its new folder; Ping checks the
+            // message itself, so Sync must too, or a Ping-announced delete
+            // arrives empty and waits for the next manual refresh.
             let candidate_missing: Vec<String> = if collection.sync_key == "0" {
                 Vec::new()
             } else {
-                previous_seen.difference(&scan_set).cloned().collect()
+                let mut ids: BTreeSet<String> =
+                    previous_seen.difference(&scan_set).cloned().collect();
+                ids.extend(previous_seen.iter().rev().take(200).cloned());
+                ids.into_iter().collect()
             };
             let to_remove: BTreeSet<String> = if candidate_missing.is_empty() {
                 BTreeSet::new()
@@ -1947,6 +2012,17 @@ async fn sync_mail(
                 continue;
             }
 
+            tracing::info!(
+                device_id,
+                collection = %collection.collection_id,
+                client_key = %collection.sync_key,
+                new_key = %new_sync_key,
+                adds = emails_to_send.len(),
+                deletes = to_remove.len(),
+                read_changes = read_changes.len(),
+                more_available = has_more,
+                "mail Sync reply"
+            );
             builder.start(air::COLLECTION);
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
@@ -2061,7 +2137,16 @@ async fn sync_mail(
     builder.end();
     builder.end();
 
-    let body = wbxml::encode_document(&builder.finish());
+    let reply = builder.finish();
+    if trace_enabled(query.device_id.as_deref()) {
+        tracing::info!(
+            device_id = query.device_id.as_deref().unwrap_or(""),
+            request = %wbxml_outline(document),
+            reply = %wbxml_outline(&reply),
+            "trace: Sync"
+        );
+    }
+    let body = wbxml::encode_document(&reply);
     state
         .metrics
         .eas_requests_total

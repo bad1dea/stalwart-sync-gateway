@@ -41,6 +41,9 @@ struct Mock {
     counter: AtomicUsize,
     read: Mutex<std::collections::BTreeSet<String>>,
     extra_folders: Mutex<Vec<String>>,
+    /// Ids still returned by Email/query after they left the mailbox
+    /// (simulates the listing trailing a move).
+    stale_listing: Mutex<Vec<(String, String)>>,
 }
 
 impl Mock {
@@ -143,6 +146,11 @@ async fn mock_api(
             "Email/query" => {
                 let mb = args["filter"]["inMailbox"].as_str().unwrap_or("inbox");
                 let mut ids = boxes.get(mb).cloned().unwrap_or_default();
+                for (smb, sid) in m.stale_listing.lock().unwrap().iter() {
+                    if smb == mb && !ids.contains(sid) {
+                        ids.push(sid.clone());
+                    }
+                }
                 ids.reverse();
                 let limit = args["limit"].as_u64().unwrap_or(100) as usize;
                 let total = ids.len();
@@ -203,6 +211,7 @@ async fn start_mock() -> Arc<Mock> {
         counter: AtomicUsize::new(1),
         read: Mutex::new(Default::default()),
         extra_folders: Mutex::new(Vec::new()),
+        stale_listing: Mutex::new(Vec::new()),
     });
     let app = Router::new()
         .route("/.well-known/jmap", get(mock_session))
@@ -1338,4 +1347,55 @@ async fn more_available_is_a_bare_tag_without_content() {
         }
     }
     assert!(found, "MoreAvailable present when more messages remain");
+}
+
+#[tokio::test]
+async fn delete_is_delivered_even_while_the_folder_listing_trails() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("phone").await;
+    let key = env.keys.lock().unwrap().get("phone").cloned().unwrap();
+    // m1 moved out of the Inbox; the listing still shows it for a moment.
+    env.mock.remove_mail("inbox", "m1");
+    env.mock.add_mail("other", "m1");
+    env.mock
+        .stale_listing
+        .lock()
+        .unwrap()
+        .push(("inbox".into(), "m1".into()));
+    let r = env.ping("phone", Some(ping_body(5, INBOX))).await;
+    assert_eq!(r.status, "2");
+    use eas::airsync as air;
+    let resp = env
+        .req("Sync", "phone")
+        .body(sync_body(&key, "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+    assert!(
+        eas::contains_token(&doc, air::DELETE),
+        "the announced delete is in this Sync"
+    );
+    assert_eq!(eas::find_all_text_after(&doc, air::SERVER_ID), vec!["m1"]);
+}
+
+#[test]
+fn wbxml_outline_shows_protocol_fields_but_not_content() {
+    use eas::airsync as air;
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.leaf(air::SYNC_KEY, "7");
+    b.start(air::COMMANDS);
+    b.start(air::DELETE);
+    b.leaf(air::SERVER_ID, "m1");
+    b.end();
+    b.end();
+    b.leaf(eas::email::SUBJECT, "secret subject");
+    b.empty_tag(air::MORE_AVAILABLE);
+    b.end();
+    let outline = crate::activesync::wbxml_outline_for_tests(&b.finish());
+    assert!(outline.contains("<0:0b>7</>"), "{outline}");
+    assert!(outline.contains("<0:09><0:0d>m1</></>"), "{outline}");
+    assert!(!outline.contains("secret"), "{outline}");
+    assert!(outline.contains("<0:14/>"), "{outline}");
 }

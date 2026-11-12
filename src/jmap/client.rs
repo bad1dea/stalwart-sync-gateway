@@ -719,6 +719,14 @@ impl JmapClient {
         if candidate_ids.is_empty() {
             return Ok(BTreeSet::new());
         }
+        if candidate_ids.len() > 400 {
+            let mut present = BTreeSet::new();
+            for chunk in candidate_ids.chunks(400) {
+                present
+                    .extend(Box::pin(self.emails_still_in_mailbox(auth, chunk, mailbox_id)).await?);
+            }
+            return Ok(present);
+        }
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
             return Ok(BTreeSet::new());
         };
