@@ -386,7 +386,7 @@ impl Env {
             .cloned()
             .unwrap_or_else(|| "0".to_owned());
         let mut delivered = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..20 {
             let resp = self
                 .req("Sync", device)
                 .body(sync_body(&key, "inbox"))
@@ -951,6 +951,41 @@ async fn read_change_on_message_older_than_the_window_still_reaches_the_device()
 }
 
 #[tokio::test]
+async fn read_change_on_newest_message_is_delivered_in_a_large_mailbox() {
+    // Regression (found by the 5000-message e2e run): Sync picked "the newest
+    // 300 seen messages" from an id-sorted set, so in a big mailbox whose ids
+    // don't sort by date a read change on the newest message woke Ping
+    // (Status 2) but the Sync sent nothing -- the undeliverable Status 2 iOS
+    // counts toward its push blacklist. Here the newest ids sort lowest.
+    let env = Arc::new(start_env(Opts::default()).await);
+    for n in 0..400 {
+        env.mock.add_mail("inbox", &format!("m{:03}", 999 - n));
+    }
+    env.sync_all("ipad").await;
+    let key = env.keys.lock().unwrap().get("ipad").cloned().unwrap();
+
+    env.mock.set_read("m600", true); // the newest message
+    let r = env.ping("ipad", Some(ping_body(10, INBOX))).await;
+    assert_eq!(r.status, "2");
+    let (key2, adds, changes) = env.sync_detail("ipad", &key).await;
+    assert!(adds.is_empty());
+    assert_eq!(changes, vec![("m600".to_owned(), "1".to_owned())]);
+    assert_ne!(key2, key);
+    let r = env.ping("ipad", Some(ping_body(2, INBOX))).await;
+    assert_eq!(r.status, "1", "quiet once delivered");
+
+    // The same holds for a move away of the newest message: Delete arrives.
+    env.mock.remove_mail("inbox", "m601");
+    env.mock.add_mail("other", "m601");
+    let r = env.ping("ipad", Some(ping_body(10, INBOX))).await;
+    assert_eq!(r.status, "2");
+    let (key3, _, _) = env.sync_detail("ipad", &key2).await;
+    assert_ne!(key3, key2, "the move was delivered");
+    let r = env.ping("ipad", Some(ping_body(2, INBOX))).await;
+    assert_eq!(r.status, "1");
+}
+
+#[tokio::test]
 async fn ignored_status2_is_answered_again_when_the_guard_window_ends() {
     let env = Arc::new(start_env(Opts::default()).await);
     env.sync_all("ipad").await;
@@ -1460,4 +1495,427 @@ async fn a_folder_that_no_longer_exists_gets_status_12_not_mass_deletes() {
         !eas::contains_token(&doc, air::DELETE),
         "no Delete for every message"
     );
+}
+
+/// End-to-end tests against a REAL Stalwart through a REAL running gateway.
+/// Ignored by default; run with the E2E_* environment set, e.g.
+///   E2E_GATEWAY=http://127.0.0.1:18099/Microsoft-Server-ActiveSync
+///   E2E_JMAP=http://127.0.0.1:18080 E2E_USER=alice@e2e.test E2E_PASS=...
+///   cargo test e2e -- --ignored --test-threads=1
+mod e2e {
+    use super::*;
+    use eas::airsync as air;
+
+    struct Live {
+        gw: String,
+        jmap: String,
+        user: String,
+        pass: String,
+        http: reqwest::Client,
+        account: String,
+        inbox: String,
+    }
+
+    fn env(name: &str) -> String {
+        std::env::var(name).unwrap_or_else(|_| panic!("set {name}"))
+    }
+
+    impl Live {
+        async fn new(user_var: &str) -> Live {
+            let jmap = env("E2E_JMAP");
+            let user = env(user_var);
+            let pass = env("E2E_PASS");
+            let http = reqwest::Client::new();
+            let session: serde_json::Value = http
+                .get(format!("{jmap}/jmap/session"))
+                .basic_auth(&user, Some(&pass))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let account = session["primaryAccounts"]["urn:ietf:params:jmap:mail"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let mut live = Live {
+                gw: env("E2E_GATEWAY"),
+                jmap,
+                user,
+                pass,
+                http,
+                account,
+                inbox: String::new(),
+            };
+            let boxes = live
+                .call(serde_json::json!([["Mailbox/get", {"accountId": live.account}, "0"]]))
+                .await;
+            live.inbox = boxes[0][1]["list"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["role"] == "inbox")
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            live
+        }
+
+        async fn call(&self, calls: serde_json::Value) -> serde_json::Value {
+            let body = serde_json::json!({
+                "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+                "methodCalls": calls
+            });
+            let r: serde_json::Value = self
+                .http
+                .post(format!("{}/jmap/", self.jmap))
+                .basic_auth(&self.user, Some(&self.pass))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            r["methodResponses"].clone()
+        }
+
+        /// Create `count` messages in `mailbox`; returns their JMAP ids. Plain
+        /// messages go through `Email/set` with inline bodies (no blob uploads:
+        /// Stalwart caps temporary uploads at 1000 files per account); messages
+        /// with an attachment share one uploaded blob.
+        async fn seed(
+            &self,
+            mailbox: &str,
+            count: usize,
+            tag: &str,
+            attachment: bool,
+        ) -> Vec<String> {
+            let blob = if attachment {
+                let up: serde_json::Value = self
+                    .http
+                    .post(format!("{}/jmap/upload/{}/", self.jmap, self.account))
+                    .basic_auth(&self.user, Some(&self.pass))
+                    .header("Content-Type", "application/octet-stream")
+                    .body(vec![0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                up["blobId"].as_str().expect("upload blobId").to_owned()
+            } else {
+                String::new()
+            };
+            let mut ids = Vec::new();
+            let mut batch = serde_json::Map::new();
+            for n in 0..count {
+                let mut email = serde_json::json!({
+                    "mailboxIds": {mailbox: true},
+                    "keywords": {},
+                    "from": [{"email": "e2e@e2e.test"}],
+                    "to": [{"email": self.user}],
+                    "subject": format!("{tag} {n}"),
+                    "messageId": [format!("{tag}-{n}@e2e.test")],
+                    "bodyValues": {"b": {"value": format!("body {n}")}},
+                    "textBody": [{"partId": "b", "type": "text/plain"}]
+                });
+                if attachment {
+                    email["attachments"] = serde_json::json!([{
+                        "blobId": blob, "type": "application/octet-stream",
+                        "name": "blob.bin", "disposition": "attachment"
+                    }]);
+                }
+                batch.insert(format!("k{n}"), email);
+                if batch.len() == 200 || n + 1 == count {
+                    let r = self
+                        .call(serde_json::json!([["Email/set", {"accountId": self.account, "create": batch}, "0"]]))
+                        .await;
+                    let created = r[0][1]["created"]
+                        .as_object()
+                        .unwrap_or_else(|| panic!("Email/set failed: {}", r[0]));
+                    if let Some(bad) = r[0][1]["notCreated"].as_object().filter(|m| !m.is_empty()) {
+                        panic!("Email/set notCreated: {bad:?}");
+                    }
+                    for (_, v) in created {
+                        ids.push(v["id"].as_str().unwrap().to_owned());
+                    }
+                    batch = serde_json::Map::new();
+                }
+            }
+            ids
+        }
+
+        fn req(&self, cmd: &str, device: &str) -> reqwest::RequestBuilder {
+            let user = self.user.split('@').next().unwrap().to_owned();
+            self.http
+                .post(format!(
+                    "{}?Cmd={cmd}&User={user}&DeviceId={device}&DeviceType=iPhone",
+                    self.gw
+                ))
+                .basic_auth(&self.user, Some(&self.pass))
+                .header("MS-ASProtocolVersion", "14.0")
+        }
+
+        async fn wbxml(&self, cmd: &str, device: &str, body: Vec<u8>) -> wbxml::Document {
+            let resp = self.req(cmd, device).body(body).send().await.unwrap();
+            assert_eq!(resp.status(), 200, "{cmd} HTTP status");
+            wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap()
+        }
+
+        /// Full initial sync of the Inbox with `window`, following MoreAvailable.
+        /// Returns (final key, every ServerId added, rounds).
+        async fn initial_sync(&self, device: &str, window: &str) -> (String, Vec<String>, usize) {
+            let doc = self
+                .wbxml("Sync", device, sync_body_window("0", &self.inbox, window))
+                .await;
+            assert!(
+                !eas::contains_token(&doc, air::COMMANDS),
+                "no items on SyncKey 0"
+            );
+            let mut key = eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap();
+            let mut all = Vec::new();
+            let mut rounds = 0;
+            loop {
+                rounds += 1;
+                let doc = self
+                    .wbxml("Sync", device, sync_body_window(&key, &self.inbox, window))
+                    .await;
+                assert_eq!(
+                    eas::find_all_text_after(&doc, air::STATUS)
+                        .first()
+                        .map(String::as_str),
+                    Some("1")
+                );
+                key = eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap();
+                all.extend(eas::find_all_text_after(&doc, air::SERVER_ID));
+                if !eas::contains_token(&doc, air::MORE_AVAILABLE) {
+                    break;
+                }
+                assert!(rounds < 10_000);
+            }
+            (key, all, rounds)
+        }
+
+        async fn ping(&self, device: &str, hb: u64) -> (String, Vec<String>) {
+            let doc = self
+                .wbxml(
+                    "Ping",
+                    device,
+                    ping_body(hb, &[(self.inbox.as_str(), "Email")]),
+                )
+                .await;
+            (
+                eas::find_text_after(&doc, eas::ping::STATUS)
+                    .unwrap_or("")
+                    .to_owned(),
+                eas::find_all_text_after(&doc, eas::ping::FOLDER),
+            )
+        }
+
+        async fn inbox_count(&self) -> usize {
+            let r = self
+                .call(serde_json::json!([["Email/query", {"accountId": self.account, "filter": {"inMailbox": self.inbox}, "calculateTotal": true, "limit": 1}, "0"]]))
+                .await;
+            r[0][1]["total"].as_u64().unwrap() as usize
+        }
+    }
+
+    fn dev(name: &str) -> String {
+        format!("{name}{}", std::process::id())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_empty_mailbox() {
+        let live = Live::new("E2E_USER2").await;
+        let (_, adds, _) = live.initial_sync(&dev("empty"), "100").await;
+        assert_eq!(adds.len(), live.inbox_count().await);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_initial_sync_delivers_every_message_exactly_once() {
+        let live = Live::new("E2E_USER").await;
+        let want: usize = std::env::var("E2E_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
+        let have = live.inbox_count().await;
+        if have < want {
+            live.seed(&live.inbox, want - have, "bulk", false).await;
+        }
+        let total = live.inbox_count().await;
+        let t = Instant::now();
+        let (_, mut adds, rounds) = live.initial_sync(&dev("bulk"), "100").await;
+        let n = adds.len();
+        adds.sort();
+        adds.dedup();
+        assert_eq!(adds.len(), n, "no duplicates");
+        assert_eq!(n, total, "every message in the Inbox delivered");
+        eprintln!(
+            "initial sync: {total} messages in {rounds} rounds, {:?}",
+            t.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_new_mail_during_ping_then_read_move_and_two_devices() {
+        let live = Live::new("E2E_USER").await;
+        let (a, b) = (dev("pa"), dev("pb"));
+        let (ka, _, _) = live.initial_sync(&a, "100").await;
+        let (kb, _, _) = live.initial_sync(&b, "100").await;
+        assert_eq!(live.ping(&a, 1).await.0, "1", "synced device is quiet");
+
+        // New mail during a long Ping, two devices at once.
+        let la = Arc::new(Live::new("E2E_USER").await);
+        let lb = la.clone();
+        let (da, db) = (a.clone(), b.clone());
+        let pa = tokio::spawn(async move { la.ping(&da, 60).await });
+        let pb = tokio::spawn(async move { lb.ping(&db, 60).await });
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let t = Instant::now();
+        let new_id = live.seed(&live.inbox, 1, "push", false).await.remove(0);
+        let (sa, fa) = pa.await.unwrap();
+        let (sb, _) = pb.await.unwrap();
+        assert_eq!((sa.as_str(), sb.as_str()), ("2", "2"), "both devices woken");
+        assert_eq!(fa, vec![live.inbox.clone()]);
+        eprintln!("new mail -> both Pings answered in {:?}", t.elapsed());
+        let doc = live.wbxml("Sync", &a, sync_body(&ka, &live.inbox)).await;
+        let ka = eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap();
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::SERVER_ID),
+            vec![new_id.clone()]
+        );
+        let doc = live.wbxml("Sync", &b, sync_body(&kb, &live.inbox)).await;
+        let kb = eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap();
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::SERVER_ID),
+            vec![new_id.clone()]
+        );
+
+        // Read elsewhere -> Change Read=1 to the device.
+        live.call(serde_json::json!([["Email/set", {"accountId": live.account, "update": {&new_id: {"keywords/$seen": true}}}, "0"]])).await;
+        assert_eq!(
+            live.ping(&a, 20).await.0,
+            "2",
+            "read change wakes the device"
+        );
+        let doc = live.wbxml("Sync", &a, sync_body(&ka, &live.inbox)).await;
+        let ka = eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap();
+        assert!(eas::contains_token(&doc, air::CHANGE), "Change sent");
+        assert_eq!(eas::find_text_after(&doc, eas::email::READ), Some("1"));
+
+        // Moved out of the Inbox elsewhere -> Delete with the same ServerId.
+        let other = live.call(serde_json::json!([["Mailbox/set", {"accountId": live.account, "create": {"m": {"name": format!("E2E move {}", std::process::id())}}}, "0"]])).await;
+        let other_id = other[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        live.call(serde_json::json!([["Email/set", {"accountId": live.account, "update": {&new_id: {"mailboxIds": {&other_id: true}}}}, "0"]])).await;
+        assert_eq!(live.ping(&a, 20).await.0, "2", "move wakes the device");
+        let doc = live.wbxml("Sync", &a, sync_body(&ka, &live.inbox)).await;
+        assert!(
+            eas::contains_token(&doc, air::DELETE),
+            "Delete sent for the moved message"
+        );
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::SERVER_ID),
+            vec![new_id.clone()]
+        );
+        // Second device gets the same Delete.
+        let _ = kb;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_lost_response_is_replayed() {
+        let live = Live::new("E2E_USER").await;
+        let d = dev("replay");
+        let (key, _, _) = live.initial_sync(&d, "100").await;
+        live.seed(&live.inbox, 1, "replay", false).await;
+        let first = live.wbxml("Sync", &d, sync_body(&key, &live.inbox)).await;
+        let again = live.wbxml("Sync", &d, sync_body(&key, &live.inbox)).await;
+        assert_eq!(again, first, "resent SyncKey gets the identical reply");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_folder_create_rename_delete() {
+        use eas::folder_hierarchy as fh;
+        let live = Live::new("E2E_USER").await;
+        let d = dev("folders");
+        let fs = |key: &str| {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(fh::FOLDER_SYNC);
+            b.leaf(fh::SYNC_KEY, key);
+            b.end();
+            wbxml::encode_document(&b.finish())
+        };
+        let doc = live.wbxml("FolderSync", &d, fs("0")).await;
+        let key = eas::find_text_after(&doc, fh::SYNC_KEY).unwrap().to_owned();
+        let name = format!("E2E folder {}", std::process::id());
+        let r = live.call(serde_json::json!([["Mailbox/set", {"accountId": live.account, "create": {"f": {"name": &name}}}, "0"]])).await;
+        let id = r[0][1]["created"]["f"]["id"].as_str().unwrap().to_owned();
+        let doc = live.wbxml("FolderSync", &d, fs(&key)).await;
+        let key = eas::find_text_after(&doc, fh::SYNC_KEY).unwrap().to_owned();
+        assert!(eas::contains_token(&doc, fh::ADD));
+        assert_eq!(
+            eas::find_all_text_after(&doc, fh::SERVER_ID),
+            vec![id.clone()]
+        );
+        live.call(serde_json::json!([["Mailbox/set", {"accountId": live.account, "update": {&id: {"name": format!("{name} renamed")}}}, "0"]])).await;
+        let doc = live.wbxml("FolderSync", &d, fs(&key)).await;
+        let key = eas::find_text_after(&doc, fh::SYNC_KEY).unwrap().to_owned();
+        assert!(eas::contains_token(&doc, fh::UPDATE));
+        live.call(serde_json::json!([["Mailbox/set", {"accountId": live.account, "destroy": [&id]}, "0"]])).await;
+        let doc = live.wbxml("FolderSync", &d, fs(&key)).await;
+        assert!(eas::contains_token(&doc, fh::DELETE));
+        assert_eq!(eas::find_all_text_after(&doc, fh::SERVER_ID), vec![id]);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_attachment_download() {
+        let live = Live::new("E2E_USER2").await;
+        let d = dev("attach");
+        let (key, _, _) = live.initial_sync(&d, "100").await;
+        live.seed(&live.inbox, 1, "attach", true).await;
+        let doc = live.wbxml("Sync", &d, sync_body(&key, &live.inbox)).await;
+        let reference = eas::find_text_after(&doc, eas::airsync_base::FILE_REFERENCE)
+            .expect("attachment advertised")
+            .to_owned();
+        let user = live.user.split('@').next().unwrap();
+        let resp = live
+            .http
+            .get(format!(
+                "{}?Cmd=GetAttachment&User={user}&DeviceId={d}&DeviceType=iPhone&AttachmentName={}",
+                live.gw,
+                urlencode(&reference)
+            ))
+            .basic_auth(&live.user, Some(&live.pass))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.bytes().await.unwrap().as_ref(),
+            &[0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        );
+    }
+
+    fn urlencode(s: &str) -> String {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect()
+    }
 }

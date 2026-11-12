@@ -108,6 +108,11 @@ pub struct BasicAuthorization {
     password: String,
 }
 
+/// How many of a device's stored mail ids (newest first) the Ping probe checks
+/// for moves and read-state drift. Sync always re-checks at least this slice,
+/// so a probe hit is always deliverable.
+pub const PROBE_SEEN_CHECK: usize = 200;
+
 impl BasicAuthorization {
     pub fn username(&self) -> &str {
         &self.username
@@ -447,37 +452,58 @@ impl JmapClient {
         mailbox_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<String>> {
+        // `limit` 0 = the whole mailbox. Paged through Email/query positions
+        // so a large mailbox is never silently cut off.
+        const PAGE: usize = 5000;
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
             return Ok(Vec::new());
         };
-        let response: JmapResponse<serde_json::Value> = self
-            .api_call(
-                auth,
-                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
-                vec![MethodCall::new(
-                    "Email/query",
-                    serde_json::json!({
-                        "accountId": account_id,
-                        "filter": { "inMailbox": mailbox_id },
-                        "sort": [{ "property": "receivedAt", "isAscending": false }],
-                        "limit": limit
-                    }),
-                    "q",
-                )],
-            )
-            .await?;
-        for method in response.method_responses {
-            match method.0.as_str() {
-                "Email/query" => {
-                    let q: QueryResponse =
-                        serde_json::from_value(method.1).context("invalid Email/query response")?;
-                    return Ok(q.ids);
+        let mut ids: Vec<String> = Vec::new();
+        loop {
+            let want = if limit == 0 {
+                PAGE
+            } else {
+                PAGE.min(limit - ids.len())
+            };
+            if want == 0 {
+                break;
+            }
+            let response: JmapResponse<serde_json::Value> = self
+                .api_call(
+                    auth,
+                    &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                    vec![MethodCall::new(
+                        "Email/query",
+                        serde_json::json!({
+                            "accountId": account_id,
+                            "filter": { "inMailbox": mailbox_id },
+                            "sort": [{ "property": "receivedAt", "isAscending": false }],
+                            "position": ids.len(),
+                            "limit": want
+                        }),
+                        "q",
+                    )],
+                )
+                .await?;
+            let mut page: Vec<String> = Vec::new();
+            for method in response.method_responses {
+                match method.0.as_str() {
+                    "Email/query" => {
+                        let q: QueryResponse = serde_json::from_value(method.1)
+                            .context("invalid Email/query response")?;
+                        page = q.ids;
+                    }
+                    "error" => anyhow::bail!("JMAP method error listing mailbox"),
+                    _ => {}
                 }
-                "error" => anyhow::bail!("JMAP method error listing mailbox"),
-                _ => {}
+            }
+            let got = page.len();
+            ids.extend(page);
+            if got < want {
+                break;
             }
         }
-        Ok(Vec::new())
+        Ok(ids)
     }
 
     /// Full message objects for `ids`, in the order given (missing ids are
@@ -780,7 +806,7 @@ impl JmapClient {
         window: usize,
     ) -> anyhow::Result<Option<&'static str>> {
         const NEWEST: usize = 100;
-        const SEEN_CHECK: usize = 200;
+        const SEEN_CHECK: usize = PROBE_SEEN_CHECK;
         // Read-flag changes are only compared for the newest few messages,
         // the part of the mailbox every device's Sync window covers.
         const READ_WINDOW: usize = 25;
@@ -808,7 +834,9 @@ impl JmapClient {
                 "n",
             ),
         ];
-        let check: Vec<&String> = seen_ids.iter().rev().take(SEEN_CHECK).collect();
+        // `seen_ids` is stored newest first (see sync_mail); Sync confirms the
+        // same leading slice, so anything reported here it can deliver.
+        let check: Vec<&String> = seen_ids.iter().take(SEEN_CHECK).collect();
         if !check.is_empty() {
             calls.push(MethodCall::new(
                 "Email/get",
@@ -883,7 +911,6 @@ impl JmapClient {
         if let Some(still_here) = still_here {
             let gone = seen_ids
                 .iter()
-                .rev()
                 .take(SEEN_CHECK)
                 .any(|id| !still_here.contains(id));
             if gone {
@@ -2470,9 +2497,15 @@ impl JmapClient {
             })
             .send()
             .await
-            .context("failed to call JMAP API")?
-            .error_for_status()
-            .context("JMAP API returned error status")?;
+            .context("failed to call JMAP API")?;
+        let status = response.status();
+        if !status.is_success() {
+            // RFC 7807 problem details from Stalwart: type/title/detail only,
+            // never mail content. Truncated so a large body can't flood logs.
+            let body = response.text().await.unwrap_or_default();
+            let detail: String = body.chars().take(300).collect();
+            anyhow::bail!("JMAP API returned error status {status}: {detail}");
+        }
 
         response.json().await.context("invalid JMAP API JSON")
     }

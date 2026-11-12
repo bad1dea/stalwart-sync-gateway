@@ -1326,7 +1326,7 @@ async fn get_item_estimate(
                     .unwrap_or_default();
                 let unseen = state
                     .jmap
-                    .email_ids_in_mailbox(auth, &folder_id, 1000)
+                    .email_ids_in_mailbox(auth, &folder_id, 0)
                     .await
                     .map(|ids| ids.iter().filter(|id| !seen.contains(id.as_str())).count())
                     .unwrap_or(0);
@@ -1813,12 +1813,15 @@ async fn sync_mail(
         };
 
         if collection.get_changes && is_mail_collection {
-            // How many of the newest messages Sync will page through.
-            const SCAN_LIMIT: usize = 1000;
-            let previous_seen: BTreeSet<String> = previous_record
+            // 0 = page through the whole mailbox (no fixed cap).
+            const SCAN_LIMIT: usize = 0;
+            // Stored newest first (records written before that order was kept
+            // are in id order; the next Sync rewrites them).
+            let previous_order: Vec<String> = previous_record
                 .as_ref()
-                .map(|record| record.seen_ids.iter().cloned().collect())
+                .map(|record| record.seen_ids.clone())
                 .unwrap_or_default();
+            let previous_seen: BTreeSet<String> = previous_order.iter().cloned().collect();
             let scan = match state
                 .jmap
                 .email_ids_in_mailbox(auth, &collection.collection_id, SCAN_LIMIT)
@@ -1862,6 +1865,16 @@ async fn sync_mail(
                 }
             }
             let scan_set: BTreeSet<String> = scan.iter().cloned().collect();
+            // What the device has, newest first by the folder listing.
+            let seen_by_date: Vec<&String> = scan
+                .iter()
+                .filter(|id| previous_seen.contains(id.as_str()))
+                .collect();
+            // The slice the Ping probe checks (see PROBE_SEEN_CHECK). Sync must
+            // cover it, or a probe hit becomes a Status 2 with nothing to send.
+            let probe_slice = previous_order
+                .iter()
+                .take(crate::jmap::client::PROBE_SEEN_CHECK);
             // Messages the device does not have yet, newest first. A SyncKey 0
             // reply sends none ([MS-ASCMD] initial Sync); afterwards each reply
             // sends up to WindowSize of them, with MoreAvailable while any
@@ -1921,7 +1934,8 @@ async fn sync_mail(
             } else {
                 let mut ids: BTreeSet<String> =
                     previous_seen.difference(&scan_set).cloned().collect();
-                ids.extend(previous_seen.iter().rev().take(200).cloned());
+                ids.extend(probe_slice.clone().cloned());
+                ids.extend(seen_by_date.iter().take(200).map(|id| (*id).clone()));
                 ids.into_iter().collect()
             };
             let to_remove: BTreeSet<String> = if candidate_missing.is_empty() {
@@ -1996,16 +2010,20 @@ async fn sync_mail(
             // device was last told. Refresh the stored ones directly.
             let mut outside_updates: Vec<(String, bool)> = Vec::new();
             if collection.sync_key != "0" {
-                // Every message the device already has (newest ids first),
-                // including ones with no stored read state yet: those get a
-                // one-time catch-up Change.
-                let outside: Vec<String> = previous_seen
+                // The newest 300 messages the device has (by date, from the
+                // listing) plus the slice the Ping probe checks, including ones
+                // with no stored read state yet: those get a one-time catch-up
+                // Change.
+                let mut picked: BTreeSet<&String> = BTreeSet::new();
+                let outside: Vec<String> = seen_by_date
                     .iter()
-                    .rev()
+                    .copied()
+                    .take(300)
+                    .chain(probe_slice.clone())
                     .filter(|id| {
                         !fetched_ids.contains(id.as_str()) && !to_remove.contains(id.as_str())
                     })
-                    .take(300)
+                    .filter(|id| picked.insert(*id))
                     .cloned()
                     .collect();
                 if !outside.is_empty() {
@@ -2101,11 +2119,24 @@ async fn sync_mail(
                     seen_ids: if collection.sync_key == "0" {
                         Vec::new()
                     } else {
-                        previous_seen
-                            .union(&fetched_ids)
-                            .filter(|id| !to_remove.contains(id.as_str()))
-                            .cloned()
-                            .collect()
+                        // Newest first, in listing order; ids the listing does
+                        // not show (yet) keep their place at the end.
+                        let keep = |id: &String| {
+                            (previous_seen.contains(id) || fetched_ids.contains(id))
+                                && !to_remove.contains(id)
+                        };
+                        let mut order: Vec<String> =
+                            scan.iter().filter(|id| keep(id)).cloned().collect();
+                        order.extend(
+                            previous_order
+                                .iter()
+                                .chain(fetched_ids.iter())
+                                .filter(|id| !scan_set.contains(*id) && keep(id))
+                                .cloned(),
+                        );
+                        let mut dedup = BTreeSet::new();
+                        order.retain(|id| dedup.insert(id.clone()));
+                        order
                     },
                 })
                 .await
