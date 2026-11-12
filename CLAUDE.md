@@ -61,13 +61,20 @@ Calendar/attachments are read-only (see Not Yet Implemented).
   reset); GetItemEstimate returns real counts with Status 3/4 and no 12.1-only Class element;
   OPTIONS sends Allow/Public. `deploy-2026-11-12i` (tagged, NOT deployed yet) stops
   advertising MeetingResponse/ResolveRecipients/ValidateCert.
-- **Open compliance items:** Sync Status 12 for unknown folders (answers 5 today); replay of the
-  previous SyncKey after a lost response; FilterType/Partial ignored; responses always shaped for
-  14.0 regardless of `MS-ASProtocolVersion`; Ping Status 6/MaxFolders; ItemOperations
-  EmptyFolderContents/Move; an isolated test Stalwart + protocol client for end-to-end tests.
+- **Since then (deploy-2026-11-12j .. m):** MoreAvailable is a bare tag (iOS 27 rejected it with
+  the content bit); deletes are confirmed with `Email/get` (the listing trails moves); a resent
+  previous SyncKey replays the stored reply; vanished folder -> Sync Status 12; the scan pages
+  the whole folder (no 1000 cap); FilterType limits what Sync sends (and what Ping announces;
+  no SoftDelete); only protocol 14.0 is advertised; seen ids are stored newest first so the Ping
+  probe and Sync check the same slice (id-sorted order made a recent read change in a large
+  folder an undeliverable Status 2). End-to-end suite against a real Stalwart: docs/TESTING.md.
+- **Open compliance items:** Partial/Truncation per Options; Ping Status 6/MaxFolders;
+  ItemOperations EmptyFolderContents/Move; `Email/changes` instead of the seen-id diff.
+- **Open device issue:** after a delete on one device, the other receives a valid Delete for the
+  exact stored ServerId and accepts the new SyncKey, but iOS Mail sometimes keeps showing the
+  message until a manual refresh. Needs the receiving phone's own log during the delete.
 - Known gaps: Notes/Contacts/Calendar/Tasks are not push-woken; server-side flag
-  changes beyond read/unread do not sync; each folder syncs only its newest ~100
-  messages (no paging into older mail); Sync is still a seen-id diff, not
+  changes beyond read/unread do not sync; Sync is still a seen-id diff, not
   `Email/changes`.
 - **Calendar recurrence is in progress** on branch `calendar-recurrence` (not
   merged): server -> device direction is done (Recurrence, TimeZone blob, deleted
