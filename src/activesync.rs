@@ -518,7 +518,9 @@ async fn ping(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(heartbeat);
     let mut rx = push.subscribe();
     let mut first = true;
+    let guard_window = Duration::from_secs(state.config.ping_resend_guard_seconds);
     loop {
+        let mut recheck: Option<tokio::time::Instant> = None;
         if push.is_superseded(&device, epoch) {
             return ping_superseded(state, command, &device);
         }
@@ -529,7 +531,7 @@ async fn ping(
 
         if !mail_ids.is_empty() {
             let changed = changed_mail_folders(state, auth, &eas_user, &device, &mail_ids).await;
-            let loop_guard = first && push.status2_pending_sync(&device, Duration::from_secs(15));
+            let loop_guard = first && push.status2_pending_sync(&device, guard_window);
             if !changed.is_empty() && !loop_guard {
                 let event_latency = push.note_status2(&device);
                 tracing::info!(
@@ -544,6 +546,10 @@ async fn ping(
             }
             if loop_guard {
                 tracing::info!(device_id = %device, "ping: pending change not yet synced, waiting instead of re-answering");
+                // Do not wait for a future event: look again when the window ends.
+                recheck = push
+                    .status2_guard_remaining(&device, guard_window)
+                    .map(|left| tokio::time::Instant::now() + left);
             }
         }
         first = false;
@@ -559,6 +565,14 @@ async fn ping(
                         "ping: completed"
                     );
                     return ping_response(state, command, 1, &[], None);
+                }
+                _ = async {
+                    match recheck {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    break;
                 }
                 _ = superseded_rx.changed() => {
                     if push.is_superseded(&device, epoch) {

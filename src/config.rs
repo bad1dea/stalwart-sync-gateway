@@ -17,6 +17,10 @@ pub struct Config {
     pub ping_max_seconds: u64,
     pub ping_min_seconds: u64,
     pub ping_max_concurrent: usize,
+    /// After answering Status 2, a device that pings again without having
+    /// synced is not re-answered for this long (loop protection); the Ping
+    /// then re-checks when the window ends instead of waiting for an event.
+    pub ping_resend_guard_seconds: u64,
     /// How long a per-user JMAP EventSource stays open with no Ping activity.
     pub push_idle_seconds: u64,
 }
@@ -74,6 +78,9 @@ impl Config {
             ping_max_concurrent: env_or("PING_MAX_CONCURRENT", "200")
                 .parse()
                 .context("PING_MAX_CONCURRENT must be an integer")?,
+            ping_resend_guard_seconds: env_or("PING_RESEND_GUARD_SECONDS", "15")
+                .parse()
+                .context("PING_RESEND_GUARD_SECONDS must be an integer")?,
             push_idle_seconds: env_or("PUSH_IDLE_SECONDS", "1800")
                 .parse()
                 .context("PUSH_IDLE_SECONDS must be an integer")?,

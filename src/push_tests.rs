@@ -263,6 +263,7 @@ async fn start_env(opts: Opts) -> Env {
         ping_max_seconds: 30,
         ping_min_seconds: 1,
         ping_max_concurrent: opts.max_concurrent,
+        ping_resend_guard_seconds: 1,
         push_idle_seconds: 60,
     };
     let state = state::new_store(&config).await.unwrap();
@@ -653,7 +654,7 @@ async fn ping_status_codes_and_cached_parameters() {
 }
 
 #[tokio::test]
-async fn unsynced_status2_does_not_cause_an_immediate_ping_loop() {
+async fn unsynced_status2_is_not_re_answered_in_a_tight_loop() {
     let env = Arc::new(start_env(Opts::default()).await);
     env.sync_all("devA").await;
     env.mock.add_mail("inbox", "m3");
@@ -661,11 +662,28 @@ async fn unsynced_status2_does_not_cause_an_immediate_ping_loop() {
         env.ping("devA", Some(ping_body(10, INBOX))).await.status,
         "2"
     );
-    // Client re-pings without syncing: must wait, not spin on Status 2.
+    // Client re-pings without syncing: the answer is held back for the
+    // guard window (1 s in tests, 15 s by default), not repeated at once,
+    // then given again so the change is not lost.
     let t = Instant::now();
-    let r = env.ping("devA", Some(ping_body(2, INBOX))).await;
-    assert_eq!(r.status, "1");
-    assert!(t.elapsed() >= Duration::from_millis(1900));
+    let r = env.ping("devA", Some(ping_body(20, INBOX))).await;
+    assert_eq!(r.status, "2");
+    assert!(
+        t.elapsed() >= Duration::from_millis(800),
+        "answered too fast: {:?}",
+        t.elapsed()
+    );
+    assert!(
+        t.elapsed() < Duration::from_secs(4),
+        "took {:?}",
+        t.elapsed()
+    );
+    // Once it has synced, it is quiet again.
+    env.sync_all("devA").await;
+    assert_eq!(
+        env.ping("devA", Some(ping_body(2, INBOX))).await.status,
+        "1"
+    );
 }
 
 #[tokio::test]
@@ -740,6 +758,7 @@ async fn existing_sqlite_device_state_is_honoured() {
             ping_max_seconds: 30,
             ping_min_seconds: 1,
             ping_max_concurrent: 1,
+            ping_resend_guard_seconds: 1,
             push_idle_seconds: 1,
         };
         let store = state::new_store(&cfg).await.unwrap();
@@ -904,4 +923,29 @@ async fn read_change_on_message_older_than_the_window_still_reaches_the_device()
     assert!(adds.is_empty() && changes.is_empty());
     let r = env.ping("ipad", Some(ping_body(2, INBOX))).await;
     assert_eq!(r.status, "1");
+}
+
+#[tokio::test]
+async fn ignored_status2_is_answered_again_when_the_guard_window_ends() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("ipad").await;
+    env.mock.add_mail("inbox", "m3");
+    assert_eq!(
+        env.ping("ipad", Some(ping_body(10, INBOX))).await.status,
+        "2"
+    );
+    // The device ignored that answer (its own Sync raced it) and pings
+    // again without syncing: the pending change must come back within the
+    // guard window (1 s here), not wait for the next event or the heartbeat.
+    let t = Instant::now();
+    let r = env.ping("ipad", Some(ping_body(20, INBOX))).await;
+    assert_eq!(
+        (r.status.as_str(), r.folders),
+        ("2", vec!["inbox".to_owned()])
+    );
+    assert!(
+        t.elapsed() < Duration::from_secs(4),
+        "took {:?}",
+        t.elapsed()
+    );
 }

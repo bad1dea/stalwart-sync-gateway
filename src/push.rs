@@ -182,6 +182,18 @@ impl UserPush {
         latency
     }
 
+    /// Time left in the loop-protection window, if a Status 2 went to this
+    /// device within `window` and no Sync has followed.
+    pub fn status2_guard_remaining(&self, device: &str, window: Duration) -> Option<Duration> {
+        let inner = self.inner.lock().unwrap();
+        let d = inner.devices.get(device)?;
+        if d.synced_since_status2 {
+            return None;
+        }
+        let elapsed = d.last_status2?.elapsed();
+        window.checked_sub(elapsed).filter(|left| !left.is_zero())
+    }
+
     /// True when a Status 2 went to this device in the last `window` and no
     /// Sync followed: an immediate re-answer would just loop.
     pub fn status2_pending_sync(&self, device: &str, window: Duration) -> bool {
