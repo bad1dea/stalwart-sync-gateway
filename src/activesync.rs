@@ -386,8 +386,11 @@ async fn changed_mail_folders(
             .mailbox_has_sync_changes(auth, id, &record.seen_ids, &read_states, window)
             .await
         {
-            Ok(true) => changed.push(id.clone()),
-            Ok(false) => {}
+            Ok(Some(reason)) => {
+                tracing::info!(device_id = device, collection = %id, reason, window, seen = record.seen_ids.len(), "push: probe found a change");
+                changed.push(id.clone())
+            }
+            Ok(None) => {}
             Err(error) => {
                 // Be conservative on a probe failure: let the client sync.
                 tracing::warn!(%error, collection = %id, "push: change probe failed");

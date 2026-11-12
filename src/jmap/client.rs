@@ -675,14 +675,14 @@ impl JmapClient {
         seen_ids: &[String],
         read_states: &BTreeMap<String, String>,
         window: usize,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<Option<&'static str>> {
         const NEWEST: usize = 100;
         const SEEN_CHECK: usize = 200;
         // Read-flag changes are only compared for the newest few messages,
         // the part of the mailbox every device's Sync window covers.
         const READ_WINDOW: usize = 25;
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
-            return Ok(false);
+            return Ok(None);
         };
         let mut calls = vec![
             MethodCall::new(
@@ -775,7 +775,7 @@ impl JmapClient {
             .take(window.clamp(1, NEWEST))
             .any(|id| !seen.contains(id.as_str()))
         {
-            return Ok(true);
+            return Ok(Some("new message in window"));
         }
         if let Some(still_here) = still_here {
             let gone = seen_ids
@@ -784,7 +784,7 @@ impl JmapClient {
                 .take(SEEN_CHECK)
                 .any(|id| !still_here.contains(id));
             if gone {
-                return Ok(true);
+                return Ok(Some("sent message left the folder"));
             }
         }
         // Read-state drift on older messages the device already has (outside
@@ -795,7 +795,7 @@ impl JmapClient {
                 .is_some_and(|stored| stored != if *read { "1" } else { "0" })
         });
         if older_drift {
-            return Ok(true);
+            return Ok(Some("read state changed (older message)"));
         }
         // Read-state drift on a message the device already has.
         let drift = query_ids.iter().take(READ_WINDOW).any(|id| {
@@ -808,7 +808,7 @@ impl JmapClient {
                 .get(id)
                 .is_some_and(|stored| stored != if *read { "1" } else { "0" })
         });
-        Ok(drift)
+        Ok(drift.then_some("read state changed (newest messages)"))
     }
 
     /// Current read flag (`$seen`) of the given messages, for the ones that
