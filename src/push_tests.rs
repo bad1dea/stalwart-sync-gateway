@@ -1000,3 +1000,16 @@ async fn a_folder_is_not_announced_more_than_three_times_without_a_sync() {
         "1"
     );
 }
+
+#[tokio::test]
+async fn a_fresh_sync_forgets_messages_the_device_no_longer_has() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("phone").await;
+    env.mock.remove_mail("inbox", "m1");
+    // The phone restarts the folder from scratch (SyncKey 0).
+    let (_, adds, _) = env.sync_detail("phone", "0").await;
+    assert_eq!(adds, vec!["m2"]);
+    // m1 is gone from the server and from the phone: nothing to report.
+    let r = env.ping("phone", Some(ping_body(1, INBOX))).await;
+    assert_eq!(r.status, "1");
+}

@@ -1687,7 +1687,13 @@ async fn sync_mail(
                     BTreeMap::new()
                 }
             };
-            let mut prev_read = stored_read.clone();
+            // Fresh start (SyncKey 0): old read records describe a copy the
+            // device no longer has.
+            let mut prev_read = if collection.sync_key == "0" {
+                BTreeMap::new()
+            } else {
+                stored_read.clone()
+            };
             // What this device itself just set is already known to it.
             for (id, read) in &client_read_changes {
                 prev_read.insert(id.clone(), read_hash(*read).to_owned());
@@ -1799,11 +1805,19 @@ async fn sync_mail(
                     // Mail records keep the device's Sync window here so Ping
                     // can judge "new" the same way Sync does.
                     jmap_state: collection.window_size.to_string(),
-                    seen_ids: previous_seen
-                        .union(&fetched_ids)
-                        .filter(|id| !to_remove.contains(id.as_str()))
-                        .cloned()
-                        .collect(),
+                    // SyncKey 0 means the device threw its copy of the folder
+                    // away: what it has now is exactly what this response
+                    // sends. Merging the old list kept messages it no longer
+                    // has (moved/deleted), so Ping kept reporting them gone.
+                    seen_ids: if collection.sync_key == "0" {
+                        fetched_ids.iter().cloned().collect()
+                    } else {
+                        previous_seen
+                            .union(&fetched_ids)
+                            .filter(|id| !to_remove.contains(id.as_str()))
+                            .cloned()
+                            .collect()
+                    },
                 })
                 .await
             {
