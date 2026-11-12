@@ -1697,6 +1697,65 @@ async fn delete_is_delivered_even_while_the_folder_listing_trails() {
     assert_eq!(eas::find_all_text_after(&doc, air::SERVER_ID), vec!["m1"]);
 }
 
+/// Sends one Sync and returns (reply outline, new SyncKey).
+async fn sync_outline(env: &Env, device: &str, key: &str) -> (String, String) {
+    use eas::airsync as air;
+    let resp = env
+        .req("Sync", device)
+        .body(sync_body_options(key, "inbox", "25", Some("5")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+    let new_key = eas::find_all_text_after(&doc, air::SYNC_KEY).pop().unwrap();
+    (crate::activesync::wbxml_outline_for_tests(&doc), new_key)
+}
+
+#[tokio::test]
+async fn delete_from_another_device_has_the_exact_spec_shape_and_is_sent_once() {
+    // Pins the Delete the receiving iPhone got in production (trace
+    // 2026-11-11 23:44:41): Collection children in MS-ASCMD order (SyncKey,
+    // CollectionId, Status, Commands), Delete holding only the ServerId it
+    // was given as an Add, the key advanced, and nothing after it.
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("iphone").await;
+    let key = env.keys.lock().unwrap().get("iphone").cloned().unwrap();
+    env.mock.remove_mail("inbox", "m1");
+    let (outline, key2) = sync_outline(&env, "iphone", &key).await;
+    assert_ne!(key2, key);
+    assert_eq!(
+        outline,
+        format!(
+            "<0:05><0:1c><0:0f><0:0b>{key2}</><0:12>inbox</><0:0e>1</>\
+             <0:16><0:09><0:0d>m1</></></></></></>"
+        )
+    );
+    let (outline, key3) = sync_outline(&env, "iphone", &key2).await;
+    assert_eq!(key3, key2, "nothing more to send");
+    assert!(!outline.contains("<0:16>"), "{outline}");
+}
+
+#[tokio::test]
+async fn adds_carry_the_server_read_flag() {
+    // The badge counts what the device stores; every Add must state Read.
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.mock.set_read("m1", true);
+    let (outline, key) = sync_outline(&env, "ipad", "0").await;
+    assert!(!outline.contains("<0:16>"), "SyncKey 0 reply has no Commands: {outline}");
+    let (outline, _) = sync_outline(&env, "ipad", &key).await;
+    let read_of = |id: &str| {
+        let at = outline.find(&format!("<0:0d>{id}</>")).expect(id);
+        let rest = &outline[at..];
+        let end = rest[1..].find("<0:07>").map(|e| e + 1).unwrap_or(rest.len());
+        let add = &rest[..end];
+        assert_eq!(add.matches("<2:15>").count(), 1, "one Read per Add: {add}");
+        add[add.find("<2:15>").unwrap() + 6..].chars().next().unwrap()
+    };
+    assert_eq!(read_of("m1"), '1');
+    assert_eq!(read_of("m2"), '0');
+}
+
 #[test]
 fn wbxml_outline_shows_protocol_fields_but_not_content() {
     use eas::airsync as air;
