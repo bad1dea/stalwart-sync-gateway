@@ -52,6 +52,19 @@ Calendar/attachments are read-only (see Not Yet Implemented).
 - **SyncKey 0 resync starts the record fresh** (seen ids and read state = exactly what is sent);
   merging the old list kept moved/deleted ids forever and caused an endless Ping/Sync loop
   (2026-11-12, deploy `deploy-2026-11-12f`). Verified live: loop stopped, iPhone badge cleared.
+- **EAS compliance batch (2026-11-12, `deploy-2026-11-12h`, verified by 89 protocol tests):**
+  SyncKey 0 reply carries no items (iOS 27 rejected `<Commands>` there: "No parse rule ...
+  codePage 0x0 token 0x16", every first sync failed); Sync pages through unsent messages
+  (newest 1000 scanned) with `MoreAvailable`; empty Sync re-executes the cached request or
+  answers Status 13; FolderSync is incremental (Add/Update/Delete, Count, Status 9 on unknown
+  key; state in SyncRecord `__folders__`; devices without stored state are baselined, not
+  reset); GetItemEstimate returns real counts with Status 3/4 and no 12.1-only Class element;
+  OPTIONS sends Allow/Public. `deploy-2026-11-12i` (tagged, NOT deployed yet) stops
+  advertising MeetingResponse/ResolveRecipients/ValidateCert.
+- **Open compliance items:** Sync Status 12 for unknown folders (answers 5 today); replay of the
+  previous SyncKey after a lost response; FilterType/Partial ignored; responses always shaped for
+  14.0 regardless of `MS-ASProtocolVersion`; Ping Status 6/MaxFolders; ItemOperations
+  EmptyFolderContents/Move; an isolated test Stalwart + protocol client for end-to-end tests.
 - Known gaps: Notes/Contacts/Calendar/Tasks are not push-woken; server-side flag
   changes beyond read/unread do not sync; each folder syncs only its newest ~100
   messages (no paging into older mail); Sync is still a seen-id diff, not
