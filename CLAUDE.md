@@ -44,6 +44,14 @@ Calendar/attachments are read-only (see Not Yet Implemented).
   default 25) and ignores messages the device never received. Found 2026-11-12 from the
   iPhone's own log (`idevicesyslog` over USB, grep `ping history`). Deploy
   `deploy-2026-11-12c`.
+- **Per-folder announce cap**: a folder is named in Status 2 at most 3 times until the device
+  syncs that folder (stays under the iOS blacklist threshold of 5). The probe logs which check
+  fired (`push: probe found a change`, `reason`).
+- **MoveItems updates the moving device's record** (drops the id from its seen list and read
+  state for the source folder), so Ping does not report the device's own move back to it.
+- **SyncKey 0 resync starts the record fresh** (seen ids and read state = exactly what is sent);
+  merging the old list kept moved/deleted ids forever and caused an endless Ping/Sync loop
+  (2026-11-12, deploy `deploy-2026-11-12f`). Verified live: loop stopped, iPhone badge cleared.
 - Known gaps: Notes/Contacts/Calendar/Tasks are not push-woken; server-side flag
   changes beyond read/unread do not sync; each folder syncs only its newest ~100
   messages (no paging into older mail); Sync is still a seen-id diff, not
