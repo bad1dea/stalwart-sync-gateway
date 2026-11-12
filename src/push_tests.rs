@@ -1293,4 +1293,16 @@ async fn options_advertises_methods_versions_and_commands() {
         assert!(h.get(name).is_some(), "missing {name}");
     }
     assert_eq!(h.get("Allow").unwrap(), "OPTIONS,POST");
+    let commands = h.get("MS-ASProtocolCommands").unwrap().to_str().unwrap();
+    for unhandled in [
+        "MeetingResponse",
+        "ResolveRecipients",
+        "ValidateCert",
+        "Find",
+    ] {
+        assert!(
+            !commands.split(',').any(|c| c == unhandled),
+            "advertises {unhandled}"
+        );
+    }
 }

@@ -46,7 +46,10 @@ const SUPPORTED_PROTOCOLS: &str = "12.0,12.1,14.0";
 // versions would never send Find anyway, so dropping it from this list
 // just makes the advertisement honest. "Search" (now actually
 // implemented, see `search()`) stays.
-const SUPPORTED_COMMANDS: &str = "Sync,SendMail,SmartForward,SmartReply,GetAttachment,FolderSync,FolderCreate,FolderDelete,FolderUpdate,MoveItems,GetItemEstimate,MeetingResponse,Search,Settings,Ping,ItemOperations,Provision,ResolveRecipients,ValidateCert";
+// Only commands that have a handler: [MS-ASHTTP] MS-ASProtocolCommands tells
+// the client what it may call, and MeetingResponse, ResolveRecipients and
+// ValidateCert would answer 501.
+const SUPPORTED_COMMANDS: &str = "Sync,SendMail,SmartForward,SmartReply,GetAttachment,FolderSync,FolderCreate,FolderDelete,FolderUpdate,MoveItems,GetItemEstimate,Search,Settings,Ping,ItemOperations,Provision";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
