@@ -483,7 +483,44 @@ fn ping_superseded(state: &AppState, command: &str, device: &str) -> Response {
     ping_response(state, command, 1, &[], None)
 }
 
+/// Logs a Ping the client hung up on before the gateway answered (the
+/// handler future is dropped, so nothing else would record it).
+struct PingHangupLog {
+    device: String,
+    started: std::time::Instant,
+    answered: bool,
+}
+
+impl Drop for PingHangupLog {
+    fn drop(&mut self) {
+        if !self.answered {
+            tracing::info!(
+                device_id = %self.device,
+                waited_ms = self.started.elapsed().as_millis() as u64,
+                "ping: client closed the connection before the answer"
+            );
+        }
+    }
+}
+
 async fn ping(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    query: &EasQuery,
+    document: Option<&wbxml::Document>,
+    command: &str,
+) -> Response {
+    let mut log = PingHangupLog {
+        device: query.device_id.clone().unwrap_or_else(|| "unknown".to_owned()),
+        started: std::time::Instant::now(),
+        answered: false,
+    };
+    let response = ping_inner(state, auth, query, document, command).await;
+    log.answered = true;
+    response
+}
+
+async fn ping_inner(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
     query: &EasQuery,
