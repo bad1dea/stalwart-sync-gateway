@@ -78,6 +78,10 @@ Calendar/attachments are read-only (see Not Yet Implemented).
   the reserved item-state collection `__ping__`, so an empty Ping after a restart watches what the
   device last asked for. With nothing stored, the fallback watches every mail folder the device
   has a Sync state for (it used to watch only the Inbox; an iPad did that all night).
+- **deploy-2026-11-12p/q:** a Ping the client hangs up on is logged ("client closed the connection
+  before the answer", waited_ms). That showed the iPad (600 s heartbeat) dropping the 900 s fallback
+  Ping at 630 s, so the fallback heartbeat is now 480 s (`FALLBACK_PING_HEARTBEAT`); seen answered
+  at 480 s on the iPad. Komodo is slow or skips rebuilding on a pin push; deploy by hand if needed.
 - **Open compliance items:** Partial/Truncation per Options; Ping Status 6/MaxFolders;
   ItemOperations EmptyFolderContents/Move; new-mail detection is still a listing diff (Email/changes
   covers changes to held mail).
