@@ -1847,6 +1847,21 @@ impl DocumentBuilder {
         self.nodes.push(Node::Start(token));
     }
 
+    /// Current position, for capturing what is written after it.
+    pub fn mark(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Copy of everything written since `mark`.
+    pub fn nodes_since(&self, mark: usize) -> Vec<Node> {
+        self.nodes[mark.min(self.nodes.len())..].to_vec()
+    }
+
+    /// Append previously captured nodes verbatim.
+    pub fn extend(&mut self, nodes: Vec<Node>) {
+        self.nodes.extend(nodes);
+    }
+
     pub fn finish(self) -> Document {
         Document { nodes: self.nodes }
     }

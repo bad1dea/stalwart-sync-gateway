@@ -201,6 +201,10 @@ pub async fn post_handler(
         contacts = auth.capabilities.contacts,
         calendar = auth.capabilities.calendar,
         event_source = auth.capabilities.event_source,
+        protocol_version = headers
+            .get("MS-ASProtocolVersion")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
         "received ActiveSync command"
     );
 
@@ -1537,6 +1541,12 @@ fn trace_enabled(device: Option<&str>) -> bool {
 fn wbxml_outline(doc: &wbxml::Document) -> String {
     use wbxml::Node;
     const SHOWN: &[(u8, u8)] = &[
+        (0, 0x18),
+        (0, 0x1b),
+        (0, 0x22),
+        (0, 0x23),
+        (17, 0x06),
+        (17, 0x07),
         (0, 0x0b),
         (0, 0x0c),
         (0, 0x0d),
@@ -1570,6 +1580,65 @@ fn wbxml_outline(doc: &wbxml::Document) -> String {
         }
     }
     out
+}
+
+/// Last mail Sync reply per (user, device, folder), kept so a client that
+/// lost the HTTP response and resends its previous SyncKey gets the same
+/// reply again instead of a full resync. Stored as one ItemState under a
+/// reserved collection id: item_id "<request key>><new key>", hash = base64
+/// WBXML of the reply's Collection element.
+fn replay_collection_id(collection_id: &str) -> String {
+    format!("__replay__:{collection_id}")
+}
+
+async fn store_replay(
+    state: &AppState,
+    user: &str,
+    device: &str,
+    collection_id: &str,
+    request_key: &str,
+    new_key: &str,
+    nodes: Vec<wbxml::Node>,
+) {
+    use base64::Engine;
+    let bytes = wbxml::encode_document(&wbxml::Document { nodes });
+    let item = ItemState {
+        item_id: format!("{request_key}>{new_key}"),
+        hash: base64::engine::general_purpose::STANDARD.encode(bytes),
+    };
+    if let Err(error) = state
+        .state
+        .put_item_states(
+            user,
+            device,
+            &replay_collection_id(collection_id),
+            vec![item],
+        )
+        .await
+    {
+        tracing::warn!(%error, "failed to store Sync replay");
+    }
+}
+
+async fn load_replay(
+    state: &AppState,
+    user: &str,
+    device: &str,
+    collection_id: &str,
+) -> Option<(String, String, Vec<wbxml::Node>)> {
+    use base64::Engine;
+    let items = state
+        .state
+        .item_states(user, device, &replay_collection_id(collection_id))
+        .await
+        .ok()?;
+    let item = items.into_iter().next()?;
+    let (request_key, new_key) = item.item_id.split_once('>')?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(item.hash)
+        .ok()?;
+    let doc = wbxml::decode_document(&bytes).ok()?;
+    Some((request_key.to_owned(), new_key.to_owned(), doc.nodes))
 }
 
 async fn sync_mail(
@@ -1620,6 +1689,7 @@ async fn sync_mail(
     builder.start(air::COLLECTIONS);
 
     for collection in collections {
+        let mut replay_capture: Option<(usize, String, String, String)> = None;
         let user = query.user.as_deref().unwrap_or_else(|| auth.username());
         let device_id = query.device_id.as_deref().unwrap_or("unknown");
         let previous_record = match state
@@ -1653,6 +1723,27 @@ async fn sync_mail(
             sync_key_valid,
             "Sync key check"
         );
+        if !sync_key_valid && collection.sync_key != "0" {
+            // [MS-ASCMD] lost response: the client resends the SyncKey it
+            // sent last time. Answer with the same reply instead of Status 3,
+            // without applying its commands again.
+            if let (Some(record), Some((request_key, new_key, nodes))) = (
+                previous_record.as_ref(),
+                load_replay(state, user, device_id, &collection.collection_id).await,
+            ) {
+                if request_key == collection.sync_key && new_key == record.sync_key {
+                    tracing::info!(
+                        device_id,
+                        collection = %collection.collection_id,
+                        resent_key = %collection.sync_key,
+                        reply_key = %new_key,
+                        "Sync: client resent its previous SyncKey, replaying the last reply"
+                    );
+                    builder.extend(nodes);
+                    continue;
+                }
+            }
+        }
         if !sync_key_valid {
             builder.start(air::COLLECTION);
             builder.leaf(air::SYNC_KEY, collection.sync_key);
@@ -1748,6 +1839,28 @@ async fn sync_mail(
                     continue;
                 }
             };
+            if scan.is_empty() && !previous_seen.is_empty() {
+                let exists = match state.jmap.collections(auth).await {
+                    Ok(all) => all.iter().any(|c| c.id == collection.collection_id),
+                    Err(_) => true,
+                };
+                if !exists {
+                    // [MS-ASCMD] Status (Sync) 12: hierarchy changed, the client
+                    // runs FolderSync. Never answer a vanished folder with a
+                    // Delete for every message in it.
+                    tracing::info!(
+                        device_id,
+                        collection = %collection.collection_id,
+                        "Sync: folder no longer exists, Status 12"
+                    );
+                    builder.start(air::COLLECTION);
+                    builder.leaf(air::SYNC_KEY, collection.sync_key);
+                    builder.leaf(air::COLLECTION_ID, collection.collection_id);
+                    builder.leaf(air::STATUS, "12");
+                    builder.end();
+                    continue;
+                }
+            }
             let scan_set: BTreeSet<String> = scan.iter().cloned().collect();
             // Messages the device does not have yet, newest first. A SyncKey 0
             // reply sends none ([MS-ASCMD] initial Sync); afterwards each reply
@@ -2023,6 +2136,14 @@ async fn sync_mail(
                 more_available = has_more,
                 "mail Sync reply"
             );
+            if new_sync_key != collection.sync_key {
+                replay_capture = Some((
+                    builder.mark(),
+                    collection.collection_id.clone(),
+                    collection.sync_key.clone(),
+                    new_sync_key.clone(),
+                ));
+            }
             builder.start(air::COLLECTION);
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
@@ -2132,6 +2253,19 @@ async fn sync_mail(
         }
 
         builder.end();
+        if let Some((mark, collection_id, request_key, new_key)) = replay_capture.take() {
+            let nodes = builder.nodes_since(mark);
+            store_replay(
+                state,
+                user,
+                device_id,
+                &collection_id,
+                &request_key,
+                &new_key,
+                nodes,
+            )
+            .await;
+        }
     }
 
     builder.end();

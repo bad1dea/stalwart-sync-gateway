@@ -44,6 +44,7 @@ struct Mock {
     /// Ids still returned by Email/query after they left the mailbox
     /// (simulates the listing trailing a move).
     stale_listing: Mutex<Vec<(String, String)>>,
+    hidden_folders: Mutex<Vec<String>>,
 }
 
 impl Mock {
@@ -134,10 +135,14 @@ async fn mock_api(
         let cid = call[2].clone();
         let body = match name {
             "Mailbox/get" => {
-                let mut list = vec![
+                let hidden = m.hidden_folders.lock().unwrap().clone();
+                let mut list: Vec<serde_json::Value> = vec![
                     serde_json::json!({"id":"inbox","name":"Inbox","parentId":null,"role":"inbox"}),
                     serde_json::json!({"id":"other","name":"Archive","parentId":null,"role":null}),
-                ];
+                ]
+                .into_iter()
+                .filter(|f| !hidden.iter().any(|h| f["id"] == h.as_str()))
+                .collect();
                 for f in m.extra_folders.lock().unwrap().iter() {
                     list.push(serde_json::json!({"id":f,"name":f,"parentId":null,"role":null}));
                 }
@@ -212,6 +217,7 @@ async fn start_mock() -> Arc<Mock> {
         read: Mutex::new(Default::default()),
         extra_folders: Mutex::new(Vec::new()),
         stale_listing: Mutex::new(Vec::new()),
+        hidden_folders: Mutex::new(Vec::new()),
     });
     let app = Router::new()
         .route("/.well-known/jmap", get(mock_session))
@@ -1398,4 +1404,60 @@ fn wbxml_outline_shows_protocol_fields_but_not_content() {
     assert!(outline.contains("<0:09><0:0d>m1</></>"), "{outline}");
     assert!(!outline.contains("secret"), "{outline}");
     assert!(outline.contains("<0:14/>"), "{outline}");
+}
+
+#[tokio::test]
+async fn a_resent_previous_synckey_gets_the_same_reply_not_a_reset() {
+    use eas::airsync as air;
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("phone").await;
+    let key = env.keys.lock().unwrap().get("phone").cloned().unwrap();
+    env.mock.add_mail("inbox", "m3");
+    let first = env
+        .req("Sync", "phone")
+        .body(sync_body(&key, "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let first = wbxml::decode_document(&first.bytes().await.unwrap()).unwrap();
+    let new_key = eas::find_all_text_after(&first, air::SYNC_KEY)
+        .pop()
+        .unwrap();
+    assert_ne!(new_key, key);
+    // The HTTP response was lost: the phone sends the same request again.
+    let again = env
+        .req("Sync", "phone")
+        .body(sync_body(&key, "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let again = wbxml::decode_document(&again.bytes().await.unwrap()).unwrap();
+    assert_eq!(again, first, "identical reply, not Status 3");
+    // And it continues normally from the new key.
+    let (key3, adds, _) = env.sync_detail("phone", &new_key).await;
+    assert!(adds.is_empty());
+    assert_eq!(key3, new_key);
+}
+
+#[tokio::test]
+async fn a_folder_that_no_longer_exists_gets_status_12_not_mass_deletes() {
+    use eas::airsync as air;
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("phone").await;
+    let key = env.keys.lock().unwrap().get("phone").cloned().unwrap();
+    env.mock.remove_mail("inbox", "m1");
+    env.mock.remove_mail("inbox", "m2");
+    env.mock.hidden_folders.lock().unwrap().push("inbox".into());
+    let resp = env
+        .req("Sync", "phone")
+        .body(sync_body(&key, "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, air::STATUS), vec!["12"]);
+    assert!(
+        !eas::contains_token(&doc, air::DELETE),
+        "no Delete for every message"
+    );
 }
