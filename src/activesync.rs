@@ -1225,10 +1225,10 @@ async fn settings(
                 }
                 builder.end();
             }
-            Ok(_) => builder.leaf(set::STATUS, "3"),
+            Ok(_) => builder.leaf(set::STATUS, "110"),
             Err(error) => {
                 tracing::warn!(%error, "failed to read user mail identities");
-                builder.leaf(set::STATUS, "3");
+                builder.leaf(set::STATUS, "110");
             }
         }
         builder.end();
@@ -1465,33 +1465,38 @@ async fn get_item_estimate(
 }
 
 async fn provision(state: &AppState, document: &wbxml::Document, command: &str) -> Response {
-    let policy_type = wbxml::eas::find_text_after(document, wbxml::eas::provision::POLICY_TYPE)
-        .unwrap_or("MS-EAS-Provisioning-WBXML");
-    let mut builder = wbxml::eas::DocumentBuilder::new();
-    use wbxml::eas::provision as prov;
-
+    use wbxml::eas::{self, provision as prov, settings as set};
+    let policy_type = eas::find_text_after(document, prov::POLICY_TYPE);
+    let has_policies = eas::contains_token(document, prov::POLICIES);
+    let malformed = has_policies && policy_type.is_none();
+    let mut builder = eas::DocumentBuilder::new();
     builder.start(prov::PROVISION);
-    builder.leaf(prov::STATUS, "1");
-    builder.start(prov::POLICIES);
-    builder.start(prov::POLICY);
-    builder.leaf(prov::POLICY_TYPE, policy_type);
-    // Real bug, found via the full z-push-stalwart-jmap source (PR #187):
-    // per src/lib/core/zpushdefs.php, Policy-level Status 2 means
-    // SYNC_PROVISION_POLICYSTATUS_NOPOLICY (a non-success state) -- 1 is
-    // SYNC_PROVISION_POLICYSTATUS_SUCCESS, z-push's own default/working
-    // value. This gateway was telling every device its policy request
-    // failed while still handing out a PolicyKey, a self-contradictory
-    // response. Never observed triggering a live failure (no real
-    // device in this session has actually issued a Provision command),
-    // but matches the exact same failure class as every other bug found
-    // this way.
-    builder.leaf(prov::STATUS, "1");
-    builder.leaf(prov::POLICY_KEY, "1");
+    builder.leaf(prov::STATUS, if malformed { "2" } else { "1" });
+    if !malformed {
+        if eas::contains_token(document, set::DEVICE_INFORMATION) {
+            builder.start(set::DEVICE_INFORMATION);
+            builder.leaf(set::STATUS, "1");
+            builder.end();
+        }
+        if let Some(policy_type) = policy_type {
+            builder.start(prov::POLICIES);
+            builder.start(prov::POLICY);
+            builder.leaf(prov::POLICY_TYPE, policy_type);
+            // [MS-ASPROV] 3.2.5.2: no device policy is configured. A
+            // success status and key would require actual policy Data.
+            builder.leaf(
+                prov::STATUS,
+                if policy_type == "MS-EAS-Provisioning-WBXML" {
+                    "2"
+                } else {
+                    "3"
+                },
+            );
+            builder.end();
+            builder.end();
+        }
+    }
     builder.end();
-    builder.end();
-    builder.end();
-
-    let body = wbxml::encode_document(&builder.finish());
     state
         .metrics
         .eas_requests_total
@@ -1500,7 +1505,7 @@ async fn provision(state: &AppState, document: &wbxml::Document, command: &str) 
     (
         StatusCode::OK,
         [("Content-Type", "application/vnd.ms-sync.wbxml")],
-        body,
+        wbxml::encode_document(&builder.finish()),
     )
         .into_response()
 }

@@ -473,6 +473,7 @@ pub mod settings {
     pub const ENABLED: Token = tag(0x11, false);
     pub const REPLY_MESSAGE: Token = tag(0x12, false);
     pub const BODY_TYPE: Token = tag(0x13, false);
+    pub const DEVICE_INFORMATION: Token = tag(0x16, false);
     pub const USER_INFORMATION: Token = tag(0x1d, false);
     pub const EMAIL_ADDRESSES: Token = tag(0x1e, false);
     pub const SMTP_ADDRESS: Token = tag(0x1f, false);
@@ -509,7 +510,7 @@ pub mod item_operations {
     pub const DATA: Token = tag(0x0c, false);
     pub const STATUS: Token = tag(0x0d, false);
     pub const RESPONSE: Token = tag(0x0e, false);
-    pub const PART: Token = tag(0x10, false);
+    pub const PART: Token = tag(0x11, false);
     pub const PROPERTIES: Token = tag(0x0b, false);
 
     pub const fn tag(token: u8, has_content: bool) -> Token {

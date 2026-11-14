@@ -3756,7 +3756,10 @@ async fn user_information_uses_versioned_accounts_and_backend_addresses() {
         .await
         .unwrap();
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
-    assert_eq!(eas::find_all_text_after(&doc, set::STATUS), vec!["1", "3"]);
+    assert_eq!(
+        eas::find_all_text_after(&doc, set::STATUS),
+        vec!["1", "110"]
+    );
     assert!(!eas::contains_token(&doc, set::SMTP_ADDRESS));
     env.mock.identity_error.store(false, Ordering::SeqCst);
     env.mock.identities.lock().unwrap().clear();
@@ -3767,7 +3770,10 @@ async fn user_information_uses_versioned_accounts_and_backend_addresses() {
         .await
         .unwrap();
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
-    assert_eq!(eas::find_all_text_after(&doc, set::STATUS), vec!["1", "3"]);
+    assert_eq!(
+        eas::find_all_text_after(&doc, set::STATUS),
+        vec!["1", "110"]
+    );
     assert!(!eas::contains_token(&doc, set::SMTP_ADDRESS));
 }
 
@@ -3851,5 +3857,65 @@ async fn item_operations_multipart_directory_and_binary_parts() {
             })
             .unwrap();
         assert_eq!(eas::find_text_after(&body, ops::PART), Some("2"));
+    }
+}
+
+#[tokio::test]
+async fn provision_reports_no_policy_without_inventing_a_policy_key() {
+    use eas::{provision as prov, settings as set};
+    let env = start_env(Opts::default()).await;
+    for version in ["14.0", "16.1"] {
+        for (kind, expected) in [
+            (Some("MS-EAS-Provisioning-WBXML"), "2"),
+            (Some("unknown"), "3"),
+            (None, "2"),
+        ] {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(prov::PROVISION);
+            b.start(set::DEVICE_INFORMATION);
+            b.empty_tag(set::SET);
+            b.end();
+            b.start(prov::POLICIES);
+            b.start(prov::POLICY);
+            if let Some(kind) = kind {
+                b.leaf(prov::POLICY_TYPE, kind);
+            }
+            b.end();
+            b.end();
+            b.end();
+            let response = env
+                .req("Provision", "client")
+                .header("MS-ASProtocolVersion", version)
+                .body(wbxml::encode_document(&b.finish()))
+                .send()
+                .await
+                .unwrap();
+            let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+            assert_eq!(
+                eas::find_all_text_after(&doc, prov::STATUS),
+                if kind.is_some() {
+                    vec!["1", expected]
+                } else {
+                    vec!["2"]
+                }
+            );
+            assert!(!eas::contains_token(&doc, prov::POLICY_KEY));
+            assert_eq!(
+                eas::contains_token(&doc, set::DEVICE_INFORMATION),
+                kind.is_some()
+            );
+        }
+        let mut b = eas::DocumentBuilder::new();
+        b.empty_tag(prov::PROVISION);
+        let response = env
+            .req("Provision", "client")
+            .header("MS-ASProtocolVersion", version)
+            .body(wbxml::encode_document(&b.finish()))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, prov::STATUS), vec!["1"]);
+        assert!(!eas::contains_token(&doc, prov::POLICIES));
     }
 }
