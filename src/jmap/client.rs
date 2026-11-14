@@ -1628,10 +1628,47 @@ impl JmapClient {
             );
         }
         if let Some(location) = &fields.location {
-            event.insert(
-                "locations".to_owned(),
-                serde_json::json!({ "loc1": { "name": location } }),
-            );
+            if location.is_empty() {
+                event.insert("locations".to_owned(), serde_json::Value::Null);
+            } else if let Some(id) = id {
+                let response: JmapResponse<serde_json::Value> = self.api_call(
+                    auth,
+                    &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
+                    vec![MethodCall::new("CalendarEvent/get", serde_json::json!({
+                        "accountId": account_id, "ids": [id], "properties": ["id", "locations"]
+                    }), "0")],
+                ).await?;
+                let object = response
+                    .method_responses
+                    .iter()
+                    .find(|method| method.0 == "CalendarEvent/get")
+                    .and_then(|method| method.1["list"].as_array())
+                    .and_then(|list| list.iter().find(|object| object["id"] == id))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("CalendarEvent/get omitted the event being edited")
+                    })?;
+                let locations = object["locations"].as_object();
+                let selected = locations.and_then(|locations| {
+                    locations
+                        .iter()
+                        .find(|(_, value)| value["name"].is_string())
+                        .or_else(|| locations.iter().next())
+                });
+                if let Some((key, _)) = selected {
+                    let key = key.replace('~', "~0").replace('/', "~1");
+                    event.insert(format!("locations/{key}/name"), serde_json::json!(location));
+                } else {
+                    event.insert(
+                        "locations".to_owned(),
+                        serde_json::json!({"loc1": {"@type": "Location", "name": location}}),
+                    );
+                }
+            } else {
+                event.insert(
+                    "locations".to_owned(),
+                    serde_json::json!({"loc1": {"@type": "Location", "name": location}}),
+                );
+            }
         }
         if let Some(start) = fields
             .start_time
@@ -3207,7 +3244,7 @@ struct CalendarEventObject {
     #[serde(default)]
     duration: Option<String>,
     #[serde(default)]
-    locations: BTreeMap<String, CalendarEventLocation>,
+    locations: Option<BTreeMap<String, CalendarEventLocation>>,
     #[serde(default)]
     show_without_time: bool,
     /// Participant map keyed by an arbitrary JMAP-assigned id (NOT the
@@ -3267,8 +3304,9 @@ impl From<CalendarEventObject> for CalendarEvent {
         };
         let location = value
             .locations
-            .into_values()
-            .find_map(|location| location.name);
+            .into_iter()
+            .flatten()
+            .find_map(|(_, location)| location.name);
 
         let mut organizer_email = None;
         let mut organizer_name = None;

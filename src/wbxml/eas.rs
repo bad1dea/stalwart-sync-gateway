@@ -344,6 +344,7 @@ pub mod airsync_base {
     // the IsInline field, which is normally a 0/1 boolean used for inline-
     // attachment context, and NEVER sent the real NativeBodyType at all.
     pub const NATIVE_BODY_TYPE: Token = tag(0x16, false);
+    pub const LOCATION: Token = tag(0x20, true);
     pub const CONTENT_TYPE: Token = tag(0x17, false);
     pub const PREVIEW: Token = tag(0x18, false);
     pub const ATTACHMENTS: Token = tag(0x0e, false);
@@ -1118,6 +1119,7 @@ pub struct SyncClientCommand {
 pub struct CalendarFields {
     pub subject: Option<String>,
     pub location: Option<String>,
+    pub unsupported_location: bool,
     pub start_time: Option<String>,
     pub end_time: Option<String>,
     pub all_day_event: Option<bool>,
@@ -1726,7 +1728,25 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                 if same_token(*token, calendar::ATTENDEE) {
                     current_attendee = Some(AttendeeField::default());
                 }
-                path.push(*token);
+                if path
+                    .last()
+                    .is_some_and(|t| same_token(*t, airsync_base::LOCATION))
+                    && !same_token(*token, airsync_base::DISPLAY_NAME)
+                {
+                    fields.unsupported_location = true;
+                }
+                if same_token(*token, calendar::LOCATION)
+                    || same_token(*token, airsync_base::LOCATION)
+                    || (same_token(*token, airsync_base::DISPLAY_NAME)
+                        && path
+                            .last()
+                            .is_some_and(|t| same_token(*t, airsync_base::LOCATION)))
+                {
+                    fields.location = Some(String::new());
+                }
+                if token.has_content {
+                    path.push(*token);
+                }
             }
             Node::Text(text) => {
                 let Some(&top) = path.last() else { continue };
@@ -1742,7 +1762,10 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                 }
                 if same_token(top, calendar::SUBJECT) {
                     fields.subject = Some(text.clone());
-                } else if same_token(top, calendar::LOCATION) {
+                } else if same_token(top, calendar::LOCATION)
+                    || (same_token(top, airsync_base::DISPLAY_NAME)
+                        && path.iter().any(|t| same_token(*t, airsync_base::LOCATION)))
+                {
                     fields.location = Some(text.clone());
                 } else if same_token(top, calendar::START_TIME) {
                     fields.start_time = Some(text.clone());
@@ -2148,6 +2171,33 @@ mod tests {
         assert_eq!(command.task.subject.as_deref(), Some("Renew passport"));
         assert_eq!(command.task.complete, Some(false));
         assert_eq!(command.task.due_date.as_deref(), Some("20260905T090000Z"));
+    }
+
+    #[test]
+    fn calendar_location_distinguishes_omission_clear_and_structured_name() {
+        let mut b = DocumentBuilder::new();
+        b.empty_tag(airsync_base::LOCATION);
+        b.leaf(calendar::SUBJECT, "After clear");
+        let doc = b.finish();
+        let fields = super::extract_calendar_fields(&doc.nodes);
+        assert_eq!(fields.location.as_deref(), Some(""));
+        assert_eq!(fields.subject.as_deref(), Some("After clear"));
+        assert!(!fields.unsupported_location);
+
+        let mut b = DocumentBuilder::new();
+        b.start(airsync_base::LOCATION);
+        b.leaf(airsync_base::DISPLAY_NAME, "Room B");
+        b.end();
+        let fields = super::extract_calendar_fields(&b.finish().nodes);
+        assert_eq!(fields.location.as_deref(), Some("Room B"));
+        assert!(!fields.unsupported_location);
+
+        let mut b = DocumentBuilder::new();
+        b.start(airsync_base::LOCATION);
+        b.leaf(airsync_base::tag(0x22, false), "Example Street");
+        b.end();
+        assert!(super::extract_calendar_fields(&b.finish().nodes).unsupported_location);
+        assert_eq!(super::extract_calendar_fields(&[]).location, None);
     }
 
     #[test]

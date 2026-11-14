@@ -2150,8 +2150,16 @@ mod e2e {
         }
 
         async fn call(&self, calls: serde_json::Value) -> serde_json::Value {
+            self.call_using(
+                calls,
+                &["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            )
+            .await
+        }
+
+        async fn call_using(&self, calls: serde_json::Value, using: &[&str]) -> serde_json::Value {
             let body = serde_json::json!({
-                "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+                "using": using,
                 "methodCalls": calls
             });
             let r: serde_json::Value = self
@@ -2251,7 +2259,22 @@ mod e2e {
         }
 
         async fn wbxml(&self, cmd: &str, device: &str, body: Vec<u8>) -> wbxml::Document {
-            let resp = self.req(cmd, device).body(body).send().await.unwrap();
+            self.wbxml_version(cmd, device, body, "14.0").await
+        }
+
+        async fn wbxml_version(
+            &self,
+            cmd: &str,
+            device: &str,
+            body: Vec<u8>,
+            version: &str,
+        ) -> wbxml::Document {
+            let resp = self
+                .req_version(cmd, device, version)
+                .body(body)
+                .send()
+                .await
+                .unwrap();
             assert_eq!(resp.status(), 200, "{cmd} HTTP status");
             wbxml::decode_document(&resp.bytes().await.unwrap()).unwrap()
         }
@@ -2614,6 +2637,220 @@ mod e2e {
             .await;
         assert!(r[0][1]["notDestroyed"].is_null());
         assert!(r[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_calendar_16_1_location_edits_preserve_jmap_data_and_clear() {
+        use eas::{airsync_base as base, calendar as cal};
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let result = live
+            .call_using(
+                serde_json::json!([["Calendar/get", {"accountId": live.account}, "0"]]),
+                &using,
+            )
+            .await;
+        let calendar = result[0][1]["list"][0]["id"].as_str().unwrap().to_owned();
+        let folder = format!("cal_{calendar}");
+        let result = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set", {
+            "accountId": live.account, "create": {"e": {
+                "@type": "Event", "calendarIds": {&calendar: true}, "title": "Location test",
+                "start": "2026-11-15T10:00:00", "duration": "PT1H",
+                "locations": {"room/~1": {"@type": "Location", "name": "Room A",
+                    "description": "Keep this door instruction", "coordinates": "geo:43.65,-79.38"}}
+            }}
+        }, "0"]]),
+                &using,
+            )
+            .await;
+        let event = result[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("CalendarEvent create failed: {result}"))
+            .to_owned();
+        let mut devices = Vec::new();
+        for prefix in ["cal16a", "cal16b"] {
+            let device = dev(prefix);
+            let doc = live
+                .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+                .await;
+            let key = eas::find_text_after(&doc, air::SYNC_KEY).unwrap();
+            let doc = live
+                .wbxml_version("Sync", &device, sync_body(key, &folder), "16.1")
+                .await;
+            assert_eq!(
+                eas::find_text_after(&doc, base::DISPLAY_NAME),
+                Some("Room A")
+            );
+            assert!(!eas::contains_token(&doc, cal::LOCATION));
+            devices.push((
+                device,
+                eas::find_text_after(&doc, air::SYNC_KEY)
+                    .unwrap()
+                    .to_owned(),
+            ));
+        }
+        let change = |key: &str, name: Option<&str>, subject: Option<&str>, unsupported: bool| {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(air::SYNC);
+            b.start(air::COLLECTIONS);
+            b.start(air::COLLECTION);
+            b.leaf(air::SYNC_KEY, key);
+            b.leaf(air::COLLECTION_ID, &folder);
+            b.start(air::COMMANDS);
+            b.start(air::CHANGE);
+            b.leaf(air::SERVER_ID, &event);
+            b.start(air::APPLICATION_DATA);
+            if let Some(name) = name {
+                if name.is_empty() {
+                    b.empty_tag(base::LOCATION);
+                } else {
+                    b.start(base::LOCATION);
+                    b.leaf(base::DISPLAY_NAME, name);
+                    if unsupported {
+                        b.leaf(base::tag(0x22, false), "Example Street");
+                    }
+                    b.end();
+                }
+            }
+            if let Some(subject) = subject {
+                b.leaf(cal::SUBJECT, subject);
+            }
+            for _ in 0..6 {
+                b.end();
+            }
+            wbxml::encode_document(&b.finish())
+        };
+        let a = &mut devices[0];
+        let body = change(&a.1, Some("Room B"), None, false);
+        let doc = live.wbxml_version("Sync", &a.0, body.clone(), "16.1").await;
+        assert!(eas::find_all_text_after(&doc, air::STATUS)
+            .iter()
+            .all(|status| status == "1"));
+        assert_eq!(live.wbxml_version("Sync", &a.0, body, "16.1").await, doc);
+        a.1 = eas::find_text_after(&doc, air::SYNC_KEY)
+            .unwrap()
+            .to_owned();
+        let result = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get", {
+            "accountId": live.account, "ids": [&event]
+        }, "0"]]),
+                &using,
+            )
+            .await;
+        let location = &result[0][1]["list"][0]["locations"]["room/~1"];
+        assert_eq!(location["name"], "Room B");
+        assert_eq!(location["description"], "Keep this door instruction");
+        assert_eq!(location["coordinates"], "geo:43.65,-79.38");
+
+        let b = &mut devices[1];
+        let doc = live
+            .wbxml_version("Sync", &b.0, sync_body(&b.1, &folder), "16.1")
+            .await;
+        assert_eq!(
+            eas::find_text_after(&doc, base::DISPLAY_NAME),
+            Some("Room B")
+        );
+        b.1 = eas::find_text_after(&doc, air::SYNC_KEY)
+            .unwrap()
+            .to_owned();
+
+        let a = &mut devices[0];
+        let doc = live
+            .wbxml_version(
+                "Sync",
+                &a.0,
+                change(&a.1, None, Some("Changed title"), false),
+                "16.1",
+            )
+            .await;
+        a.1 = eas::find_text_after(&doc, air::SYNC_KEY)
+            .unwrap()
+            .to_owned();
+        let result = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get", {
+            "accountId": live.account, "ids": [&event]
+        }, "0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(
+            result[0][1]["list"][0]["locations"]["room/~1"]["name"],
+            "Room B"
+        );
+
+        let doc = live
+            .wbxml_version(
+                "Sync",
+                &a.0,
+                change(&a.1, Some("Bad replacement"), Some("Must not apply"), true),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&doc, air::STATUS).contains(&"6".to_owned()));
+        a.1 = eas::find_text_after(&doc, air::SYNC_KEY)
+            .unwrap()
+            .to_owned();
+        let result = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get", {
+            "accountId": live.account, "ids": [&event]
+        }, "0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(result[0][1]["list"][0]["title"], "Changed title");
+        assert_eq!(
+            result[0][1]["list"][0]["locations"]["room/~1"]["name"],
+            "Room B"
+        );
+
+        let doc = live
+            .wbxml_version(
+                "Sync",
+                &a.0,
+                change(&a.1, Some(""), Some("Cleared location"), false),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&doc, air::STATUS)
+            .iter()
+            .all(|status| status == "1"));
+        let result = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get", {
+            "accountId": live.account, "ids": [&event]
+        }, "0"]]),
+                &using,
+            )
+            .await;
+        assert!(result[0][1]["list"][0]["locations"]
+            .as_object()
+            .is_none_or(|locations| locations.is_empty()));
+        assert_eq!(result[0][1]["list"][0]["title"], "Cleared location");
+
+        let b = &devices[1];
+        let doc = live
+            .wbxml_version("Sync", &b.0, sync_body(&b.1, &folder), "16.1")
+            .await;
+        assert!(doc.nodes.iter().any(|node| matches!(node, wbxml::Node::Start(token)
+            if token.code_page == base::PAGE && token.token == base::LOCATION.token && !token.has_content)));
+        let result = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set", {
+            "accountId": live.account, "destroy": [&event]
+        }, "0"]]),
+                &using,
+            )
+            .await;
+        assert!(result[0][1]["notDestroyed"].is_null());
     }
 
     #[tokio::test]

@@ -1969,8 +1969,16 @@ async fn sync_mail(
                 sync_contacts_collection(state, auth, &mut builder, user, device_id, &collection)
                     .await;
             } else if collection.collection_id.starts_with("cal_") {
-                sync_calendar_collection(state, auth, &mut builder, user, device_id, &collection)
-                    .await;
+                sync_calendar_collection(
+                    state,
+                    auth,
+                    &mut builder,
+                    user,
+                    device_id,
+                    &collection,
+                    version,
+                )
+                .await;
             } else {
                 sync_tasks_collection(state, auth, &mut builder, user, device_id, &collection)
                     .await;
@@ -3859,6 +3867,7 @@ async fn sync_calendar_collection(
     user: &str,
     device_id: &str,
     collection: &wbxml::eas::SyncCollectionRequest,
+    version: ProtocolVersion,
 ) {
     use wbxml::eas::airsync as air;
 
@@ -3883,6 +3892,19 @@ async fn sync_calendar_collection(
     let mut change_responses: Vec<(String, &'static str)> = Vec::new();
 
     for command in &collection.commands {
+        if command.calendar.unsupported_location {
+            match command.kind {
+                wbxml::eas::SyncClientCommandKind::Add => {
+                    add_responses.push((command.client_id.clone(), None, "6"));
+                    continue;
+                }
+                wbxml::eas::SyncClientCommandKind::Change => {
+                    change_responses.push((command.server_id.clone(), "6"));
+                    continue;
+                }
+                _ => {}
+            }
+        }
         match command.kind {
             wbxml::eas::SyncClientCommandKind::Add => {
                 match state
@@ -4070,12 +4092,12 @@ async fn sync_calendar_collection(
         builder.start(air::COMMANDS);
         for id in &to_add {
             if let Some((_, event)) = current_by_id.get(id) {
-                write_calendar_command(builder, air::ADD, event);
+                write_calendar_command(builder, air::ADD, event, version);
             }
         }
         for id in &to_change {
             if let Some((_, event)) = current_by_id.get(id) {
-                write_calendar_command(builder, air::CHANGE, event);
+                write_calendar_command(builder, air::CHANGE, event, version);
             }
         }
         for id in &to_remove {
@@ -4108,6 +4130,7 @@ fn write_calendar_command(
     builder: &mut wbxml::eas::DocumentBuilder,
     tag: wbxml::token::Token,
     event: &crate::model::CalendarEvent,
+    version: ProtocolVersion,
 ) {
     use wbxml::eas::{airsync as air, calendar as cal};
 
@@ -4137,7 +4160,16 @@ fn write_calendar_command(
     if let Some(email) = &event.organizer_email {
         builder.leaf(cal::ORGANIZER_EMAIL, email.clone());
     }
-    if let Some(location) = &event.location {
+    if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
+        use wbxml::eas::airsync_base as base;
+        if let Some(location) = &event.location {
+            builder.start(base::LOCATION);
+            builder.leaf(base::DISPLAY_NAME, location.clone());
+            builder.end();
+        } else {
+            builder.empty_tag(base::LOCATION);
+        }
+    } else if let Some(location) = &event.location {
         builder.leaf(cal::LOCATION, location.clone());
     }
     if let Some(end) = &event.end_utc {
@@ -5407,6 +5439,55 @@ mod tests {
     use crate::model::{Email, EmailAttachment, EmailBody, EmailBodyType};
     use crate::wbxml::eas::{airsync_base as base, DocumentBuilder};
     use crate::wbxml::Node;
+
+    #[test]
+    fn calendar_location_wire_format_and_clear_follow_the_protocol_version() {
+        use crate::wbxml::{
+            self,
+            eas::{self, airsync as air, airsync_base as base, calendar as cal},
+        };
+        for version in [
+            super::ProtocolVersion::V14_0,
+            super::ProtocolVersion::V14_1,
+            super::ProtocolVersion::V16_0,
+            super::ProtocolVersion::V16_1,
+        ] {
+            let modern = matches!(
+                version,
+                super::ProtocolVersion::V16_0 | super::ProtocolVersion::V16_1
+            );
+            for location in [Some("Room A".to_owned()), None] {
+                let event = crate::model::CalendarEvent {
+                    id: "event".to_owned(),
+                    location: location.clone(),
+                    ..Default::default()
+                };
+                let mut b = eas::DocumentBuilder::new();
+                super::write_calendar_command(&mut b, air::CHANGE, &event, version);
+                let doc = wbxml::decode_document(&wbxml::encode_document(&b.finish())).unwrap();
+                assert_eq!(
+                    eas::contains_token(&doc, cal::LOCATION),
+                    !modern && location.is_some()
+                );
+                assert_eq!(eas::contains_token(&doc, base::LOCATION), modern);
+                if modern {
+                    assert_eq!(
+                        eas::find_text_after(&doc, base::DISPLAY_NAME),
+                        location.as_deref()
+                    );
+                    if location.is_none() {
+                        assert!(doc.nodes.iter().any(|node| matches!(node, wbxml::Node::Start(token)
+                            if token.code_page == base::PAGE && token.token == base::LOCATION.token && !token.has_content)));
+                    }
+                } else {
+                    assert_eq!(
+                        eas::find_text_after(&doc, cal::LOCATION),
+                        location.as_deref()
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn eas_datetime_strips_dashes_and_colons() {
