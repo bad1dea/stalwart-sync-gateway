@@ -59,6 +59,10 @@ pub fn build_router(app_state: AppState) -> Router {
                 .get(activesync::get_handler),
         )
         .route(
+            "/autodiscover/autodiscover.xml",
+            post(autodiscover::handler),
+        )
+        .route(
             "/Autodiscover/Autodiscover.xml",
             post(autodiscover::handler),
         )

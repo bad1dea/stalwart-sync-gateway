@@ -3924,3 +3924,34 @@ async fn provision_reports_no_policy_without_inventing_a_policy_key() {
         assert!(!eas::contains_token(&doc, prov::POLICIES));
     }
 }
+
+#[tokio::test]
+async fn autodiscover_accepts_standard_lowercase_and_existing_paths() {
+    let env = start_env(Opts::default()).await;
+    let base = env.gw.strip_suffix("/Microsoft-Server-ActiveSync").unwrap();
+    let request = r#"<?xml version="1.0"?>
+<Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/mobilesync/requestschema/2006">
+<Request><EMailAddress>u@test</EMailAddress><AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/mobilesync/responseschema/2006</AcceptableResponseSchema></Request>
+</Autodiscover>"#;
+    for path in [
+        "/autodiscover/autodiscover.xml",
+        "/Autodiscover/Autodiscover.xml",
+    ] {
+        let response = env
+            .http
+            .post(format!("{base}{path}"))
+            .header("Content-Type", "text/xml")
+            .body(request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "Autodiscover POST {path}");
+        assert_eq!(
+            response.headers()["Content-Type"],
+            "text/xml; charset=utf-8"
+        );
+        let body = response.text().await.unwrap();
+        assert!(body.contains("<Type>MobileSync</Type>"));
+        assert!(body.contains("<Url>http://localhost/Microsoft-Server-ActiveSync</Url>"));
+    }
+}
