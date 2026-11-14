@@ -691,6 +691,47 @@ fn sync_body_options(key: &str, collection: &str, window: &str, filter: Option<&
     wbxml::encode_document(&b.finish())
 }
 
+fn mail_preferences(filter: Option<&str>, body: Option<(&str, &str)>) -> wbxml::Document {
+    use eas::{airsync as air, airsync_base as base};
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::OPTIONS);
+    if let Some(filter) = filter {
+        b.leaf(air::FILTER_TYPE, filter);
+    }
+    if let Some((body_type, limit)) = body {
+        b.start(base::BODY_PREFERENCE);
+        b.leaf(base::TYPE, body_type);
+        b.leaf(base::TRUNCATION_SIZE, limit);
+        b.end();
+    }
+    b.end();
+    b.finish()
+}
+
+fn sync_body_preferences(
+    key: &str,
+    folder: &str,
+    options: Option<&wbxml::Document>,
+    downloads: bool,
+) -> Vec<u8> {
+    use eas::airsync as air;
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, key);
+    b.leaf(air::COLLECTION_ID, folder);
+    b.leaf(air::GET_CHANGES, if downloads { "1" } else { "0" });
+    b.leaf(air::WINDOW_SIZE, "100");
+    if let Some(options) = options {
+        b.extend(options.nodes.clone());
+    }
+    b.end();
+    b.end();
+    b.end();
+    wbxml::encode_document(&b.finish())
+}
+
 impl Env {
     fn req(&self, cmd: &str, device: &str) -> reqwest::RequestBuilder {
         self.http
@@ -2855,6 +2896,115 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_sync_options_preserve_body_format_across_restart_and_replace() {
+        use eas::airsync_base as base;
+        let live = Live::new("E2E_USER2").await;
+        let result = live.call(serde_json::json!([["Mailbox/set", {
+            "accountId": live.account, "create": {"m": {"name": format!("Options {}", std::process::id())}}
+        }, "0"]])).await;
+        let folder = result[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let html = "<p>Hello from the native backend</p>";
+        let create = |client: &str| {
+            serde_json::json!([["Email/set", {
+            "accountId": live.account, "create": {client: {
+                "mailboxIds": {&folder: true}, "keywords": {},
+                "from": [{"email":"e2e@example.test"}], "to":[{"email":live.user}],
+                "subject": client, "bodyValues":{"b":{"value":html}},
+                "htmlBody":[{"partId":"b","type":"text/html"}]
+            }}
+        }, "0"]])
+        };
+        let result = live.call(create("first")).await;
+        let mut ids = vec![result[0][1]["created"]["first"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()];
+        let device = dev("opts");
+        let options = mail_preferences(Some("5"), Some(("1", "5")));
+        let doc = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body_preferences("0", &folder, Some(&options), true),
+                "16.1",
+            )
+            .await;
+        let doc = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body_preferences(&sync_key(&doc), &folder, None, true),
+                "16.1",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&doc, base::DATA), Some("Hello"));
+        assert_eq!(eas::find_text_after(&doc, base::TYPE), Some("1"));
+        let key = sync_key(&doc);
+
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(env("E2E_RESTART_CMD"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "gateway restart failed");
+        let live = Live::new("E2E_USER2").await;
+        let result = live.call(create("second")).await;
+        ids.push(
+            result[0][1]["created"]["second"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+        let doc = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body_preferences(&key, &folder, None, true),
+                "16.1",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&doc, base::DATA), Some("Hello"));
+        let key = sync_key(&doc);
+        let replacement = mail_preferences(Some("0"), None);
+        let doc = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body_preferences(&key, &folder, Some(&replacement), false),
+                "16.1",
+            )
+            .await;
+        let result = live.call(create("third")).await;
+        ids.push(
+            result[0][1]["created"]["third"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+        let doc = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body_preferences(&sync_key(&doc), &folder, None, true),
+                "16.1",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&doc, base::TYPE), Some("2"));
+        assert_eq!(eas::find_text_after(&doc, base::DATA), Some(html));
+        let result = live
+            .call(serde_json::json!([["Email/set", {
+            "accountId": live.account, "destroy": ids
+        }, "0"], ["Mailbox/set", {"accountId":live.account,"destroy":[&folder]}, "1"]]))
+            .await;
+        assert!(result[0][1]["notDestroyed"].is_null());
+        assert!(result[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_lost_response_is_replayed() {
         let live = Live::new("E2E_USER").await;
         let d = dev("replay");
@@ -4785,4 +4935,178 @@ async fn find_scopes_queries_and_rejects_unsupported_inputs() {
         .await
         .unwrap();
     assert_eq!(response.status(), 400);
+}
+
+#[tokio::test]
+async fn sync_options_survive_restart_replace_as_a_block_and_stay_scoped() {
+    use eas::{airsync as air, airsync_base as base};
+    for version in ["14.0", "16.1"] {
+        let env = start_env(Opts::default()).await;
+        env.mock.set_date("m1", &days_ago(90));
+        let options = mail_preferences(Some("5"), Some(("1", "2")));
+        let send = |body, device: &str| {
+            env.req("Sync", device)
+                .header("MS-ASProtocolVersion", version)
+                .body(body)
+                .send()
+        };
+        let response = send(
+            sync_body_preferences("0", "inbox", Some(&options), true),
+            "iphone",
+        )
+        .await
+        .unwrap();
+        let prime = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        let body = sync_body_preferences(&sync_key(&prime), "inbox", None, true);
+        let response = send(body.clone(), "iphone").await.unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, air::SERVER_ID), vec!["m2"]);
+        assert_eq!(eas::find_text_after(&doc, base::DATA), Some("bo"));
+        let response = send(body, "iphone").await.unwrap();
+        assert_eq!(
+            wbxml::decode_document(&response.bytes().await.unwrap()).unwrap(),
+            doc
+        );
+        let key = sync_key(&doc);
+
+        let env = env.restarted().await;
+        let send = |body, device: &str| {
+            env.req("Sync", device)
+                .header("MS-ASProtocolVersion", version)
+                .body(body)
+                .send()
+        };
+        let empty = mail_preferences(None, None);
+        let response = send(
+            sync_body_preferences("wrong-key", "inbox", Some(&empty), true),
+            "iphone",
+        )
+        .await
+        .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("3"));
+        env.mock.add_mail("inbox", "new");
+        let response = send(sync_body_preferences(&key, "inbox", None, true), "iphone")
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, base::DATA), Some("bo"));
+        let key = sync_key(&doc);
+
+        let body_only = mail_preferences(None, Some(("1", "1")));
+        let response = send(
+            sync_body_preferences(&key, "inbox", Some(&body_only), true),
+            "iphone",
+        )
+        .await
+        .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, air::SERVER_ID), vec!["m1"]);
+        assert_eq!(eas::find_text_after(&doc, base::DATA), Some("b"));
+        let key = sync_key(&doc);
+
+        let response = send(sync_body_preferences("0", "inbox", None, true), "ipad")
+            .await
+            .unwrap();
+        let prime = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        let response = send(
+            sync_body_preferences(&sync_key(&prime), "inbox", None, true),
+            "ipad",
+        )
+        .await
+        .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert!(eas::find_all_text_after(&doc, base::DATA)
+            .iter()
+            .all(|body| body == "body"));
+
+        env.mock.add_mail("other", "other-mail");
+        let response = send(sync_body_preferences("0", "other", None, true), "iphone")
+            .await
+            .unwrap();
+        let prime = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        let response = send(
+            sync_body_preferences(&sync_key(&prime), "other", None, true),
+            "iphone",
+        )
+        .await
+        .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, base::DATA), Some("body"));
+
+        let response = send(
+            sync_body_preferences(&key, "inbox", Some(&empty), false),
+            "iphone",
+        )
+        .await
+        .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("1"));
+        env.mock.add_mail("inbox", "after-clear");
+        let response = send(
+            sync_body_preferences(&sync_key(&doc), "inbox", None, true),
+            "iphone",
+        )
+        .await
+        .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, base::DATA), Some("body"));
+    }
+}
+
+#[tokio::test]
+async fn sync_options_do_not_cross_protocol_versions_or_accept_mixed_sms_options() {
+    use eas::{airsync as air, airsync_base as base};
+    let env = start_env(Opts::default()).await;
+    let options = mail_preferences(None, Some(("1", "1")));
+    let response = env
+        .req("Sync", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(sync_body_preferences("0", "inbox", Some(&options), true))
+        .send()
+        .await
+        .unwrap();
+    let prime = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    let key = sync_key(&prime);
+
+    let mut mixed = mail_preferences(Some("5"), None);
+    mixed.nodes.extend(mail_preferences(None, None).nodes);
+    let response = env
+        .req("Sync", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(sync_body_preferences(&key, "inbox", Some(&mixed), true))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("4"));
+    let mut sms = eas::DocumentBuilder::new();
+    sms.start(air::OPTIONS);
+    sms.leaf(air::CLASS, "SMS");
+    sms.end();
+    let response = env
+        .req("Sync", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(sync_body_preferences(
+            &key,
+            "inbox",
+            Some(&sms.finish()),
+            true,
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("4"));
+    let response = env
+        .req("Sync", "client")
+        .header("MS-ASProtocolVersion", "14.0")
+        .body(sync_body_preferences(&key, "inbox", None, true))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert!(eas::find_all_text_after(&doc, base::DATA)
+        .iter()
+        .all(|body| body == "body"));
 }

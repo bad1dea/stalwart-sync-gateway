@@ -1060,6 +1060,8 @@ pub struct SyncCollectionRequest {
     pub get_changes: bool,
     pub deletes_as_moves: bool,
     pub commands: Vec<SyncClientCommand>,
+    pub options_count: usize,
+    pub options_class: Option<String>,
     /// AirSyncBase:BodyPreference > Type, if the client sent one (real
     /// EAS clients always do on the list-sync Options; a bare
     /// scripted/test client typically doesn't). 1 = plain text, 2 = HTML.
@@ -1080,6 +1082,8 @@ impl Default for SyncCollectionRequest {
             get_changes: true,
             deletes_as_moves: true,
             commands: Vec::new(),
+            options_count: 0,
+            options_class: None,
             body_pref_type: None,
             body_pref_truncation_size: None,
             filter_type: None,
@@ -1493,7 +1497,14 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                         command.flag_status = Some(0);
                     }
                 }
-                if current.is_some() {
+                if let Some(collection) = current.as_mut() {
+                    if same_token(*token, airsync::OPTIONS)
+                        && stack
+                            .last()
+                            .is_some_and(|parent| same_token(*parent, airsync::COLLECTION))
+                    {
+                        collection.options_count += 1;
+                    }
                     if token.code_page == airsync::PAGE && token.token == airsync::COMMANDS.token {
                         commands_depth = Some(stack.len());
                     } else if commands_depth.is_some()
@@ -1558,6 +1569,15 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             collection.get_changes = text != "0";
                         } else if same_token(token, airsync::DELETES_AS_MOVES) {
                             collection.deletes_as_moves = text != "0";
+                        } else if same_token(token, airsync::CLASS)
+                            && stack
+                                .last()
+                                .is_some_and(|parent| same_token(*parent, airsync::CLASS))
+                            && stack
+                                .iter()
+                                .any(|parent| same_token(*parent, airsync::OPTIONS))
+                        {
+                            collection.options_class = Some(text.clone());
                         } else if token.code_page == airsync::PAGE
                             && token.token == airsync::FILTER_TYPE.token
                         {

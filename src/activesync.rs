@@ -1,5 +1,6 @@
 mod find;
 mod item_operations;
+mod sync_options;
 
 use axum::{
     body::Bytes,
@@ -1870,7 +1871,7 @@ async fn sync_mail(
     builder.start(air::SYNC);
     builder.start(air::COLLECTIONS);
 
-    for collection in collections {
+    for mut collection in collections {
         let mut replay_capture: Option<(usize, String, String, String)> = None;
         let user = query.user.as_deref().unwrap_or_else(|| auth.username());
         let device_id = query.device_id.as_deref().unwrap_or("unknown");
@@ -1931,6 +1932,37 @@ async fn sync_mail(
             builder.leaf(air::SYNC_KEY, collection.sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "3");
+            builder.end();
+            continue;
+        }
+
+        if collection.options_count > 1 || collection.options_class.as_deref() == Some("SMS") {
+            builder.start(air::COLLECTION);
+            builder.leaf(air::SYNC_KEY, &collection.sync_key);
+            builder.leaf(air::COLLECTION_ID, &collection.collection_id);
+            builder.leaf(air::STATUS, "4");
+            builder.end();
+            continue;
+        }
+        let legacy_filter = previous_record
+            .as_ref()
+            .map(|record| mail_record_options(&record.jmap_state).filter)
+            .unwrap_or(0);
+        if let Err(error) = sync_options::apply(
+            state,
+            user,
+            device_id,
+            version,
+            &mut collection,
+            legacy_filter,
+        )
+        .await
+        {
+            tracing::warn!(%error, "failed to persist Sync options");
+            builder.start(air::COLLECTION);
+            builder.leaf(air::SYNC_KEY, &collection.sync_key);
+            builder.leaf(air::COLLECTION_ID, &collection.collection_id);
+            builder.leaf(air::STATUS, "5");
             builder.end();
             continue;
         }
@@ -2702,7 +2734,7 @@ async fn sync_mail(
             } else {
                 collection.sync_key.clone()
             };
-            if advance {
+            if advance || collection.options_count > 0 {
                 if let Err(error) = state
                     .state
                     .put(SyncRecord {
@@ -2710,10 +2742,24 @@ async fn sync_mail(
                         device_id: device_id.to_owned(),
                         collection_id: collection.collection_id.clone(),
                         sync_key: new_sync_key.clone(),
-                        jmap_state: previous_record
-                            .as_ref()
-                            .map(|record| record.jmap_state.clone())
-                            .unwrap_or_default(),
+                        jmap_state: if collection.options_count > 0 {
+                            let previous = mail_record_options(
+                                previous_record
+                                    .as_ref()
+                                    .map(|record| record.jmap_state.as_str())
+                                    .unwrap_or(""),
+                            );
+                            mail_record_state(
+                                previous.window,
+                                collection.filter_type.unwrap_or(0),
+                                &previous.email_state,
+                            )
+                        } else {
+                            previous_record
+                                .as_ref()
+                                .map(|record| record.jmap_state.clone())
+                                .unwrap_or_default()
+                        },
                         seen_ids: previous_record
                             .as_ref()
                             .map(|record| record.seen_ids.clone())
