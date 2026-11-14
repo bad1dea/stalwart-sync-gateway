@@ -19,43 +19,31 @@ use crate::{
     wbxml,
 };
 
-// Real bug, root-caused via the full z-push-stalwart-jmap source (PR #187,
-// pinned in config/z-push/Dockerfile) -- verified against
-// src/lib/syncobjects/*.php: nearly every WBXML class (SyncMail,
-// SyncContact, SyncAppointment, SyncUserInformation, SyncBaseAttachment,
-// ...) conditionally changes its field set -- sometimes its ENTIRE shape,
-// e.g. SyncUserInformation's EmailAddresses moves from a direct child of
-// Get to nested inside Accounts>Account>EmailAddresses at >=14.1 -- based
-// on `Request::GetProtocolVersion()`, which iOS derives from the HIGHEST
-// version this server advertises in MS-ASProtocolVersions. This gateway
-// implements none of that version-conditional branching anywhere; it
-// always sends the <=14.0 shape regardless of what it claims to support.
-// Advertising up to 16.1 (as this did) let iOS negotiate a protocol
-// version whose schema this gateway doesn't actually speak, which is the
-// root cause behind the whole family of "No parse rule ..." / "We have
-// an int in our WBXML" errors seen live (Attachment's ContentType field
-// is itself gated to >=16.0 in the real source -- confirmed the same
-// day, independently, via idevicesyslog, before this root cause was
-// found). Matching z-push's own advertised ceiling exactly (confirmed
-// against a live z-push OPTIONS response: "12.0,12.1,14.0") makes iOS
-// negotiate the SAME protocol version z-push does, so every class
-// collapses onto the single shape this gateway actually implements.
-// 2026-11-12: narrowed to 14.0 only. Every response is shaped for 14.0
-// (GetItemEstimate without the 12.x Class element, 14.0 Sync/Ping forms), so
-// advertising 12.x promised behaviour that isn't implemented. Both live iOS
-// devices already negotiate 14.0 (`protocol_version` in the request log).
+// Keep negotiation at the tested production version while newer response
+// shapes and commands are implemented and checked with independent clients.
 const SUPPORTED_PROTOCOLS: &str = "14.0";
-// "Find" deliberately removed (was falsely advertised despite having no
-// handler): per the real MS-ASCMD spec text, every element in Find's own
-// WBXML codepage is gated to protocol 16.1 only, and this gateway
-// advertises 12.0/12.1/14.0 above -- a real device negotiating at those
-// versions would never send Find anyway, so dropping it from this list
-// just makes the advertisement honest. "Search" (now actually
-// implemented, see `search()`) stays.
-// Only commands that have a handler: [MS-ASHTTP] MS-ASProtocolCommands tells
-// the client what it may call, and MeetingResponse, ResolveRecipients and
-// ValidateCert would answer 501.
+// Advertise only commands with handlers.
 const SUPPORTED_COMMANDS: &str = "Sync,SendMail,SmartForward,SmartReply,GetAttachment,FolderSync,FolderCreate,FolderDelete,FolderUpdate,MoveItems,GetItemEstimate,Search,Settings,Ping,ItemOperations,Provision";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProtocolVersion {
+    V14_0,
+    V14_1,
+    V16_0,
+    V16_1,
+}
+
+impl ProtocolVersion {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "14.0" => Some(Self::V14_0),
+            "14.1" => Some(Self::V14_1),
+            "16.0" => Some(Self::V16_0),
+            "16.1" => Some(Self::V16_1),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -217,20 +205,24 @@ pub async fn post_handler(
             .unwrap_or(""),
         "received ActiveSync command"
     );
-    if let Some(version) = headers
+    let version_header = headers
         .get("MS-ASProtocolVersion")
         .and_then(|v| v.to_str().ok())
-    {
-        if !SUPPORTED_PROTOCOLS.split(',').any(|v| v == version) {
-            // Answered in the 14.0 shape anyway; the log says why a client of
-            // another version might misread it.
-            tracing::warn!(
-                device_id = query.device_id.as_deref().unwrap_or(""),
-                version,
-                supported = SUPPORTED_PROTOCOLS,
-                "client uses a protocol version this gateway does not implement"
-            );
-        }
+        .unwrap_or("14.0");
+    let Some(version) = ProtocolVersion::parse(version_header) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "unsupported MS-ASProtocolVersion\n",
+        )
+            .into_response();
+    };
+    if !SUPPORTED_PROTOCOLS.split(',').any(|v| v == version_header) {
+        tracing::warn!(
+            device_id = query.device_id.as_deref().unwrap_or(""),
+            version = version_header,
+            supported = SUPPORTED_PROTOCOLS,
+            "client uses a protocol version still under development"
+        );
     }
 
     if command.eq_ignore_ascii_case("SendMail")
@@ -319,7 +311,7 @@ pub async fn post_handler(
                     return get_item_estimate(&state, &auth, &query, &document, command).await;
                 }
                 if command.eq_ignore_ascii_case("Settings") {
-                    return settings(&state, &auth, &document, command).await;
+                    return settings(&state, &auth, &document, version, command).await;
                 }
                 if command.eq_ignore_ascii_case("Ping") {
                     return ping(&state, &auth, &query, Some(&document), command).await;
@@ -1177,6 +1169,7 @@ async fn settings(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
     document: &wbxml::Document,
+    version: ProtocolVersion,
     command: &str,
 ) -> Response {
     let include_user = wbxml::eas::contains_token(document, wbxml::eas::settings::USER_INFORMATION);
@@ -1189,28 +1182,51 @@ async fn settings(
     builder.leaf(set::STATUS, "1");
 
     if include_user {
-        // Real bug, confirmed live via idevicesyslog on the zoidberg A/B
-        // test: "No parse rule from object <private> for codePage 0x12
-        // token 0x23" -- 0x12=18 is Settings, 0x23 is
-        // set::PRIMARY_SMTP_ADDRESS. iOS's parser desynced on this
-        // unrecognized field and every subsequent field in the SAME
-        // response misparsed too (the immediately-following "We have an
-        // int in our WBXML, but Exchange never gives us this" is the same
-        // cascade, not a separate bug -- the same failure class as the
-        // Attachment field-order bug: one bad field corrupts the whole
-        // response). The working PHP z-push reference (config/z-push/
-        // *.php in the homelab repo) doesn't implement EmailAddresses/
-        // PrimarySmtpAddress at all, so rather than guess at where this
-        // field actually belongs in MS-ASSETTINGS's real schema, just
-        // stop sending it -- EmailAddresses > SMTPAddress below already
-        // conveys the same information in a schema-valid way.
         builder.start(set::USER_INFORMATION);
-        builder.leaf(set::STATUS, "1");
-        builder.start(set::GET);
-        builder.start(set::EMAIL_ADDRESSES);
-        builder.leaf(set::SMTP_ADDRESS, auth.username());
-        builder.end();
-        builder.end();
+        match state.jmap.mail_identities(auth).await {
+            Ok(identities) if !identities.is_empty() => {
+                builder.leaf(set::STATUS, "1");
+                builder.start(set::GET);
+                let modern = version != ProtocolVersion::V14_0;
+                if modern {
+                    builder.start(set::ACCOUNTS);
+                    builder.start(set::ACCOUNT);
+                    // Identity/get's first identity is also used for outbound mail.
+                    // The primary EAS account must not have an AccountId.
+                    if !identities[0].name.is_empty() {
+                        builder.leaf(set::USER_DISPLAY_NAME, &identities[0].name);
+                    }
+                }
+                builder.start(set::EMAIL_ADDRESSES);
+                let mut addresses = BTreeSet::new();
+                for identity in &identities {
+                    if addresses.insert(identity.email.to_ascii_lowercase()) {
+                        builder.leaf(set::SMTP_ADDRESS, &identity.email);
+                    }
+                }
+                // JMAP identities do not designate a primary SMTP address.
+                // Only identify it when the login itself matches an identity.
+                if modern {
+                    if let Some(identity) = identities
+                        .iter()
+                        .find(|identity| identity.email.eq_ignore_ascii_case(auth.username()))
+                    {
+                        builder.leaf(set::PRIMARY_SMTP_ADDRESS, &identity.email);
+                    }
+                }
+                builder.end();
+                if modern {
+                    builder.end();
+                    builder.end();
+                }
+                builder.end();
+            }
+            Ok(_) => builder.leaf(set::STATUS, "3"),
+            Err(error) => {
+                tracing::warn!(%error, "failed to read user mail identities");
+                builder.leaf(set::STATUS, "3");
+            }
+        }
         builder.end();
     }
 

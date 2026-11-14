@@ -2511,13 +2511,14 @@ impl JmapClient {
         Ok(())
     }
 
-    async fn fetch_primary_identity(
+    pub async fn mail_identities(
         &self,
         auth: &AuthenticatedSession,
-    ) -> anyhow::Result<(String, String)> {
-        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
-            return Ok((String::new(), String::new()));
-        };
+    ) -> anyhow::Result<Vec<MailIdentity>> {
+        let account_id = auth
+            .session
+            .primary_account_for(capabilities::MAIL)
+            .context("no primary mail account")?;
         let response: JmapResponse<serde_json::Value> = self
             .api_call(
                 auth,
@@ -2535,27 +2536,26 @@ impl JmapClient {
             .await?;
         for method in response.method_responses {
             if method.0 == "Identity/get" {
-                if let Some(first) = method
-                    .1
-                    .get("list")
-                    .and_then(|l| l.as_array())
-                    .and_then(|a| a.first())
-                {
-                    let id = first
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_owned();
-                    let name = first
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_owned();
-                    return Ok((id, name));
-                }
+                let identities: GetResponse<MailIdentity> = serde_json::from_value(method.1)?;
+                return Ok(identities.list);
+            }
+            if method.0 == "error" {
+                anyhow::bail!("Identity/get failed");
             }
         }
-        Ok((String::new(), String::new()))
+        anyhow::bail!("missing Identity/get response")
+    }
+
+    async fn fetch_primary_identity(
+        &self,
+        auth: &AuthenticatedSession,
+    ) -> anyhow::Result<(String, String)> {
+        let identities = self.mail_identities(auth).await?;
+        Ok(identities
+            .into_iter()
+            .next()
+            .map(|identity| (identity.id, identity.name))
+            .unwrap_or_default())
     }
 
     async fn find_mailbox_by_role(
@@ -2717,6 +2717,14 @@ pub(crate) struct QueryResponse {
     total: Option<u64>,
     #[serde(default)]
     ids: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct MailIdentity {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    pub email: String,
 }
 
 /// Minimal shape for `emails_still_in_mailbox`'s deletion-candidate

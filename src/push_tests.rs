@@ -59,6 +59,8 @@ struct Mock {
     change_log: Mutex<Vec<String>>,
     groupware: Mutex<std::collections::BTreeMap<String, Vec<serde_json::Value>>>,
     snapshot_changes: AtomicBool,
+    identity_error: AtomicBool,
+    identities: Mutex<Vec<serde_json::Value>>,
 }
 
 impl Mock {
@@ -189,6 +191,13 @@ async fn mock_api(
         let args = &call[1];
         let cid = call[2].clone();
         let body = match name {
+            "Identity/get" => {
+                if m.identity_error.load(Ordering::SeqCst) {
+                    responses.push(serde_json::json!(["error", {"type": "serverFail"}, cid]));
+                    continue;
+                }
+                serde_json::json!({"accountId": "a1", "state": "i1", "list": *m.identities.lock().unwrap()})
+            }
             "Mailbox/get" => {
                 let hidden = m.hidden_folders.lock().unwrap().clone();
                 let mut list: Vec<serde_json::Value> = vec![
@@ -419,6 +428,11 @@ async fn start_mock() -> Arc<Mock> {
         change_log: Mutex::new(Vec::new()),
         groupware: Mutex::new(Default::default()),
         snapshot_changes: AtomicBool::new(false),
+        identity_error: AtomicBool::new(false),
+        identities: Mutex::new(vec![
+            serde_json::json!({"id": "i1", "name": "Owner", "email": "owner@example.test"}),
+            serde_json::json!({"id": "i2", "name": "Alias", "email": "alias@example.test"}),
+        ]),
     });
     let app = Router::new()
         .route("/.well-known/jmap", get(mock_session))
@@ -3660,4 +3674,99 @@ async fn item_operations_mime_preserves_non_utf8_bytes() {
     assert_eq!(eas::find_all_text_after(&doc, ops::STATUS), vec!["1", "1"]);
     assert_eq!(eas::find_text_after(&doc, base::TYPE), Some("4"));
     assert_eq!(eas::find_opaque_after(&doc, base::DATA), Some(MIME_BYTES));
+}
+
+/// Local mock-backed endpoint for independent EAS clients. EAS_INTEROP_FILE
+/// receives its URL; this does not connect to a production mailbox.
+#[tokio::test]
+#[ignore]
+async fn client_interop_fixture() {
+    let env = start_env(Opts::default()).await;
+    let path = std::env::var("EAS_INTEROP_FILE").expect("set EAS_INTEROP_FILE");
+    std::fs::write(path, serde_json::json!({"gateway": env.gw}).to_string()).unwrap();
+    tokio::time::sleep(Duration::from_secs(120)).await;
+}
+
+#[tokio::test]
+async fn user_information_uses_versioned_accounts_and_backend_addresses() {
+    use eas::settings as set;
+    let env = start_env(Opts::default()).await;
+    let mut b = eas::DocumentBuilder::new();
+    b.start(set::SETTINGS);
+    b.start(set::USER_INFORMATION);
+    b.empty_tag(set::GET);
+    b.end();
+    b.end();
+    let body = wbxml::encode_document(&b.finish());
+    for version in ["14.0", "14.1", "16.0", "16.1"] {
+        for login in ["owner", "owner@example.test"] {
+            let response = env
+                .http
+                .post(format!("{}?Cmd=Settings&DeviceId=client", env.gw))
+                .basic_auth(login, Some("pw"))
+                .header("MS-ASProtocolVersion", version)
+                .body(body.clone())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+            assert_eq!(eas::find_all_text_after(&doc, set::STATUS), vec!["1", "1"]);
+            assert_eq!(
+                eas::find_all_text_after(&doc, set::SMTP_ADDRESS),
+                vec!["owner@example.test", "alias@example.test"]
+            );
+            let user = &eas::child_elements(&doc)[1];
+            let get = &eas::child_elements(user)[1];
+            let children = eas::child_elements(get);
+            let modern = version != "14.0";
+            assert_eq!(eas::contains_token(&doc, set::ACCOUNTS), modern);
+            assert!(!eas::contains_token(&doc, set::ACCOUNT_ID));
+            if modern {
+                assert_eq!(
+                    children[0].nodes[0],
+                    wbxml::Node::Start(wbxml::token::Token {
+                        has_content: true,
+                        ..set::ACCOUNTS
+                    })
+                );
+                let accounts = eas::child_elements(&children[0]);
+                assert_eq!(accounts.len(), 1);
+                assert!(eas::contains_token(&accounts[0], set::EMAIL_ADDRESSES));
+                assert_eq!(
+                    eas::find_text_after(&doc, set::PRIMARY_SMTP_ADDRESS),
+                    if login.contains('@') {
+                        Some("owner@example.test")
+                    } else {
+                        None
+                    }
+                );
+            } else {
+                assert!(eas::contains_token(&children[0], set::SMTP_ADDRESS));
+                assert!(!eas::contains_token(&doc, set::PRIMARY_SMTP_ADDRESS));
+            }
+        }
+    }
+    env.mock.identity_error.store(true, Ordering::SeqCst);
+    let response = env
+        .req("Settings", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, set::STATUS), vec!["1", "3"]);
+    assert!(!eas::contains_token(&doc, set::SMTP_ADDRESS));
+    env.mock.identity_error.store(false, Ordering::SeqCst);
+    env.mock.identities.lock().unwrap().clear();
+    let response = env
+        .req("Settings", "client")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, set::STATUS), vec!["1", "3"]);
+    assert!(!eas::contains_token(&doc, set::SMTP_ADDRESS));
 }

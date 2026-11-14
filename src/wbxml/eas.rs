@@ -477,6 +477,12 @@ pub mod settings {
     pub const EMAIL_ADDRESSES: Token = tag(0x1e, false);
     pub const SMTP_ADDRESS: Token = tag(0x1f, false);
     pub const PRIMARY_SMTP_ADDRESS: Token = tag(0x23, false);
+    pub const ACCOUNTS: Token = tag(0x24, false);
+    pub const ACCOUNT: Token = tag(0x25, false);
+    pub const ACCOUNT_ID: Token = tag(0x26, false);
+    pub const ACCOUNT_NAME: Token = tag(0x27, false);
+    pub const USER_DISPLAY_NAME: Token = tag(0x28, false);
+    pub const SEND_DISABLED: Token = tag(0x29, false);
 
     pub const fn tag(token: u8, has_content: bool) -> Token {
         Token {
