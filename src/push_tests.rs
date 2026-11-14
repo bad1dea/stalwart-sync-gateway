@@ -2236,6 +2236,10 @@ mod e2e {
         }
 
         fn req(&self, cmd: &str, device: &str) -> reqwest::RequestBuilder {
+            self.req_version(cmd, device, "14.0")
+        }
+
+        fn req_version(&self, cmd: &str, device: &str, version: &str) -> reqwest::RequestBuilder {
             let user = self.user.split('@').next().unwrap().to_owned();
             self.http
                 .post(format!(
@@ -2243,7 +2247,7 @@ mod e2e {
                     self.gw
                 ))
                 .basic_auth(&self.user, Some(&self.pass))
-                .header("MS-ASProtocolVersion", "14.0")
+                .header("MS-ASProtocolVersion", version)
         }
 
         async fn wbxml(&self, cmd: &str, device: &str, body: Vec<u8>) -> wbxml::Document {
@@ -2539,6 +2543,77 @@ mod e2e {
         );
         // Second device gets the same Delete.
         let _ = kb;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_find_16_1_reads_native_jmap_metadata_and_keywords() {
+        use eas::{airsync_base as base, email2, find as f};
+        let live = Live::new("E2E_USER2").await;
+        let device = dev("find16");
+        let tag = format!("findinterop{}", std::process::id());
+        let r = live
+            .call(serde_json::json!([["Mailbox/set", {
+            "accountId": live.account, "create": {"m": {"name": &tag}}
+        }, "0"]]))
+            .await;
+        let folder = r[0][1]["created"]["m"]["id"].as_str().unwrap().to_owned();
+        let ids = live.seed(&folder, 3, &tag, true).await;
+        let r = live.call(serde_json::json!([["Email/set", {
+            "accountId": live.account,
+            "update": {&ids[0]: {"keywords/$flagged": true, "keywords/$seen": true, "keywords/$draft": true}}
+        }, "0"]])).await;
+        assert!(r[0][1]["updated"].get(&ids[0]).is_some());
+        let search_id = uuid::Uuid::new_v4().to_string();
+        let send = |text: String, range: &str| {
+            live.req_version("Find", &device, "16.1")
+                .body(find_body(&search_id, &text, Some(&folder), range))
+                .send()
+        };
+        let response = send(format!("subject:{tag}"), "0-0").await.unwrap();
+        assert_eq!(response.status(), 200);
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+        assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("3"));
+        assert_eq!(eas::find_text_after(&doc, f::RANGE), Some("0-0"));
+        let mut found = eas::find_all_text_after(&doc, air::SERVER_ID);
+        let response = send(format!("subject:{tag}"), "1-2").await.unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+        found.extend(eas::find_all_text_after(&doc, air::SERVER_ID));
+        found.sort();
+        let mut expected = ids.clone();
+        expected.sort();
+        assert_eq!(found, expected);
+        assert!(!eas::contains_token(&doc, base::BODY));
+
+        let response = send(format!("subject:{tag} isflagged:true isread:true"), "0-9")
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+        assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::SERVER_ID),
+            vec![ids[0].clone()]
+        );
+        assert_eq!(eas::find_text_after(&doc, email2::IS_DRAFT), Some("1"));
+        assert_eq!(eas::find_text_after(&doc, f::HAS_ATTACHMENTS), Some("1"));
+        assert!(!eas::contains_token(&doc, base::BODY));
+
+        let response = send(format!("subject:\"{tag} 0\""), "0-9").await.unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["2"]);
+
+        let r = live
+            .call(serde_json::json!([["Email/set", {
+            "accountId": live.account, "destroy": ids
+        }, "0"], ["Mailbox/set", {
+            "accountId": live.account, "destroy": [&folder]
+        }, "1"]]))
+            .await;
+        assert!(r[0][1]["notDestroyed"].is_null());
+        assert!(r[1][1]["notDestroyed"].is_null());
     }
 
     #[tokio::test]

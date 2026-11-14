@@ -38,6 +38,9 @@ fn tokenize(input: &str) -> Result<Vec<Token>, &'static str> {
             tokens.push(Token::Right);
             continue;
         }
+        if matches!(c, '+' | '-') {
+            return Err("unsupported search operator");
+        }
         let mut value = String::new();
         let mut quoted = false;
         let mut in_quote = false;
@@ -47,8 +50,13 @@ fn tokenize(input: &str) -> Result<Vec<Token>, &'static str> {
                 '"' => {
                     quoted = true;
                     in_quote = !in_quote;
+                    value.push(c);
                 }
-                '\\' if in_quote => value.push(chars.next().ok_or("unfinished escape")?),
+                '\\' if in_quote => {
+                    value.push(c);
+                    value.push(chars.next().ok_or("unfinished escape")?);
+                }
+                '<' | '>' | '=' if !in_quote => return Err("unsupported search comparison"),
                 _ => value.push(c),
             }
             if !in_quote
@@ -93,7 +101,7 @@ impl Parser {
             let start = self.position;
             let value = self.or(depth)?;
             let property = match &self.tokens[start..self.position] {
-                [Token::Word(word)] => word
+                [Token::Word(word)] if !word.starts_with('"') => word
                     .split_once(':')
                     .map(|(key, _)| key.to_ascii_lowercase()),
                 [Token::Word(word), Token::Word(_)] if word.ends_with(':') => {
@@ -154,6 +162,9 @@ impl Parser {
                 Ok(value)
             }
             Token::Word(word) => {
+                if word.starts_with('"') {
+                    return condition("text", &word);
+                }
                 if let Some((property, value)) = word.split_once(':') {
                     let value = if value.is_empty() {
                         let Some(Token::Word(value)) = self.tokens.get(self.position) else {
@@ -184,8 +195,12 @@ fn combine(operator: &str, mut left: Value, right: Value) -> Value {
 }
 
 fn condition(property: &str, value: &str) -> Result<Value, &'static str> {
-    if value.is_empty() || value.contains('*') || value.contains('?') {
+    if value.is_empty() || value == "\"\"" || value.contains('*') || value.contains('?') {
         return Err("unsupported or empty search value");
+    }
+    // Stalwart 0.16.19's native index does not preserve phrase order.
+    if value.starts_with('"') && value.chars().any(char::is_whitespace) {
+        return Err("phrase search is unavailable");
     }
     match property {
         "text" | "subject" | "body" | "from" | "to" | "cc" | "bcc" => Ok(json!({property: value})),
@@ -233,9 +248,9 @@ mod tests {
             ]})
         );
         assert_eq!(
-            to_filter("from:a from:b subject:\"hello world\"").unwrap(),
+            to_filter("from:a from:b subject:\"mobile\"").unwrap(),
             json!({"operator":"AND", "conditions":[
-                {"operator":"OR", "conditions":[{"from":"a"}, {"from":"b"}]}, {"subject":"hello world"}
+                {"operator":"OR", "conditions":[{"from":"a"}, {"from":"b"}]}, {"subject":"\"mobile\""}
             ]})
         );
         assert_eq!(
@@ -245,6 +260,23 @@ mod tests {
             ]})
         );
     }
+    #[test]
+    fn quoted_terms_are_not_property_restrictions_or_operators() {
+        assert_eq!(
+            to_filter("\"from:a\"").unwrap(),
+            json!({"text": "\"from:a\""})
+        );
+        assert_eq!(
+            to_filter("subject: \"mobile\"").unwrap(),
+            json!({"subject": "\"mobile\""})
+        );
+        assert_eq!(to_filter("\"AND\"").unwrap(), json!({"text": "\"AND\""}));
+        assert_eq!(
+            to_filter(r#"subject:"a\"b""#).unwrap(),
+            json!({"subject": r#""a\"b""#})
+        );
+    }
+
     #[test]
     fn rejects_queries_that_cannot_be_translated() {
         for query in [
@@ -256,6 +288,12 @@ mod tests {
             "from:",
             "sent:2026-01-01",
             "foo*",
+            "subject:\"hello world\"",
+            "\"hello world\"",
+            "-from:a",
+            "+subject:a",
+            "size>=1024",
+            "received<2026-01-01",
             "a NEAR b",
             "subject:\"unfinished",
         ] {
