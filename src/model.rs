@@ -53,6 +53,8 @@ pub struct Email {
     pub from: String,
     pub to: String,
     pub cc: String,
+    pub bcc: String,
+    pub preview: Option<String>,
     pub read: bool,
     pub body: Option<EmailBody>,
     pub attachments: Vec<EmailAttachment>,

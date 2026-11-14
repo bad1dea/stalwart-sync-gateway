@@ -187,6 +187,56 @@ fn email_json(
     })
 }
 
+fn matches_mail_filter(m: &Mock, id: &str, filter: &serde_json::Value) -> bool {
+    if let Some(operator) = filter["operator"].as_str() {
+        let conditions = filter["conditions"].as_array().unwrap();
+        return match operator {
+            "AND" => conditions
+                .iter()
+                .all(|value| matches_mail_filter(m, id, value)),
+            "OR" => conditions
+                .iter()
+                .any(|value| matches_mail_filter(m, id, value)),
+            "NOT" => !conditions
+                .iter()
+                .any(|value| matches_mail_filter(m, id, value)),
+            _ => panic!("unknown JMAP operator"),
+        };
+    }
+    filter
+        .as_object()
+        .unwrap()
+        .iter()
+        .all(|(key, value)| match key.as_str() {
+            "inMailbox" => m
+                .boxes
+                .lock()
+                .unwrap()
+                .get(value.as_str().unwrap())
+                .is_some_and(|ids| ids.iter().any(|item| item == id)),
+            "text" | "subject" => format!("subject {id}").contains(value.as_str().unwrap()),
+            "body" => "body".contains(value.as_str().unwrap()),
+            "from" => "a@x.test".contains(value.as_str().unwrap()),
+            "to" | "cc" | "bcc" => false,
+            "hasAttachment" => value == false,
+            "hasKeyword" => m
+                .keywords
+                .lock()
+                .unwrap()
+                .get(id)
+                .is_some_and(|keywords| keywords.contains(value.as_str().unwrap())),
+            "notKeyword" => !m
+                .keywords
+                .lock()
+                .unwrap()
+                .get(id)
+                .is_some_and(|keywords| keywords.contains(value.as_str().unwrap())),
+            "after" => m.date_of(id).as_str() >= value.as_str().unwrap(),
+            "before" => m.date_of(id).as_str() < value.as_str().unwrap(),
+            _ => panic!("unexpected native JMAP filter field: {key}"),
+        })
+}
+
 async fn mock_api(
     State(m): State<Arc<Mock>>,
     Json(req): Json<serde_json::Value>,
@@ -239,6 +289,16 @@ async fn mock_api(
                         .cloned()
                         .collect();
                 }
+                if args["filter"]["operator"].is_string() {
+                    ids = boxes
+                        .values()
+                        .flatten()
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
+                    ids.retain(|id| matches_mail_filter(&m, id, &args["filter"]));
+                }
                 ids.reverse();
                 if let Some(after) = args["filter"]["after"].as_str() {
                     // RFC 3339 UTC strings of one format compare as dates.
@@ -249,7 +309,7 @@ async fn mock_api(
                 let position = args["position"].as_u64().unwrap_or(0) as usize;
                 ids = ids.into_iter().skip(position).take(limit).collect();
                 last_query = ids.clone();
-                serde_json::json!({ "ids": ids, "total": total })
+                serde_json::json!({ "ids": ids, "total": total, "queryState": m.change_log.lock().unwrap().len().to_string() })
             }
             "AddressBook/get" => {
                 serde_json::json!({"list": [{"id": "book", "name": "Contacts", "isDefault": true}]})
@@ -4280,4 +4340,137 @@ async fn replay_never_serves_a_response_encoded_for_another_protocol_version() {
         .await
         .unwrap();
     assert_eq!(replay, response);
+}
+
+fn find_body(id: &str, text: &str, folder: Option<&str>, range: &str) -> Vec<u8> {
+    use eas::{airsync as air, find as f};
+    let mut b = eas::DocumentBuilder::new();
+    b.start(f::FIND);
+    b.leaf(f::SEARCH_ID, id);
+    b.start(f::EXECUTE_SEARCH);
+    b.start(f::MAILBOX_SEARCH_CRITERION);
+    b.start(f::QUERY);
+    b.leaf(air::CLASS, "Email");
+    b.leaf(f::FREE_TEXT, text);
+    if let Some(folder) = folder {
+        b.leaf(air::COLLECTION_ID, folder);
+    }
+    b.end();
+    b.start(f::OPTIONS);
+    b.leaf(f::RANGE, range);
+    b.end();
+    b.end();
+    b.end();
+    b.end();
+    wbxml::encode_document(&b.finish())
+}
+
+#[tokio::test]
+async fn find_maps_kql_to_jmap_pages_metadata_and_restarts_changed_searches() {
+    use eas::{airsync as air, airsync_base as base, find as f};
+    let env = start_env(Opts::default()).await;
+    env.mock.add_mail("other", "archived-old");
+    env.mock.set_date("archived-old", "2020-01-01T00:00:00Z");
+    let sid = "7dc6ffa0-2aa5-43f6-b441-bdda13785428";
+    let request = find_body(sid, "subject: subject", None, "0-0");
+    let send = |body| {
+        env.req("Find", "client")
+            .header("MS-ASProtocolVersion", "16.1")
+            .body(body)
+            .send()
+    };
+    let response = send(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("3"));
+    assert_eq!(eas::find_text_after(&doc, f::RANGE), Some("0-0"));
+    assert_eq!(eas::find_all_text_after(&doc, air::SERVER_ID).len(), 1);
+    assert!(!eas::contains_token(&doc, base::BODY));
+    let response = send(find_body(sid, "subject: subject", None, "1-2"))
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    let ids = eas::find_all_text_after(&doc, air::SERVER_ID);
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&"archived-old".to_owned()));
+    let env = env.restarted().await;
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(sid, "subject: subject", None, "1-2"))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+    env.mock.add_mail("inbox", "new");
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(sid, "subject: subject", None, "1-2"))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "4"]);
+}
+
+#[tokio::test]
+async fn find_scopes_queries_and_rejects_unsupported_inputs() {
+    use eas::{airsync as air, find as f};
+    let env = start_env(Opts::default()).await;
+    env.mock.add_mail("other", "archived");
+    env.mock.set_keyword("m1", "$flagged", true);
+    let sid = "7dc6ffa0-2aa5-43f6-b441-bdda13785428";
+    for (query, folder, range, status, expected) in [
+        (
+            "subject:subject AND isflagged:true",
+            Some("inbox"),
+            "0-9",
+            vec!["1", "1"],
+            vec!["m1"],
+        ),
+        (
+            "subject:archived",
+            Some("other"),
+            "0-9",
+            vec!["1", "1"],
+            vec!["archived"],
+        ),
+        (
+            "subject:archived",
+            Some("inbox"),
+            "0-9",
+            vec!["1", "1"],
+            vec![],
+        ),
+        ("sent:2020-01-01", None, "0-9", vec!["2"], vec![]),
+        ("subject:subject", Some("missing"), "0-9", vec!["3"], vec![]),
+        ("subject:subject", None, "8-2", vec!["2"], vec![]),
+        ("subject:subject", None, "1-2", vec!["1", "4"], vec![]),
+    ] {
+        let response = env
+            .req("Find", "client")
+            .header("MS-ASProtocolVersion", "16.1")
+            .body(find_body(sid, query, folder, range))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, f::STATUS), status, "{query}");
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::SERVER_ID),
+            expected,
+            "{query}"
+        );
+    }
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "14.0")
+        .body(find_body(sid, "subject:subject", None, "0-9"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
 }

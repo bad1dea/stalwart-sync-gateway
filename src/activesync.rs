@@ -1,3 +1,4 @@
+mod find;
 mod item_operations;
 
 use axum::{
@@ -333,6 +334,9 @@ pub async fn post_handler(
                         &state, &auth, &document, multipart, version, command,
                     )
                     .await;
+                }
+                if command.eq_ignore_ascii_case("Find") {
+                    return find::handle(&state, &auth, &query, &document, version).await;
                 }
                 if command.eq_ignore_ascii_case("Search") {
                     return search(&state, &auth, &document, version, command).await;
@@ -3118,11 +3122,13 @@ fn write_email_fields(
     // matching z-push's real appended order (Body, Attachments,
     // NativeBodyType) -- this gateway had it right after Body instead.
     let native_body_type = email.body.as_ref().map(|body| body.body_type);
-    let preview_text = email
-        .body
-        .as_ref()
-        .map(plain_text_preview)
-        .unwrap_or_default();
+    let preview_text = email.preview.clone().unwrap_or_else(|| {
+        email
+            .body
+            .as_ref()
+            .map(plain_text_preview)
+            .unwrap_or_default()
+    });
     if let Some(mime) = body_pref.as_ref().and_then(|pref| pref.mime_data.clone()) {
         builder.start(base::BODY);
         builder.leaf(base::TYPE, "4");
@@ -3229,6 +3235,9 @@ fn write_email_fields(
     }
     write_email_flag(builder, email.keywords.iter().any(|k| k == "$flagged"));
     if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
+        if !email.bcc.is_empty() {
+            builder.leaf(email2::BCC, &email.bcc);
+        }
         builder.leaf(
             email2::IS_DRAFT,
             if email.keywords.iter().any(|k| k == "$draft") {
@@ -5651,6 +5660,8 @@ mod tests {
             from: "sender@example.com".to_owned(),
             to: "recipient@example.com".to_owned(),
             cc: "cc@example.com".to_owned(),
+            bcc: String::new(),
+            preview: None,
             read: true,
             body: Some(EmailBody {
                 body_type: EmailBodyType::Plain,
@@ -5733,6 +5744,8 @@ mod tests {
             from: String::new(),
             to: String::new(),
             cc: String::new(),
+            bcc: String::new(),
+            preview: None,
             read: false,
             body: Some(EmailBody {
                 body_type: EmailBodyType::Plain,
@@ -5780,6 +5793,8 @@ mod tests {
             from: String::new(),
             to: String::new(),
             cc: String::new(),
+            bcc: String::new(),
+            preview: None,
             read: false,
             body: None,
             attachments: vec![],
@@ -5822,6 +5837,8 @@ mod tests {
             from: String::new(),
             to: String::new(),
             cc: String::new(),
+            bcc: String::new(),
+            preview: None,
             read: false,
             body: Some(EmailBody {
                 body_type: EmailBodyType::Plain,
@@ -5899,6 +5916,8 @@ mod tests {
             from: String::new(),
             to: String::new(),
             cc: String::new(),
+            bcc: String::new(),
+            preview: None,
             read: false,
             body: None,
             attachments: vec![EmailAttachment {

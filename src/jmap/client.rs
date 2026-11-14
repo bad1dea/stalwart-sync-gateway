@@ -108,7 +108,13 @@ pub struct BasicAuthorization {
     password: String,
 }
 
-/// Mail changes since a stored JMAP Email state (see `email_changes_since`).
+pub struct EmailSearchPage {
+    pub emails: Vec<Email>,
+    pub total: u64,
+    pub query_state: Option<String>,
+}
+
+/// Mail changes since a stored JMAP Email state.
 #[derive(Debug, Default)]
 pub struct EmailChangesSince {
     pub new_state: String,
@@ -603,17 +609,62 @@ impl JmapClient {
         position: i64,
         limit: usize,
     ) -> anyhow::Result<(Vec<Email>, u64)> {
+        let page = self
+            .query_emails(
+                auth,
+                serde_json::json!({"text": text}),
+                position,
+                limit.min(100),
+                &[
+                    "id",
+                    "blobId",
+                    "mailboxIds",
+                    "keywords",
+                    "receivedAt",
+                    "subject",
+                    "from",
+                    "to",
+                    "cc",
+                    "bcc",
+                    "preview",
+                    "textBody",
+                    "htmlBody",
+                    "bodyValues",
+                    "attachments",
+                    "threadId",
+                ],
+            )
+            .await?;
+        Ok((page.emails, page.total))
+    }
+
+    pub async fn query_emails(
+        &self,
+        auth: &AuthenticatedSession,
+        filter: serde_json::Value,
+        position: i64,
+        limit: usize,
+        properties: &[&str],
+    ) -> anyhow::Result<EmailSearchPage> {
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
-            return Ok((Vec::new(), 0));
+            anyhow::bail!("JMAP Mail capability is unavailable");
         };
-        let limit = limit.clamp(1, 100);
+        let maximum = auth
+            .session
+            .capabilities
+            .get(capabilities::CORE)
+            .and_then(|cap| cap.get("maxObjectsInGet"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(100)
+            .clamp(1, 1000) as usize;
+        let limit = limit.clamp(1, maximum);
 
         let calls = vec![
             MethodCall::new(
                 "Email/query",
                 serde_json::json!({
                     "accountId": account_id,
-                    "filter": { "text": text },
+                    "filter": filter,
                     "sort": [{ "property": "receivedAt", "isAscending": false }],
                     "position": position,
                     "limit": limit,
@@ -630,11 +681,8 @@ impl JmapClient {
                         "name": "Email/query",
                         "path": "/ids"
                     },
-                    "properties": [
-                        "id", "blobId", "mailboxIds", "keywords", "receivedAt", "subject",
-                        "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments", "threadId"
-                    ],
-                    "fetchAllBodyValues": true,
+                    "properties": properties,
+                    "fetchAllBodyValues": properties.contains(&"bodyValues"),
                     "maxBodyValueBytes": 65536
                 }),
                 "g",
@@ -650,25 +698,37 @@ impl JmapClient {
             .await?;
 
         let mut total: u64 = 0;
+        let mut query_state = None;
+        let mut query_count = 0;
         for method in response.method_responses {
             match method.0.as_str() {
                 "Email/query" => {
                     let query: QueryResponse =
                         serde_json::from_value(method.1).context("invalid Email/query response")?;
-                    total = query.total.unwrap_or(0);
+                    total = query.total.context("Email/query omitted total")?;
+                    query_state = query.query_state;
+                    query_count = query.ids.len();
                 }
                 "Email/get" => {
                     let get: GetResponse<EmailObject> =
                         serde_json::from_value(method.1).context("invalid Email/get response")?;
                     let emails: Vec<Email> = get.list.into_iter().map(Email::from).collect();
-                    return Ok((emails, total));
+                    anyhow::ensure!(
+                        emails.len() == query_count,
+                        "Email search changed during fetch"
+                    );
+                    return Ok(EmailSearchPage {
+                        emails,
+                        total,
+                        query_state,
+                    });
                 }
                 "error" => anyhow::bail!("JMAP method error in email search"),
                 _ => {}
             }
         }
 
-        Ok((Vec::new(), total))
+        anyhow::bail!("missing Email/get response for search")
     }
 
     /// Backs EAS `Search` for `Store>Name == "GAL"` -- confirmed live
@@ -2800,6 +2860,10 @@ struct EmailObject {
     #[serde(default)]
     cc: Option<Vec<EmailAddress>>,
     #[serde(default)]
+    bcc: Option<Vec<EmailAddress>>,
+    #[serde(default)]
+    preview: Option<String>,
+    #[serde(default)]
     text_body: Vec<EmailBodyPart>,
     #[serde(default)]
     html_body: Vec<EmailBodyPart>,
@@ -2871,6 +2935,8 @@ impl From<EmailObject> for Email {
             from: format_addresses(value.from.as_deref().unwrap_or_default()),
             to: format_addresses(value.to.as_deref().unwrap_or_default()),
             cc: format_addresses(value.cc.as_deref().unwrap_or_default()),
+            bcc: format_addresses(value.bcc.as_deref().unwrap_or_default()),
+            preview: value.preview,
             read: value.keywords.get("$seen").copied().unwrap_or(false),
             body,
             attachments,
