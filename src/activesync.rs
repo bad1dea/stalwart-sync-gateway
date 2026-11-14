@@ -1,6 +1,7 @@
 mod find;
 mod item_operations;
 mod sync_options;
+mod sync_request;
 
 use axum::{
     body::Bytes,
@@ -243,45 +244,18 @@ pub async fn post_handler(
         return send_mail(&state, &auth, &query, &body, command).await;
     }
 
-    // [MS-ASCMD] 2.2.1.21: an empty Sync re-executes the device's previous
-    // (cached) Sync request; with nothing cached the answer is Status 13.
-    // A full Sync is remembered for that purpose.
-    let push_user = state.push.user(&auth.username().to_ascii_lowercase());
-    let device_key = query.device_id.clone().unwrap_or_default();
-    let replayed;
-    let body: &[u8] = if command.eq_ignore_ascii_case("Sync") {
-        if body.is_empty() {
-            match push_user.last_sync_body(&device_key) {
-                Some(cached) => {
-                    replayed = cached;
-                    &replayed
-                }
-                None => {
-                    use wbxml::eas::airsync as air;
-                    let mut builder = wbxml::eas::DocumentBuilder::new();
-                    builder.start(air::SYNC);
-                    builder.leaf(air::STATUS, "13");
-                    builder.end();
-                    state
-                        .metrics
-                        .eas_requests_total
-                        .with_label_values(&[command, "200"])
-                        .inc();
-                    return (
-                        StatusCode::OK,
-                        [("Content-Type", "application/vnd.ms-sync.wbxml")],
-                        wbxml::encode_document(&builder.finish()),
-                    )
-                        .into_response();
-                }
-            }
-        } else {
-            push_user.remember_sync_body(&device_key, &body);
-            &body
-        }
-    } else {
-        &body
-    };
+    if body.is_empty() && command.eq_ignore_ascii_case("Sync") {
+        return sync_mail(
+            &state,
+            &auth,
+            &query,
+            &wbxml::Document { nodes: Vec::new() },
+            version,
+            command,
+        )
+        .await;
+    }
+    let body: &[u8] = &body;
 
     // ActiveSync lets a client send Ping with an empty body to reuse the
     // heartbeat and folder list from its previous Ping.
@@ -1831,6 +1805,13 @@ async fn sync_mail(
     version: ProtocolVersion,
     command: &str,
 ) -> Response {
+    let user = auth.username();
+    let device = query.device_id.as_deref().unwrap_or("unknown");
+    let effective = match sync_request::resolve(state, user, device, version, document).await {
+        Ok(document) => document,
+        Err(status) => return sync_request::error(state, command, status),
+    };
+    let document = &effective;
     let collections = wbxml::eas::sync_collections(document);
     for c in &collections {
         tracing::debug!(
@@ -2817,6 +2798,10 @@ async fn sync_mail(
     builder.end();
 
     let reply = builder.finish();
+    if let Err(error) = sync_request::save(state, user, device, version, document, &reply).await {
+        tracing::warn!(%error, "failed to cache Sync request");
+        return sync_request::error(state, command, "5");
+    }
     if trace_enabled(query.device_id.as_deref()) {
         tracing::info!(
             device_id = query.device_id.as_deref().unwrap_or(""),

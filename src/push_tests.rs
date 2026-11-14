@@ -732,6 +732,26 @@ fn sync_body_preferences(
     wbxml::encode_document(&b.finish())
 }
 
+fn partial_sync(folders: &[(&str, &str)], partial: bool) -> Vec<u8> {
+    use eas::airsync as air;
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    if partial {
+        b.empty_tag(air::PARTIAL);
+    }
+    b.start(air::COLLECTIONS);
+    for &(folder, key) in folders {
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, key);
+        b.leaf(air::COLLECTION_ID, folder);
+        b.leaf(air::WINDOW_SIZE, "100");
+        b.end();
+    }
+    b.end();
+    b.end();
+    wbxml::encode_document(&b.finish())
+}
+
 impl Env {
     fn req(&self, cmd: &str, device: &str) -> reqwest::RequestBuilder {
         self.http
@@ -3005,6 +3025,89 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_partial_and_empty_sync_keep_collection_cache_after_restart() {
+        let live = Live::new("E2E_USER2").await;
+        let mut folders = Vec::new();
+        for name in ["partial-a", "partial-b"] {
+            let result = live.call(serde_json::json!([["Mailbox/set", {
+                "accountId": live.account, "create": {"m":{"name":format!("{name} {}", std::process::id())}}
+            }, "0"]])).await;
+            folders.push(
+                result[0][1]["created"]["m"]["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+        let device = dev("partial16");
+        let doc = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                partial_sync(&[(&folders[0], "0"), (&folders[1], "0")], false),
+                "16.1",
+            )
+            .await;
+        let keys = eas::find_all_text_after(&doc, air::SYNC_KEY);
+        let doc = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                partial_sync(&[(&folders[0], &keys[0]), (&folders[1], &keys[1])], false),
+                "16.1",
+            )
+            .await;
+        let keys = eas::find_all_text_after(&doc, air::SYNC_KEY);
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(env("E2E_RESTART_CMD"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "gateway restart failed");
+        let live = Live::new("E2E_USER2").await;
+        let mut ids = live.seed(&folders[1], 1, "partial", false).await;
+        let doc = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                partial_sync(&[(&folders[0], &keys[0])], true),
+                "16.1",
+            )
+            .await;
+        assert_eq!(eas::find_all_text_after(&doc, air::COLLECTION_ID), folders);
+        assert_eq!(eas::find_all_text_after(&doc, air::SERVER_ID), ids);
+        let keys = eas::find_all_text_after(&doc, air::SYNC_KEY);
+        live.wbxml_version(
+            "Sync",
+            &device,
+            partial_sync(&[(&folders[0], &keys[0]), (&folders[1], &keys[1])], false),
+            "16.1",
+        )
+        .await;
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(env("E2E_RESTART_CMD"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "gateway restart failed");
+        let live = Live::new("E2E_USER2").await;
+        let new_ids = live.seed(&folders[0], 1, "empty", false).await;
+        let doc = live
+            .wbxml_version("Sync", &device, Vec::new(), "16.1")
+            .await;
+        assert_eq!(eas::find_all_text_after(&doc, air::SERVER_ID), new_ids);
+        ids.extend(new_ids);
+        let result = live
+            .call(serde_json::json!([["Email/set",{
+            "accountId":live.account,"destroy":ids
+        }, "0"],["Mailbox/set",{"accountId":live.account,"destroy":folders},"1"]]))
+            .await;
+        assert!(result[0][1]["notDestroyed"].is_null());
+        assert!(result[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_lost_response_is_replayed() {
         let live = Live::new("E2E_USER").await;
         let d = dev("replay");
@@ -5109,4 +5212,171 @@ async fn sync_options_do_not_cross_protocol_versions_or_accept_mixed_sms_options
     assert!(eas::find_all_text_after(&doc, base::DATA)
         .iter()
         .all(|body| body == "body"));
+}
+
+#[tokio::test]
+async fn partial_and_empty_sync_preserve_cached_folders_across_restart() {
+    use eas::airsync as air;
+    for version in ["14.0", "16.1"] {
+        let env = start_env(Opts::default()).await;
+        env.mock.add_mail("other", "other-mail");
+        let send = |body| {
+            env.req("Sync", "client")
+                .header("MS-ASProtocolVersion", version)
+                .body(body)
+                .send()
+        };
+        let response = send(partial_sync(&[("inbox", "0")], true)).await.unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("13"));
+        let response = send(partial_sync(&[("inbox", "0"), ("other", "0")], false))
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::SYNC_KEY),
+            vec!["1", "1"]
+        );
+        let response = send(partial_sync(&[("inbox", "1"), ("other", "1")], false))
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        let keys = eas::find_all_text_after(&doc, air::SYNC_KEY);
+        let response = send(partial_sync(
+            &[("inbox", &keys[0]), ("other", &keys[1])],
+            false,
+        ))
+        .await
+        .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert!(!eas::contains_token(&doc, air::COMMANDS));
+
+        let env = env.restarted().await;
+        let send = |body| {
+            env.req("Sync", "client")
+                .header("MS-ASProtocolVersion", version)
+                .body(body)
+                .send()
+        };
+        env.mock.add_mail("other", "after-restart");
+        let response = send(partial_sync(&[("inbox", &keys[0])], true))
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::COLLECTION_ID),
+            vec!["inbox", "other"]
+        );
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::SERVER_ID),
+            vec!["after-restart"]
+        );
+        let new_keys = eas::find_all_text_after(&doc, air::SYNC_KEY);
+        let response = send(partial_sync(&[("other", &new_keys[1])], true))
+            .await
+            .unwrap();
+        let quiet = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert!(!eas::contains_token(&quiet, air::COMMANDS));
+
+        let response = send(partial_sync(&[("inbox", "invalid")], false))
+            .await
+            .unwrap();
+        let invalid = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&invalid, air::STATUS), Some("3"));
+        let env = env.restarted().await;
+        env.mock.add_mail("inbox", "empty-after-restart");
+        let response = env
+            .req("Sync", "client")
+            .header("MS-ASProtocolVersion", version)
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::COLLECTION_ID),
+            vec!["other", "inbox"]
+        );
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::SERVER_ID),
+            vec!["empty-after-restart"]
+        );
+        let response = env
+            .req("Sync", "other-device")
+            .header("MS-ASProtocolVersion", version)
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("13"));
+        let response = env
+            .http
+            .post(format!("{}?Cmd=Sync&User=u%40test&DeviceId=client", env.gw))
+            .basic_auth("different@example.test", Some("pw"))
+            .header("MS-ASProtocolVersion", version)
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("13"));
+        let other_version = if version == "14.0" { "16.1" } else { "14.0" };
+        let response = env
+            .req("Sync", "client")
+            .header("MS-ASProtocolVersion", other_version)
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("13"));
+    }
+}
+
+#[tokio::test]
+async fn cached_sync_omits_uploads_and_rejects_duplicate_collections() {
+    use base64::Engine;
+    use eas::airsync as air;
+    let env = start_env(Opts::default()).await;
+    let (key, _) = initial_sync(&env, "client", None).await;
+    let response = env
+        .req("Sync", "client")
+        .body(flag_change_body(&key, "m1", Some("2"), Some(true), false))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("1"));
+    let saved = env
+        .state
+        .item_states("u@test", "client", "__sync_request__:14.0")
+        .await
+        .unwrap();
+    let cached = base64::engine::general_purpose::STANDARD
+        .decode(&saved[0].hash)
+        .unwrap();
+    let cached = wbxml::decode_document(&cached).unwrap();
+    assert!(!eas::contains_token(&cached, air::COMMANDS));
+    let log_count = env.mock.change_log.lock().unwrap().len();
+    let response = env.req("Sync", "client").send().await.unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("1"));
+    assert_eq!(env.mock.change_log.lock().unwrap().len(), log_count);
+    let response = env
+        .req("Sync", "client")
+        .body(partial_sync(&[("inbox", "0"), ("inbox", "0")], false))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("4"));
+    let mut bare = eas::DocumentBuilder::new();
+    bare.start(air::SYNC);
+    bare.empty_tag(air::PARTIAL);
+    bare.end();
+    let response = env
+        .req("Sync", "client")
+        .body(wbxml::encode_document(&bare.finish()))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("4"));
 }

@@ -257,6 +257,9 @@ pub mod airsync {
     pub const FILTER_TYPE: Token = tag(0x18, false);
     pub const DELETES_AS_MOVES: Token = tag(0x1e, false);
     pub const SOFT_DELETE: Token = tag(0x21, false);
+    pub const WAIT: Token = tag(0x24, false);
+    pub const PARTIAL: Token = tag(0x26, false);
+    pub const HEARTBEAT_INTERVAL: Token = tag(0x29, false);
     pub const COMMANDS: Token = tag(0x16, false);
     pub const COLLECTIONS: Token = tag(0x1c, false);
     pub const APPLICATION_DATA: Token = tag(0x1d, false);
