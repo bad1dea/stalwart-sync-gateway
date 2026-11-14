@@ -383,6 +383,24 @@ async fn mock_es(State(m): State<Arc<Mock>>) -> impl IntoResponse {
     )
 }
 
+const BLOB_BYTES: &[u8] = b"\x00\xff\x01\x02\x80payload";
+const MIME_BYTES: &[u8] =
+    b"From: a@example.test\r\nContent-Type: application/octet-stream\r\n\r\n\xff\x00\x80";
+
+async fn mock_download(
+    axum::extract::Path((_account, blob, _name)): axum::extract::Path<(String, String, String)>,
+) -> axum::response::Response {
+    if blob == "missing" {
+        return (axum::http::StatusCode::NOT_FOUND, "missing").into_response();
+    }
+    let data = if blob == "binary" {
+        BLOB_BYTES
+    } else {
+        MIME_BYTES
+    };
+    ([("Content-Type", "application/octet-stream")], data).into_response()
+}
+
 async fn start_mock() -> Arc<Mock> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -405,6 +423,7 @@ async fn start_mock() -> Arc<Mock> {
     let app = Router::new()
         .route("/.well-known/jmap", get(mock_session))
         .route("/api", post(mock_api))
+        .route("/dl/:account/:blob/:name", get(mock_download))
         .route("/es/", get(mock_es))
         .with_state(mock.clone());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -3528,4 +3547,117 @@ async fn item_estimates_count_pending_downloads_instead_of_always_zero() {
         let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
         assert_eq!(eas::find_text_after(&doc, gie::ESTIMATE), Some("3"));
     }
+}
+
+#[tokio::test]
+async fn item_operations_fetches_all_entries_in_order_and_isolates_failures() {
+    use base64::Engine;
+    use eas::{airsync as air, airsync_base as base, item_operations as ops};
+    let env = start_env(Opts::default()).await;
+    let mut b = eas::DocumentBuilder::new();
+    b.start(ops::ITEM_OPERATIONS);
+    b.start(ops::FETCH);
+    b.leaf(ops::STORE, "Mailbox");
+    b.leaf(base::FILE_REFERENCE, "binary||test.dat");
+    b.start(ops::OPTIONS);
+    b.leaf(ops::RANGE, "1-3");
+    b.end();
+    b.end();
+    b.start(ops::FETCH);
+    b.leaf(ops::STORE, "Mailbox");
+    b.leaf(air::COLLECTION_ID, "inbox");
+    b.leaf(air::SERVER_ID, "missing");
+    b.end();
+    b.start(ops::FETCH);
+    b.leaf(ops::STORE, "Mailbox");
+    b.leaf(air::COLLECTION_ID, "inbox");
+    b.leaf(air::SERVER_ID, "m1");
+    b.start(ops::OPTIONS);
+    b.start(base::BODY_PREFERENCE);
+    b.leaf(base::TYPE, "1");
+    b.leaf(base::TRUNCATION_SIZE, "2");
+    b.end();
+    b.end();
+    b.end();
+    b.start(ops::FETCH);
+    b.leaf(ops::STORE, "Mailbox");
+    b.leaf(base::FILE_REFERENCE, "binary||test.dat");
+    b.start(ops::OPTIONS);
+    b.leaf(ops::RANGE, "9-1");
+    b.end();
+    b.end();
+    b.start(ops::FETCH);
+    b.leaf(ops::STORE, "Other");
+    b.leaf(base::FILE_REFERENCE, "binary||test.dat");
+    b.end();
+    b.start(ops::FETCH);
+    b.leaf(ops::STORE, "Mailbox");
+    b.leaf(base::FILE_REFERENCE, "missing||test.dat");
+    b.end();
+    b.end();
+    let request = wbxml::encode_document(&b.finish());
+    for version in ["14.0", "16.1"] {
+        let response = env
+            .req("ItemOperations", "client")
+            .header("MS-ASProtocolVersion", version)
+            .body(request.clone())
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(
+            eas::find_all_text_after(&doc, ops::STATUS),
+            vec!["1", "1", "6", "1", "8", "9", "15"]
+        );
+        let root = eas::child_elements(&doc);
+        let fetches = eas::child_elements(&root[1]);
+        assert_eq!(fetches.len(), 6);
+        let data = eas::find_text_after(&fetches[0], ops::DATA).unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .unwrap(),
+            BLOB_BYTES[1..4]
+        );
+        assert_eq!(eas::find_text_after(&fetches[0], ops::RANGE), Some("1-3"));
+        assert_eq!(
+            eas::find_text_after(&fetches[0], ops::TOTAL),
+            Some(BLOB_BYTES.len().to_string()).as_deref()
+        );
+        assert_eq!(eas::find_text_after(&fetches[2], base::DATA), Some("bo"));
+        assert_eq!(
+            eas::find_text_after(&fetches[2], base::TRUNCATED),
+            Some("1")
+        );
+    }
+}
+
+#[tokio::test]
+async fn item_operations_mime_preserves_non_utf8_bytes() {
+    use eas::{airsync as air, airsync_base as base, item_operations as ops};
+    let env = start_env(Opts::default()).await;
+    let mut b = eas::DocumentBuilder::new();
+    b.start(ops::ITEM_OPERATIONS);
+    b.start(ops::FETCH);
+    b.leaf(ops::STORE, "Mailbox");
+    b.leaf(air::COLLECTION_ID, "inbox");
+    b.leaf(air::SERVER_ID, "m1");
+    b.start(ops::OPTIONS);
+    b.start(base::BODY_PREFERENCE);
+    b.leaf(base::TYPE, "4");
+    b.end();
+    b.end();
+    b.end();
+    b.end();
+    let response = env
+        .req("ItemOperations", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, ops::STATUS), vec!["1", "1"]);
+    assert_eq!(eas::find_text_after(&doc, base::TYPE), Some("4"));
+    assert_eq!(eas::find_opaque_after(&doc, base::DATA), Some(MIME_BYTES));
 }

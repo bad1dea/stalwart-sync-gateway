@@ -1,3 +1,5 @@
+mod item_operations;
+
 use axum::{
     body::Bytes,
     extract::{Query, State},
@@ -323,7 +325,7 @@ pub async fn post_handler(
                     return ping(&state, &auth, &query, Some(&document), command).await;
                 }
                 if command.eq_ignore_ascii_case("ItemOperations") {
-                    return item_operations(&state, &auth, &document, command).await;
+                    return item_operations::handle(&state, &auth, &document, command).await;
                 }
                 if command.eq_ignore_ascii_case("Search") {
                     return search(&state, &auth, &document, command).await;
@@ -816,115 +818,6 @@ async fn ping_inner(
             }
         }
     }
-}
-
-/// Handles `ItemOperations > Fetch` addressed the "Mailbox Store" way
-/// (Store/CollectionId/ServerId) -- what iOS sends when a user opens a
-/// message from a prior Sync result. This command was entirely
-/// unimplemented (fell through to the generic 501 in `post_handler`)
-/// until now, which iOS reads as "keep waiting" rather than an error --
-/// confirmed live as an infinite spinner with no body shown when opening
-/// any message, even though the full body was already delivered inline
-/// in the original Sync response.
-async fn item_operations(
-    state: &AppState,
-    auth: &crate::jmap::client::AuthenticatedSession,
-    document: &wbxml::Document,
-    command: &str,
-) -> Response {
-    use wbxml::eas::{airsync as air, item_operations as ops};
-
-    let Some(fetch) = wbxml::eas::item_operations_fetch(document) else {
-        state
-            .metrics
-            .eas_requests_total
-            .with_label_values(&[command, "400"])
-            .inc();
-        return (
-            StatusCode::BAD_REQUEST,
-            "ItemOperations Fetch missing Store plus CollectionId+ServerId or LongId\n",
-        )
-            .into_response();
-    };
-
-    let mut builder = wbxml::eas::DocumentBuilder::new();
-    builder.start(ops::ITEM_OPERATIONS);
-    builder.leaf(ops::STATUS, "1");
-    builder.start(ops::RESPONSE);
-    builder.start(ops::FETCH);
-
-    if !fetch.store.eq_ignore_ascii_case("Mailbox") {
-        // Only mail items are fetchable this way today (no Notes/Contacts/
-        // Calendar item fetch, no DocumentLibrary store). Fail this one
-        // Fetch cleanly rather than hang or 400 the whole request.
-        builder.leaf(ops::STATUS, "2");
-        builder.end();
-        builder.end();
-        builder.end();
-    } else {
-        // `long_id` (a Search-result fetch) and `server_id` (a Sync-result
-        // fetch) are the same underlying JMAP email id in this gateway --
-        // `Search`'s own Result writer sets LongId to that id precisely so
-        // this lookup works. Prefer long_id when both happen to be present
-        // (shouldn't occur from a real device, but long_id is the more
-        // specific request shape if it does).
-        let target_id = fetch.long_id.as_deref().or(fetch.server_id.as_deref());
-        match target_id {
-            None => {
-                // Parser already guarantees at least one of these is
-                // present, but stay defensive rather than panic/unwrap.
-                builder.leaf(ops::STATUS, "2");
-                builder.end();
-                builder.end();
-                builder.end();
-            }
-            Some(target_id) => match state.jmap.get_email_by_id(auth, target_id).await {
-                Ok(Some(email)) => {
-                    builder.leaf(ops::STATUS, "1");
-                    if let Some(collection_id) = &fetch.collection_id {
-                        builder.leaf(air::COLLECTION_ID, collection_id.clone());
-                    }
-                    builder.leaf(air::SERVER_ID, target_id.to_owned());
-                    builder.start(ops::PROPERTIES);
-                    write_email_fields(&mut builder, target_id, email, None);
-                    builder.end();
-                    builder.end();
-                    builder.end();
-                    builder.end();
-                }
-                Ok(None) => {
-                    tracing::warn!(
-                        server_id = target_id,
-                        "ItemOperations Fetch: email not found"
-                    );
-                    builder.leaf(ops::STATUS, "8");
-                    builder.end();
-                    builder.end();
-                    builder.end();
-                }
-                Err(error) => {
-                    tracing::warn!(%error, server_id = target_id, "ItemOperations Fetch failed");
-                    builder.leaf(ops::STATUS, "3");
-                    builder.end();
-                    builder.end();
-                    builder.end();
-                }
-            },
-        }
-    }
-
-    let body = wbxml::encode_document(&builder.finish());
-    state
-        .metrics
-        .eas_requests_total
-        .with_label_values(&[command, "200"])
-        .inc();
-    (
-        StatusCode::OK,
-        [("Content-Type", "application/vnd.ms-sync.wbxml")],
-        body,
-    )
-        .into_response()
 }
 
 /// Handles `Search` (MS-ASCMD 2.2.1.16) -- was advertised in
@@ -2858,7 +2751,7 @@ async fn resolve_fetch_commands(
     body_pref_type: Option<u8>,
 ) -> Vec<(
     String,
-    anyhow::Result<Option<(crate::model::Email, Option<String>)>>,
+    anyhow::Result<Option<(crate::model::Email, Option<bytes::Bytes>)>>,
 )> {
     let mut results = Vec::new();
     for command in commands {
@@ -2886,7 +2779,7 @@ async fn resolve_fetch_commands(
                         match &email.blob_id {
                             Some(blob_id) => {
                                 match state.jmap.download_blob(auth, blob_id, "message.eml").await {
-                                    Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+                                    Ok(bytes) => Some(bytes::Bytes::from(bytes)),
                                     Err(error) => {
                                         tracing::warn!(
                                             %error,
@@ -2918,7 +2811,7 @@ async fn resolve_fetch_commands(
 /// can't drift.
 type FetchResult = (
     String,
-    anyhow::Result<Option<(crate::model::Email, Option<String>)>>,
+    anyhow::Result<Option<(crate::model::Email, Option<bytes::Bytes>)>>,
 );
 
 fn write_fetch_responses(builder: &mut wbxml::eas::DocumentBuilder, results: Vec<FetchResult>) {
@@ -2973,7 +2866,7 @@ struct BodyPreference {
     /// Pre-fetched raw RFC822 MIME source, when body_type == Some(4). Has
     /// to be fetched async (a JMAP blob download) before write_email_fields
     /// runs, since that function isn't async -- see resolve_fetch_commands.
-    mime_data: Option<String>,
+    mime_data: Option<bytes::Bytes>,
 }
 
 fn write_email_add(
@@ -3077,52 +2970,29 @@ fn write_email_fields(
     // NativeBodyType is captured here but emitted AFTER Attachments below,
     // matching z-push's real appended order (Body, Attachments,
     // NativeBodyType) -- this gateway had it right after Body instead.
-    let mut native_body_type = None;
-    if let Some(body) = email.body {
-        // Real structural bug, found via the full z-push-stalwart-jmap
-        // source (PR #187): AirSyncBase:Preview is a CHILD of Body (in
-        // SyncBaseBody's own $mapping, appended after Data), not a
-        // sibling of Body under ApplicationData/Email. This gateway had
-        // it as a sibling, written BEFORE Body even opened. iOS never
-        // hard-errored on it (unlike the Attachment/Settings bugs) --
-        // it silently ignored a Preview in the wrong position instead,
-        // which is why every message's list-row preview was still
-        // showing raw HTML/markup even after the "strip tags" fix
-        // landed: the correctly-stripped Preview text was being sent to
-        // a schema position iOS's parser doesn't associate with the
-        // list-view snippet at all.
-        let preview_text = plain_text_preview(&body);
-        native_body_type = Some(body.body_type);
-        // Real bug, found via a direct live wire comparison against
-        // z-push for a real message-open: the request's own
-        // BodyPreference asked for Type=4 (MIME), not plain/HTML, and
-        // this gateway had no MIME path at all -- see
-        // resolve_fetch_commands's own docs for the full story. A MIME
-        // reply bypasses apply_body_preference's HTML/plain conversion
-        // entirely: the pre-fetched raw RFC822 source IS the Data,
-        // Type is the literal "4", verbatim (not truncated -- z-push's
-        // own MIME path doesn't truncate it either).
-        if let Some(mime) = body_pref.as_ref().and_then(|p| p.mime_data.clone()) {
-            builder.start(base::BODY);
-            builder.leaf(base::TYPE, "4");
-            builder.leaf(base::ESTIMATED_DATA_SIZE, mime.len().to_string());
-            builder.leaf(base::TRUNCATED, "0");
-            builder.leaf(base::DATA, mime);
-            builder.leaf(base::PREVIEW, preview_text);
-            builder.end();
-        } else {
-            let (out_type, out_value, full_len, truncated) = apply_body_preference(body, body_pref);
-            builder.start(base::BODY);
-            builder.leaf(base::TYPE, out_type.eas_value());
-            // Full untruncated size, even when Data below is cut short --
-            // this is how the client knows there's more to fetch via
-            // ItemOperations.
-            builder.leaf(base::ESTIMATED_DATA_SIZE, full_len.to_string());
-            builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
-            builder.leaf(base::DATA, out_value);
-            builder.leaf(base::PREVIEW, preview_text);
-            builder.end();
-        }
+    let native_body_type = email.body.as_ref().map(|body| body.body_type);
+    let preview_text = email
+        .body
+        .as_ref()
+        .map(plain_text_preview)
+        .unwrap_or_default();
+    if let Some(mime) = body_pref.as_ref().and_then(|pref| pref.mime_data.clone()) {
+        builder.start(base::BODY);
+        builder.leaf(base::TYPE, "4");
+        builder.leaf(base::ESTIMATED_DATA_SIZE, mime.len().to_string());
+        builder.leaf(base::TRUNCATED, "0");
+        builder.opaque_leaf(base::DATA, mime);
+        builder.leaf(base::PREVIEW, preview_text);
+        builder.end();
+    } else if let Some(body) = email.body {
+        let (out_type, out_value, full_len, truncated) = apply_body_preference(body, body_pref);
+        builder.start(base::BODY);
+        builder.leaf(base::TYPE, out_type.eas_value());
+        builder.leaf(base::ESTIMATED_DATA_SIZE, full_len.to_string());
+        builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
+        builder.leaf(base::DATA, out_value);
+        builder.leaf(base::PREVIEW, preview_text);
+        builder.end();
     }
     if !email.attachments.is_empty() {
         builder.start(base::ATTACHMENTS);

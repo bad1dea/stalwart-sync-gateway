@@ -2297,6 +2297,15 @@ impl JmapClient {
         blob_id: &str,
         name: &str,
     ) -> anyhow::Result<Vec<u8>> {
+        Ok(self.download_blob_with_type(auth, blob_id, name).await?.0)
+    }
+
+    pub async fn download_blob_with_type(
+        &self,
+        auth: &AuthenticatedSession,
+        blob_id: &str,
+        name: &str,
+    ) -> anyhow::Result<(Vec<u8>, String)> {
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
             anyhow::bail!("JMAP Mail capability is not available");
         };
@@ -2321,11 +2330,18 @@ impl JmapClient {
         if !status.is_success() {
             anyhow::bail!("JMAP blob download from {url} returned {status}");
         }
-        Ok(response
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_owned();
+        let bytes = response
             .bytes()
             .await
             .context("failed to read blob download body")?
-            .to_vec())
+            .to_vec();
+        Ok((bytes, content_type))
     }
 
     pub(crate) async fn upload_blob(

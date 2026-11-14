@@ -497,6 +497,10 @@ pub mod item_operations {
     pub const ITEM_OPERATIONS: Token = tag(0x05, false);
     pub const FETCH: Token = tag(0x06, false);
     pub const STORE: Token = tag(0x07, false);
+    pub const OPTIONS: Token = tag(0x08, true);
+    pub const RANGE: Token = tag(0x09, false);
+    pub const TOTAL: Token = tag(0x0a, false);
+    pub const DATA: Token = tag(0x0c, false);
     pub const STATUS: Token = tag(0x0d, false);
     pub const RESPONSE: Token = tag(0x0e, false);
     pub const PROPERTIES: Token = tag(0x0b, false);
@@ -1193,6 +1197,10 @@ pub struct ItemOperationsFetchRequest {
     /// a specific `Search` result by the opaque id that result's own
     /// `LongId` carried, instead of the CollectionId+ServerId shape.
     pub long_id: Option<String>,
+    pub file_reference: Option<String>,
+    pub range: Option<String>,
+    pub body_pref_type: Option<u8>,
+    pub body_pref_truncation_size: Option<usize>,
 }
 
 /// Parses an `ItemOperations > Fetch` request, accepting EITHER the
@@ -1206,12 +1214,49 @@ pub struct ItemOperationsFetchRequest {
 /// (CollectionId+ServerId) or LongId; returns `None` otherwise. Ignores
 /// `Options` (body preference/truncation) -- the gateway always returns
 /// the full body regardless, same as Sync does.
+pub fn child_elements(document: &Document) -> Vec<Document> {
+    let mut children = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (index, node) in document.nodes.iter().enumerate() {
+        match node {
+            Node::Start(token) => {
+                if depth == 1 {
+                    start = index;
+                    if !token.has_content {
+                        children.push(Document {
+                            nodes: vec![node.clone()],
+                        });
+                    }
+                }
+                if token.has_content {
+                    depth += 1;
+                }
+            }
+            Node::End => {
+                depth -= 1;
+                if depth == 1 {
+                    children.push(Document {
+                        nodes: document.nodes[start..=index].to_vec(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    children
+}
+
 pub fn item_operations_fetch(document: &Document) -> Option<ItemOperationsFetchRequest> {
     let store = find_text_after(document, item_operations::STORE)?.to_owned();
     let collection_id = find_text_after(document, airsync::COLLECTION_ID).map(str::to_owned);
     let server_id = find_text_after(document, airsync::SERVER_ID).map(str::to_owned);
     let long_id = find_text_after(document, search::LONG_ID).map(str::to_owned);
-    if long_id.is_none() && (collection_id.is_none() || server_id.is_none()) {
+    let file_reference = find_text_after(document, airsync_base::FILE_REFERENCE).map(str::to_owned);
+    if file_reference.is_none()
+        && long_id.is_none()
+        && (collection_id.is_none() || server_id.is_none())
+    {
         return None;
     }
     Some(ItemOperationsFetchRequest {
@@ -1219,6 +1264,11 @@ pub fn item_operations_fetch(document: &Document) -> Option<ItemOperationsFetchR
         collection_id,
         server_id,
         long_id,
+        file_reference,
+        range: find_text_after(document, item_operations::RANGE).map(str::to_owned),
+        body_pref_type: find_text_after(document, airsync_base::TYPE).and_then(|s| s.parse().ok()),
+        body_pref_truncation_size: find_text_after(document, airsync_base::TRUNCATION_SIZE)
+            .and_then(|s| s.parse().ok()),
     })
 }
 
