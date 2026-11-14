@@ -3682,6 +3682,11 @@ async fn item_operations_mime_preserves_non_utf8_bytes() {
 #[ignore]
 async fn client_interop_fixture() {
     let env = start_env(Opts::default()).await;
+    env.mock
+        .extra_folders
+        .lock()
+        .unwrap()
+        .push("trash".to_owned());
     let path = std::env::var("EAS_INTEROP_FILE").expect("set EAS_INTEROP_FILE");
     std::fs::write(path, serde_json::json!({"gateway": env.gw}).to_string()).unwrap();
     tokio::time::sleep(Duration::from_secs(120)).await;
