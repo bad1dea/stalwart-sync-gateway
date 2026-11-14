@@ -299,7 +299,7 @@ pub async fn post_handler(
                     return folder_update(&state, &auth, &document, command).await;
                 }
                 if command.eq_ignore_ascii_case("Sync") {
-                    return sync_mail(&state, &auth, &query, &document, command).await;
+                    return sync_mail(&state, &auth, &query, &document, version, command).await;
                 }
                 if command.eq_ignore_ascii_case("MoveItems") {
                     return move_items(&state, &auth, &query, &document, command).await;
@@ -320,11 +320,13 @@ pub async fn post_handler(
                     let multipart = headers
                         .get("MS-ASAcceptMultiPart")
                         .is_some_and(|value| value == "T");
-                    return item_operations::handle(&state, &auth, &document, multipart, command)
-                        .await;
+                    return item_operations::handle(
+                        &state, &auth, &document, multipart, version, command,
+                    )
+                    .await;
                 }
                 if command.eq_ignore_ascii_case("Search") {
-                    return search(&state, &auth, &document, command).await;
+                    return search(&state, &auth, &document, version, command).await;
                 }
             }
             Err(error) => {
@@ -836,6 +838,7 @@ async fn search(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
     document: &wbxml::Document,
+    version: ProtocolVersion,
     command: &str,
 ) -> Response {
     use wbxml::eas::{airsync as air, gal, search as srch};
@@ -905,7 +908,13 @@ async fn search(
                             builder.leaf(air::COLLECTION_ID, mailbox_id.clone());
                         }
                         builder.start(srch::PROPERTIES);
-                        write_email_fields(&mut builder, &email_id, email, body_pref.clone());
+                        write_email_fields(
+                            &mut builder,
+                            &email_id,
+                            email,
+                            body_pref.clone(),
+                            version,
+                        );
                         builder.end();
                         builder.end();
                     }
@@ -1800,6 +1809,7 @@ async fn sync_mail(
     auth: &crate::jmap::client::AuthenticatedSession,
     query: &EasQuery,
     document: &wbxml::Document,
+    version: ProtocolVersion,
     command: &str,
 ) -> Response {
     let collections = wbxml::eas::sync_collections(document);
@@ -2537,7 +2547,7 @@ async fn sync_mail(
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "1");
-            write_fetch_responses(&mut builder, fetch_responses);
+            write_fetch_responses(&mut builder, fetch_responses, version);
             // Element order matters to a strict WBXML parser (iOS's
             // included) -- MoreAvailable must come AFTER Responses and
             // BEFORE Commands, confirmed against the working PHP z-push
@@ -2575,7 +2585,7 @@ async fn sync_mail(
                 };
                 builder.start(air::COMMANDS);
                 for email in emails_to_send {
-                    write_email_add(&mut builder, email, Some(body_pref.clone()));
+                    write_email_add(&mut builder, email, Some(body_pref.clone()), version);
                 }
                 for id in &to_remove {
                     builder.start(air::DELETE);
@@ -2651,7 +2661,7 @@ async fn sync_mail(
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "1");
-            write_fetch_responses(&mut builder, fetch_responses);
+            write_fetch_responses(&mut builder, fetch_responses, version);
         }
 
         builder.end();
@@ -2842,7 +2852,11 @@ type FetchResult = (
     anyhow::Result<Option<(crate::model::Email, Option<bytes::Bytes>)>>,
 );
 
-fn write_fetch_responses(builder: &mut wbxml::eas::DocumentBuilder, results: Vec<FetchResult>) {
+fn write_fetch_responses(
+    builder: &mut wbxml::eas::DocumentBuilder,
+    results: Vec<FetchResult>,
+    version: ProtocolVersion,
+) {
     use wbxml::eas::airsync as air;
 
     if results.is_empty() {
@@ -2861,7 +2875,7 @@ fn write_fetch_responses(builder: &mut wbxml::eas::DocumentBuilder, results: Vec
                     truncation_size: None,
                     mime_data: Some(mime_data),
                 });
-                write_email_fields(builder, &server_id, email, body_pref);
+                write_email_fields(builder, &server_id, email, body_pref, version);
                 builder.end();
             }
             Ok(None) => {
@@ -2901,6 +2915,7 @@ fn write_email_add(
     builder: &mut wbxml::eas::DocumentBuilder,
     email: crate::model::Email,
     body_pref: Option<BodyPreference>,
+    version: ProtocolVersion,
 ) {
     use wbxml::eas::airsync as air;
 
@@ -2908,7 +2923,7 @@ fn write_email_add(
     builder.start(air::ADD);
     builder.leaf(air::SERVER_ID, email.id.clone());
     builder.start(air::APPLICATION_DATA);
-    write_email_fields(builder, &email_id, email, body_pref);
+    write_email_fields(builder, &email_id, email, body_pref, version);
     builder.end();
     builder.end();
 }
@@ -2923,6 +2938,7 @@ fn write_email_fields(
     email_id: &str,
     email: crate::model::Email,
     body_pref: Option<BodyPreference>,
+    version: ProtocolVersion,
 ) {
     use wbxml::eas::{airsync_base as base, email as mail, email2};
 
@@ -3107,6 +3123,16 @@ fn write_email_fields(
                 eas_conversation_id(&thread_id).to_vec(),
             );
         }
+    }
+    if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
+        builder.leaf(
+            email2::IS_DRAFT,
+            if email.keywords.iter().any(|k| k == "$draft") {
+                "1"
+            } else {
+                "0"
+            },
+        );
     }
 }
 
@@ -5263,7 +5289,7 @@ mod tests {
     use super::{
         apply_body_preference, decode_entity_at, eas_conversation_id, eas_datetime,
         eas_datetime_dashes, is_non_mail_collection_id, plain_text_preview, write_email_fields,
-        BodyPreference,
+        BodyPreference, ProtocolVersion,
     };
     use crate::model::{Email, EmailAttachment, EmailBody, EmailBodyType};
     use crate::wbxml::eas::{airsync_base as base, DocumentBuilder};
@@ -5536,7 +5562,7 @@ mod tests {
             thread_id: None,
         };
         let mut builder = DocumentBuilder::new();
-        write_email_fields(&mut builder, "email-1", email, None);
+        write_email_fields(&mut builder, "email-1", email, None, ProtocolVersion::V14_0);
         let doc = builder.finish();
 
         use crate::wbxml::eas::email as mail;
@@ -5613,7 +5639,13 @@ mod tests {
             thread_id: Some("thread-abc".to_owned()),
         };
         let mut builder = DocumentBuilder::new();
-        write_email_fields(&mut builder, "email-1", email_with_thread, None);
+        write_email_fields(
+            &mut builder,
+            "email-1",
+            email_with_thread,
+            None,
+            ProtocolVersion::V14_0,
+        );
         let doc = builder.finish();
 
         let native_body_type_pos = doc.nodes.iter().position(|n| matches!(
@@ -5651,7 +5683,13 @@ mod tests {
             thread_id: None,
         };
         let mut builder2 = DocumentBuilder::new();
-        write_email_fields(&mut builder2, "email-2", email_without_thread, None);
+        write_email_fields(
+            &mut builder2,
+            "email-2",
+            email_without_thread,
+            None,
+            ProtocolVersion::V14_0,
+        );
         let doc2 = builder2.finish();
         assert!(
             !doc2.nodes.iter().any(|n| matches!(
@@ -5690,7 +5728,7 @@ mod tests {
             thread_id: None,
         };
         let mut builder = DocumentBuilder::new();
-        write_email_fields(&mut builder, "email-1", email, None);
+        write_email_fields(&mut builder, "email-1", email, None, ProtocolVersion::V14_0);
         let doc = builder.finish();
 
         let mut depth = 0i32;
@@ -5769,7 +5807,7 @@ mod tests {
             thread_id: None,
         };
         let mut builder = DocumentBuilder::new();
-        write_email_fields(&mut builder, "email-1", email, None);
+        write_email_fields(&mut builder, "email-1", email, None, ProtocolVersion::V14_0);
         let doc = builder.finish();
 
         // Compare by (code_page, token) only -- Token's derived equality

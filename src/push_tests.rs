@@ -46,7 +46,7 @@ struct Mock {
     es_tx: broadcast::Sender<String>,
     es_conns: AtomicUsize,
     counter: AtomicUsize,
-    read: Mutex<std::collections::BTreeSet<String>>,
+    keywords: Mutex<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>,
     extra_folders: Mutex<Vec<String>>,
     /// Ids still returned by Email/query after they left the mailbox
     /// (simulates the listing trailing a move).
@@ -101,12 +101,17 @@ impl Mock {
     }
 
     fn set_read(&self, id: &str, read: bool) {
+        self.set_keyword(id, "$seen", read);
+    }
+
+    fn set_keyword(&self, id: &str, keyword: &str, enabled: bool) {
         self.log_change(id);
-        let mut set = self.read.lock().unwrap();
-        if read {
-            set.insert(id.to_owned());
+        let mut all = self.keywords.lock().unwrap();
+        let keywords = all.entry(id.to_owned()).or_default();
+        if enabled {
+            keywords.insert(keyword.to_owned());
         } else {
-            set.remove(id);
+            keywords.remove(keyword);
         }
     }
 
@@ -165,11 +170,16 @@ async fn mock_session(State(m): State<Arc<Mock>>) -> impl IntoResponse {
     Json(session)
 }
 
-fn email_json(id: &str, mailbox: &str, read: bool, received_at: &str) -> serde_json::Value {
+fn email_json(
+    id: &str,
+    mailbox: &str,
+    keywords: &std::collections::BTreeSet<String>,
+    received_at: &str,
+) -> serde_json::Value {
     serde_json::json!({
         "id": id, "blobId": format!("b-{id}"), "threadId": format!("t-{id}"),
         "mailboxIds": { mailbox: true },
-        "keywords": if read { serde_json::json!({"$seen": true}) } else { serde_json::json!({}) },
+        "keywords": keywords.iter().map(|keyword| (keyword.clone(), true)).collect::<std::collections::BTreeMap<_, _>>(),
         "receivedAt": received_at, "subject": format!("subject {id}"),
         "from": [{"name": "A", "email": "a@x.test"}], "to": null, "cc": null,
         "textBody": [{"partId": "1"}], "htmlBody": [],
@@ -182,7 +192,7 @@ async fn mock_api(
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let boxes = m.boxes.lock().unwrap().clone();
-    let read_set = m.read.lock().unwrap().clone();
+    let keyword_map = m.keywords.lock().unwrap().clone();
     let mut responses = Vec::new();
     let mut last_query: Vec<String> = Vec::new();
     let mut last_changes: Vec<String> = Vec::new();
@@ -290,6 +300,16 @@ async fn mock_api(
                         m.log_change(id);
                         let mut boxes = m.boxes.lock().unwrap();
                         for (key, value) in patch.as_object().unwrap() {
+                            if let Some(keyword) = key.strip_prefix("keywords/") {
+                                let keyword = keyword.replace("~1", "/").replace("~0", "~");
+                                let mut all = m.keywords.lock().unwrap();
+                                let keywords = all.entry(id.to_owned()).or_default();
+                                if value == true {
+                                    keywords.insert(keyword);
+                                } else {
+                                    keywords.remove(&keyword);
+                                }
+                            }
                             if let Some(folder) = key.strip_prefix("mailboxIds/") {
                                 let items = boxes.entry(folder.to_owned()).or_default();
                                 items.retain(|item| item != id);
@@ -355,8 +375,12 @@ async fn mock_api(
                 for id in ids {
                     for (mb, items) in &boxes {
                         if items.contains(&id) {
-                            let mut email =
-                                email_json(&id, mb, read_set.contains(&id), &m.date_of(&id));
+                            let mut email = email_json(
+                                &id,
+                                mb,
+                                keyword_map.get(&id).unwrap_or(&Default::default()),
+                                &m.date_of(&id),
+                            );
                             if mb == "notes" {
                                 email["keywords"] = serde_json::json!({format!("noteid-{id}"): true, "$note": true});
                             }
@@ -420,7 +444,7 @@ async fn start_mock() -> Arc<Mock> {
         es_tx,
         es_conns: AtomicUsize::new(0),
         counter: AtomicUsize::new(1),
-        read: Mutex::new(Default::default()),
+        keywords: Mutex::new(Default::default()),
         extra_folders: Mutex::new(Vec::new()),
         stale_listing: Mutex::new(Vec::new()),
         hidden_folders: Mutex::new(Vec::new()),
@@ -3953,5 +3977,66 @@ async fn autodiscover_accepts_standard_lowercase_and_existing_paths() {
         let body = response.text().await.unwrap();
         assert!(body.contains("<Type>MobileSync</Type>"));
         assert!(body.contains("<Url>http://localhost/Microsoft-Server-ActiveSync</Url>"));
+    }
+}
+
+#[tokio::test]
+async fn mail_draft_marker_follows_requested_protocol_in_sync_and_fetch() {
+    use eas::{airsync as air, email2, item_operations as ops};
+    let env = start_env(Opts::default()).await;
+    env.mock.set_keyword("m1", "$draft", true);
+    for version in ["14.0", "14.1", "16.0", "16.1"] {
+        let device = format!("version-{version}");
+        let prime = env
+            .req("Sync", &device)
+            .header("MS-ASProtocolVersion", version)
+            .body(sync_body("0", "inbox"))
+            .send()
+            .await
+            .unwrap();
+        let prime = wbxml::decode_document(&prime.bytes().await.unwrap()).unwrap();
+        let response = env
+            .req("Sync", &device)
+            .header("MS-ASProtocolVersion", version)
+            .body(sync_body(&sync_key(&prime), "inbox"))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, air::SERVER_ID).len(), 2);
+        let markers = eas::find_all_text_after(&doc, email2::IS_DRAFT);
+        if version.starts_with("16") {
+            assert_eq!(markers.len(), 2);
+            assert!(markers.contains(&"1".to_owned()));
+            assert!(markers.contains(&"0".to_owned()));
+        } else {
+            assert!(markers.is_empty());
+        }
+        for (id, draft) in [("m1", "1"), ("m2", "0")] {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(ops::ITEM_OPERATIONS);
+            b.start(ops::FETCH);
+            b.leaf(ops::STORE, "Mailbox");
+            b.leaf(air::COLLECTION_ID, "inbox");
+            b.leaf(air::SERVER_ID, id);
+            b.end();
+            b.end();
+            let response = env
+                .req("ItemOperations", &device)
+                .header("MS-ASProtocolVersion", version)
+                .body(wbxml::encode_document(&b.finish()))
+                .send()
+                .await
+                .unwrap();
+            let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+            assert_eq!(
+                eas::find_text_after(&doc, email2::IS_DRAFT),
+                if version.starts_with("16") {
+                    Some(draft)
+                } else {
+                    None
+                }
+            );
+        }
     }
 }

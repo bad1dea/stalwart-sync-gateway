@@ -5,7 +5,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 
-use super::{write_email_fields, BodyPreference};
+use super::{write_email_fields, BodyPreference, ProtocolVersion};
 use crate::{
     http_server::AppState,
     jmap::client::AuthenticatedSession,
@@ -22,6 +22,7 @@ pub(super) async fn handle(
     auth: &AuthenticatedSession,
     document: &wbxml::Document,
     multipart: bool,
+    version: ProtocolVersion,
     command: &str,
 ) -> Response {
     let operations = eas::child_elements(document);
@@ -38,7 +39,7 @@ pub(super) async fn handle(
             if kind.code_page != ops::PAGE || kind.token != ops::FETCH.token {
                 builder.leaf(ops::STATUS, "2");
             } else if let Some(fetch) = eas::item_operations_fetch(&operation) {
-                fetch_item(state, auth, &mut builder, fetch).await;
+                fetch_item(state, auth, &mut builder, fetch, version).await;
             } else {
                 builder.leaf(ops::STATUS, "2");
             }
@@ -129,6 +130,7 @@ async fn fetch_item(
     auth: &AuthenticatedSession,
     builder: &mut DocumentBuilder,
     fetch: eas::ItemOperationsFetchRequest,
+    version: ProtocolVersion,
 ) {
     if !fetch.store.eq_ignore_ascii_case("Mailbox") {
         builder.leaf(ops::STATUS, "9");
@@ -211,7 +213,7 @@ async fn fetch_item(
                 truncation_size: fetch.body_pref_truncation_size,
                 mime_data: mime,
             });
-            write_email_fields(builder, target, email, preference);
+            write_email_fields(builder, target, email, preference, version);
             builder.end();
         }
         Ok(None) => {
