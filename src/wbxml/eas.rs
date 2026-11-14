@@ -314,6 +314,7 @@ pub mod email {
     pub const FROM: Token = tag(0x18, false);
     pub const FLAG: Token = tag(0x3a, false);
     pub const FLAG_STATUS: Token = tag(0x3b, false);
+    pub const COMPLETE_TIME: Token = tag(0x3c, false);
     pub const FLAG_TYPE: Token = tag(0x3d, false);
 
     pub const fn tag(token: u8, has_content: bool) -> Token {
@@ -1104,6 +1105,7 @@ pub struct SyncClientCommand {
     pub server_id: String,
     pub read: Option<bool>,
     pub flag_status: Option<u8>,
+    pub flag_valid: bool,
     pub note: NoteFields,
     pub contact: ContactFields,
     pub calendar: CalendarFields,
@@ -1522,6 +1524,7 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             server_id: String::new(),
                             read: None,
                             flag_status: None,
+                            flag_valid: true,
                             note: NoteFields::default(),
                             contact: ContactFields::default(),
                             calendar: CalendarFields::default(),
@@ -1614,6 +1617,12 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                         // Start and this End is its ApplicationData subtree
                         // -- extract Notes fields from it regardless of
                         // command kind (Delete/Fetch simply won't have any).
+                        command.flag_valid = valid_mail_flag(
+                            &Document {
+                                nodes: document.nodes[start..=idx].to_vec(),
+                            },
+                            command.flag_status,
+                        );
                         command.note = extract_note_fields(&document.nodes[start + 1..idx]);
                         command.contact = extract_contact_fields(&document.nodes[start + 1..idx]);
                         command.calendar = extract_calendar_fields(&document.nodes[start + 1..idx]);
@@ -1639,6 +1648,59 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
     }
 
     collections
+}
+
+fn valid_mail_flag(command: &Document, status: Option<u8>) -> bool {
+    let flags: Vec<_> = child_elements(command).iter()
+        .filter(|child| matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, airsync::APPLICATION_DATA)))
+        .flat_map(child_elements)
+        .filter(|child| matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, email::FLAG)))
+        .collect();
+    let Some(flag) = flags.first() else {
+        return status.is_none();
+    };
+    if flags.len() != 1 {
+        return false;
+    }
+    let fields = child_elements(flag);
+    let text = |token| {
+        let mut matching = fields.iter().filter(|field| {
+            matches!(field.nodes.first(),
+            Some(Node::Start(start)) if same_token(*start, token))
+        });
+        let field = matching.next()?;
+        if matching.next().is_some() {
+            None
+        } else {
+            find_text_after(field, token)
+        }
+    };
+    if status == Some(0) {
+        let empty = fields.is_empty()
+            && !flag
+                .nodes
+                .iter()
+                .any(|node| matches!(node, Node::Text(_) | Node::Opaque(_)));
+        return empty
+            || text(email::FLAG_STATUS).and_then(|value| value.parse::<u8>().ok()) == Some(0);
+    }
+    if status != Some(2)
+        || text(email::FLAG_STATUS).and_then(|value| value.parse::<u8>().ok()) != Some(2)
+        || text(email::FLAG_TYPE) != Some("Flag for follow up")
+    {
+        return false;
+    }
+    let date = |token| {
+        text(token).is_some_and(|value| {
+            value.ends_with('Z') && chrono::DateTime::parse_from_rfc3339(value).is_ok()
+        })
+    };
+    let scheduled = date(tasks::START_DATE)
+        && date(tasks::UTC_START_DATE)
+        && date(tasks::DUE_DATE)
+        && date(tasks::UTC_DUE_DATE);
+    let completed = date(tasks::DATE_COMPLETED) && date(email::COMPLETE_TIME);
+    scheduled || completed
 }
 
 /// Walks the nodes strictly inside one Add/Change command (i.e. inside its
@@ -2221,6 +2283,72 @@ mod tests {
         b.end();
         assert!(super::extract_calendar_fields(&b.finish().nodes).unsupported_location);
         assert_eq!(super::extract_calendar_fields(&[]).location, None);
+    }
+
+    #[test]
+    fn mail_flags_require_the_specified_type_and_date_fields() {
+        let date = "2026-11-14T12:00:00.000Z";
+        let fields = vec![
+            (email::FLAG_STATUS, "2"),
+            (email::FLAG_TYPE, "Flag for follow up"),
+            (tasks::START_DATE, date),
+            (tasks::UTC_START_DATE, date),
+            (tasks::DUE_DATE, date),
+            (tasks::UTC_DUE_DATE, date),
+        ];
+        let command = |fields: &[(Token, &str)]| {
+            let mut b = DocumentBuilder::new();
+            b.start(airsync::CHANGE);
+            b.start(airsync::APPLICATION_DATA);
+            b.start(email::FLAG);
+            for &(token, value) in fields {
+                b.leaf(token, value);
+            }
+            b.end();
+            b.end();
+            b.end();
+            b.finish()
+        };
+        assert!(super::valid_mail_flag(&command(&fields), Some(2)));
+        for missing in 0..fields.len() {
+            let mut bad = fields.clone();
+            bad.remove(missing);
+            assert!(
+                !super::valid_mail_flag(&command(&bad), Some(2)),
+                "missing field {missing}"
+            );
+        }
+        for invalid in [
+            "invalid",
+            "2026-02-30T12:00:00.000Z",
+            "2026-11-14T12:00:00+02:00",
+        ] {
+            let mut bad = fields.clone();
+            bad[2].1 = invalid;
+            assert!(!super::valid_mail_flag(&command(&bad), Some(2)));
+        }
+        let mut duplicate = fields.clone();
+        duplicate.push(fields[0]);
+        assert!(!super::valid_mail_flag(&command(&duplicate), Some(2)));
+        let mut duplicate = fields.clone();
+        duplicate.push(fields[1]);
+        assert!(!super::valid_mail_flag(&command(&duplicate), Some(2)));
+        let completed = [
+            (email::FLAG_STATUS, "2"),
+            (email::FLAG_TYPE, "Flag for follow up"),
+            (tasks::DATE_COMPLETED, date),
+            (email::COMPLETE_TIME, date),
+        ];
+        assert!(super::valid_mail_flag(&command(&completed), Some(2)));
+        assert!(super::valid_mail_flag(
+            &command(&[(email::FLAG_STATUS, "0")]),
+            Some(0)
+        ));
+        assert!(super::valid_mail_flag(&command(&[]), Some(0)));
+        assert!(!super::valid_mail_flag(
+            &command(&[(email::FLAG_STATUS, "1")]),
+            Some(1)
+        ));
     }
 
     #[test]

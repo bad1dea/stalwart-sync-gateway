@@ -1196,7 +1196,7 @@ async fn concurrent_ping_limit_returns_503() {
 
 #[tokio::test]
 async fn existing_sqlite_device_state_is_honoured() {
-    let dir = std::env::temp_dir().join(format!("ssg-push-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("ssg-push-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("state.db").to_string_lossy().into_owned();
     {
@@ -3108,6 +3108,60 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_flag_validation_keeps_failed_items_unchanged_and_replays_mixed_results() {
+        let live = Live::new("E2E_USER2").await;
+        let r = live.call(serde_json::json!([["Mailbox/set", {
+            "accountId": live.account, "create": {"m":{"name":format!("Flag validation {}", std::process::id())}}
+        }, "0"]])).await;
+        let folder = r[0][1]["created"]["m"]["id"].as_str().unwrap().to_owned();
+        let ids = live.seed(&folder, 2, "flag-validation", false).await;
+        let device = dev("flag-validation");
+        let doc = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let doc = live
+            .wbxml_version("Sync", &device, sync_body(&sync_key(&doc), &folder), "16.1")
+            .await;
+        let body = mixed_flag_request(&sync_key(&doc), &folder, &ids[0], &ids[1]);
+        let doc = live
+            .wbxml_version("Sync", &device, body.clone(), "16.1")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::STATUS),
+            vec!["1", "6", "1"]
+        );
+        assert_eq!(live.wbxml_version("Sync", &device, body, "16.1").await, doc);
+        let r = live
+            .call(serde_json::json!([["Email/get",{
+            "accountId":live.account,"ids":ids,"properties":["id","keywords"]
+        },"0"]]))
+            .await;
+        let list = r[0][1]["list"].as_array().unwrap();
+        let failed = list.iter().find(|email| email["id"] == ids[0]).unwrap();
+        let good = list.iter().find(|email| email["id"] == ids[1]).unwrap();
+        assert!(failed["keywords"]["$seen"] != true && failed["keywords"]["$flagged"] != true);
+        assert_eq!(good["keywords"]["$seen"], true);
+
+        let body = flag_change_body(&sync_key(&doc), &folder, &ids[0], Some("2"), None, false);
+        let doc = live.wbxml_version("Sync", &device, body, "16.1").await;
+        assert_eq!(eas::find_all_text_after(&doc, air::STATUS), vec!["1"]);
+        let r = live
+            .call(serde_json::json!([["Email/get",{
+            "accountId":live.account,"ids":[&ids[0]],"properties":["id","keywords"]
+        },"0"]]))
+            .await;
+        assert_eq!(r[0][1]["list"][0]["keywords"]["$flagged"], true);
+        let r = live
+            .call(serde_json::json!([["Email/set", {
+            "accountId": live.account, "destroy": ids
+        }, "0"],["Mailbox/set", {"accountId":live.account,"destroy":[&folder]}, "1"]]))
+            .await;
+        assert!(r[0][1]["notDestroyed"].is_null());
+        assert!(r[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_lost_response_is_replayed() {
         let live = Live::new("E2E_USER").await;
         let d = dev("replay");
@@ -4666,8 +4720,44 @@ async fn mail_draft_marker_follows_requested_protocol_in_sync_and_fetch() {
     }
 }
 
+fn mixed_flag_request(key: &str, folder: &str, bad: &str, good: &str) -> Vec<u8> {
+    use eas::{airsync as air, email as mail};
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, key);
+    b.leaf(air::COLLECTION_ID, folder);
+    b.leaf(air::GET_CHANGES, "0");
+    b.start(air::COMMANDS);
+    b.start(air::CHANGE);
+    b.leaf(air::SERVER_ID, bad);
+    b.start(air::APPLICATION_DATA);
+    b.leaf(mail::READ, "1");
+    b.start(mail::FLAG);
+    b.leaf(mail::FLAG_STATUS, "2");
+    b.leaf(mail::FLAG_TYPE, "Flag for follow up");
+    b.end();
+    b.end();
+    b.end();
+    b.start(air::CHANGE);
+    b.leaf(air::SERVER_ID, good);
+    b.start(air::APPLICATION_DATA);
+    b.leaf(mail::READ, "1");
+    b.end();
+    b.end();
+    b.start(air::FETCH);
+    b.leaf(air::SERVER_ID, bad);
+    b.end();
+    for _ in 0..4 {
+        b.end();
+    }
+    wbxml::encode_document(&b.finish())
+}
+
 fn flag_change_body(
     key: &str,
+    folder: &str,
     id: &str,
     status: Option<&str>,
     read: Option<bool>,
@@ -4679,7 +4769,7 @@ fn flag_change_body(
     b.start(air::COLLECTIONS);
     b.start(air::COLLECTION);
     b.leaf(air::SYNC_KEY, key);
-    b.leaf(air::COLLECTION_ID, "inbox");
+    b.leaf(air::COLLECTION_ID, folder);
     b.leaf(air::GET_CHANGES, if downloads { "1" } else { "0" });
     b.start(air::COMMANDS);
     b.start(air::CHANGE);
@@ -4692,6 +4782,16 @@ fn flag_change_body(
         b.start(mail::FLAG);
         b.leaf(mail::FLAG_STATUS, status);
         b.leaf(mail::FLAG_TYPE, "Flag for follow up");
+        if status == "2" {
+            for token in [
+                eas::tasks::START_DATE,
+                eas::tasks::UTC_START_DATE,
+                eas::tasks::DUE_DATE,
+                eas::tasks::UTC_DUE_DATE,
+            ] {
+                b.leaf(token, "2026-11-14T12:00:00.000Z");
+            }
+        }
         b.end();
     } else {
         b.empty_tag(mail::FLAG);
@@ -4717,7 +4817,7 @@ async fn native_jmap_flags_push_between_devices_and_survive_replay_and_restart()
         let ping = env.ping("ipad", Some(ping_body(4, &[("inbox", "Email")])));
         let upload = async {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let request = flag_change_body(&a, "m1", Some("2"), Some(true), false);
+            let request = flag_change_body(&a, "inbox", "m1", Some("2"), Some(true), false);
             let response = env
                 .req("Sync", "iphone")
                 .header("MS-ASProtocolVersion", version)
@@ -4777,7 +4877,7 @@ async fn native_jmap_flags_push_between_devices_and_survive_replay_and_restart()
         let response = env
             .req("Sync", "iphone")
             .header("MS-ASProtocolVersion", version)
-            .body(flag_change_body(&akey, "m1", None, None, true))
+            .body(flag_change_body(&akey, "inbox", "m1", None, None, true))
             .send()
             .await
             .unwrap();
@@ -4840,12 +4940,19 @@ async fn unsupported_flag_completion_does_not_silently_clear_the_native_flag() {
     let (key, _, _) = env.sync_detail("client", &prime).await;
     let response = env
         .req("Sync", "client")
-        .body(flag_change_body(&key, "m1", Some("1"), Some(true), true))
+        .body(flag_change_body(
+            &key,
+            "inbox",
+            "m1",
+            Some("1"),
+            Some(true),
+            true,
+        ))
         .send()
         .await
         .unwrap();
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
-    assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("6"));
+    assert_eq!(eas::find_all_text_after(&doc, air::STATUS), vec!["1", "6"]);
     assert_eq!(sync_key(&doc), key);
     let keywords = env.mock.keywords.lock().unwrap()["m1"].clone();
     assert!(keywords.contains("$flagged"));
@@ -5338,7 +5445,14 @@ async fn cached_sync_omits_uploads_and_rejects_duplicate_collections() {
     let (key, _) = initial_sync(&env, "client", None).await;
     let response = env
         .req("Sync", "client")
-        .body(flag_change_body(&key, "m1", Some("2"), Some(true), false))
+        .body(flag_change_body(
+            &key,
+            "inbox",
+            "m1",
+            Some("2"),
+            Some(true),
+            false,
+        ))
         .send()
         .await
         .unwrap();
@@ -5379,4 +5493,43 @@ async fn cached_sync_omits_uploads_and_rejects_duplicate_collections() {
         .unwrap();
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("4"));
+}
+
+#[tokio::test]
+async fn invalid_flag_changes_are_item_errors_and_do_not_block_valid_changes_or_fetches() {
+    use eas::{airsync as air, email as mail};
+    for version in ["14.0", "16.1"] {
+        let env = start_env(Opts::default()).await;
+        let (key, _) = initial_sync(&env, "client", None).await;
+        let body = mixed_flag_request(&key, "inbox", "m1", "m2");
+        let send = || {
+            env.req("Sync", "client")
+                .header("MS-ASProtocolVersion", version)
+                .body(body.clone())
+                .send()
+        };
+        let response = send().await.unwrap();
+        let first = response.bytes().await.unwrap();
+        let doc = wbxml::decode_document(&first).unwrap();
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::STATUS),
+            vec!["1", "6", "1"]
+        );
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::SERVER_ID),
+            vec!["m1", "m1"]
+        );
+        assert_eq!(eas::find_text_after(&doc, mail::READ), Some("0"));
+        let keywords = env.mock.keywords.lock().unwrap().clone();
+        assert!(!keywords
+            .get("m1")
+            .is_some_and(|values| values.contains("$seen") || values.contains("$flagged")));
+        assert!(keywords
+            .get("m2")
+            .is_some_and(|values| values.contains("$seen")));
+        let count = env.mock.change_log.lock().unwrap().len();
+        let response = send().await.unwrap();
+        assert_eq!(response.bytes().await.unwrap(), first);
+        assert_eq!(env.mock.change_log.lock().unwrap().len(), count);
+    }
 }

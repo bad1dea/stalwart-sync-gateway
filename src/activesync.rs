@@ -2023,21 +2023,18 @@ async fn sync_mail(
             && !collection.collection_id.starts_with("cal_")
             && !collection.collection_id.starts_with("note_")
             && !collection.collection_id.starts_with("task_");
-        // JMAP's native flag is a boolean. Completion and scheduled follow-up
-        // metadata need a separate backend representation before accepting them.
-        if is_mail_collection
-            && collection.commands.iter().any(|command| {
-                command
-                    .flag_status
-                    .is_some_and(|status| !matches!(status, 0 | 2))
-            })
-        {
-            builder.start(air::COLLECTION);
-            builder.leaf(air::SYNC_KEY, &collection.sync_key);
-            builder.leaf(air::COLLECTION_ID, &collection.collection_id);
-            builder.leaf(air::STATUS, "6");
-            builder.end();
-            continue;
+        let mut failed_changes = Vec::new();
+        if is_mail_collection {
+            collection.commands.retain(|command| {
+                if matches!(command.kind, wbxml::eas::SyncClientCommandKind::Change)
+                    && !command.flag_valid
+                {
+                    failed_changes.push(command.server_id.clone());
+                    false
+                } else {
+                    true
+                }
+            });
         }
         let (client_commands_applied, client_state_changes) =
             if is_mail_collection && !collection.commands.is_empty() {
@@ -2607,7 +2604,7 @@ async fn sync_mail(
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "1");
-            write_fetch_responses(&mut builder, fetch_responses, version);
+            write_mail_responses(&mut builder, fetch_responses, failed_changes, version);
             // Element order matters to a strict WBXML parser (iOS's
             // included) -- MoreAvailable must come AFTER Responses and
             // BEFORE Commands, confirmed against the working PHP z-push
@@ -2775,7 +2772,7 @@ async fn sync_mail(
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "1");
-            write_fetch_responses(&mut builder, fetch_responses, version);
+            write_mail_responses(&mut builder, fetch_responses, failed_changes, version);
         }
 
         builder.end();
@@ -2990,25 +2987,29 @@ async fn resolve_fetch_commands(
     results
 }
 
-/// Writes the `<Responses>` block answering any Sync-embedded Fetch
-/// commands, reusing the same field writer as a normal Add so the two
-/// can't drift.
 type FetchResult = (
     String,
     anyhow::Result<Option<(crate::model::Email, Option<bytes::Bytes>)>>,
 );
 
-fn write_fetch_responses(
+fn write_mail_responses(
     builder: &mut wbxml::eas::DocumentBuilder,
     results: Vec<FetchResult>,
+    failed_changes: Vec<String>,
     version: ProtocolVersion,
 ) {
     use wbxml::eas::airsync as air;
 
-    if results.is_empty() {
+    if results.is_empty() && failed_changes.is_empty() {
         return;
     }
     builder.start(air::RESPONSES);
+    for server_id in failed_changes {
+        builder.start(air::CHANGE);
+        builder.leaf(air::SERVER_ID, server_id);
+        builder.leaf(air::STATUS, "6");
+        builder.end();
+    }
     for (server_id, result) in results {
         builder.start(air::FETCH);
         builder.leaf(air::SERVER_ID, server_id.clone());
