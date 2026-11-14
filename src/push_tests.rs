@@ -4226,3 +4226,58 @@ async fn unsupported_flag_completion_does_not_silently_clear_the_native_flag() {
     assert!(keywords.contains("$flagged"));
     assert!(!keywords.contains("$seen"));
 }
+
+#[tokio::test]
+async fn replay_never_serves_a_response_encoded_for_another_protocol_version() {
+    use eas::{airsync as air, email2};
+    let env = start_env(Opts::default()).await;
+    let prime = env
+        .req("Sync", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(sync_body("0", "inbox"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let key = sync_key(&wbxml::decode_document(&prime).unwrap());
+    let body = sync_body(&key, "inbox");
+    let response = env
+        .req("Sync", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response).unwrap();
+    assert!(eas::contains_token(&doc, email2::IS_DRAFT));
+    let wrong_version = env
+        .req("Sync", "client")
+        .header("MS-ASProtocolVersion", "14.0")
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let wrong_version = wbxml::decode_document(&wrong_version).unwrap();
+    assert_eq!(eas::find_text_after(&wrong_version, air::STATUS), Some("3"));
+    assert!(!eas::contains_token(&wrong_version, email2::IS_DRAFT));
+    let env = env.restarted().await;
+    let replay = env
+        .req("Sync", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(body)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(replay, response);
+}

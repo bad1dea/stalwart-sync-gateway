@@ -34,6 +34,15 @@ enum ProtocolVersion {
 }
 
 impl ProtocolVersion {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::V14_0 => "14.0",
+            Self::V14_1 => "14.1",
+            Self::V16_0 => "16.0",
+            Self::V16_1 => "16.1",
+        }
+    }
+
     fn parse(value: &str) -> Option<Self> {
         match value {
             "14.0" => Some(Self::V14_0),
@@ -1750,8 +1759,12 @@ async fn load_ping_params(
     (!folders.is_empty()).then_some((heartbeat, folders))
 }
 
-fn replay_collection_id(collection_id: &str) -> String {
-    format!("__replay__:{collection_id}")
+fn replay_collection_id(collection_id: &str, version: ProtocolVersion) -> String {
+    if version == ProtocolVersion::V14_0 {
+        format!("__replay__:{collection_id}")
+    } else {
+        format!("__replay__:{}:{collection_id}", version.as_str())
+    }
 }
 
 async fn store_replay(
@@ -1759,14 +1772,14 @@ async fn store_replay(
     user: &str,
     device: &str,
     collection_id: &str,
-    request_key: &str,
-    new_key: &str,
+    keys: (&str, &str),
     nodes: Vec<wbxml::Node>,
+    version: ProtocolVersion,
 ) {
     use base64::Engine;
     let bytes = wbxml::encode_document(&wbxml::Document { nodes });
     let item = ItemState {
-        item_id: format!("{request_key}>{new_key}"),
+        item_id: format!("{}>{}", keys.0, keys.1),
         hash: base64::engine::general_purpose::STANDARD.encode(bytes),
     };
     if let Err(error) = state
@@ -1774,7 +1787,7 @@ async fn store_replay(
         .put_item_states(
             user,
             device,
-            &replay_collection_id(collection_id),
+            &replay_collection_id(collection_id, version),
             vec![item],
         )
         .await
@@ -1788,11 +1801,12 @@ async fn load_replay(
     user: &str,
     device: &str,
     collection_id: &str,
+    version: ProtocolVersion,
 ) -> Option<(String, String, Vec<wbxml::Node>)> {
     use base64::Engine;
     let items = state
         .state
-        .item_states(user, device, &replay_collection_id(collection_id))
+        .item_states(user, device, &replay_collection_id(collection_id, version))
         .await
         .ok()?;
     let item = items.into_iter().next()?;
@@ -1893,7 +1907,7 @@ async fn sync_mail(
             // without applying its commands again.
             if let (Some(record), Some((request_key, new_key, nodes))) = (
                 previous_record.as_ref(),
-                load_replay(state, user, device_id, &collection.collection_id).await,
+                load_replay(state, user, device_id, &collection.collection_id, version).await,
             ) {
                 if request_key == collection.sync_key && new_key == record.sync_key {
                     tracing::info!(
@@ -1969,9 +1983,9 @@ async fn sync_mail(
                             user,
                             device_id,
                             &collection.collection_id,
-                            &collection.sync_key,
-                            key,
+                            (&collection.sync_key, key),
                             nodes,
+                            version,
                         )
                         .await;
                     }
@@ -2733,9 +2747,9 @@ async fn sync_mail(
                 user,
                 device_id,
                 &collection_id,
-                &request_key,
-                &new_key,
+                (&request_key, &new_key),
                 nodes,
+                version,
             )
             .await;
         }
