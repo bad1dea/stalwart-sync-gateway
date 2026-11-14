@@ -255,6 +255,7 @@ pub mod airsync {
     /// [MS-ASCMD] 2.2.3.68.2 Options > FilterType: 0 all, 1 one day, 2 three
     /// days, 3 one week, 4 two weeks, 5 one month (mail).
     pub const FILTER_TYPE: Token = tag(0x18, false);
+    pub const DELETES_AS_MOVES: Token = tag(0x1e, false);
     pub const SOFT_DELETE: Token = tag(0x21, false);
     pub const COMMANDS: Token = tag(0x16, false);
     pub const COLLECTIONS: Token = tag(0x1c, false);
@@ -1041,6 +1042,7 @@ pub struct SyncCollectionRequest {
     pub collection_id: String,
     pub window_size: usize,
     pub get_changes: bool,
+    pub deletes_as_moves: bool,
     pub commands: Vec<SyncClientCommand>,
     /// AirSyncBase:BodyPreference > Type, if the client sent one (real
     /// EAS clients always do on the list-sync Options; a bare
@@ -1060,6 +1062,7 @@ impl Default for SyncCollectionRequest {
             collection_id: String::new(),
             window_size: 25,
             get_changes: true,
+            deletes_as_moves: true,
             commands: Vec::new(),
             body_pref_type: None,
             body_pref_truncation_size: None,
@@ -1473,11 +1476,14 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                         } else if token.code_page == airsync::PAGE
                             && token.token == airsync::WINDOW_SIZE.token
                         {
-                            collection.window_size = text.parse().unwrap_or(25);
+                            let size = text.parse::<usize>().unwrap_or(25);
+                            collection.window_size = if size == 0 { 512 } else { size.min(512) };
                         } else if token.code_page == airsync::PAGE
                             && token.token == airsync::GET_CHANGES.token
                         {
                             collection.get_changes = text != "0";
+                        } else if same_token(token, airsync::DELETES_AS_MOVES) {
+                            collection.deletes_as_moves = text != "0";
                         } else if token.code_page == airsync::PAGE
                             && token.token == airsync::FILTER_TYPE.token
                         {
@@ -2268,5 +2274,32 @@ mod tests {
                 dst_fld_id: "archive".to_owned(),
             }]
         );
+    }
+    #[test]
+    fn sync_window_and_delete_defaults_follow_the_protocol() {
+        for (window, expected) in [("0", 512), ("513", 512), ("19", 19)] {
+            for mode in [None, Some(""), Some("0"), Some("1")] {
+                let mut b = DocumentBuilder::new();
+                b.start(airsync::SYNC);
+                b.start(airsync::COLLECTIONS);
+                b.start(airsync::COLLECTION);
+                b.leaf(airsync::SYNC_KEY, "1");
+                b.leaf(airsync::COLLECTION_ID, "folder");
+                if let Some(mode) = mode {
+                    if mode.is_empty() {
+                        b.empty_tag(airsync::DELETES_AS_MOVES);
+                    } else {
+                        b.leaf(airsync::DELETES_AS_MOVES, mode);
+                    }
+                }
+                b.leaf(airsync::WINDOW_SIZE, window);
+                b.end();
+                b.end();
+                b.end();
+                let collections = sync_collections(&b.finish());
+                assert_eq!(collections[0].window_size, expected);
+                assert_eq!(collections[0].deletes_as_moves, mode != Some("0"));
+            }
+        }
     }
 }

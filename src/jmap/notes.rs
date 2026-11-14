@@ -222,91 +222,60 @@ impl JmapClient {
         mailbox_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<NoteSummary>> {
-        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
-            return Ok(Vec::new());
-        };
-
-        let calls = vec![
-            MethodCall::new(
-                "Email/query",
-                serde_json::json!({
-                    "accountId": account_id,
-                    "filter": { "inMailbox": mailbox_id },
-                    "limit": limit.clamp(1, 200)
-                }),
-                "q",
-            ),
-            MethodCall::new(
-                "Email/get",
-                serde_json::json!({
-                    "accountId": account_id,
-                    "#ids": { "resultOf": "q", "name": "Email/query", "path": "/ids" },
-                    "properties": ["id", "subject", "keywords", "receivedAt"]
-                }),
-                "g",
-            ),
-        ];
-
-        let response: JmapResponse<serde_json::Value> = self
-            .api_call(
+        let emails: Vec<NoteEmailObject> = self
+            .query_objects(
                 auth,
-                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
-                calls,
+                capabilities::MAIL,
+                "Email",
+                serde_json::json!({ "inMailbox": mailbox_id }),
+                Some(&["id", "subject", "keywords", "receivedAt"]),
+                limit,
             )
             .await?;
-
-        for method in response.method_responses {
-            if method.0 == "Email/get" {
-                let get: GetResponse<NoteEmailObject> = serde_json::from_value(method.1)
-                    .context("invalid Email/get response while listing notes")?;
-
-                let mut summaries = Vec::with_capacity(get.list.len());
-                let mut adoptions: Vec<(String, String)> = Vec::new();
-                for email in &get.list {
-                    let stable_id = match extract_stable_id(&email.keywords) {
-                        Some(id) => id,
-                        None => {
-                            // Real bug, found live: a note created by
-                            // anything other than this gateway (Apple's
-                            // own IMAP Notes sync writing directly to the
-                            // same "Notes" mailbox, or anything that
-                            // predates this gateway) has no noteid-*
-                            // keyword -- the ONLY thing this function used
-                            // to recognize a note at all. The old
-                            // filter_map silently dropped it, so it was
-                            // invisible to EAS sync with no trace at all.
-                            // Adopt it instead: patch a freshly generated
-                            // stable id onto the existing Email in place
-                            // (keywords are mutable post-import, unlike
-                            // subject/body -- see module docs), so it
-                            // starts showing up without disturbing
-                            // whatever other client is also using this
-                            // mailbox.
-                            let new_id = generate_stable_id();
-                            adoptions.push((email.id.clone(), new_id.clone()));
-                            new_id
-                        }
-                    };
-                    summaries.push(NoteSummary {
-                        id: stable_id,
-                        hash: note_hash(email),
-                    });
+        let mut summaries = Vec::with_capacity(emails.len());
+        let mut adoptions: Vec<(String, String)> = Vec::new();
+        for email in &emails {
+            let stable_id = match extract_stable_id(&email.keywords) {
+                Some(id) => id,
+                None => {
+                    // Real bug, found live: a note created by
+                    // anything other than this gateway (Apple's
+                    // own IMAP Notes sync writing directly to the
+                    // same "Notes" mailbox, or anything that
+                    // predates this gateway) has no noteid-*
+                    // keyword -- the ONLY thing this function used
+                    // to recognize a note at all. The old
+                    // filter_map silently dropped it, so it was
+                    // invisible to EAS sync with no trace at all.
+                    // Adopt it instead: patch a freshly generated
+                    // stable id onto the existing Email in place
+                    // (keywords are mutable post-import, unlike
+                    // subject/body -- see module docs), so it
+                    // starts showing up without disturbing
+                    // whatever other client is also using this
+                    // mailbox.
+                    let new_id = generate_stable_id();
+                    adoptions.push((email.id.clone(), new_id.clone()));
+                    new_id
                 }
+            };
+            summaries.push(NoteSummary {
+                id: stable_id,
+                hash: note_hash(email),
+            });
+        }
 
-                if !adoptions.is_empty() {
-                    if let Err(error) = self.adopt_notes(auth, &adoptions).await {
-                        tracing::warn!(
-                            %error,
-                            count = adoptions.len(),
-                            "failed to adopt pre-existing notes with a stable id"
-                        );
-                    }
-                }
-
-                return Ok(summaries);
+        if !adoptions.is_empty() {
+            if let Err(error) = self.adopt_notes(auth, &adoptions).await {
+                tracing::warn!(
+                    %error,
+                    count = adoptions.len(),
+                    "failed to adopt pre-existing notes with a stable id"
+                );
             }
         }
-        Ok(Vec::new())
+
+        Ok(summaries)
     }
 
     /// Patches a freshly generated `noteid-*` keyword (plus the internal

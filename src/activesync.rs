@@ -169,7 +169,7 @@ pub async fn options_handler(State(state): State<AppState>, headers: HeaderMap) 
 
 pub async fn post_handler(
     State(state): State<AppState>,
-    Query(query): Query<EasQuery>,
+    Query(mut query): Query<EasQuery>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -195,6 +195,10 @@ pub async fn post_handler(
             return unauthorized();
         }
     };
+
+    // Persisted device state and replayed responses belong to the authenticated
+    // login, never the untrusted User query parameter.
+    query.user = Some(auth.username().to_owned());
 
     tracing::info!(
         user = query.user.as_deref().unwrap_or(""),
@@ -392,9 +396,7 @@ fn ping_response(
         .into_response()
 }
 
-/// Mail folder ids (real Mailbox ids) among the watched folders; Notes,
-/// Contacts, Calendar and Tasks use synthetic prefixed ids and are not
-/// push-woken (their Sync keeps working on the client's own schedule).
+/// Mailbox ids among the watched folders. Other item classes use prefixed ids.
 fn watched_mail_ids(folders: &[(String, String)]) -> Vec<String> {
     folders
         .iter()
@@ -476,6 +478,76 @@ async fn changed_mail_folders(
     changed
 }
 
+async fn item_collection_hashes(
+    state: &AppState,
+    auth: &AuthenticatedSession,
+    id: &str,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    let current = if let Some(mailbox) = id.strip_prefix("note_") {
+        state
+            .jmap
+            .list_notes(auth, mailbox, 0)
+            .await?
+            .into_iter()
+            .map(|note| (note.id, note.hash))
+            .collect()
+    } else if let Some(book) = id.strip_prefix("ab_") {
+        state
+            .jmap
+            .contacts_in_address_book(auth, book, 0)
+            .await?
+            .into_iter()
+            .map(|contact| (contact.id.clone(), contact_hash(&contact)))
+            .collect()
+    } else if let Some(calendar) = id.strip_prefix("cal_") {
+        state
+            .jmap
+            .calendar_events_in_calendar(auth, calendar, 0)
+            .await?
+            .into_iter()
+            .map(|event| (event.id.clone(), calendar_event_hash(&event)))
+            .collect()
+    } else if let Some(calendar) = id.strip_prefix("task_") {
+        state
+            .jmap
+            .tasks_in_calendar(auth, calendar, 0)
+            .await?
+            .into_iter()
+            .map(|task| (task.id.clone(), task_hash(&task)))
+            .collect()
+    } else {
+        anyhow::bail!("unknown item collection {id}");
+    };
+    Ok(current)
+}
+
+async fn changed_item_folders(
+    state: &AppState,
+    auth: &AuthenticatedSession,
+    user: &str,
+    device: &str,
+    folders: &[(String, String)],
+) -> anyhow::Result<Vec<String>> {
+    let mut changed = Vec::new();
+    for (id, _) in folders {
+        if !is_non_mail_collection_id(id) || state.state.get(user, device, id).await?.is_none() {
+            continue;
+        }
+        let previous: BTreeMap<String, String> = state
+            .state
+            .item_states(user, device, id)
+            .await?
+            .into_iter()
+            .map(|item| (item.item_id, item.hash))
+            .collect();
+        let current = item_collection_hashes(state, auth, id).await?;
+        if current != previous {
+            changed.push(id.clone());
+        }
+    }
+    Ok(changed)
+}
+
 /// A newer Ping from the same device replaced this one: answer it quietly
 /// (the client has already moved on) so its resources free up now.
 fn ping_superseded(state: &AppState, command: &str, device: &str) -> Response {
@@ -511,7 +583,10 @@ async fn ping(
     command: &str,
 ) -> Response {
     let mut log = PingHangupLog {
-        device: query.device_id.clone().unwrap_or_else(|| "unknown".to_owned()),
+        device: query
+            .device_id
+            .clone()
+            .unwrap_or_else(|| "unknown".to_owned()),
         started: std::time::Instant::now(),
         answered: false,
     };
@@ -650,8 +725,18 @@ async fn ping_inner(
         // the wait.
         let seen_generation = *rx.borrow_and_update();
 
-        if !mail_ids.is_empty() {
-            let found = changed_mail_folders(state, auth, &eas_user, &device, &mail_ids).await;
+        {
+            let mut found = changed_mail_folders(state, auth, &eas_user, &device, &mail_ids).await;
+            match changed_item_folders(state, auth, &eas_user, &device, &folders).await {
+                Ok(items) => found.extend(items),
+                Err(error) => {
+                    tracing::warn!(%error, "ping: item change probe failed");
+                    return ping_response(state, command, 8, &[], None);
+                }
+            }
+            if push.is_superseded(&device, epoch) {
+                return ping_superseded(state, command, &device);
+            }
             // Never name a folder more than 3 times without the device syncing
             // it: iOS blacklists the folder from push after more than 5.
             let mut changed = Vec::new();
@@ -686,7 +771,7 @@ async fn ping_inner(
         }
         first = false;
 
-        // Wait for a mail-relevant event or the heartbeat.
+        // Wait for an event for a watched class or the heartbeat.
         loop {
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => {
@@ -719,7 +804,9 @@ async fn ping_inner(
                     }
                     // Coalesce bursts (a multi-message delivery fires several events).
                     tokio::time::sleep(Duration::from_millis(250)).await;
-                    if push.changed_since(seen_generation).contains(&Class::Mail) {
+                    if push.changed_since(seen_generation).iter().any(|class| {
+                        folders.iter().any(|(_, name)| Class::from_eas(name) == Some(*class))
+                    }) {
                         break;
                     }
                     // Unrelated type changed: keep waiting, but advance our
@@ -1389,7 +1476,29 @@ async fn get_item_estimate(
         let (status, estimate) = match (key, &record) {
             (Some("0"), _) => ("3", 0usize),
             (Some(k), Some(r)) if r.sync_key != k => ("4", 0),
-            _ if is_non_mail_collection_id(&folder_id) => ("1", 0),
+            _ if is_non_mail_collection_id(&folder_id) => {
+                match (
+                    item_collection_hashes(state, auth, &folder_id).await,
+                    state.state.item_states(user, device, &folder_id).await,
+                ) {
+                    (Ok(current), Ok(items)) => {
+                        let previous: BTreeMap<String, String> = items
+                            .into_iter()
+                            .map(|item| (item.item_id, item.hash))
+                            .collect();
+                        let changes = current
+                            .iter()
+                            .filter(|(id, hash)| previous.get(*id) != Some(*hash))
+                            .count()
+                            + previous
+                                .keys()
+                                .filter(|id| !current.contains_key(*id))
+                                .count();
+                        ("1", changes)
+                    }
+                    _ => ("2", 0),
+                }
+            }
             _ => {
                 let seen: BTreeSet<&str> = record
                     .as_ref()
@@ -1880,23 +1989,66 @@ async fn sync_mail(
             continue;
         }
 
-        if collection.collection_id.starts_with("note_") {
-            sync_notes_collection(state, auth, &mut builder, user, device_id, &collection).await;
-            continue;
-        }
-
-        if collection.collection_id.starts_with("ab_") {
-            sync_contacts_collection(state, auth, &mut builder, user, device_id, &collection).await;
-            continue;
-        }
-
-        if collection.collection_id.starts_with("cal_") {
-            sync_calendar_collection(state, auth, &mut builder, user, device_id, &collection).await;
-            continue;
-        }
-
-        if collection.collection_id.starts_with("task_") {
-            sync_tasks_collection(state, auth, &mut builder, user, device_id, &collection).await;
+        if is_non_mail_collection_id(&collection.collection_id) {
+            let mark = builder.mark();
+            if collection.sync_key == "0" {
+                let record = SyncRecord {
+                    user: user.to_owned(),
+                    device_id: device_id.to_owned(),
+                    collection_id: collection.collection_id.clone(),
+                    sync_key: "1".to_owned(),
+                    jmap_state: String::new(),
+                    seen_ids: Vec::new(),
+                };
+                let result = async {
+                    state
+                        .state
+                        .put_item_states(user, device_id, &collection.collection_id, Vec::new())
+                        .await?;
+                    state.state.put(record).await
+                }
+                .await;
+                builder.start(air::COLLECTION);
+                builder.leaf(air::SYNC_KEY, if result.is_ok() { "1" } else { "0" });
+                builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+                builder.leaf(air::STATUS, if result.is_ok() { "1" } else { "5" });
+                builder.end();
+                if let Err(error) = result {
+                    tracing::warn!(%error, "failed to prime item collection");
+                }
+            } else if collection.collection_id.starts_with("note_") {
+                sync_notes_collection(state, auth, &mut builder, user, device_id, &collection)
+                    .await;
+            } else if collection.collection_id.starts_with("ab_") {
+                sync_contacts_collection(state, auth, &mut builder, user, device_id, &collection)
+                    .await;
+            } else if collection.collection_id.starts_with("cal_") {
+                sync_calendar_collection(state, auth, &mut builder, user, device_id, &collection)
+                    .await;
+            } else {
+                sync_tasks_collection(state, auth, &mut builder, user, device_id, &collection)
+                    .await;
+            }
+            let nodes = builder.nodes_since(mark);
+            let reply = wbxml::Document {
+                nodes: nodes.clone(),
+            };
+            if wbxml::eas::find_text_after(&reply, air::STATUS) == Some("1") {
+                if let Some(key) = wbxml::eas::find_text_after(&reply, air::SYNC_KEY) {
+                    if key != collection.sync_key {
+                        store_replay(
+                            state,
+                            user,
+                            device_id,
+                            &collection.collection_id,
+                            &collection.sync_key,
+                            key,
+                            nodes,
+                        )
+                        .await;
+                    }
+                }
+            }
             continue;
         }
 
@@ -1911,6 +2063,7 @@ async fn sync_mail(
                     auth,
                     &collection.collection_id,
                     &collection.commands,
+                    collection.deletes_as_moves,
                 )
                 .await
                 {
@@ -2187,13 +2340,14 @@ async fn sync_mail(
             let aged_mode = state.config.mail_aged_out;
             let aged_out: Vec<String> = match &in_range {
                 Some(range)
-                    if aged_mode != crate::config::AgedOut::Keep
-                        && collection.sync_key != "0" =>
+                    if aged_mode != crate::config::AgedOut::Keep && collection.sync_key != "0" =>
                 {
                     let range: BTreeSet<&str> = range.iter().map(String::as_str).collect();
                     seen_by_date
                         .iter()
-                        .filter(|id| !range.contains(id.as_str()) && !to_remove.contains(id.as_str()))
+                        .filter(|id| {
+                            !range.contains(id.as_str()) && !to_remove.contains(id.as_str())
+                        })
                         .map(|id| (*id).clone())
                         .collect()
                 }
@@ -2523,15 +2677,6 @@ async fn sync_mail(
                 builder.end();
             }
         } else {
-            // Contacts/calendar have no real two-way sync yet (see
-            // CLAUDE.md's Not-Yet-Implemented list) -- this branch is a
-            // stub. But the initial sync_key 0->1 handshake still has to
-            // happen and persist even with zero commands, or the server
-            // echoes sync_key=0 back forever: the client reads that as
-            // "never initialized" and retries immediately in a tight loop,
-            // never settling into its normal Ping cadence. Confirmed live:
-            // a real account's ab_*/cal_* collections hammered Sync every
-            // ~300ms indefinitely with stored_sync_key always "<none>".
             let is_first_sync = collection.sync_key == "0";
             let advance = is_first_sync || client_commands_applied;
             let new_sync_key = if advance {
@@ -2572,6 +2717,14 @@ async fn sync_mail(
                     builder.end();
                     continue;
                 }
+            }
+            if new_sync_key != collection.sync_key {
+                replay_capture = Some((
+                    builder.mark(),
+                    collection.collection_id.clone(),
+                    collection.sync_key.clone(),
+                    new_sync_key.clone(),
+                ));
             }
             builder.start(air::COLLECTION);
             builder.leaf(air::SYNC_KEY, new_sync_key);
@@ -2627,6 +2780,7 @@ async fn apply_mail_client_commands(
     auth: &crate::jmap::client::AuthenticatedSession,
     collection_id: &str,
     commands: &[wbxml::eas::SyncClientCommand],
+    deletes_as_moves: bool,
 ) -> anyhow::Result<(bool, Vec<(String, bool)>)> {
     let mut applied = false;
     let mut read_changes = Vec::new();
@@ -2643,7 +2797,10 @@ async fn apply_mail_client_commands(
                 }
             }
             wbxml::eas::SyncClientCommandKind::Delete => {
-                state.jmap.destroy_email(auth, &command.server_id).await?;
+                state
+                    .jmap
+                    .delete_email(auth, &command.server_id, collection_id, deletes_as_moves)
+                    .await?;
                 applied = true;
             }
             wbxml::eas::SyncClientCommandKind::Add => {
@@ -3287,18 +3444,56 @@ fn decode_named_or_numeric_entity(entity: &str) -> Option<char> {
     })
 }
 
-/// Handles one Contacts collection's Sync round-trip end to end: applies
-/// client Add/Change/Delete via `ContactCard/set` (real in-place update --
-/// confirmed live, see `save_contact`'s own doc -- so unlike Notes, the
-/// JMAP id itself is a stable ServerId with no keyword-based workaround
-/// needed), then diffs current JMAP state against last-known per-item
-/// hashes to find what to push back as `<Commands>`, mirroring
-/// `sync_notes_collection`'s contract exactly (one complete
-/// `<Collection>...</Collection>` block written directly into `builder`).
-/// Upgraded from the old seen-id-only read path (which could never detect
-/// a contact edited some other way, e.g. via webmail, since it only ever
-/// tracked "have I sent this id before") to the same hash-based
-/// add/change/remove diff Notes already uses.
+/// Select one EAS page and advance only the item hashes the client receives.
+fn item_sync_page(
+    previous: &mut BTreeMap<String, String>,
+    current: &BTreeMap<String, String>,
+    just_written: &BTreeSet<String>,
+    get_changes: bool,
+    window: usize,
+) -> (Vec<String>, Vec<String>, Vec<String>, bool) {
+    for id in just_written {
+        if let Some(hash) = current.get(id) {
+            previous.insert(id.clone(), hash.clone());
+        }
+    }
+    let mut adds = Vec::new();
+    let mut changes = Vec::new();
+    let mut removes = Vec::new();
+    let mut more = false;
+    if get_changes {
+        let pending: Vec<(String, u8)> = current
+            .iter()
+            .filter_map(|(id, hash)| match previous.get(id) {
+                None => Some((id.clone(), 0)),
+                Some(old) if old != hash => Some((id.clone(), 1)),
+                _ => None,
+            })
+            .chain(
+                previous
+                    .keys()
+                    .filter(|id| !current.contains_key(*id))
+                    .map(|id| (id.clone(), 2)),
+            )
+            .collect();
+        more = pending.len() > window;
+        for (id, kind) in pending.into_iter().take(window) {
+            if kind == 2 {
+                previous.remove(&id);
+                removes.push(id);
+            } else {
+                previous.insert(id.clone(), current[&id].clone());
+                if kind == 0 {
+                    adds.push(id);
+                } else {
+                    changes.push(id);
+                }
+            }
+        }
+    }
+    (adds, changes, removes, more)
+}
+
 async fn sync_contacts_collection(
     state: &AppState,
     auth: &AuthenticatedSession,
@@ -3325,6 +3520,7 @@ async fn sync_contacts_collection(
         .map(|item| (item.item_id, item.hash))
         .collect();
 
+    let mut deleted = false;
     let mut add_responses: Vec<(String, Option<String>, &'static str)> = Vec::new();
     let mut change_responses: Vec<(String, &'static str)> = Vec::new();
 
@@ -3375,6 +3571,7 @@ async fn sync_contacts_collection(
                 match state.jmap.destroy_contact(auth, &command.server_id).await {
                     Ok(()) => {
                         previous_by_id.remove(&command.server_id);
+                        deleted = true;
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -3396,7 +3593,7 @@ async fn sync_contacts_collection(
 
     let contacts = match state
         .jmap
-        .contacts_in_address_book(auth, &address_book_id, collection.window_size)
+        .contacts_in_address_book(auth, &address_book_id, 0)
         .await
     {
         Ok(contacts) => contacts,
@@ -3426,34 +3623,30 @@ async fn sync_contacts_collection(
     // Commands as if the server discovered it independently.
     let just_written: BTreeSet<String> = add_responses
         .iter()
-        .filter_map(|(_, server_id, _)| server_id.clone())
+        .filter_map(|(_, server_id, status)| (*status == "1").then(|| server_id.clone()).flatten())
         .chain(
             change_responses
                 .iter()
+                .filter(|(_, status)| *status == "1")
                 .map(|(server_id, _)| server_id.clone()),
         )
         .collect();
 
-    let mut to_add = Vec::new();
-    let mut to_change = Vec::new();
-    for (id, (hash, _)) in &current_by_id {
-        if just_written.contains(id) {
-            continue;
-        }
-        match previous_by_id.get(id) {
-            None => to_add.push(id.clone()),
-            Some(previous_hash) if previous_hash != hash => to_change.push(id.clone()),
-            _ => {}
-        }
-    }
-    let to_remove: Vec<String> = previous_by_id
-        .keys()
-        .filter(|id| !current_by_id.contains_key(id.as_str()))
-        .cloned()
+    let current_hashes: BTreeMap<String, String> = current_by_id
+        .iter()
+        .map(|(id, (hash, _))| (id.clone(), hash.clone()))
         .collect();
+    let (to_add, to_change, to_remove, more_available) = item_sync_page(
+        &mut previous_by_id,
+        &current_hashes,
+        &just_written,
+        collection.get_changes,
+        collection.window_size,
+    );
 
     let has_server_changes = !to_add.is_empty() || !to_change.is_empty() || !to_remove.is_empty();
-    let client_commands_applied = !add_responses.is_empty() || !change_responses.is_empty();
+    let client_commands_applied =
+        deleted || !add_responses.is_empty() || !change_responses.is_empty();
     let new_sync_key =
         if collection.sync_key == "0" || has_server_changes || client_commands_applied {
             next_sync_key(&collection.sync_key)
@@ -3475,12 +3668,9 @@ async fn sync_contacts_collection(
     {
         tracing::warn!(%error, user, device_id, collection = collection.collection_id, "failed to persist Contacts SyncRecord");
     }
-    let item_states: Vec<ItemState> = current_by_id
-        .iter()
-        .map(|(id, (hash, _))| ItemState {
-            item_id: id.clone(),
-            hash: hash.clone(),
-        })
+    let item_states: Vec<ItemState> = previous_by_id
+        .into_iter()
+        .map(|(item_id, hash)| ItemState { item_id, hash })
         .collect();
     if let Err(error) = state
         .state
@@ -3515,6 +3705,9 @@ async fn sync_contacts_collection(
         builder.end();
     }
 
+    if more_available {
+        builder.empty_tag(air::MORE_AVAILABLE);
+    }
     if collection.get_changes && has_server_changes {
         builder.start(air::COMMANDS);
         for id in &to_add {
@@ -3648,6 +3841,7 @@ async fn sync_calendar_collection(
         .map(|item| (item.item_id, item.hash))
         .collect();
 
+    let mut deleted = false;
     let mut add_responses: Vec<(String, Option<String>, &'static str)> = Vec::new();
     let mut change_responses: Vec<(String, &'static str)> = Vec::new();
 
@@ -3702,6 +3896,7 @@ async fn sync_calendar_collection(
                 {
                     Ok(()) => {
                         previous_by_id.remove(&command.server_id);
+                        deleted = true;
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -3723,7 +3918,7 @@ async fn sync_calendar_collection(
 
     let events = match state
         .jmap
-        .calendar_events_in_calendar(auth, &calendar_id, collection.window_size)
+        .calendar_events_in_calendar(auth, &calendar_id, 0)
         .await
     {
         Ok(events) => events,
@@ -3749,34 +3944,30 @@ async fn sync_calendar_collection(
 
     let just_written: BTreeSet<String> = add_responses
         .iter()
-        .filter_map(|(_, server_id, _)| server_id.clone())
+        .filter_map(|(_, server_id, status)| (*status == "1").then(|| server_id.clone()).flatten())
         .chain(
             change_responses
                 .iter()
+                .filter(|(_, status)| *status == "1")
                 .map(|(server_id, _)| server_id.clone()),
         )
         .collect();
 
-    let mut to_add = Vec::new();
-    let mut to_change = Vec::new();
-    for (id, (hash, _)) in &current_by_id {
-        if just_written.contains(id) {
-            continue;
-        }
-        match previous_by_id.get(id) {
-            None => to_add.push(id.clone()),
-            Some(previous_hash) if previous_hash != hash => to_change.push(id.clone()),
-            _ => {}
-        }
-    }
-    let to_remove: Vec<String> = previous_by_id
-        .keys()
-        .filter(|id| !current_by_id.contains_key(id.as_str()))
-        .cloned()
+    let current_hashes: BTreeMap<String, String> = current_by_id
+        .iter()
+        .map(|(id, (hash, _))| (id.clone(), hash.clone()))
         .collect();
+    let (to_add, to_change, to_remove, more_available) = item_sync_page(
+        &mut previous_by_id,
+        &current_hashes,
+        &just_written,
+        collection.get_changes,
+        collection.window_size,
+    );
 
     let has_server_changes = !to_add.is_empty() || !to_change.is_empty() || !to_remove.is_empty();
-    let client_commands_applied = !add_responses.is_empty() || !change_responses.is_empty();
+    let client_commands_applied =
+        deleted || !add_responses.is_empty() || !change_responses.is_empty();
     let new_sync_key =
         if collection.sync_key == "0" || has_server_changes || client_commands_applied {
             next_sync_key(&collection.sync_key)
@@ -3798,12 +3989,9 @@ async fn sync_calendar_collection(
     {
         tracing::warn!(%error, user, device_id, collection = collection.collection_id, "failed to persist Calendar SyncRecord");
     }
-    let item_states: Vec<ItemState> = current_by_id
-        .iter()
-        .map(|(id, (hash, _))| ItemState {
-            item_id: id.clone(),
-            hash: hash.clone(),
-        })
+    let item_states: Vec<ItemState> = previous_by_id
+        .into_iter()
+        .map(|(item_id, hash)| ItemState { item_id, hash })
         .collect();
     if let Err(error) = state
         .state
@@ -3838,6 +4026,9 @@ async fn sync_calendar_collection(
         builder.end();
     }
 
+    if more_available {
+        builder.empty_tag(air::MORE_AVAILABLE);
+    }
     if collection.get_changes && has_server_changes {
         builder.start(air::COMMANDS);
         for id in &to_add {
@@ -3994,6 +4185,7 @@ async fn sync_tasks_collection(
         .map(|item| (item.item_id, item.hash))
         .collect();
 
+    let mut deleted = false;
     let mut add_responses: Vec<(String, Option<String>, &'static str)> = Vec::new();
     let mut change_responses: Vec<(String, &'static str)> = Vec::new();
 
@@ -4043,6 +4235,7 @@ async fn sync_tasks_collection(
                 {
                     Ok(()) => {
                         previous_by_id.remove(&command.server_id);
+                        deleted = true;
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -4062,11 +4255,7 @@ async fn sync_tasks_collection(
         }
     }
 
-    let tasks = match state
-        .jmap
-        .tasks_in_calendar(auth, &calendar_id, collection.window_size)
-        .await
-    {
+    let tasks = match state.jmap.tasks_in_calendar(auth, &calendar_id, 0).await {
         Ok(tasks) => tasks,
         Err(error) => {
             tracing::warn!(
@@ -4090,34 +4279,30 @@ async fn sync_tasks_collection(
 
     let just_written: BTreeSet<String> = add_responses
         .iter()
-        .filter_map(|(_, server_id, _)| server_id.clone())
+        .filter_map(|(_, server_id, status)| (*status == "1").then(|| server_id.clone()).flatten())
         .chain(
             change_responses
                 .iter()
+                .filter(|(_, status)| *status == "1")
                 .map(|(server_id, _)| server_id.clone()),
         )
         .collect();
 
-    let mut to_add = Vec::new();
-    let mut to_change = Vec::new();
-    for (id, (hash, _)) in &current_by_id {
-        if just_written.contains(id) {
-            continue;
-        }
-        match previous_by_id.get(id) {
-            None => to_add.push(id.clone()),
-            Some(previous_hash) if previous_hash != hash => to_change.push(id.clone()),
-            _ => {}
-        }
-    }
-    let to_remove: Vec<String> = previous_by_id
-        .keys()
-        .filter(|id| !current_by_id.contains_key(id.as_str()))
-        .cloned()
+    let current_hashes: BTreeMap<String, String> = current_by_id
+        .iter()
+        .map(|(id, (hash, _))| (id.clone(), hash.clone()))
         .collect();
+    let (to_add, to_change, to_remove, more_available) = item_sync_page(
+        &mut previous_by_id,
+        &current_hashes,
+        &just_written,
+        collection.get_changes,
+        collection.window_size,
+    );
 
     let has_server_changes = !to_add.is_empty() || !to_change.is_empty() || !to_remove.is_empty();
-    let client_commands_applied = !add_responses.is_empty() || !change_responses.is_empty();
+    let client_commands_applied =
+        deleted || !add_responses.is_empty() || !change_responses.is_empty();
     let new_sync_key =
         if collection.sync_key == "0" || has_server_changes || client_commands_applied {
             next_sync_key(&collection.sync_key)
@@ -4139,12 +4324,9 @@ async fn sync_tasks_collection(
     {
         tracing::warn!(%error, user, device_id, collection = collection.collection_id, "failed to persist Tasks SyncRecord");
     }
-    let item_states: Vec<ItemState> = current_by_id
-        .iter()
-        .map(|(id, (hash, _))| ItemState {
-            item_id: id.clone(),
-            hash: hash.clone(),
-        })
+    let item_states: Vec<ItemState> = previous_by_id
+        .into_iter()
+        .map(|(item_id, hash)| ItemState { item_id, hash })
         .collect();
     if let Err(error) = state
         .state
@@ -4179,6 +4361,9 @@ async fn sync_tasks_collection(
         builder.end();
     }
 
+    if more_available {
+        builder.empty_tag(air::MORE_AVAILABLE);
+    }
     if collection.get_changes && has_server_changes {
         builder.start(air::COMMANDS);
         for id in &to_add {
@@ -4277,6 +4462,7 @@ async fn sync_notes_collection(
         .map(|item| (item.item_id, item.hash))
         .collect();
 
+    let mut deleted = false;
     let mut add_responses: Vec<(String, Option<String>, &'static str)> = Vec::new();
     let mut change_responses: Vec<(String, &'static str)> = Vec::new();
 
@@ -4330,6 +4516,7 @@ async fn sync_notes_collection(
                 match state.jmap.destroy_note(auth, &command.server_id).await {
                     Ok(()) => {
                         previous_by_id.remove(&command.server_id);
+                        deleted = true;
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -4354,7 +4541,7 @@ async fn sync_notes_collection(
         }
     }
 
-    let current_summaries = match state.jmap.list_notes(auth, &mailbox_id, 500).await {
+    let current_summaries = match state.jmap.list_notes(auth, &mailbox_id, 0).await {
         Ok(summaries) => summaries,
         Err(error) => {
             tracing::warn!(
@@ -4386,34 +4573,45 @@ async fn sync_notes_collection(
     // seen while building the PHP reference implementation.
     let just_written: BTreeSet<String> = add_responses
         .iter()
-        .filter_map(|(_, server_id, _)| server_id.clone())
+        .filter_map(|(_, server_id, status)| (*status == "1").then(|| server_id.clone()).flatten())
         .chain(
             change_responses
                 .iter()
+                .filter(|(_, status)| *status == "1")
                 .map(|(server_id, _)| server_id.clone()),
         )
         .collect();
 
-    let mut to_add = Vec::new();
-    let mut to_change = Vec::new();
-    for (id, hash) in &current_by_id {
-        if just_written.contains(id) {
-            continue;
-        }
-        match previous_by_id.get(id) {
-            None => to_add.push(id.clone()),
-            Some(previous_hash) if previous_hash != hash => to_change.push(id.clone()),
-            _ => {}
+    let current_hashes: BTreeMap<String, String> = current_by_id.clone();
+    let (to_add, to_change, to_remove, more_available) = item_sync_page(
+        &mut previous_by_id,
+        &current_hashes,
+        &just_written,
+        collection.get_changes,
+        collection.window_size,
+    );
+
+    let mut notes = BTreeMap::new();
+    for id in to_add.iter().chain(&to_change) {
+        match state.jmap.get_note(auth, id).await {
+            Ok(Some(note)) => {
+                notes.insert(id.clone(), note);
+            }
+            result => {
+                tracing::warn!(error = ?result.err(), "Notes body unavailable during Sync");
+                builder.start(air::COLLECTION);
+                builder.leaf(air::SYNC_KEY, collection.sync_key.clone());
+                builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+                builder.leaf(air::STATUS, "5");
+                builder.end();
+                return;
+            }
         }
     }
-    let to_remove: Vec<String> = previous_by_id
-        .keys()
-        .filter(|id| !current_by_id.contains_key(id.as_str()))
-        .cloned()
-        .collect();
 
     let has_server_changes = !to_add.is_empty() || !to_change.is_empty() || !to_remove.is_empty();
-    let client_commands_applied = !add_responses.is_empty() || !change_responses.is_empty();
+    let client_commands_applied =
+        deleted || !add_responses.is_empty() || !change_responses.is_empty();
     let new_sync_key =
         if collection.sync_key == "0" || has_server_changes || client_commands_applied {
             next_sync_key(&collection.sync_key)
@@ -4435,12 +4633,9 @@ async fn sync_notes_collection(
     {
         tracing::warn!(%error, user, device_id, collection = collection.collection_id, "failed to persist Notes SyncRecord");
     }
-    let item_states: Vec<ItemState> = current_by_id
-        .iter()
-        .map(|(id, hash)| ItemState {
-            item_id: id.clone(),
-            hash: hash.clone(),
-        })
+    let item_states: Vec<ItemState> = previous_by_id
+        .into_iter()
+        .map(|(item_id, hash)| ItemState { item_id, hash })
         .collect();
     if let Err(error) = state
         .state
@@ -4475,16 +4670,19 @@ async fn sync_notes_collection(
         builder.end();
     }
 
+    if more_available {
+        builder.empty_tag(air::MORE_AVAILABLE);
+    }
     if collection.get_changes && has_server_changes {
         builder.start(air::COMMANDS);
         for id in &to_add {
-            if let Ok(Some(note)) = state.jmap.get_note(auth, id).await {
-                write_note_command(builder, air::ADD, &note);
+            if let Some(note) = notes.get(id) {
+                write_note_command(builder, air::ADD, note);
             }
         }
         for id in &to_change {
-            if let Ok(Some(note)) = state.jmap.get_note(auth, id).await {
-                write_note_command(builder, air::CHANGE, &note);
+            if let Some(note) = notes.get(id) {
+                write_note_command(builder, air::CHANGE, note);
             }
         }
         for id in &to_remove {

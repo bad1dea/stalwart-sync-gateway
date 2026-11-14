@@ -40,7 +40,7 @@ impl Class {
         match class.to_ascii_lowercase().as_str() {
             "" | "email" | "notes" => Some(Class::Mail),
             "contacts" => Some(Class::Contacts),
-            "calendar" => Some(Class::Calendar),
+            "calendar" | "tasks" => Some(Class::Calendar),
             _ => None,
         }
     }

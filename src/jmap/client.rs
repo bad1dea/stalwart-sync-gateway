@@ -1149,64 +1149,96 @@ impl JmapClient {
     /// Contacts have no real two-way sync yet (this is read-only, like
     /// mail's own list-and-diff via seen_ids) -- see the
     /// `sync_contacts_collection` caller for that state-diffing.
+    pub(crate) async fn query_objects<T: serde::de::DeserializeOwned + Default>(
+        &self,
+        auth: &AuthenticatedSession,
+        capability: &str,
+        object_type: &str,
+        filter: serde_json::Value,
+        properties: Option<&[&str]>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<T>> {
+        let Some(account_id) = auth.session.primary_account_for(capability) else {
+            return Ok(Vec::new());
+        };
+        let query = format!("{object_type}/query");
+        let get = format!("{object_type}/get");
+        let mut objects = Vec::new();
+        let mut position = 0;
+        let mut query_state = None;
+        loop {
+            let page_size = if limit == 0 {
+                200
+            } else {
+                (limit - position).min(200)
+            };
+            let mut get_args = serde_json::json!({
+                "accountId": account_id,
+                "#ids": { "resultOf": "q", "name": query, "path": "/ids" }
+            });
+            if let Some(properties) = properties {
+                get_args["properties"] = serde_json::json!(properties);
+            }
+            let response: JmapResponse<serde_json::Value> = self
+                .api_call(
+                    auth,
+                    &[capabilities::CORE.to_owned(), capability.to_owned()],
+                    vec![
+                        MethodCall::new(
+                            &query,
+                            serde_json::json!({
+                                "accountId": account_id, "filter": filter,
+                                "position": position, "limit": page_size
+                            }),
+                            "q",
+                        ),
+                        MethodCall::new(&get, get_args, "g"),
+                    ],
+                )
+                .await?;
+            let mut count = None;
+            let mut page = None;
+            for method in response.method_responses {
+                if method.0 == "error" {
+                    anyhow::bail!("JMAP method error in {object_type} snapshot");
+                } else if method.0 == query {
+                    let result: QueryResponse = serde_json::from_value(method.1)?;
+                    if position != 0 && query_state != result.query_state {
+                        anyhow::bail!("JMAP {object_type} changed during snapshot; retry Sync");
+                    }
+                    query_state = result.query_state;
+                    count = Some(result.ids.len());
+                } else if method.0 == get {
+                    let result: GetResponse<T> = serde_json::from_value(method.1)?;
+                    page = Some(result.list);
+                }
+            }
+            let count = count.context("missing JMAP query response")?;
+            objects.extend(page.context("missing JMAP get response")?);
+            position += count;
+            if count == 0 || (limit != 0 && position >= limit) {
+                return Ok(objects);
+            }
+        }
+    }
+
     pub async fn contacts_in_address_book(
         &self,
         auth: &AuthenticatedSession,
         address_book_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<Contact>> {
-        let Some(account_id) = auth.session.primary_account_for(capabilities::CONTACTS) else {
-            return Ok(Vec::new());
-        };
-
-        let calls = vec![
-            MethodCall::new(
-                "ContactCard/query",
-                serde_json::json!({
-                    "accountId": account_id,
-                    "filter": { "inAddressBook": address_book_id },
-                    "limit": limit.clamp(1, 200)
-                }),
-                "q",
-            ),
-            MethodCall::new(
-                "ContactCard/get",
-                serde_json::json!({
-                    "accountId": account_id,
-                    "#ids": {
-                        "resultOf": "q",
-                        "name": "ContactCard/query",
-                        "path": "/ids"
-                    }
-                }),
-                "g",
-            ),
-        ];
-
-        let response: JmapResponse<serde_json::Value> = self
-            .api_call(
+        let items: Vec<ContactCardObject> = self
+            .query_objects(
                 auth,
-                &[
-                    capabilities::CORE.to_owned(),
-                    capabilities::CONTACTS.to_owned(),
-                ],
-                calls,
+                capabilities::CONTACTS,
+                "ContactCard",
+                serde_json::json!({ "inAddressBook": address_book_id }),
+                None,
+                limit,
             )
             .await?;
-
-        for method in response.method_responses {
-            match method.0.as_str() {
-                "ContactCard/get" => {
-                    let get: GetResponse<ContactCardObject> = serde_json::from_value(method.1)
-                        .context("invalid ContactCard/get response")?;
-                    return Ok(get.list.into_iter().map(Contact::from).collect());
-                }
-                "error" => anyhow::bail!("JMAP method error in contact sync"),
-                _ => {}
-            }
-        }
-
-        Ok(Vec::new())
+        Ok(items.into_iter().map(Contact::from).collect())
     }
 
     /// Creates (`id: None`) or updates (`id: Some`) a contact from
@@ -1467,80 +1499,39 @@ impl JmapClient {
         calendar_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<CalendarEvent>> {
-        let Some(account_id) = auth.session.primary_account_for(capabilities::CALENDARS) else {
-            return Ok(Vec::new());
-        };
-
-        let calls = vec![
-            MethodCall::new(
-                "CalendarEvent/query",
-                serde_json::json!({
-                    "accountId": account_id,
-                    "filter": { "inCalendar": calendar_id },
-                    "limit": limit.clamp(1, 200)
-                }),
-                "q",
-            ),
-            MethodCall::new(
-                "CalendarEvent/get",
-                serde_json::json!({
-                    "accountId": account_id,
-                    "#ids": {
-                        "resultOf": "q",
-                        "name": "CalendarEvent/query",
-                        "path": "/ids"
-                    },
-                    "properties": [
-                        "id", "@type", "title", "start", "timeZone", "duration",
-                        "locations", "showWithoutTime", "participants"
-                    ]
-                }),
-                "g",
-            ),
-        ];
-
-        let response: JmapResponse<serde_json::Value> = self
-            .api_call(
+        let items: Vec<CalendarEventObject> = self
+            .query_objects(
                 auth,
-                &[
-                    capabilities::CORE.to_owned(),
-                    capabilities::CALENDARS.to_owned(),
-                ],
-                calls,
+                capabilities::CALENDARS,
+                "CalendarEvent",
+                serde_json::json!({ "inCalendar": calendar_id }),
+                Some(&[
+                    "id",
+                    "@type",
+                    "title",
+                    "start",
+                    "timeZone",
+                    "duration",
+                    "locations",
+                    "showWithoutTime",
+                    "participants",
+                ]),
+                limit,
             )
             .await?;
-
-        for method in response.method_responses {
-            match method.0.as_str() {
-                "CalendarEvent/get" => {
-                    let get: GetResponse<CalendarEventObject> = serde_json::from_value(method.1)
-                        .context("invalid CalendarEvent/get response")?;
-                    let username = auth.authorization.username.as_str();
-                    return Ok(get
-                        .list
-                        .into_iter()
-                        .filter(|item| item.kind != "Task")
-                        .map(CalendarEvent::from)
-                        .map(|mut event| {
-                            // No organizer at all (a plain, non-meeting
-                            // event) still needs `is_organizer` -- doesn't
-                            // matter which way since `write_calendar_command`
-                            // only reads it when `attendees` is non-empty.
-                            event.is_organizer = event
-                                .organizer_email
-                                .as_deref()
-                                .map(|email| email.eq_ignore_ascii_case(username))
-                                .unwrap_or(true);
-                            event
-                        })
-                        .collect());
-                }
-                "error" => anyhow::bail!("JMAP method error in calendar sync"),
-                _ => {}
-            }
-        }
-
-        Ok(Vec::new())
+        Ok(items
+            .into_iter()
+            .filter(|item| item.kind != "Task")
+            .map(CalendarEvent::from)
+            .map(|mut event| {
+                event.is_organizer = event
+                    .organizer_email
+                    .as_deref()
+                    .map(|email| email.eq_ignore_ascii_case(auth.username()))
+                    .unwrap_or(true);
+                event
+            })
+            .collect())
     }
 
     /// Creates (`id: None`) or updates (`id: Some`) a non-recurring
@@ -1802,64 +1793,21 @@ impl JmapClient {
         calendar_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<Task>> {
-        let Some(account_id) = auth.session.primary_account_for(capabilities::CALENDARS) else {
-            return Ok(Vec::new());
-        };
-
-        let calls = vec![
-            MethodCall::new(
-                "CalendarEvent/query",
-                serde_json::json!({
-                    "accountId": account_id,
-                    "filter": { "inCalendar": calendar_id },
-                    "limit": limit.clamp(1, 200)
-                }),
-                "q",
-            ),
-            MethodCall::new(
-                "CalendarEvent/get",
-                serde_json::json!({
-                    "accountId": account_id,
-                    "#ids": {
-                        "resultOf": "q",
-                        "name": "CalendarEvent/query",
-                        "path": "/ids"
-                    },
-                    "properties": ["id", "@type", "title", "due", "progress"]
-                }),
-                "g",
-            ),
-        ];
-
-        let response: JmapResponse<serde_json::Value> = self
-            .api_call(
+        let items: Vec<TaskObject> = self
+            .query_objects(
                 auth,
-                &[
-                    capabilities::CORE.to_owned(),
-                    capabilities::CALENDARS.to_owned(),
-                ],
-                calls,
+                capabilities::CALENDARS,
+                "CalendarEvent",
+                serde_json::json!({ "inCalendar": calendar_id }),
+                Some(&["id", "@type", "title", "due", "progress"]),
+                limit,
             )
             .await?;
-
-        for method in response.method_responses {
-            match method.0.as_str() {
-                "CalendarEvent/get" => {
-                    let get: GetResponse<TaskObject> = serde_json::from_value(method.1)
-                        .context("invalid CalendarEvent/get response (tasks)")?;
-                    return Ok(get
-                        .list
-                        .into_iter()
-                        .filter(|item| item.kind == "Task")
-                        .map(Task::from)
-                        .collect());
-                }
-                "error" => anyhow::bail!("JMAP method error in task sync"),
-                _ => {}
-            }
-        }
-
-        Ok(Vec::new())
+        Ok(items
+            .into_iter()
+            .filter(|item| item.kind == "Task")
+            .map(Task::from)
+            .collect())
     }
 
     /// Creates (`id: None`) or updates (`id: Some`) a Task-typed
@@ -2065,6 +2013,25 @@ impl JmapClient {
             }),
         )
         .await
+    }
+
+    pub async fn delete_email(
+        &self,
+        auth: &AuthenticatedSession,
+        email_id: &str,
+        mailbox_id: &str,
+        as_move: bool,
+    ) -> anyhow::Result<()> {
+        if as_move {
+            let trash = self
+                .find_mailbox_by_role(auth, "trash")
+                .await?
+                .context("Deleted Items mailbox is unavailable")?;
+            if trash != mailbox_id {
+                return self.move_email(auth, email_id, mailbox_id, &trash).await;
+            }
+        }
+        self.destroy_email(auth, email_id).await
     }
 
     pub async fn destroy_email(
@@ -2728,6 +2695,8 @@ pub(crate) struct GetResponse<T> {
 /// windowed query left more messages unfetched, for EAS's MoreAvailable.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct QueryResponse {
+    #[serde(rename = "queryState", default)]
+    query_state: Option<String>,
     #[serde(default)]
     total: Option<u64>,
     #[serde(default)]

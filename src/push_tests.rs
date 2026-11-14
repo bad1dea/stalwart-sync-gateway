@@ -4,7 +4,7 @@
 use std::{
     convert::Infallible,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -57,6 +57,8 @@ struct Mock {
     /// Every mutation's message id, in order; the JMAP Email state is its
     /// length (for Email/changes).
     change_log: Mutex<Vec<String>>,
+    groupware: Mutex<std::collections::BTreeMap<String, Vec<serde_json::Value>>>,
+    snapshot_changes: AtomicBool,
 }
 
 impl Mock {
@@ -82,6 +84,11 @@ impl Mock {
     }
 
     fn add_mail(&self, mailbox: &str, id: &str) {
+        self.dates
+            .lock()
+            .unwrap()
+            .entry(id.to_owned())
+            .or_insert_with(|| days_ago(0));
         self.log_change(id);
         self.boxes
             .lock()
@@ -131,7 +138,7 @@ impl Mock {
 
 async fn mock_session(State(m): State<Arc<Mock>>) -> impl IntoResponse {
     let base = format!("http://127.0.0.1:{}", m.port);
-    Json(serde_json::json!({
+    let mut session = serde_json::json!({
         "capabilities": { "urn:ietf:params:jmap:core": {}, MAIL_CAP: {} },
         "accounts": { "a1": { "name": "u@test", "isPersonal": true, "isReadOnly": false,
                               "accountCapabilities": { MAIL_CAP: {} } } },
@@ -142,7 +149,18 @@ async fn mock_session(State(m): State<Arc<Mock>>) -> impl IntoResponse {
         "uploadUrl": format!("{base}/ul/{{accountId}}/"),
         "eventSourceUrl": format!("{base}/es/?types={{types}}&closeafter={{closeafter}}&ping={{ping}}"),
         "state": "s"
-    }))
+    });
+    if !m.groupware.lock().unwrap().is_empty() {
+        for cap in [
+            crate::jmap::capabilities::CONTACTS,
+            crate::jmap::capabilities::CALENDARS,
+        ] {
+            session["capabilities"][cap] = serde_json::json!({});
+            session["accounts"]["a1"]["accountCapabilities"][cap] = serde_json::json!({});
+            session["primaryAccounts"][cap] = serde_json::json!("a1");
+        }
+    }
+    Json(session)
 }
 
 fn email_json(id: &str, mailbox: &str, read: bool, received_at: &str) -> serde_json::Value {
@@ -181,7 +199,7 @@ async fn mock_api(
                 .filter(|f| !hidden.iter().any(|h| f["id"] == h.as_str()))
                 .collect();
                 for f in m.extra_folders.lock().unwrap().iter() {
-                    list.push(serde_json::json!({"id":f,"name":f,"parentId":null,"role":null}));
+                    list.push(serde_json::json!({"id":f,"name": if f == "notes" {"Notes"} else {f},"parentId":null,"role": if f == "trash" {Some("trash")} else {None} }));
                 }
                 serde_json::json!({ "list": list })
             }
@@ -193,6 +211,15 @@ async fn mock_api(
                         ids.push(sid.clone());
                     }
                 }
+                if let Some(keyword) = args["filter"]["hasKeyword"].as_str() {
+                    ids = boxes
+                        .get("notes")
+                        .into_iter()
+                        .flatten()
+                        .filter(|id| format!("noteid-{id}") == keyword)
+                        .cloned()
+                        .collect();
+                }
                 ids.reverse();
                 if let Some(after) = args["filter"]["after"].as_str() {
                     // RFC 3339 UTC strings of one format compare as dates.
@@ -200,9 +227,81 @@ async fn mock_api(
                 }
                 let limit = args["limit"].as_u64().unwrap_or(100) as usize;
                 let total = ids.len();
-                ids.truncate(limit);
+                let position = args["position"].as_u64().unwrap_or(0) as usize;
+                ids = ids.into_iter().skip(position).take(limit).collect();
                 last_query = ids.clone();
                 serde_json::json!({ "ids": ids, "total": total })
+            }
+            "AddressBook/get" => {
+                serde_json::json!({"list": [{"id": "book", "name": "Contacts", "isDefault": true}]})
+            }
+            "Calendar/get" => {
+                serde_json::json!({"list": [{"id": "calendar", "name": "Calendar", "isDefault": true}]})
+            }
+            "ContactCard/query" | "CalendarEvent/query" => {
+                let kind = if name == "ContactCard/query" {
+                    "contacts"
+                } else {
+                    "calendar"
+                };
+                let items = m.groupware.lock().unwrap();
+                let items = items.get(kind).cloned().unwrap_or_default();
+                let position = args["position"].as_u64().unwrap_or(0) as usize;
+                // Deliberately return short pages, as a server may do.
+                let limit = (args["limit"].as_u64().unwrap_or(200) as usize).min(37);
+                last_query = items
+                    .iter()
+                    .skip(position)
+                    .take(limit)
+                    .map(|v| v["id"].as_str().unwrap().to_owned())
+                    .collect();
+                serde_json::json!({"ids": last_query, "total": items.len(),
+                    "queryState": if m.snapshot_changes.load(Ordering::SeqCst) && position > 0 {"changed"} else {"stable"}})
+            }
+            "ContactCard/get" | "CalendarEvent/get" => {
+                let kind = if name == "ContactCard/get" {
+                    "contacts"
+                } else {
+                    "calendar"
+                };
+                let items = m.groupware.lock().unwrap();
+                let list: Vec<_> = items
+                    .get(kind)
+                    .into_iter()
+                    .flatten()
+                    .filter(|v| last_query.iter().any(|id| v["id"] == id.as_str()))
+                    .cloned()
+                    .collect();
+                serde_json::json!({"list": list})
+            }
+            "Email/set" => {
+                let mut updated = serde_json::Map::new();
+                if let Some(updates) = args["update"].as_object() {
+                    for (id, patch) in updates {
+                        m.log_change(id);
+                        let mut boxes = m.boxes.lock().unwrap();
+                        for (key, value) in patch.as_object().unwrap() {
+                            if let Some(folder) = key.strip_prefix("mailboxIds/") {
+                                let items = boxes.entry(folder.to_owned()).or_default();
+                                items.retain(|item| item != id);
+                                if value == true {
+                                    items.push(id.clone());
+                                }
+                            }
+                        }
+                        updated.insert(id.clone(), serde_json::Value::Null);
+                    }
+                }
+                let destroyed = args["destroy"].as_array().cloned().unwrap_or_default();
+                for id in &destroyed {
+                    let id = id.as_str().unwrap();
+                    m.log_change(id);
+                    for items in m.boxes.lock().unwrap().values_mut() {
+                        items.retain(|item| item != id);
+                    }
+                }
+                m.emit_email_change();
+                serde_json::json!({"updated": updated, "destroyed": destroyed})
             }
             "Email/changes" => {
                 let log = m.change_log.lock().unwrap().clone();
@@ -247,7 +346,12 @@ async fn mock_api(
                 for id in ids {
                     for (mb, items) in &boxes {
                         if items.contains(&id) {
-                            list.push(email_json(&id, mb, read_set.contains(&id), &m.date_of(&id)));
+                            let mut email =
+                                email_json(&id, mb, read_set.contains(&id), &m.date_of(&id));
+                            if mb == "notes" {
+                                email["keywords"] = serde_json::json!({format!("noteid-{id}"): true, "$note": true});
+                            }
+                            list.push(email);
                         }
                     }
                 }
@@ -295,6 +399,8 @@ async fn start_mock() -> Arc<Mock> {
         hidden_folders: Mutex::new(Vec::new()),
         dates: Mutex::new(Default::default()),
         change_log: Mutex::new(Vec::new()),
+        groupware: Mutex::new(Default::default()),
+        snapshot_changes: AtomicBool::new(false),
     });
     let app = Router::new()
         .route("/.well-known/jmap", get(mock_session))
@@ -1071,7 +1177,10 @@ async fn empty_ping_with_nothing_stored_gets_status_3_then_a_full_ping_works() {
     assert_eq!((r.status.as_str(), r.folders.len()), ("3", 0));
     // Status 3 does not count as an announcement or eat the change.
     let r = env.ping("ipad", Some(ping_body(3, INBOX))).await;
-    assert_eq!((r.status.as_str(), r.folders), ("2", vec!["inbox".to_owned()]));
+    assert_eq!(
+        (r.status.as_str(), r.folders),
+        ("2", vec!["inbox".to_owned()])
+    );
     env.sync_all("ipad").await;
     env.mock.add_mail("inbox", "m4");
     let r = env.ping("ipad", None).await;
@@ -1757,15 +1866,24 @@ async fn adds_carry_the_server_read_flag() {
     let env = Arc::new(start_env(Opts::default()).await);
     env.mock.set_read("m1", true);
     let (outline, key) = sync_outline(&env, "ipad", "0").await;
-    assert!(!outline.contains("<0:16>"), "SyncKey 0 reply has no Commands: {outline}");
+    assert!(
+        !outline.contains("<0:16>"),
+        "SyncKey 0 reply has no Commands: {outline}"
+    );
     let (outline, _) = sync_outline(&env, "ipad", &key).await;
     let read_of = |id: &str| {
         let at = outline.find(&format!("<0:0d>{id}</>")).expect(id);
         let rest = &outline[at..];
-        let end = rest[1..].find("<0:07>").map(|e| e + 1).unwrap_or(rest.len());
+        let end = rest[1..]
+            .find("<0:07>")
+            .map(|e| e + 1)
+            .unwrap_or(rest.len());
         let add = &rest[..end];
         assert_eq!(add.matches("<2:15>").count(), 1, "one Read per Add: {add}");
-        add[add.find("<2:15>").unwrap() + 6..].chars().next().unwrap()
+        add[add.find("<2:15>").unwrap() + 6..]
+            .chars()
+            .next()
+            .unwrap()
     };
     assert_eq!(read_of("m1"), '1');
     assert_eq!(read_of("m2"), '0');
@@ -2093,22 +2211,30 @@ mod e2e {
         async fn seed_dated(&self, items: &[(&str, String)]) -> Vec<String> {
             let mut batch = serde_json::Map::new();
             for (n, (tag, at)) in items.iter().enumerate() {
-                batch.insert(format!("k{n}"), serde_json::json!({
-                    "mailboxIds": {self.inbox.clone(): true},
-                    "keywords": {},
-                    "receivedAt": at,
-                    "from": [{"email": "e2e@e2e.test"}],
-                    "to": [{"email": self.user}],
-                    "subject": format!("{tag}"),
-                    "bodyValues": {"b": {"value": "body"}},
-                    "textBody": [{"partId": "b", "type": "text/plain"}]
-                }));
+                batch.insert(
+                    format!("k{n}"),
+                    serde_json::json!({
+                        "mailboxIds": {self.inbox.clone(): true},
+                        "keywords": {},
+                        "receivedAt": at,
+                        "from": [{"email": "e2e@e2e.test"}],
+                        "to": [{"email": self.user}],
+                        "subject": tag,
+                        "bodyValues": {"b": {"value": "body"}},
+                        "textBody": [{"partId": "b", "type": "text/plain"}]
+                    }),
+                );
             }
             let r = self
                 .call(serde_json::json!([["Email/set", {"accountId": self.account, "create": batch}, "0"]]))
                 .await;
             (0..items.len())
-                .map(|n| r[0][1]["created"][format!("k{n}")]["id"].as_str().expect("created").to_owned())
+                .map(|n| {
+                    r[0][1]["created"][format!("k{n}")]["id"]
+                        .as_str()
+                        .expect("created")
+                        .to_owned()
+                })
                 .collect()
         }
 
@@ -2120,9 +2246,18 @@ mod e2e {
         }
 
         /// One Sync with a FilterType: (key, SoftDelete ids, Delete ids, Add ids).
-        async fn sync_filter(&self, device: &str, key: &str, filter: &str) -> (String, Vec<String>, Vec<String>, Vec<String>) {
+        async fn sync_filter(
+            &self,
+            device: &str,
+            key: &str,
+            filter: &str,
+        ) -> (String, Vec<String>, Vec<String>, Vec<String>) {
             let doc = self
-                .wbxml("Sync", device, sync_body_options(key, &self.inbox, "100", Some(filter)))
+                .wbxml(
+                    "Sync",
+                    device,
+                    sync_body_options(key, &self.inbox, "100", Some(filter)),
+                )
                 .await;
             let outline = crate::activesync::wbxml_outline_for_tests(&doc);
             (
@@ -2152,20 +2287,34 @@ mod e2e {
         let mut key = k0;
         loop {
             let (k, _, _, _) = live.sync_filter(&d, &key, "0").await;
-            if k == key { break; }
+            if k == key {
+                break;
+            }
             key = k;
         }
         let (k1, soft, del, adds) = live.sync_filter(&d, &key, "5").await;
         assert!(soft.contains(old45) && soft.contains(old400), "{soft:?}");
-        assert!(!soft.contains(recent) && del.is_empty() && adds.is_empty(), "{soft:?} {del:?} {adds:?}");
-        assert!(live.in_inbox(old45).await && live.in_inbox(old400).await, "still on the server");
+        assert!(
+            !soft.contains(recent) && del.is_empty() && adds.is_empty(),
+            "{soft:?} {del:?} {adds:?}"
+        );
+        assert!(
+            live.in_inbox(old45).await && live.in_inbox(old400).await,
+            "still on the server"
+        );
         let (k2, soft2, del2, _) = live.sync_filter(&d, &k1, "5").await;
-        assert!(soft2.is_empty() && del2.is_empty() && k2 == k1, "not repeated");
+        assert!(
+            soft2.is_empty() && del2.is_empty() && k2 == k1,
+            "not repeated"
+        );
         if let Ok(cmd) = std::env::var("E2E_RESTART_CMD") {
             assert!(std::process::Command::new(cmd).status().unwrap().success());
             let live = Live::new("E2E_USER2").await;
             let (k3, soft3, del3, _) = live.sync_filter(&d, &k2, "5").await;
-            assert!(soft3.is_empty() && del3.is_empty() && k3 == k2, "not repeated after restart");
+            assert!(
+                soft3.is_empty() && del3.is_empty() && k3 == k2,
+                "not repeated after restart"
+            );
         }
         // Widening the window brings them back.
         let (_, _, _, adds) = live.sync_filter(&d, &k2, "0").await;
@@ -2771,7 +2920,12 @@ async fn initial_sync(env: &Env, device: &str, filter: Option<&str>) -> (String,
 }
 
 fn still_on_server(env: &Env, id: &str) -> bool {
-    env.mock.boxes.lock().unwrap().get("inbox").is_some_and(|b| b.iter().any(|i| i == id))
+    env.mock
+        .boxes
+        .lock()
+        .unwrap()
+        .get("inbox")
+        .is_some_and(|b| b.iter().any(|i| i == id))
 }
 
 #[tokio::test]
@@ -2803,13 +2957,19 @@ async fn previously_synced_mail_older_than_one_month_is_soft_deleted_once_and_ke
     let mut soft = r.soft.clone();
     soft.sort();
     assert_eq!(soft, vec!["old40", "old90"]);
-    assert!(r.deletes.is_empty() && r.adds.is_empty() && r.changes.is_empty(), "{r:?}");
+    assert!(
+        r.deletes.is_empty() && r.adds.is_empty() && r.changes.is_empty(),
+        "{r:?}"
+    );
     assert_ne!(r.key, key, "SyncKey advances");
     assert!(still_on_server(&env, "old40") && still_on_server(&env, "old90"));
     // Repeated Syncs (with and without Options): nothing again.
     for filter in [Some("5"), None, Some("5")] {
         let again = sync_cmds(&env, "ipad", &r.key, filter, "25").await;
-        assert!(again.soft.is_empty() && again.deletes.is_empty(), "{again:?}");
+        assert!(
+            again.soft.is_empty() && again.deletes.is_empty(),
+            "{again:?}"
+        );
         assert_eq!(again.key, r.key);
     }
     // Ping has nothing to announce about them.
@@ -2839,9 +2999,11 @@ async fn one_month_boundary_keeps_mail_just_inside_and_removes_mail_just_outside
         .unwrap();
     let fmt = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     env.mock.add_mail("inbox", "inside");
-    env.mock.set_date("inside", &fmt(cutoff + chrono::Duration::minutes(10)));
+    env.mock
+        .set_date("inside", &fmt(cutoff + chrono::Duration::minutes(10)));
     env.mock.add_mail("inbox", "outside");
-    env.mock.set_date("outside", &fmt(cutoff - chrono::Duration::minutes(10)));
+    env.mock
+        .set_date("outside", &fmt(cutoff - chrono::Duration::minutes(10)));
     let (key, _) = initial_sync(&env, "ipad", Some("0")).await;
     let r = sync_cmds(&env, "ipad", &key, Some("5"), "25").await;
     assert_eq!(r.soft, vec!["outside"]);
@@ -2921,13 +3083,25 @@ async fn an_unread_aged_message_is_removed_without_a_read_change_and_its_state_d
     let p = env.ping("ipad", Some(ping_body(2, INBOX))).await;
     let r = sync_cmds(&env, "ipad", &key, Some("5"), "25").await;
     assert_eq!(r.soft, vec!["oldunread"]);
-    assert!(r.changes.is_empty(), "no Change for a removed message: {r:?}");
+    assert!(
+        r.changes.is_empty(),
+        "no Change for a removed message: {r:?}"
+    );
     // Ping announced the read flip on a held message (Email/changes); the
     // Sync it triggers carries the cleanup, so that Status 2 was deliverable.
     assert_eq!(p.status, "2");
-    let states = env.state.item_states("u@test", "ipad", "inbox").await.unwrap();
+    let states = env
+        .state
+        .item_states("u@test", "ipad", "inbox")
+        .await
+        .unwrap();
     assert!(!states.iter().any(|s| s.item_id == "oldunread"));
-    let rec = env.state.get("u@test", "ipad", "inbox").await.unwrap().unwrap();
+    let rec = env
+        .state
+        .get("u@test", "ipad", "inbox")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(!rec.seen_ids.contains(&"oldunread".to_owned()));
 }
 
@@ -2952,7 +3126,13 @@ async fn delete_mode_sends_an_ordinary_delete_and_keep_mode_sends_nothing() {
         (crate::config::AgedOut::Keep, false, false),
         (crate::config::AgedOut::SoftDelete, true, false),
     ] {
-        let env = Arc::new(start_env(Opts { aged_out: mode, ..Opts::default() }).await);
+        let env = Arc::new(
+            start_env(Opts {
+                aged_out: mode,
+                ..Opts::default()
+            })
+            .await,
+        );
         env.mock.add_mail("inbox", "old");
         env.mock.set_date("old", &days_ago(45));
         let (key, _) = initial_sync(&env, "ipad", Some("0")).await;
@@ -2961,7 +3141,10 @@ async fn delete_mode_sends_an_ordinary_delete_and_keep_mode_sends_nothing() {
         assert_eq!(r.deletes == vec!["old"], want_del, "{mode:?} {r:?}");
         assert!(still_on_server(&env, "old"));
         let again = sync_cmds(&env, "ipad", &r.key, Some("5"), "25").await;
-        assert!(again.soft.is_empty() && again.deletes.is_empty(), "{mode:?} {again:?}");
+        assert!(
+            again.soft.is_empty() && again.deletes.is_empty(),
+            "{mode:?} {again:?}"
+        );
     }
 }
 
@@ -2987,5 +3170,362 @@ async fn cross_device_delete_is_still_an_ordinary_delete_inside_the_window() {
     let (key, _) = initial_sync(&env, "iphone", Some("5")).await;
     env.mock.remove_mail("inbox", "m1");
     let r = sync_cmds(&env, "iphone", &key, Some("5"), "25").await;
-    assert_eq!((r.deletes.clone(), r.soft.clone()), (vec!["m1".to_owned()], vec![]));
+    assert_eq!(
+        (r.deletes.clone(), r.soft.clone()),
+        (vec!["m1".to_owned()], vec![])
+    );
+}
+
+async fn item_sync(
+    env: &Env,
+    device: &str,
+    folder: &str,
+    key: &str,
+    window: &str,
+) -> wbxml::Document {
+    let response = env
+        .req("Sync", device)
+        .body(sync_body_window(key, folder, window))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    wbxml::decode_document(&response.bytes().await.unwrap()).unwrap()
+}
+
+fn sync_key(doc: &wbxml::Document) -> String {
+    eas::find_text_after(doc, eas::airsync::SYNC_KEY)
+        .unwrap()
+        .to_owned()
+}
+
+fn enable_groupware(env: &Env, count: usize) {
+    let mut items = env.mock.groupware.lock().unwrap();
+    items.insert(
+        "contacts".into(),
+        (0..count)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("c{i:04}"), "addressBookIds": {"book": true},
+                    "name": {"full": format!("Contact {i}")}
+                })
+            })
+            .collect(),
+    );
+    let mut calendar: Vec<_> = (0..count)
+        .map(|i| {
+            serde_json::json!({
+                "id": format!("e{i:04}"), "@type": "Event", "calendarIds": {"calendar": true},
+                "title": format!("Event {i}"), "start": "2026-11-13T12:00:00", "duration": "PT1H"
+            })
+        })
+        .collect();
+    calendar.extend((0..count).map(|i| {
+        serde_json::json!({
+            "id": format!("t{i:04}"), "@type": "Task", "calendarIds": {"calendar": true},
+            "title": format!("Task {i}"), "due": "2026-11-13T12:00:00", "progress": "needs-action"
+        })
+    }));
+    items.insert("calendar".into(), calendar);
+    drop(items);
+    env.mock.extra_folders.lock().unwrap().push("notes".into());
+    for i in 0..count {
+        env.mock.add_mail("notes", &format!("n{i:04}"));
+    }
+}
+
+#[tokio::test]
+async fn item_collections_prime_page_replay_and_resync_without_losing_items() {
+    use eas::airsync as air;
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 215);
+    for folder in ["ab_book", "cal_calendar", "task_calendar", "note_notes"] {
+        let prime = item_sync(&env, "ipad", folder, "0", "19").await;
+        assert_eq!(eas::find_text_after(&prime, air::STATUS), Some("1"));
+        assert!(
+            !eas::contains_token(&prime, air::COMMANDS),
+            "priming must have no Commands"
+        );
+        let mut key = sync_key(&prime);
+        let mut delivered = std::collections::BTreeSet::new();
+        for _ in 0..20 {
+            let page = item_sync(&env, "ipad", folder, &key, "19").await;
+            let ids = eas::find_all_text_after(&page, air::SERVER_ID);
+            assert!(ids.len() <= 19);
+            for id in ids {
+                assert!(
+                    delivered.insert(id.clone()),
+                    "duplicate item {id} in {folder}"
+                );
+            }
+            let next = sync_key(&page);
+            if next != key {
+                let replay = item_sync(&env, "ipad", folder, &key, "19").await;
+                assert_eq!(
+                    wbxml::encode_document(&page),
+                    wbxml::encode_document(&replay)
+                );
+            }
+            key = next;
+            if !eas::contains_token(&page, air::MORE_AVAILABLE) {
+                break;
+            }
+        }
+        assert_eq!(
+            delivered.len(),
+            215,
+            "{folder} must include backend pages beyond 200"
+        );
+        let quiet = item_sync(&env, "ipad", folder, &key, "19").await;
+        assert!(!eas::contains_token(&quiet, air::COMMANDS));
+        let reset = item_sync(&env, "ipad", folder, "0", "19").await;
+        assert!(!eas::contains_token(&reset, air::COMMANDS));
+        let again = item_sync(&env, "ipad", folder, &sync_key(&reset), "19").await;
+        assert_eq!(eas::find_all_text_after(&again, air::SERVER_ID).len(), 19);
+    }
+}
+
+#[tokio::test]
+async fn item_changes_wake_both_devices_and_sync_delivers_them() {
+    use eas::airsync as air;
+    let env = Arc::new(start_env(Opts::default()).await);
+    enable_groupware(&env, 1);
+    for (folder, class, kind) in [
+        ("ab_book", "Contacts", "ContactCard"),
+        ("cal_calendar", "Calendar", "CalendarEvent"),
+        ("task_calendar", "Tasks", "CalendarEvent"),
+        ("note_notes", "Notes", "Email"),
+    ] {
+        let mut keys = Vec::new();
+        for device in ["iphone", "ipad"] {
+            let prime = item_sync(&env, device, folder, "0", "25").await;
+            let page = item_sync(&env, device, folder, &sync_key(&prime), "25").await;
+            keys.push(sync_key(&page));
+        }
+        let mut pings = Vec::new();
+        for device in ["iphone", "ipad"] {
+            let env = env.clone();
+            pings.push(tokio::spawn(async move {
+                env.ping(device, Some(ping_body(4, &[(folder, class)])))
+                    .await
+            }));
+        }
+        env.wait_connected(1).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        if folder == "note_notes" {
+            env.mock.add_mail("notes", "new-note");
+        } else {
+            let mut all = env.mock.groupware.lock().unwrap();
+            if folder == "ab_book" {
+                all.get_mut("contacts").unwrap()[0]["name"]["full"] = "Changed contact".into();
+            } else {
+                let index = if folder == "cal_calendar" { 0 } else { 1 };
+                all.get_mut("calendar").unwrap()[index]["title"] = "Changed title".into();
+            }
+        }
+        let n = env.mock.counter.fetch_add(1, Ordering::SeqCst);
+        env.mock.emit(
+            serde_json::json!({"@type": "StateChange", "changed": {"a1": {kind: n.to_string()}}})
+                .to_string(),
+        );
+        for (index, ping) in pings.into_iter().enumerate() {
+            let answer = ping.await.unwrap();
+            assert_eq!(answer.status, "2", "{folder} must wake");
+            assert_eq!(answer.folders, vec![folder]);
+            let device = ["iphone", "ipad"][index];
+            let page = item_sync(&env, device, folder, &keys[index], "25").await;
+            assert_eq!(
+                eas::find_all_text_after(&page, air::SERVER_ID).len(),
+                1,
+                "{folder}: {}",
+                crate::activesync::wbxml_outline_for_tests(&page)
+            );
+            let quiet = item_sync(&env, device, folder, &sync_key(&page), "25").await;
+            assert!(!eas::contains_token(&quiet, air::COMMANDS));
+        }
+    }
+}
+
+#[tokio::test]
+async fn upload_only_item_sync_does_not_acknowledge_unreceived_changes() {
+    use eas::airsync as air;
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 1);
+    for folder in ["ab_book", "cal_calendar", "task_calendar", "note_notes"] {
+        let prime = item_sync(&env, "ipad", folder, "0", "25").await;
+        let key = sync_key(&prime);
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, key.clone());
+        b.leaf(air::COLLECTION_ID, folder);
+        b.leaf(air::GET_CHANGES, "0");
+        b.end();
+        b.end();
+        b.end();
+        let request = b.finish();
+        let response = env
+            .req("Sync", "ipad")
+            .body(wbxml::encode_document(&request))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert!(!eas::contains_token(&doc, air::COMMANDS));
+        let received = item_sync(&env, "ipad", folder, &sync_key(&doc), "25").await;
+        assert_eq!(eas::find_all_text_after(&received, air::SERVER_ID).len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn mail_delete_defaults_to_trash_and_explicit_zero_permanently_deletes() {
+    use eas::airsync as air;
+    let env = start_env(Opts::default()).await;
+    env.mock.extra_folders.lock().unwrap().push("trash".into());
+    env.sync_all("iphone").await;
+    env.sync_all("ipad").await;
+    for (id, mode) in [("m1", None), ("m2", Some("0"))] {
+        let key = env
+            .state
+            .get("u@test", "iphone", "inbox")
+            .await
+            .unwrap()
+            .unwrap()
+            .sync_key;
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, key);
+        b.leaf(air::COLLECTION_ID, "inbox");
+        if let Some(mode) = mode {
+            b.leaf(air::DELETES_AS_MOVES, mode);
+        }
+        b.leaf(air::GET_CHANGES, "0");
+        b.start(air::COMMANDS);
+        b.start(air::DELETE);
+        b.leaf(air::SERVER_ID, id);
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        let request = wbxml::encode_document(&b.finish());
+        let response = env
+            .req("Sync", "iphone")
+            .body(request.clone())
+            .send()
+            .await
+            .unwrap();
+        let bytes = response.bytes().await.unwrap();
+        let replay = env
+            .req("Sync", "iphone")
+            .body(request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(replay.bytes().await.unwrap(), bytes);
+        let doc = wbxml::decode_document(&bytes).unwrap();
+        assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("1"));
+    }
+    let boxes = env.mock.boxes.lock().unwrap().clone();
+    assert!(!boxes["inbox"].contains(&"m1".into()));
+    assert_eq!(boxes["trash"], vec!["m1"]);
+    assert!(!boxes.values().any(|items| items.contains(&"m2".into())));
+    let key = env
+        .state
+        .get("u@test", "ipad", "inbox")
+        .await
+        .unwrap()
+        .unwrap()
+        .sync_key;
+    let page = item_sync(&env, "ipad", "inbox", &key, "25").await;
+    assert!(eas::contains_token(&page, air::DELETE));
+    assert_eq!(eas::find_all_text_after(&page, air::SERVER_ID).len(), 2);
+}
+
+#[tokio::test]
+async fn user_query_cannot_select_another_accounts_sync_state() {
+    let env = start_env(Opts::default()).await;
+    let response = env
+        .http
+        .post(format!(
+            "{}?Cmd=Sync&User=victim&DeviceId=iphone&DeviceType=iPhone",
+            env.gw
+        ))
+        .basic_auth("u@test", Some("pw"))
+        .body(sync_body("0", "inbox"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert!(env
+        .state
+        .get("victim", "iphone", "inbox")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(env
+        .state
+        .get("u@test", "iphone", "inbox")
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn a_changing_backend_snapshot_does_not_delete_held_contacts() {
+    use eas::airsync as air;
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 80);
+    let prime = item_sync(&env, "ipad", "ab_book", "0", "100").await;
+    let page = item_sync(&env, "ipad", "ab_book", &sync_key(&prime), "100").await;
+    let key = sync_key(&page);
+    let previous = env
+        .state
+        .item_states("u@test", "ipad", "ab_book")
+        .await
+        .unwrap();
+    assert_eq!(previous.len(), 80);
+    env.mock.snapshot_changes.store(true, Ordering::SeqCst);
+    let failed = item_sync(&env, "ipad", "ab_book", &key, "100").await;
+    assert_eq!(eas::find_text_after(&failed, air::STATUS), Some("5"));
+    assert_eq!(sync_key(&failed), key);
+    assert!(!eas::contains_token(&failed, air::DELETE));
+    assert_eq!(
+        env.state
+            .item_states("u@test", "ipad", "ab_book")
+            .await
+            .unwrap(),
+        previous
+    );
+}
+
+#[tokio::test]
+async fn item_estimates_count_pending_downloads_instead_of_always_zero() {
+    use eas::{airsync as air, get_item_estimate as gie};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 3);
+    for folder in ["ab_book", "cal_calendar", "task_calendar", "note_notes"] {
+        let prime = item_sync(&env, "ipad", folder, "0", "1").await;
+        let key = sync_key(&prime);
+        let mut b = eas::DocumentBuilder::new();
+        b.start(gie::GET_ITEM_ESTIMATE);
+        b.start(gie::FOLDERS);
+        b.start(gie::FOLDER);
+        b.leaf(air::SYNC_KEY, &key);
+        b.leaf(gie::FOLDER_ID, folder);
+        b.end();
+        b.end();
+        b.end();
+        let response = env
+            .req("GetItemEstimate", "ipad")
+            .body(wbxml::encode_document(&b.finish()))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, gie::ESTIMATE), Some("3"));
+    }
 }
