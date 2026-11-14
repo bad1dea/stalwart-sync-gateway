@@ -14,7 +14,7 @@ use tokio::time::Duration;
 use crate::{
     http_server::AppState,
     jmap::client::{basic_credentials, AuthenticatedSession},
-    model::{EmailBodyType, Note},
+    model::{EmailBodyType, EmailState, Note},
     state::{ItemState, SyncRecord},
     wbxml,
 };
@@ -1984,7 +1984,23 @@ async fn sync_mail(
             && !collection.collection_id.starts_with("cal_")
             && !collection.collection_id.starts_with("note_")
             && !collection.collection_id.starts_with("task_");
-        let (client_commands_applied, client_read_changes) =
+        // JMAP's native flag is a boolean. Completion and scheduled follow-up
+        // metadata need a separate backend representation before accepting them.
+        if is_mail_collection
+            && collection.commands.iter().any(|command| {
+                command
+                    .flag_status
+                    .is_some_and(|status| !matches!(status, 0 | 2))
+            })
+        {
+            builder.start(air::COLLECTION);
+            builder.leaf(air::SYNC_KEY, &collection.sync_key);
+            builder.leaf(air::COLLECTION_ID, &collection.collection_id);
+            builder.leaf(air::STATUS, "6");
+            builder.end();
+            continue;
+        }
+        let (client_commands_applied, client_state_changes) =
             if is_mail_collection && !collection.commands.is_empty() {
                 match apply_mail_client_commands(
                     state,
@@ -2297,7 +2313,7 @@ async fn sync_mail(
             // elsewhere (another device, webmail). `item_states` holds what
             // this device was last told; a message with no stored state (a
             // device that predates this) gets one catch-up Change.
-            let stored_read: BTreeMap<String, String> = match state
+            let stored_states: BTreeMap<String, String> = match state
                 .state
                 .item_states(user, device_id, &collection.collection_id)
                 .await
@@ -2310,31 +2326,30 @@ async fn sync_mail(
             };
             // Fresh start (SyncKey 0): old read records describe a copy the
             // device no longer has.
-            let mut prev_read = if collection.sync_key == "0" {
+            let mut previous_states = if collection.sync_key == "0" {
                 BTreeMap::new()
             } else {
-                stored_read.clone()
+                stored_states.clone()
             };
             // What this device itself just set is already known to it.
-            for (id, read) in &client_read_changes {
-                prev_read.insert(id.clone(), read_hash(*read).to_owned());
-            }
-            let mut read_changes: Vec<(String, bool)> = if collection.sync_key == "0" {
+            acknowledge_mail_changes(&mut previous_states, &client_state_changes);
+            let mut state_changes: Vec<(String, EmailState)> = if collection.sync_key == "0" {
                 Vec::new()
             } else {
                 emails
                     .iter()
                     .filter(|email| previous_seen.contains(&email.id))
                     .filter(|email| {
-                        prev_read.get(&email.id).map(String::as_str) != Some(read_hash(email.read))
+                        previous_states.get(&email.id).map(String::as_str)
+                            != Some(email.message_state().fingerprint())
                     })
-                    .map(|email| (email.id.clone(), email.read))
+                    .map(|email| (email.id.clone(), email.message_state()))
                     .collect()
             };
             // Messages older than this device's Sync window never show up in
             // `emails`, so their read state would stay frozen at whatever the
             // device was last told. Refresh the stored ones directly.
-            let mut outside_updates: Vec<(String, bool)> = Vec::new();
+            let mut outside_updates: Vec<(String, EmailState)> = Vec::new();
             if collection.sync_key != "0" {
                 // The newest 300 messages the device has (by date, from the
                 // listing) plus the slice the Ping probe checks, including ones
@@ -2353,11 +2368,13 @@ async fn sync_mail(
                     .cloned()
                     .collect();
                 if !outside.is_empty() {
-                    match state.jmap.email_read_states(auth, &outside).await {
+                    match state.jmap.email_message_states(auth, &outside).await {
                         Ok(current) => {
                             for (id, read) in current {
-                                if prev_read.get(&id).map(String::as_str) != Some(read_hash(read)) {
-                                    read_changes.push((id.clone(), read));
+                                if previous_states.get(&id).map(String::as_str)
+                                    != Some(read.fingerprint())
+                                {
+                                    state_changes.push((id.clone(), read));
                                     outside_updates.push((id, read));
                                 }
                             }
@@ -2374,8 +2391,8 @@ async fn sync_mail(
             if let Some(c) = &changes {
                 const CHANGES_CAP: usize = 500;
                 let already: BTreeSet<String> =
-                    read_changes.iter().map(|(id, _)| id.clone()).collect();
-                let drift: Vec<(String, bool)> = c
+                    state_changes.iter().map(|(id, _)| id.clone()).collect();
+                let drift: Vec<(String, EmailState)> = c
                     .touched
                     .iter()
                     .filter(|(id, (_, here))| {
@@ -2386,7 +2403,8 @@ async fn sync_mail(
                             && !already.contains(id.as_str())
                     })
                     .filter(|(id, (read, _))| {
-                        prev_read.get(id.as_str()).map(String::as_str) != Some(read_hash(*read))
+                        previous_states.get(id.as_str()).map(String::as_str)
+                            != Some(read.fingerprint())
                     })
                     .map(|(id, (read, _))| (id.clone(), *read))
                     .collect();
@@ -2397,35 +2415,38 @@ async fn sync_mail(
                     }
                 }
                 for (id, read) in drift.into_iter().take(CHANGES_CAP) {
-                    read_changes.push((id.clone(), read));
+                    state_changes.push((id.clone(), read));
                     outside_updates.push((id, read));
                 }
             }
             // No Change for a message removed in this same reply.
-            read_changes.retain(|(id, _)| !aged_set.contains(id));
+            state_changes.retain(|(id, _)| !aged_set.contains(id));
             outside_updates.retain(|(id, _)| !aged_set.contains(id));
-            if !read_changes.is_empty() {
+            if !state_changes.is_empty() {
                 tracing::info!(
                     device_id,
                     collection = %collection.collection_id,
-                    read_changes = read_changes.len(),
+                    state_changes = state_changes.len(),
                     older_than_window = outside_updates.len(),
-                    "mail Sync: sending read-state changes"
+                    "mail Sync: sending message-state changes"
                 );
             }
-            let mut new_read = prev_read;
+            let mut new_states = previous_states;
             for (id, read) in &outside_updates {
-                new_read.insert(id.clone(), read_hash(*read).to_owned());
+                new_states.insert(id.clone(), read.fingerprint().to_owned());
             }
             // Nothing is sent on a SyncKey 0 reply, so nothing is recorded.
             if collection.sync_key != "0" {
                 for email in &emails {
-                    new_read.insert(email.id.clone(), read_hash(email.read).to_owned());
+                    new_states.insert(
+                        email.id.clone(),
+                        email.message_state().fingerprint().to_owned(),
+                    );
                 }
             }
-            new_read.retain(|id, _| !to_remove.contains(id.as_str()) && !aged_set.contains(id));
-            if new_read != stored_read {
-                let items = new_read
+            new_states.retain(|id, _| !to_remove.contains(id.as_str()) && !aged_set.contains(id));
+            if new_states != stored_states {
+                let items = new_states
                     .iter()
                     .map(|(id, hash)| crate::state::ItemState {
                         item_id: id.clone(),
@@ -2457,7 +2478,7 @@ async fn sync_mail(
                 || !emails_to_send.is_empty()
                 || !to_remove.is_empty()
                 || !aged_sent.is_empty()
-                || !read_changes.is_empty()
+                || !state_changes.is_empty()
                 || client_commands_applied
             {
                 next_sync_key(&collection.sync_key)
@@ -2528,7 +2549,7 @@ async fn sync_mail(
                 adds = emails_to_send.len(),
                 deletes = to_remove.len(),
                 aged_out = aged_sent.len(),
-                read_changes = read_changes.len(),
+                state_changes = state_changes.len(),
                 more_available = has_more,
                 filter_type = filter,
                 mailbox_items = scan.len(),
@@ -2572,7 +2593,7 @@ async fn sync_mail(
             if !emails_to_send.is_empty()
                 || !to_remove.is_empty()
                 || !aged_sent.is_empty()
-                || !read_changes.is_empty()
+                || !state_changes.is_empty()
             {
                 let body_pref = BodyPreference {
                     body_type: collection.body_pref_type,
@@ -2602,12 +2623,52 @@ async fn sync_mail(
                     builder.leaf(air::SERVER_ID, id.clone());
                     builder.end();
                 }
-                for (id, read) in &read_changes {
-                    write_email_read_change(&mut builder, id, *read);
+                for (id, read) in &state_changes {
+                    write_email_state_change(&mut builder, id, *read);
                 }
                 builder.end();
             }
         } else {
+            if !client_state_changes.is_empty() {
+                let items = match state
+                    .state
+                    .item_states(user, device_id, &collection.collection_id)
+                    .await
+                {
+                    Ok(items) => items,
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to load uploaded message state");
+                        builder.start(air::COLLECTION);
+                        builder.leaf(air::SYNC_KEY, &collection.sync_key);
+                        builder.leaf(air::COLLECTION_ID, &collection.collection_id);
+                        builder.leaf(air::STATUS, "5");
+                        builder.end();
+                        continue;
+                    }
+                };
+                let mut items: BTreeMap<String, String> = items
+                    .into_iter()
+                    .map(|item| (item.item_id, item.hash))
+                    .collect();
+                acknowledge_mail_changes(&mut items, &client_state_changes);
+                let items = items
+                    .into_iter()
+                    .map(|(item_id, hash)| ItemState { item_id, hash })
+                    .collect();
+                if let Err(error) = state
+                    .state
+                    .put_item_states(user, device_id, &collection.collection_id, items)
+                    .await
+                {
+                    tracing::warn!(%error, "failed to acknowledge uploaded message state");
+                    builder.start(air::COLLECTION);
+                    builder.leaf(air::SYNC_KEY, &collection.sync_key);
+                    builder.leaf(air::COLLECTION_ID, &collection.collection_id);
+                    builder.leaf(air::STATUS, "5");
+                    builder.end();
+                    continue;
+                }
+            }
             let is_first_sync = collection.sync_key == "0";
             let advance = is_first_sync || client_commands_applied;
             let new_sync_key = if advance {
@@ -2712,19 +2773,20 @@ async fn apply_mail_client_commands(
     collection_id: &str,
     commands: &[wbxml::eas::SyncClientCommand],
     deletes_as_moves: bool,
-) -> anyhow::Result<(bool, Vec<(String, bool)>)> {
+) -> anyhow::Result<(bool, Vec<(String, Option<bool>, Option<bool>)>)> {
     let mut applied = false;
-    let mut read_changes = Vec::new();
+    let mut metadata_changes = Vec::new();
     for command in commands {
         match command.kind {
             wbxml::eas::SyncClientCommandKind::Change => {
-                if let Some(read) = command.read {
+                let flagged = command.flag_status.map(|status| status == 2);
+                if command.read.is_some() || flagged.is_some() {
                     state
                         .jmap
-                        .set_email_seen(auth, &command.server_id, read)
+                        .update_email_state(auth, &command.server_id, command.read, flagged)
                         .await?;
                     applied = true;
-                    read_changes.push((command.server_id.clone(), read));
+                    metadata_changes.push((command.server_id.clone(), command.read, flagged));
                 }
             }
             wbxml::eas::SyncClientCommandKind::Delete => {
@@ -2735,23 +2797,35 @@ async fn apply_mail_client_commands(
                 applied = true;
             }
             wbxml::eas::SyncClientCommandKind::Add => {
-                tracing::debug!(
-                    collection = collection_id,
-                    server_id = command.server_id,
-                    kind = ?command.kind,
-                    "ignoring unsupported mail Sync client command"
-                );
+                anyhow::bail!("mail draft creation is not implemented");
             }
-            // Handled separately by resolve_fetch_commands/write_fetch_responses
-            // -- a Fetch is a request for item details, not a mutation, so it
-            // doesn't belong in "did anything change" bookkeeping.
             wbxml::eas::SyncClientCommandKind::Fetch => {}
         }
     }
-    Ok((applied, read_changes))
+    Ok((applied, metadata_changes))
 }
 
-/// Opaque per-message read-state token kept in `item_states` for mail.
+fn acknowledge_mail_changes(
+    previous: &mut BTreeMap<String, String>,
+    changes: &[(String, Option<bool>, Option<bool>)],
+) {
+    for (id, read, flagged) in changes {
+        if let Some(hash) = previous.get_mut(id) {
+            let mut metadata = EmailState {
+                read: hash.starts_with('1'),
+                flagged: hash.ends_with(";flagged"),
+            };
+            if let Some(read) = read {
+                metadata.read = *read;
+            }
+            if let Some(flagged) = flagged {
+                metadata.flagged = *flagged;
+            }
+            *hash = metadata.fingerprint().to_owned();
+        }
+    }
+}
+
 fn read_hash(read: bool) -> &'static str {
     if read {
         "1"
@@ -2760,14 +2834,29 @@ fn read_hash(read: bool) -> &'static str {
     }
 }
 
-/// `<Change>` carrying only the Read flag, how a server tells a device that
-/// a message was read or unread elsewhere.
-fn write_email_read_change(builder: &mut wbxml::eas::DocumentBuilder, id: &str, read: bool) {
+fn write_email_flag(builder: &mut wbxml::eas::DocumentBuilder, flagged: bool) {
+    use wbxml::eas::email as mail;
+    if flagged {
+        builder.start(mail::FLAG);
+        builder.leaf(mail::FLAG_STATUS, "2");
+        builder.leaf(mail::FLAG_TYPE, "Flag for follow up");
+        builder.end();
+    } else {
+        builder.empty_tag(mail::FLAG);
+    }
+}
+
+fn write_email_state_change(
+    builder: &mut wbxml::eas::DocumentBuilder,
+    id: &str,
+    metadata: EmailState,
+) {
     use wbxml::eas::{airsync as air, email as mail};
     builder.start(air::CHANGE);
     builder.leaf(air::SERVER_ID, id.to_owned());
     builder.start(air::APPLICATION_DATA);
-    builder.leaf(mail::READ, read_hash(read));
+    builder.leaf(mail::READ, read_hash(metadata.read));
+    write_email_flag(builder, metadata.flagged);
     builder.end();
     builder.end();
 }
@@ -3124,6 +3213,7 @@ fn write_email_fields(
             );
         }
     }
+    write_email_flag(builder, email.keywords.iter().any(|k| k == "$flagged"));
     if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
         builder.leaf(
             email2::IS_DRAFT,
@@ -5213,7 +5303,7 @@ fn mail_changes_reason(
         }
         if read_states
             .get(id)
-            .is_some_and(|stored| stored != read_hash(*read))
+            .is_some_and(|stored| stored != read.fingerprint())
         {
             return Some("read state changed (changes)");
         }

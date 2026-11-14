@@ -14,7 +14,7 @@ use crate::{
     },
     model::{
         eas_folder_type, CalendarEvent, Collection, CollectionKind, Contact, Email, EmailBody,
-        EmailBodyType, Task,
+        EmailBodyType, EmailState, Task,
     },
 };
 
@@ -112,8 +112,8 @@ pub struct BasicAuthorization {
 #[derive(Debug, Default)]
 pub struct EmailChangesSince {
     pub new_state: String,
-    /// Created or updated message id -> (read, in the mailbox asked about).
-    pub touched: BTreeMap<String, (bool, bool)>,
+    /// Created or updated message id -> (message state, in the requested mailbox).
+    pub touched: BTreeMap<String, (EmailState, bool)>,
     pub destroyed: Vec<String>,
 }
 
@@ -828,7 +828,7 @@ impl JmapClient {
         auth: &AuthenticatedSession,
         mailbox_id: &str,
         seen_ids: &[String],
-        read_states: &BTreeMap<String, String>,
+        message_states: &BTreeMap<String, String>,
         window: usize,
         after: Option<&str>,
     ) -> anyhow::Result<Option<&'static str>> {
@@ -836,7 +836,7 @@ impl JmapClient {
         const SEEN_CHECK: usize = PROBE_SEEN_CHECK;
         // Read-flag changes are only compared for the newest few messages,
         // the part of the mailbox every device's Sync window covers.
-        const READ_WINDOW: usize = 25;
+        const STATE_WINDOW: usize = 25;
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
             return Ok(None);
         };
@@ -890,9 +890,9 @@ impl JmapClient {
 
         let seen: BTreeSet<&str> = seen_ids.iter().map(String::as_str).collect();
         let mut query_ids: Vec<String> = Vec::new();
-        let mut newest_read: BTreeMap<String, bool> = BTreeMap::new();
+        let mut newest_state: BTreeMap<String, EmailState> = BTreeMap::new();
         let mut still_here: Option<BTreeSet<String>> = None;
-        let mut seen_read: BTreeMap<String, bool> = BTreeMap::new();
+        let mut seen_state: BTreeMap<String, EmailState> = BTreeMap::new();
         for method in response.method_responses {
             let call_id = method.2.clone();
             match method.0.as_str() {
@@ -905,17 +905,14 @@ impl JmapClient {
                     let g: GetResponse<EmailMembership> =
                         serde_json::from_value(method.1).context("invalid Email/get response")?;
                     for e in g.list {
-                        newest_read.insert(e.id, e.keywords.get("$seen").copied().unwrap_or(false));
+                        newest_state.insert(e.id, EmailState::from_keywords(&e.keywords));
                     }
                 }
                 "Email/get" => {
                     let g: GetResponse<EmailMembership> =
                         serde_json::from_value(method.1).context("invalid Email/get response")?;
                     for e in &g.list {
-                        seen_read.insert(
-                            e.id.clone(),
-                            e.keywords.get("$seen").copied().unwrap_or(false),
-                        );
+                        seen_state.insert(e.id.clone(), EmailState::from_keywords(&e.keywords));
                     }
                     still_here = Some(
                         g.list
@@ -951,24 +948,24 @@ impl JmapClient {
         }
         // Read-state drift on older messages the device already has (outside
         // the newest-25 check below): only ids with a stored state count.
-        let older_drift = seen_read.iter().any(|(id, read)| {
-            read_states
+        let older_drift = seen_state.iter().any(|(id, read)| {
+            message_states
                 .get(id)
-                .is_some_and(|stored| stored != if *read { "1" } else { "0" })
+                .is_some_and(|stored| stored != read.fingerprint())
         });
         if older_drift {
             return Ok(Some("read state changed (older message)"));
         }
         // Read-state drift on a message the device already has.
-        let drift = query_ids.iter().take(READ_WINDOW).any(|id| {
-            let Some(read) = newest_read.get(id) else {
+        let drift = query_ids.iter().take(STATE_WINDOW).any(|id| {
+            let Some(read) = newest_state.get(id) else {
                 return false;
             };
             // Only messages the device was actually sent (stored state) count;
             // a message outside its window is not a change it can receive.
-            read_states
+            message_states
                 .get(id)
-                .is_some_and(|stored| stored != if *read { "1" } else { "0" })
+                .is_some_and(|stored| stored != read.fingerprint())
         });
         Ok(drift.then_some("read state changed (newest messages)"))
     }
@@ -1073,7 +1070,7 @@ impl JmapClient {
                         let get: GetResponse<EmailMembership> = serde_json::from_value(method.1)
                             .context("invalid Email/get response for changes")?;
                         for e in get.list {
-                            let read = e.keywords.get("$seen").copied().unwrap_or(false);
+                            let read = EmailState::from_keywords(&e.keywords);
                             let here = e.mailbox_ids.get(mailbox_id).copied().unwrap_or(false);
                             out.touched.insert(e.id, (read, here));
                         }
@@ -1098,14 +1095,13 @@ impl JmapClient {
         Ok(None)
     }
 
-    /// Current read flag (`$seen`) of the given messages, for the ones that
-    /// still exist. Used to refresh read state of messages older than a
-    /// device's Sync window.
-    pub async fn email_read_states(
+    /// Native read and flagged keywords of messages that still exist.
+    /// Includes held messages outside the newest listing window.
+    pub async fn email_message_states(
         &self,
         auth: &AuthenticatedSession,
         ids: &[String],
-    ) -> anyhow::Result<BTreeMap<String, bool>> {
+    ) -> anyhow::Result<BTreeMap<String, EmailState>> {
         let mut out = BTreeMap::new();
         if ids.is_empty() {
             return Ok(out);
@@ -1134,7 +1130,7 @@ impl JmapClient {
                     let get: GetResponse<EmailMembership> = serde_json::from_value(method.1)
                         .context("invalid Email/get response for read states")?;
                     for email in get.list {
-                        let read = email.keywords.get("$seen").copied().unwrap_or(false);
+                        let read = EmailState::from_keywords(&email.keywords);
                         out.insert(email.id, read);
                     }
                 }
@@ -1983,33 +1979,34 @@ impl JmapClient {
         Ok(None)
     }
 
-    pub async fn set_email_seen(
+    pub async fn update_email_state(
         &self,
         auth: &AuthenticatedSession,
         email_id: &str,
-        seen: bool,
+        read: Option<bool>,
+        flagged: Option<bool>,
     ) -> anyhow::Result<()> {
-        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
-            anyhow::bail!("JMAP Mail capability is not available");
-        };
-
+        let account_id = auth
+            .session
+            .primary_account_for(capabilities::MAIL)
+            .context("JMAP Mail capability is not available")?;
         let mut patch = serde_json::Map::new();
-        patch.insert(
-            "keywords/$seen".to_owned(),
-            if seen {
-                serde_json::Value::Bool(true)
-            } else {
-                serde_json::Value::Null
-            },
-        );
-        let mut update = serde_json::Map::new();
-        update.insert(email_id.to_owned(), serde_json::Value::Object(patch));
-
+        for (keyword, value) in [("$seen", read), ("$flagged", flagged)] {
+            if let Some(value) = value {
+                patch.insert(
+                    format!("keywords/{keyword}"),
+                    if value {
+                        serde_json::Value::Bool(true)
+                    } else {
+                        serde_json::Value::Null
+                    },
+                );
+            }
+        }
         self.email_set(
             auth,
             serde_json::json!({
-                "accountId": account_id,
-                "update": update
+                "accountId": account_id, "update": {email_id: patch}
             }),
         )
         .await

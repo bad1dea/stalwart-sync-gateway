@@ -4040,3 +4040,189 @@ async fn mail_draft_marker_follows_requested_protocol_in_sync_and_fetch() {
         }
     }
 }
+
+fn flag_change_body(
+    key: &str,
+    id: &str,
+    status: Option<&str>,
+    read: Option<bool>,
+    downloads: bool,
+) -> Vec<u8> {
+    use eas::{airsync as air, email as mail};
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, key);
+    b.leaf(air::COLLECTION_ID, "inbox");
+    b.leaf(air::GET_CHANGES, if downloads { "1" } else { "0" });
+    b.start(air::COMMANDS);
+    b.start(air::CHANGE);
+    b.leaf(air::SERVER_ID, id);
+    b.start(air::APPLICATION_DATA);
+    if let Some(read) = read {
+        b.leaf(mail::READ, if read { "1" } else { "0" });
+    }
+    if let Some(status) = status {
+        b.start(mail::FLAG);
+        b.leaf(mail::FLAG_STATUS, status);
+        b.leaf(mail::FLAG_TYPE, "Flag for follow up");
+        b.end();
+    } else {
+        b.empty_tag(mail::FLAG);
+    }
+    b.end();
+    b.end();
+    b.end();
+    b.end();
+    b.end();
+    b.end();
+    wbxml::encode_document(&b.finish())
+}
+
+#[tokio::test]
+async fn native_jmap_flags_push_between_devices_and_survive_replay_and_restart() {
+    use eas::{airsync as air, email as mail};
+    for version in ["14.0", "16.1"] {
+        let env = start_env(Opts::default()).await;
+        let (a0, _, _) = env.sync_detail("iphone", "0").await;
+        let (a, _, _) = env.sync_detail("iphone", &a0).await;
+        let (b0, _, _) = env.sync_detail("ipad", "0").await;
+        let (bkey, _, _) = env.sync_detail("ipad", &b0).await;
+        let ping = env.ping("ipad", Some(ping_body(4, &[("inbox", "Email")])));
+        let upload = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let request = flag_change_body(&a, "m1", Some("2"), Some(true), false);
+            let response = env
+                .req("Sync", "iphone")
+                .header("MS-ASProtocolVersion", version)
+                .body(request.clone())
+                .send()
+                .await
+                .unwrap();
+            let bytes = response.bytes().await.unwrap();
+            let doc = wbxml::decode_document(&bytes).unwrap();
+            assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("1"));
+            assert!(!eas::contains_token(&doc, air::COMMANDS));
+            let replay = env
+                .req("Sync", "iphone")
+                .header("MS-ASProtocolVersion", version)
+                .body(request)
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            assert_eq!(bytes, replay);
+            assert_eq!(
+                env.mock.keywords.lock().unwrap()["m1"],
+                ["$seen".to_owned(), "$flagged".to_owned()]
+                    .into_iter()
+                    .collect()
+            );
+            sync_key(&doc)
+        };
+        let (ping, akey) = tokio::join!(ping, upload);
+        assert_eq!(ping.status, "2");
+        let response = env
+            .req("Sync", "ipad")
+            .header("MS-ASProtocolVersion", version)
+            .body(sync_body(&bkey, "inbox"))
+            .send()
+            .await
+            .unwrap();
+        let bytes = response.bytes().await.unwrap();
+        let doc = wbxml::decode_document(&bytes).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, mail::FLAG_STATUS), vec!["2"]);
+        assert_eq!(eas::find_text_after(&doc, mail::READ), Some("1"));
+        let replay = env
+            .req("Sync", "ipad")
+            .header("MS-ASProtocolVersion", version)
+            .body(sync_body(&bkey, "inbox"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(bytes, replay);
+        let bkey = sync_key(&doc);
+        let env = env.restarted().await;
+        let response = env
+            .req("Sync", "iphone")
+            .header("MS-ASProtocolVersion", version)
+            .body(flag_change_body(&akey, "m1", None, None, true))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("1"));
+        let keywords = env.mock.keywords.lock().unwrap()["m1"].clone();
+        assert!(keywords.contains("$seen"));
+        assert!(!keywords.contains("$flagged"));
+        let response = env
+            .req("Sync", "ipad")
+            .header("MS-ASProtocolVersion", version)
+            .body(sync_body(&bkey, "inbox"))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert!(eas::contains_token(&doc, air::CHANGE));
+        assert!(eas::contains_token(&doc, mail::FLAG));
+        assert!(!eas::contains_token(&doc, mail::FLAG_STATUS));
+    }
+}
+
+#[tokio::test]
+async fn older_native_jmap_flag_change_wakes_ping_without_an_email_event() {
+    use eas::{airsync as air, email as mail};
+    let env = start_env(Opts::default()).await;
+    for i in 0..350 {
+        env.mock.add_mail("inbox", &format!("later{i}"));
+    }
+    env.sync_folder("ipad", "inbox").await;
+    let record = env
+        .state
+        .get("u@test", "ipad", "inbox")
+        .await
+        .unwrap()
+        .unwrap();
+    // Native JMAP or webmail mutation, outside the newest-25 listing window.
+    env.mock.set_keyword("m1", "$flagged", true);
+    let ping = env
+        .ping("ipad", Some(ping_body(4, &[("inbox", "Email")])))
+        .await;
+    assert_eq!(ping.status, "2");
+    let response = env
+        .req("Sync", "ipad")
+        .body(sync_body(&record.sync_key, "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, air::SERVER_ID), Some("m1"));
+    assert_eq!(eas::find_text_after(&doc, mail::FLAG_STATUS), Some("2"));
+}
+
+#[tokio::test]
+async fn unsupported_flag_completion_does_not_silently_clear_the_native_flag() {
+    use eas::airsync as air;
+    let env = start_env(Opts::default()).await;
+    env.mock.set_keyword("m1", "$flagged", true);
+    let (prime, _, _) = env.sync_detail("client", "0").await;
+    let (key, _, _) = env.sync_detail("client", &prime).await;
+    let response = env
+        .req("Sync", "client")
+        .body(flag_change_body(&key, "m1", Some("1"), Some(true), true))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("6"));
+    assert_eq!(sync_key(&doc), key);
+    let keywords = env.mock.keywords.lock().unwrap()["m1"].clone();
+    assert!(keywords.contains("$flagged"));
+    assert!(!keywords.contains("$seen"));
+}

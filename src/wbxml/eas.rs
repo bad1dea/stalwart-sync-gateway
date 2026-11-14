@@ -309,6 +309,9 @@ pub mod email {
     pub const TO: Token = tag(0x16, false);
     pub const CC: Token = tag(0x17, false);
     pub const FROM: Token = tag(0x18, false);
+    pub const FLAG: Token = tag(0x3a, false);
+    pub const FLAG_STATUS: Token = tag(0x3b, false);
+    pub const FLAG_TYPE: Token = tag(0x3d, false);
 
     pub const fn tag(token: u8, has_content: bool) -> Token {
         Token {
@@ -1092,6 +1095,7 @@ pub struct SyncClientCommand {
     /// The item's ServerId. Present on Change/Delete/Fetch; empty on Add.
     pub server_id: String,
     pub read: Option<bool>,
+    pub flag_status: Option<u8>,
     pub note: NoteFields,
     pub contact: ContactFields,
     pub calendar: CalendarFields,
@@ -1482,6 +1486,11 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                 }
             }
             Node::Start(token) => {
+                if same_token(*token, email::FLAG) {
+                    if let Some(command) = current_command.as_mut() {
+                        command.flag_status = Some(0);
+                    }
+                }
                 if current.is_some() {
                     if token.code_page == airsync::PAGE && token.token == airsync::COMMANDS.token {
                         commands_depth = Some(stack.len());
@@ -1496,6 +1505,7 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             client_id: String::new(),
                             server_id: String::new(),
                             read: None,
+                            flag_status: None,
                             note: NoteFields::default(),
                             contact: ContactFields::default(),
                             calendar: CalendarFields::default(),
@@ -1519,6 +1529,10 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             command.client_id = text.clone();
                         } else if same_token(token, email::READ) {
                             command.read = Some(text == "1");
+                        } else if same_token(token, email::FLAG_STATUS)
+                            && stack.iter().any(|t| same_token(*t, email::FLAG))
+                        {
+                            command.flag_status = Some(text.parse().unwrap_or(u8::MAX));
                         }
                     }
                 } else if let Some(collection) = current.as_mut() {

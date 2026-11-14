@@ -72,6 +72,39 @@ pub struct Email {
     pub thread_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EmailState {
+    pub read: bool,
+    pub flagged: bool,
+}
+
+impl EmailState {
+    pub fn from_keywords(keywords: &std::collections::BTreeMap<String, bool>) -> Self {
+        Self {
+            read: keywords.get("$seen").copied().unwrap_or(false),
+            flagged: keywords.get("$flagged").copied().unwrap_or(false),
+        }
+    }
+
+    pub fn fingerprint(self) -> &'static str {
+        match (self.read, self.flagged) {
+            (false, false) => "0",
+            (true, false) => "1",
+            (false, true) => "0;flagged",
+            (true, true) => "1;flagged",
+        }
+    }
+}
+
+impl Email {
+    pub fn message_state(&self) -> EmailState {
+        EmailState {
+            read: self.read,
+            flagged: self.keywords.iter().any(|k| k == "$flagged"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmailAttachment {
     pub blob_id: String,
