@@ -2520,6 +2520,9 @@ async fn sync_mail(
                 aged_out = aged_sent.len(),
                 read_changes = read_changes.len(),
                 more_available = has_more,
+                filter_type = filter,
+                mailbox_items = scan.len(),
+                eligible_items = in_range.as_ref().map_or(scan.len(), Vec::len),
                 "mail Sync reply"
             );
             if new_sync_key != collection.sync_key {
