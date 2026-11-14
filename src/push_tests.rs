@@ -3770,3 +3770,86 @@ async fn user_information_uses_versioned_accounts_and_backend_addresses() {
     assert_eq!(eas::find_all_text_after(&doc, set::STATUS), vec!["1", "3"]);
     assert!(!eas::contains_token(&doc, set::SMTP_ADDRESS));
 }
+
+#[tokio::test]
+async fn item_operations_multipart_directory_and_binary_parts() {
+    use eas::{airsync as air, airsync_base as base, item_operations as ops};
+    let env = start_env(Opts::default()).await;
+    let mut b = eas::DocumentBuilder::new();
+    b.start(ops::ITEM_OPERATIONS);
+    b.start(ops::FETCH);
+    b.leaf(ops::STORE, "Mailbox");
+    b.leaf(base::FILE_REFERENCE, "binary||test.dat");
+    b.start(ops::OPTIONS);
+    b.leaf(ops::RANGE, "1-3");
+    b.end();
+    b.end();
+    b.start(ops::FETCH);
+    b.leaf(ops::STORE, "Mailbox");
+    b.leaf(base::FILE_REFERENCE, "missing||test.dat");
+    b.end();
+    b.start(ops::FETCH);
+    b.leaf(ops::STORE, "Mailbox");
+    b.leaf(air::COLLECTION_ID, "inbox");
+    b.leaf(air::SERVER_ID, "m1");
+    b.start(ops::OPTIONS);
+    b.start(base::BODY_PREFERENCE);
+    b.leaf(base::TYPE, "4");
+    b.end();
+    b.end();
+    b.end();
+    b.end();
+    let request = wbxml::encode_document(&b.finish());
+    for version in ["14.0", "16.1"] {
+        let response = env
+            .req("ItemOperations", "client")
+            .header("MS-ASProtocolVersion", version)
+            .header("MS-ASAcceptMultiPart", "T")
+            .body(request.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.headers()["Content-Type"],
+            "application/vnd.ms-sync.multipart"
+        );
+        let bytes = response.bytes().await.unwrap();
+        let read_u32 =
+            |start: usize| u32::from_le_bytes(bytes[start..start + 4].try_into().unwrap()) as usize;
+        let count = read_u32(0);
+        assert_eq!(count, 3);
+        let mut offset = 4 + count * 8;
+        let mut parts = Vec::new();
+        for part in 0..count {
+            let start = read_u32(4 + part * 8);
+            let len = read_u32(8 + part * 8);
+            assert_eq!(start, offset);
+            parts.push(&bytes[start..start + len]);
+            offset += len;
+        }
+        assert_eq!(offset, bytes.len());
+        let doc = wbxml::decode_document(parts[0]).unwrap();
+        assert_eq!(
+            eas::find_all_text_after(&doc, ops::STATUS),
+            vec!["1", "1", "15", "1"]
+        );
+        assert_eq!(eas::find_all_text_after(&doc, ops::PART), vec!["1", "2"]);
+        assert!(!eas::contains_token(&doc, ops::DATA));
+        assert!(!eas::contains_token(&doc, base::DATA));
+        assert_eq!(parts[1], &BLOB_BYTES[1..4]);
+        assert_eq!(parts[2], MIME_BYTES);
+        let fetches = eas::child_elements(&eas::child_elements(&doc)[1]);
+        assert!(eas::contains_token(&fetches[0], ops::PART));
+        let properties = eas::child_elements(&fetches[2]);
+        let properties = properties.last().unwrap();
+        let body = eas::child_elements(properties)
+            .into_iter()
+            .find(|node| {
+                matches!(node.nodes.first(), Some(wbxml::Node::Start(t))
+                if t.code_page == base::PAGE && t.token == base::BODY.token)
+            })
+            .unwrap();
+        assert_eq!(eas::find_text_after(&body, ops::PART), Some("2"));
+    }
+}

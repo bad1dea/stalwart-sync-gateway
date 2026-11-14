@@ -1,3 +1,4 @@
+use anyhow::Context;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -20,6 +21,7 @@ pub(super) async fn handle(
     state: &AppState,
     auth: &AuthenticatedSession,
     document: &wbxml::Document,
+    multipart: bool,
     command: &str,
 ) -> Response {
     let operations = eas::child_elements(document);
@@ -45,17 +47,81 @@ pub(super) async fn handle(
         builder.end();
     }
     builder.end();
+    let (content_type, body) = match encode_response(builder.finish(), multipart) {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%error, "failed to encode ItemOperations response");
+            state
+                .metrics
+                .eas_requests_total
+                .with_label_values(&[command, "500"])
+                .inc();
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
     state
         .metrics
         .eas_requests_total
         .with_label_values(&[command, "200"])
         .inc();
-    (
-        StatusCode::OK,
-        [("Content-Type", "application/vnd.ms-sync.wbxml")],
-        wbxml::encode_document(&builder.finish()),
-    )
-        .into_response()
+    (StatusCode::OK, [("Content-Type", content_type)], body).into_response()
+}
+
+fn encode_response(
+    mut document: wbxml::Document,
+    multipart: bool,
+) -> anyhow::Result<(&'static str, Vec<u8>)> {
+    if !multipart {
+        return Ok((
+            "application/vnd.ms-sync.wbxml",
+            wbxml::encode_document(&document),
+        ));
+    }
+    // [MS-ASCMD] 2.2.1.10.1.1: part zero is WBXML. Data elements
+    // become one-based references into the remaining binary parts.
+    let mut parts = vec![Vec::new()];
+    for index in 0..document.nodes.len().saturating_sub(2) {
+        let wbxml::Node::Start(token) = document.nodes[index] else {
+            continue;
+        };
+        let attachment = token.code_page == ops::PAGE && token.token == ops::DATA.token;
+        let body = token.code_page == base::PAGE && token.token == base::DATA.token;
+        if !attachment && !body {
+            continue;
+        }
+        let data = match &document.nodes[index + 1] {
+            wbxml::Node::Text(value) if attachment => STANDARD.decode(value)?,
+            wbxml::Node::Text(value) => value.as_bytes().to_vec(),
+            wbxml::Node::Opaque(value) => value.to_vec(),
+            _ => continue,
+        };
+        document.nodes[index] = wbxml::Node::Start(wbxml::token::Token {
+            has_content: true,
+            ..ops::PART
+        });
+        document.nodes[index + 1] = wbxml::Node::Text(parts.len().to_string());
+        parts.push(data);
+    }
+    parts[0] = wbxml::encode_document(&document);
+    let count = u32::try_from(parts.len())?;
+    let mut offset = count
+        .checked_mul(8)
+        .and_then(|n| n.checked_add(4))
+        .context("multipart directory too large")?;
+    let mut response = Vec::new();
+    response.extend_from_slice(&count.to_le_bytes());
+    for part in &parts {
+        let size = u32::try_from(part.len())?;
+        response.extend_from_slice(&offset.to_le_bytes());
+        response.extend_from_slice(&size.to_le_bytes());
+        offset = offset
+            .checked_add(size)
+            .context("multipart response too large")?;
+    }
+    for part in parts {
+        response.extend_from_slice(&part);
+    }
+    Ok(("application/vnd.ms-sync.multipart", response))
 }
 
 async fn fetch_item(

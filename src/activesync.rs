@@ -317,7 +317,11 @@ pub async fn post_handler(
                     return ping(&state, &auth, &query, Some(&document), command).await;
                 }
                 if command.eq_ignore_ascii_case("ItemOperations") {
-                    return item_operations::handle(&state, &auth, &document, command).await;
+                    let multipart = headers
+                        .get("MS-ASAcceptMultiPart")
+                        .is_some_and(|value| value == "T");
+                    return item_operations::handle(&state, &auth, &document, multipart, command)
+                        .await;
                 }
                 if command.eq_ignore_ascii_case("Search") {
                     return search(&state, &auth, &document, command).await;
