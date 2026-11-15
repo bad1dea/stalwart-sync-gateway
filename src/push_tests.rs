@@ -2868,7 +2868,11 @@ mod e2e {
                 }
             }
             if let Some(subject) = subject {
-                b.leaf(cal::SUBJECT, subject);
+                if subject.is_empty() {
+                    b.empty_tag(cal::SUBJECT);
+                } else {
+                    b.leaf(cal::SUBJECT, subject);
+                }
             }
             for _ in 0..6 {
                 b.end();
@@ -2984,6 +2988,25 @@ mod e2e {
             .as_object()
             .is_none_or(|locations| locations.is_empty()));
         assert_eq!(result[0][1]["list"][0]["title"], "Cleared location");
+
+        a.1 = eas::find_text_after(&doc, air::SYNC_KEY)
+            .unwrap()
+            .to_owned();
+        let doc = live
+            .wbxml_version("Sync", &a.0, change(&a.1, None, Some(""), false), "16.1")
+            .await;
+        assert!(eas::find_all_text_after(&doc, air::STATUS)
+            .iter()
+            .all(|status| status == "1"));
+        let result = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get", {
+            "accountId": live.account, "ids": [&event]
+        }, "0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(result[0][1]["list"][0]["title"], "");
 
         let b = &devices[1];
         let doc = live

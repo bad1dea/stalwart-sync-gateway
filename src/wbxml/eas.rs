@@ -1930,6 +1930,9 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     for node in nodes {
         match node {
             Node::Start(token) => {
+                if same_token(*token, calendar::SUBJECT) {
+                    fields.subject = Some(String::new());
+                }
                 if same_token(*token, calendar::ATTENDEE) {
                     current_attendee = Some(AttendeeField::default());
                 }
@@ -2376,6 +2379,25 @@ mod tests {
         assert_eq!(command.task.subject.as_deref(), Some("Renew passport"));
         assert_eq!(command.task.complete, Some(false));
         assert_eq!(command.task.due_date.as_deref(), Some("20260905T090000Z"));
+    }
+
+    #[test]
+    fn calendar_subject_distinguishes_omission_and_clear() {
+        assert_eq!(super::extract_calendar_fields(&[]).subject, None);
+        let mut b = DocumentBuilder::new();
+        b.empty_tag(calendar::SUBJECT);
+        assert_eq!(
+            super::extract_calendar_fields(&b.finish().nodes).subject,
+            Some(String::new())
+        );
+        let mut b = DocumentBuilder::new();
+        b.leaf(calendar::SUBJECT, "Meeting");
+        assert_eq!(
+            super::extract_calendar_fields(&b.finish().nodes)
+                .subject
+                .as_deref(),
+            Some("Meeting")
+        );
     }
 
     #[test]
