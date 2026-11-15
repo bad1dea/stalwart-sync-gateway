@@ -108,6 +108,11 @@ pub struct BasicAuthorization {
     password: String,
 }
 
+pub struct DraftCreated {
+    pub id: String,
+    pub attachments: Vec<(String, String, String)>,
+}
+
 pub struct EmailSearchPage {
     pub emails: Vec<Email>,
     pub total: u64,
@@ -418,7 +423,8 @@ impl JmapClient {
                     },
                     "properties": [
                         "id", "blobId", "mailboxIds", "keywords", "receivedAt", "subject",
-                        "from", "to", "cc", "bcc", "textBody", "htmlBody", "bodyValues", "bodyStructure", "attachments", "threadId"
+                        "from", "to", "cc", "bcc", "replyTo", "header:To:asRaw", "header:Cc:asRaw",
+                            "header:Bcc:asRaw", "header:Reply-To:asRaw", "header:Importance:asText", "textBody", "htmlBody", "bodyValues", "bodyStructure", "attachments", "threadId"
                     ],
                     "fetchAllBodyValues": true,
                     "maxBodyValueBytes": 65536
@@ -562,7 +568,8 @@ impl JmapClient {
                         "ids": ids,
                         "properties": [
                             "id", "blobId", "mailboxIds", "keywords", "receivedAt", "subject",
-                            "from", "to", "cc", "bcc", "textBody", "htmlBody", "bodyValues", "bodyStructure", "attachments", "threadId"
+                            "from", "to", "cc", "bcc", "replyTo", "header:To:asRaw", "header:Cc:asRaw",
+                            "header:Bcc:asRaw", "header:Reply-To:asRaw", "header:Importance:asText", "textBody", "htmlBody", "bodyValues", "bodyStructure", "attachments", "threadId"
                         ],
                         "fetchAllBodyValues": true,
                         "maxBodyValueBytes": 65536
@@ -1264,6 +1271,20 @@ impl JmapClient {
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
             return Ok(out);
         };
+        let maximum = auth
+            .session
+            .capabilities
+            .get(capabilities::CORE)
+            .and_then(|cap| cap.get("maxObjectsInGet"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(100)
+            .clamp(1, 1000) as usize;
+        if ids.len() > maximum {
+            for chunk in ids.chunks(maximum) {
+                out.extend(Box::pin(self.email_message_states(auth, chunk)).await?);
+            }
+            return Ok(out);
+        }
         let response: JmapResponse<serde_json::Value> = self
             .api_call(
                 auth,
@@ -2361,7 +2382,8 @@ impl JmapClient {
                 "ids": [email_id],
                 "properties": [
                     "id", "blobId", "mailboxIds", "keywords", "receivedAt", "subject",
-                    "from", "to", "cc", "bcc", "textBody", "htmlBody", "bodyValues", "bodyStructure", "attachments", "threadId"
+                    "from", "to", "cc", "bcc", "replyTo", "header:To:asRaw", "header:Cc:asRaw",
+                            "header:Bcc:asRaw", "header:Reply-To:asRaw", "header:Importance:asText", "textBody", "htmlBody", "bodyValues", "bodyStructure", "attachments", "threadId"
                 ],
                 "fetchAllBodyValues": true,
                 "maxBodyValueBytes": 65536
@@ -2434,6 +2456,210 @@ impl JmapClient {
             }
         }
         anyhow::bail!("Email/get body response was missing")
+    }
+
+    pub async fn create_email_draft(
+        &self,
+        auth: &AuthenticatedSession,
+        folder: &str,
+        markers: (&str, &str),
+        properties: serde_json::Value,
+        mime: Option<Vec<u8>>,
+        attachments: &[crate::model::DraftAttachment],
+    ) -> anyhow::Result<Option<DraftCreated>> {
+        let account_id = auth
+            .session
+            .primary_account_for(capabilities::MAIL)
+            .context("JMAP Mail capability is not available")?;
+        if self.find_mailbox_by_role(auth, "drafts").await?.as_deref() != Some(folder) {
+            return Ok(None);
+        }
+        let state = self.email_state(auth).await?;
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Email/query",
+                    serde_json::json!({
+                        "accountId":account_id, "filter":{"hasKeyword":markers.0}, "limit":2
+                    }),
+                    "q",
+                )],
+            )
+            .await?;
+        let query = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "Email/query")
+            .ok_or_else(|| anyhow::anyhow!("draft replay query failed"))?;
+        let ids = query.1["ids"]
+            .as_array()
+            .context("draft replay query omitted ids")?;
+        match ids.as_slice() {
+            [id] => {
+                let id = id.as_str().context("invalid draft id")?;
+                let response: JmapResponse<serde_json::Value> = self
+                    .api_call(
+                        auth,
+                        &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                        vec![MethodCall::new(
+                            "Email/get",
+                            serde_json::json!({
+                                "accountId":account_id, "ids":[id], "properties":["id","keywords"]
+                            }),
+                            "get",
+                        )],
+                    )
+                    .await?;
+                let object = response
+                    .method_responses
+                    .iter()
+                    .find(|method| method.0 == "Email/get")
+                    .and_then(|method| method.1["list"].as_array())
+                    .and_then(|items| items.iter().find(|item| item["id"] == id))
+                    .context("draft replay item disappeared")?;
+                if object["keywords"][markers.1] != true {
+                    anyhow::bail!("draft replay content differs");
+                }
+                return Ok(Some(self.finish_draft(auth, id, attachments).await?));
+            }
+            [] => {}
+            _ => anyhow::bail!("duplicate draft replay identity"),
+        }
+        let mut properties = properties;
+        if !attachments.is_empty() {
+            let mut parts = Vec::new();
+            for attachment in attachments {
+                let blob = self
+                    .upload_blob(auth, attachment.content.clone(), &attachment.content_type)
+                    .await?;
+                let mut part = serde_json::json!({
+                    "blobId":blob, "type":attachment.content_type, "name":attachment.name,
+                    "disposition":if attachment.inline {"inline"} else {"attachment"}
+                });
+                if let Some(cid) = &attachment.content_id {
+                    part["cid"] = serde_json::json!(cid);
+                }
+                if let Some(location) = &attachment.content_location {
+                    part["location"] = serde_json::json!(location);
+                }
+                parts.push(part);
+            }
+            properties["attachments"] = serde_json::json!(parts);
+        }
+        let (method, arguments) = if let Some(mime) = mime {
+            let blob = self.upload_blob(auth, mime, "message/rfc822").await?;
+            (
+                "Email/import",
+                serde_json::json!({
+                    "accountId":account_id, "ifInState":state,
+                    "emails":{"draft":{"blobId":blob,"mailboxIds":properties["mailboxIds"],"keywords":properties["keywords"]}}
+                }),
+            )
+        } else {
+            (
+                "Email/set",
+                serde_json::json!({
+                    "accountId":account_id, "ifInState":state, "create":{"draft":properties}
+                }),
+            )
+        };
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(method, arguments, "create")],
+            )
+            .await?;
+        let result = response
+            .method_responses
+            .iter()
+            .find(|response| response.0 == method)
+            .ok_or_else(|| anyhow::anyhow!("draft creation failed"))?;
+        let id = result.1["created"]["draft"]["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("JMAP did not create draft"))?;
+        Ok(Some(self.finish_draft(auth, id, attachments).await?))
+    }
+
+    async fn finish_draft(
+        &self,
+        auth: &AuthenticatedSession,
+        id: &str,
+        attachments: &[crate::model::DraftAttachment],
+    ) -> anyhow::Result<DraftCreated> {
+        if attachments.is_empty() {
+            return Ok(DraftCreated {
+                id: id.to_owned(),
+                attachments: Vec::new(),
+            });
+        }
+        let account_id = auth
+            .session
+            .primary_account_for(capabilities::MAIL)
+            .context("JMAP Mail capability is not available")?;
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Email/get",
+                    serde_json::json!({
+                        "accountId":account_id, "ids":[id], "properties":["id","attachments"]
+                    }),
+                    "get",
+                )],
+            )
+            .await?;
+        let object = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "Email/get")
+            .and_then(|method| method.1["list"].as_array())
+            .and_then(|items| items.iter().find(|item| item["id"] == id))
+            .context("created draft is unavailable")?;
+        let mut candidates = object["attachments"]
+            .as_array()
+            .context("created draft omitted attachments")?
+            .clone();
+        if candidates.len() != attachments.len() {
+            anyhow::bail!("draft attachment count differs");
+        }
+        let mut refs = Vec::new();
+        for expected in attachments {
+            let mut matched = None;
+            for (index, candidate) in candidates.iter().enumerate() {
+                if candidate["name"].as_str() != Some(expected.name.as_str())
+                    || candidate["size"].as_u64() != Some(expected.content.len() as u64)
+                    || candidate["type"].as_str().is_none_or(|kind| {
+                        !kind.eq_ignore_ascii_case(
+                            expected.content_type.split(';').next().unwrap_or("").trim(),
+                        )
+                    })
+                    || candidate["cid"].as_str() != expected.content_id.as_deref()
+                    || candidate["location"].as_str() != expected.content_location.as_deref()
+                    || (candidate["disposition"].as_str() == Some("inline")) != expected.inline
+                {
+                    continue;
+                }
+                let Some(blob) = candidate["blobId"].as_str() else {
+                    continue;
+                };
+                let data = self.download_blob(auth, blob, &expected.name).await?;
+                if data == expected.content {
+                    matched = Some((index, blob.to_owned()));
+                    break;
+                }
+            }
+            let (index, blob) = matched.context("draft attachment did not round-trip")?;
+            candidates.remove(index);
+            refs.push((expected.client_id.clone(), blob, expected.name.clone()));
+        }
+        Ok(DraftCreated {
+            id: id.to_owned(),
+            attachments: refs,
+        })
     }
 
     pub async fn update_email_state(
@@ -3389,6 +3615,18 @@ struct EmailObject {
     #[serde(default)]
     bcc: Option<Vec<EmailAddress>>,
     #[serde(default)]
+    reply_to: Option<Vec<EmailAddress>>,
+    #[serde(default, rename = "header:To")]
+    raw_to: Option<String>,
+    #[serde(default, rename = "header:Cc")]
+    raw_cc: Option<String>,
+    #[serde(default, rename = "header:Bcc")]
+    raw_bcc: Option<String>,
+    #[serde(default, rename = "header:Reply-To")]
+    raw_reply_to: Option<String>,
+    #[serde(default, rename = "header:Importance:asText")]
+    importance_header: Option<String>,
+    #[serde(default)]
     preview: Option<String>,
     #[serde(default)]
     text_body: Vec<EmailBodyPart>,
@@ -3450,6 +3688,12 @@ struct EmailAttachmentObject {
     content_type: Option<String>,
     #[serde(default)]
     size: u64,
+    #[serde(default)]
+    cid: Option<String>,
+    #[serde(default)]
+    location: Option<String>,
+    #[serde(default)]
+    disposition: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3486,8 +3730,24 @@ impl From<EmailObject> for Email {
                     .content_type
                     .unwrap_or_else(|| "application/octet-stream".to_owned()),
                 size: attachment.size,
+                content_id: attachment.cid,
+                content_location: attachment.location,
+                inline: attachment.disposition.as_deref() == Some("inline"),
             })
             .collect();
+        let is_draft = value.keywords.get("$draft").copied().unwrap_or(false);
+        let address = |raw: Option<String>, parsed: Option<Vec<EmailAddress>>| {
+            if is_draft {
+                if let Some(raw) = raw {
+                    return raw
+                        .replace("\r\n ", " ")
+                        .replace("\r\n\t", " ")
+                        .trim()
+                        .to_owned();
+                }
+            }
+            format_addresses(parsed.as_deref().unwrap_or_default())
+        };
         Self {
             id: value.id,
             mailbox_ids: value
@@ -3503,9 +3763,15 @@ impl From<EmailObject> for Email {
                 .filter_map(|(keyword, present)| present.then_some(keyword.clone()))
                 .collect(),
             from: format_addresses(value.from.as_deref().unwrap_or_default()),
-            to: format_addresses(value.to.as_deref().unwrap_or_default()),
-            cc: format_addresses(value.cc.as_deref().unwrap_or_default()),
-            bcc: format_addresses(value.bcc.as_deref().unwrap_or_default()),
+            to: address(value.raw_to, value.to),
+            cc: address(value.raw_cc, value.cc),
+            bcc: address(value.raw_bcc, value.bcc),
+            reply_to: address(value.raw_reply_to, value.reply_to),
+            importance: match value.importance_header.as_deref().map(str::trim) {
+                Some(value) if value.eq_ignore_ascii_case("low") => 0,
+                Some(value) if value.eq_ignore_ascii_case("high") => 2,
+                _ => 1,
+            },
             preview: value.preview,
             read: value.keywords.get("$seen").copied().unwrap_or(false),
             body,

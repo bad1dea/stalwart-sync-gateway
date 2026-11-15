@@ -314,6 +314,7 @@ pub mod email {
     pub const TO: Token = tag(0x16, false);
     pub const CC: Token = tag(0x17, false);
     pub const FROM: Token = tag(0x18, false);
+    pub const REPLY_TO: Token = tag(0x19, false);
     pub const FLAG: Token = tag(0x3a, false);
     pub const FLAG_STATUS: Token = tag(0x3b, false);
     pub const COMPLETE_TIME: Token = tag(0x3e, false);
@@ -359,7 +360,12 @@ pub mod airsync_base {
     pub const DISPLAY_NAME: Token = tag(0x10, false);
     pub const FILE_REFERENCE: Token = tag(0x11, false);
     pub const METHOD: Token = tag(0x12, false);
+    pub const CONTENT_ID: Token = tag(0x13, false);
+    pub const CONTENT_LOCATION: Token = tag(0x14, false);
     pub const IS_INLINE: Token = tag(0x15, false);
+    pub const ADD: Token = tag(0x1c, true);
+    pub const CLIENT_ID: Token = tag(0x1e, false);
+    pub const CONTENT: Token = tag(0x1f, false);
 
     pub const fn tag(token: u8, has_content: bool) -> Token {
         Token {
@@ -1239,6 +1245,7 @@ pub struct SyncClientCommand {
     pub flag_fields: Vec<(u8, u8, String)>,
     pub flag_valid: bool,
     pub unsupported_mail_change: bool,
+    pub document: Document,
     pub note: NoteFields,
     pub contact: ContactFields,
     pub calendar: CalendarFields,
@@ -1649,6 +1656,7 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             flag_fields: Vec::new(),
                             flag_valid: true,
                             unsupported_mail_change: false,
+                            document: Document { nodes: Vec::new() },
                             note: NoteFields::default(),
                             contact: ContactFields::default(),
                             calendar: CalendarFields::default(),
@@ -1747,6 +1755,7 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             .filter(|child| matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, airsync::APPLICATION_DATA)))
                             .flat_map(child_elements)
                             .any(|child| !matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, email::READ) || same_token(*t, email::FLAG)));
+                        command.document = command_doc;
                         command.note = extract_note_fields(&document.nodes[start + 1..idx]);
                         command.contact = extract_contact_fields(&document.nodes[start + 1..idx]);
                         command.calendar = extract_calendar_fields(&document.nodes[start + 1..idx]);

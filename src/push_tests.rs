@@ -2225,6 +2225,28 @@ async fn a_resent_previous_synckey_gets_the_same_reply_not_a_reset() {
         .unwrap();
     let again = wbxml::decode_document(&again.bytes().await.unwrap()).unwrap();
     assert_eq!(again, first, "identical reply, not Status 3");
+    let changed = env
+        .req("Sync", "phone")
+        .body(flag_change_body(
+            &key,
+            "inbox",
+            "m1",
+            None,
+            Some(true),
+            false,
+        ))
+        .send()
+        .await
+        .unwrap();
+    let changed = wbxml::decode_document(&changed.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&changed, air::STATUS), Some("3"));
+    assert!(env
+        .mock
+        .keywords
+        .lock()
+        .unwrap()
+        .get("m1")
+        .is_none_or(|keywords| !keywords.contains("$seen")));
     // And it continues normally from the new key.
     let (key3, adds, _) = env.sync_detail("phone", &new_key).await;
     assert!(adds.is_empty());
@@ -4185,6 +4207,465 @@ mod e2e {
             .await;
         assert!(result[0][1]["notDestroyed"].is_null());
         assert!(result[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_draft_create_replays_and_syncs_to_another_device() {
+        use eas::{airsync_base as base, email, email2};
+        let mut live = Live::new("E2E_USER2").await;
+        let boxes = live
+            .call(serde_json::json!([["Mailbox/get",{"accountId":live.account},"0"]]))
+            .await;
+        let folder = boxes[0][1]["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["role"] == "drafts")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let device = dev("draft-create");
+        let peer = dev("draft-create-peer");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let sync = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let peer_prime = live
+            .wbxml_version("Sync", &peer, sync_body("0", &folder), "16.1")
+            .await;
+        let peer_sync = live
+            .wbxml_version(
+                "Sync",
+                &peer,
+                sync_body(&sync_key(&peer_prime), &folder),
+                "16.1",
+            )
+            .await;
+        let request = draft_add_body(&sync_key(&sync), &folder, "draft-client-id", false);
+        let response = live
+            .wbxml_version("Sync", &device, request.clone(), "16.1")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&response, air::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(
+            eas::find_text_after(&response, air::CLIENT_ID),
+            Some("draft-client-id")
+        );
+        let id = eas::find_text_after(&response, air::SERVER_ID)
+            .unwrap()
+            .to_owned();
+        let mut altered = wbxml::decode_document(&request).unwrap();
+        for node in &mut altered.nodes {
+            if let wbxml::Node::Text(value) = node {
+                if value == "Draft creation fixture" {
+                    *value = "Different content".to_owned();
+                }
+            }
+        }
+        let changed = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&altered), "16.1")
+            .await;
+        assert_eq!(eas::find_text_after(&changed, air::STATUS), Some("3"));
+        assert_eq!(
+            live.wbxml_version("Sync", &device, request.clone(), "16.1")
+                .await,
+            response
+        );
+        let restart = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(env("E2E_RESTART_CMD"))
+            .output()
+            .unwrap();
+        assert!(restart.status.success());
+        live = Live::new("E2E_USER2").await;
+        assert_eq!(
+            live.wbxml_version("Sync", &device, request, "16.1").await,
+            response
+        );
+        let native = live.call(serde_json::json!([["Email/get",{
+            "accountId":live.account,"ids":[&id],"properties":["id","subject","keywords","to","bcc","replyTo","header:Importance:asText","bodyValues","textBody"],
+            "fetchAllBodyValues":true
+        },"0"]])).await;
+        let item = &native[0][1]["list"][0];
+        assert_eq!(item["subject"], "Draft creation fixture");
+        assert_eq!(item["keywords"]["$draft"], true);
+        assert_eq!(item["keywords"]["$seen"], true);
+        assert_eq!(item["to"][0]["email"], "recipient@example.test");
+        assert_eq!(item["bcc"][0]["email"], "hidden@example.test");
+        assert_eq!(item["replyTo"][0]["email"], "reply@example.test");
+        assert_eq!(item["header:Importance:asText"], "high");
+        let peer_update = live
+            .wbxml_version(
+                "Sync",
+                &peer,
+                sync_body(&sync_key(&peer_sync), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&peer_update, air::SERVER_ID),
+            Some(id.as_str())
+        );
+        assert_eq!(
+            eas::find_text_after(&peer_update, email::SUBJECT),
+            Some("Draft creation fixture")
+        );
+        assert!(eas::find_text_after(&peer_update, email2::BCC)
+            .is_some_and(|s| s.contains("hidden@example.test")));
+        assert_eq!(
+            eas::find_text_after(&peer_update, base::DATA),
+            Some("Draft contents")
+        );
+        assert_eq!(
+            eas::find_text_after(&peer_update, email::IMPORTANCE),
+            Some("2")
+        );
+        assert!(eas::find_text_after(&peer_update, email::REPLY_TO)
+            .is_some_and(|value| value.contains("reply@example.test")));
+        let mut second = wbxml::decode_document(&draft_add_body(
+            &sync_key(&response),
+            &folder,
+            "draft-second",
+            true,
+        ))
+        .unwrap();
+        for node in &mut second.nodes {
+            if let wbxml::Node::Text(value) = node {
+                if value.contains("recipient@example.test") {
+                    *value = "partially-entered-recipient".to_owned();
+                }
+            }
+        }
+        let normal = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&second), "16.1")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&normal, air::STATUS),
+            vec!["1", "1"]
+        );
+        let new_id = eas::find_text_after(&normal, air::SERVER_ID)
+            .unwrap()
+            .to_owned();
+        assert_ne!(new_id, id);
+        assert_eq!(
+            eas::find_all_text_after(&normal, air::SERVER_ID)
+                .iter()
+                .filter(|server_id| *server_id == &new_id)
+                .count(),
+            1
+        );
+        let peer_second = live
+            .wbxml_version(
+                "Sync",
+                &peer,
+                sync_body(&sync_key(&peer_update), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&peer_second, air::SERVER_ID),
+            Some(new_id.as_str())
+        );
+        assert_eq!(
+            eas::find_text_after(&peer_second, email::TO),
+            Some("partially-entered-recipient")
+        );
+        let cleanup = live
+            .call(serde_json::json!([["Email/set",{"accountId":live.account,"destroy":[id,new_id]},"0"]]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_draft_add_recovers_after_server_write_before_sync_checkpoint() {
+        let live = Live::new("E2E_USER2").await;
+        let boxes = live
+            .call(serde_json::json!([["Mailbox/get",{"accountId":live.account},"0"]]))
+            .await;
+        let folder = boxes[0][1]["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["role"] == "drafts")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let device = dev("draft-recovery");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let sync = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let key = sync_key(&sync);
+        let request = draft_add_body(&key, &folder, "recovery-id", false);
+        let doc = wbxml::decode_document(&request).unwrap();
+        let collection = eas::sync_collections(&doc).remove(0);
+        let identity = serde_json::to_vec(&(
+            device.as_str(),
+            &folder,
+            &key,
+            &collection.commands[0].client_id,
+        ))
+        .unwrap();
+        let marker = format!(
+            "eas-draft-add-{}",
+            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &identity).simple()
+        );
+        let content = format!(
+            "eas-draft-data-{}",
+            uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_OID,
+                &wbxml::encode_document(&collection.commands[0].document)
+            )
+            .simple()
+        );
+        let created = live
+            .call(serde_json::json!([["Email/set",{
+            "accountId":live.account,"create":{"e":{"mailboxIds":{&folder:true},
+            "keywords":{"$draft":true,&marker:true,&content:true},"subject":"recovery fixture"}}
+        },"0"]]))
+            .await;
+        let id = created[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let response = live.wbxml_version("Sync", &device, request, "16.1").await;
+        assert_eq!(
+            eas::find_all_text_after(&response, air::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(
+            eas::find_text_after(&response, air::SERVER_ID),
+            Some(id.as_str())
+        );
+        let query = live
+            .call(serde_json::json!([["Email/query",{
+            "accountId":live.account,"filter":{"hasKeyword":&marker}
+        },"0"]]))
+            .await;
+        assert_eq!(query[0][1]["ids"].as_array().unwrap().len(), 1);
+        let cleanup = live
+            .call(serde_json::json!([["Email/set",{"accountId":live.account,"destroy":[id]},"0"]]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_draft_attachments_round_trip_and_return_client_references() {
+        use base64::Engine;
+        use eas::{airsync_base as base, item_operations as ops};
+        let live = Live::new("E2E_USER2").await;
+        let boxes = live
+            .call(serde_json::json!([["Mailbox/get",{"accountId":live.account},"0"]]))
+            .await;
+        let folder = boxes[0][1]["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["role"] == "drafts")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let device = dev("draft-attachments");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let sync = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let reply = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                attachment_draft_add_body(&sync_key(&sync), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&reply, air::STATUS),
+            vec!["1", "1"]
+        );
+        let id = eas::find_text_after(&reply, air::SERVER_ID)
+            .unwrap()
+            .to_owned();
+        let clients = eas::find_all_text_after(&reply, base::CLIENT_ID);
+        let refs = eas::find_all_text_after(&reply, base::FILE_REFERENCE);
+        assert_eq!(
+            clients,
+            vec![
+                "file-client",
+                "message-client",
+                "duplicate-a",
+                "duplicate-b"
+            ]
+        );
+        assert_eq!(refs.len(), 4);
+        for (reference, expected) in refs.iter().zip([
+            DRAFT_ATTACHMENT_BYTES,
+            DRAFT_EMBEDDED_BYTES,
+            b"same1".as_slice(),
+            b"same2".as_slice(),
+        ]) {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(ops::ITEM_OPERATIONS);
+            b.start(ops::FETCH);
+            b.leaf(ops::STORE, "Mailbox");
+            b.leaf(base::FILE_REFERENCE, reference);
+            b.end();
+            b.end();
+            let result = live
+                .wbxml_version(
+                    "ItemOperations",
+                    &device,
+                    wbxml::encode_document(&b.finish()),
+                    "16.1",
+                )
+                .await;
+            let data = eas::find_text_after(&result, ops::DATA).unwrap();
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .unwrap(),
+                expected
+            );
+        }
+        let peer = dev("draft-attachment-peer");
+        let prime = live
+            .wbxml_version("Sync", &peer, sync_body("0", &folder), "16.1")
+            .await;
+        let sync = live
+            .wbxml_version("Sync", &peer, sync_body(&sync_key(&prime), &folder), "16.1")
+            .await;
+        let collection = eas::child_elements(&sync).into_iter().flat_map(|d| eas::child_elements(&d))
+            .find(|d| matches!(d.nodes.first(), Some(wbxml::Node::Start(t)) if t.code_page == air::PAGE && t.token == air::COLLECTION.token)).unwrap();
+        let commands = eas::child_elements(&collection).into_iter()
+            .find(|d| matches!(d.nodes.first(), Some(wbxml::Node::Start(t)) if t.code_page == air::PAGE && t.token == air::COMMANDS.token)).unwrap();
+        let item = eas::child_elements(&commands)
+            .into_iter()
+            .find(|item| eas::find_text_after(item, air::SERVER_ID) == Some(id.as_str()))
+            .unwrap();
+        assert!(eas::find_all_text_after(&item, base::METHOD).contains(&"5".to_owned()));
+        assert_eq!(
+            eas::find_text_after(&item, base::CONTENT_ID),
+            Some("inline@example.test")
+        );
+        assert_eq!(
+            eas::find_text_after(&item, base::CONTENT_LOCATION),
+            Some("https://example.test/image")
+        );
+        assert!(eas::find_all_text_after(&item, base::IS_INLINE).contains(&"1".to_owned()));
+        let cleanup = live
+            .call(serde_json::json!([["Email/set",{"accountId":live.account,"destroy":[id]},"0"]]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_mime_draft_import_preserves_original_bytes() {
+        use eas::airsync_base as base;
+        let live = Live::new("E2E_USER2").await;
+        let boxes = live
+            .call(serde_json::json!([["Mailbox/get",{"accountId":live.account},"0"]]))
+            .await;
+        let folder = boxes[0][1]["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["role"] == "drafts")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let device = dev("draft-mime");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let sync = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let raw = b"From: sender@example.test\r\nTo: recipient@example.test\r\nSubject: MIME draft fixture\r\nMIME-Version: 1.0\r\nContent-Type: text/plain\r\n\r\nOriginal MIME body.\r\n";
+        let reply = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                mime_draft_add_body(&sync_key(&sync), &folder, raw),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&reply, air::STATUS),
+            vec!["1", "1"]
+        );
+        let id = eas::find_text_after(&reply, air::SERVER_ID)
+            .unwrap()
+            .to_owned();
+        let peer = dev("draft-mime-peer");
+        let options = mime_options(Some("2"), u32::MAX as usize);
+        let prime = live
+            .wbxml_version(
+                "Sync",
+                &peer,
+                sync_body_preferences("0", &folder, Some(&options), true),
+                "16.1",
+            )
+            .await;
+        let sync = live
+            .wbxml_version(
+                "Sync",
+                &peer,
+                sync_body_preferences(&sync_key(&prime), &folder, None, true),
+                "16.1",
+            )
+            .await;
+        let collection = eas::child_elements(&sync).into_iter().flat_map(|d| eas::child_elements(&d))
+            .find(|d| matches!(d.nodes.first(), Some(wbxml::Node::Start(t)) if t.code_page == air::PAGE && t.token == air::COLLECTION.token)).unwrap();
+        let commands = eas::child_elements(&collection).into_iter()
+            .find(|d| matches!(d.nodes.first(), Some(wbxml::Node::Start(t)) if t.code_page == air::PAGE && t.token == air::COMMANDS.token)).unwrap();
+        let item = eas::child_elements(&commands)
+            .into_iter()
+            .find(|item| eas::find_text_after(item, air::SERVER_ID) == Some(id.as_str()))
+            .unwrap();
+        assert_eq!(eas::find_text_after(&item, base::TYPE), Some("4"));
+        assert_eq!(
+            eas::find_opaque_after(&item, base::DATA),
+            Some(raw.as_slice())
+        );
+        let cleanup = live
+            .call(serde_json::json!([["Email/set",{"accountId":live.account,"destroy":[id]},"0"]]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
     }
 
     #[tokio::test]
@@ -6409,6 +6890,120 @@ async fn partial_flag_metadata_preserves_other_fields() {
         eas::find_text_after(&doc, tasks::REMINDER_TIME),
         Some("2026-11-15T10:00:00.000Z")
     );
+}
+
+const DRAFT_ATTACHMENT_BYTES: &[u8] = b"file bytes\0\xff";
+const DRAFT_EMBEDDED_BYTES: &[u8] =
+    b"From: sender@example.test\r\nSubject: Embedded\r\n\r\nMessage body\r\n";
+
+fn attachment_draft_add_body(key: &str, folder: &str) -> Vec<u8> {
+    use eas::{airsync as air, airsync_base as base, email};
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, key);
+    b.leaf(air::COLLECTION_ID, folder);
+    b.leaf(air::GET_CHANGES, "0");
+    b.start(air::COMMANDS);
+    b.start(air::ADD);
+    b.leaf(air::CLIENT_ID, "draft-attachments");
+    b.start(air::APPLICATION_DATA);
+    b.leaf(email::SUBJECT, "Draft attachment fixture");
+    b.start(base::BODY);
+    b.leaf(base::TYPE, "2");
+    b.leaf(base::DATA, "<p>Draft</p>");
+    b.end();
+    b.start(base::ATTACHMENTS);
+    b.start(base::ADD);
+    b.leaf(base::CLIENT_ID, "file-client");
+    b.leaf(base::METHOD, "1");
+    b.leaf(base::CONTENT_TYPE, "application/octet-stream");
+    b.opaque_leaf(base::CONTENT, DRAFT_ATTACHMENT_BYTES.to_vec());
+    b.leaf(base::DISPLAY_NAME, "image.bin");
+    b.leaf(base::CONTENT_ID, "inline@example.test");
+    b.leaf(base::CONTENT_LOCATION, "https://example.test/image");
+    b.empty_tag(base::IS_INLINE);
+    b.end();
+    b.start(base::ADD);
+    b.leaf(base::CLIENT_ID, "message-client");
+    b.leaf(base::METHOD, "5");
+    b.leaf(base::CONTENT_TYPE, "message/rfc822");
+    b.opaque_leaf(base::CONTENT, DRAFT_EMBEDDED_BYTES.to_vec());
+    b.leaf(base::DISPLAY_NAME, "message.eml");
+    b.end();
+    for (client_id, data) in [
+        ("duplicate-a", b"same1".as_slice()),
+        ("duplicate-b", b"same2".as_slice()),
+    ] {
+        b.start(base::ADD);
+        b.leaf(base::CLIENT_ID, client_id);
+        b.leaf(base::METHOD, "1");
+        b.leaf(base::CONTENT_TYPE, "application/octet-stream");
+        b.opaque_leaf(base::CONTENT, data.to_vec());
+        b.leaf(base::DISPLAY_NAME, "same.bin");
+        b.end();
+    }
+    b.end();
+    b.end();
+    for _ in 0..5 {
+        b.end();
+    }
+    wbxml::encode_document(&b.finish())
+}
+
+fn mime_draft_add_body(key: &str, folder: &str, content: &[u8]) -> Vec<u8> {
+    use eas::{airsync as air, airsync_base as base};
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, key);
+    b.leaf(air::COLLECTION_ID, folder);
+    b.leaf(air::GET_CHANGES, "0");
+    b.start(air::COMMANDS);
+    b.start(air::ADD);
+    b.leaf(air::CLIENT_ID, "mime-draft");
+    b.start(air::APPLICATION_DATA);
+    b.start(base::BODY);
+    b.leaf(base::TYPE, "4");
+    b.opaque_leaf(base::DATA, content.to_vec());
+    b.end();
+    b.end();
+    for _ in 0..5 {
+        b.end();
+    }
+    wbxml::encode_document(&b.finish())
+}
+
+fn draft_add_body(key: &str, folder: &str, client_id: &str, get_changes: bool) -> Vec<u8> {
+    use eas::{airsync as air, airsync_base as base, email, email2};
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, key);
+    b.leaf(air::COLLECTION_ID, folder);
+    b.leaf(air::GET_CHANGES, if get_changes { "1" } else { "0" });
+    b.start(air::COMMANDS);
+    b.start(air::ADD);
+    b.leaf(air::CLIENT_ID, client_id);
+    b.start(air::APPLICATION_DATA);
+    b.leaf(email::TO, r#""Recipient" <recipient@example.test>"#);
+    b.leaf(email2::BCC, r#""Hidden" <hidden@example.test>"#);
+    b.leaf(email::REPLY_TO, r#""Reply" <reply@example.test>"#);
+    b.leaf(email::IMPORTANCE, "2");
+    b.leaf(email::SUBJECT, "Draft creation fixture");
+    b.start(base::BODY);
+    b.leaf(base::TYPE, "1");
+    b.leaf(base::DATA, "Draft contents");
+    b.end();
+    b.leaf(email::READ, "1");
+    b.end();
+    for _ in 0..5 {
+        b.end();
+    }
+    wbxml::encode_document(&b.finish())
 }
 
 fn unsupported_mail_change_body(key: &str, folder: &str, id: &str) -> Vec<u8> {

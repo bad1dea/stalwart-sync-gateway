@@ -54,6 +54,8 @@ pub struct Email {
     pub to: String,
     pub cc: String,
     pub bcc: String,
+    pub reply_to: String,
+    pub importance: u8,
     pub preview: Option<String>,
     pub read: bool,
     pub body: Option<EmailBody>,
@@ -204,11 +206,25 @@ impl Email {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftAttachment {
+    pub client_id: String,
+    pub name: String,
+    pub content_type: String,
+    pub content: Vec<u8>,
+    pub content_id: Option<String>,
+    pub content_location: Option<String>,
+    pub inline: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmailAttachment {
     pub blob_id: String,
     pub name: String,
     pub content_type: String,
     pub size: u64,
+    pub content_id: Option<String>,
+    pub content_location: Option<String>,
+    pub inline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

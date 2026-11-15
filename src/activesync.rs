@@ -1,3 +1,4 @@
+mod draft;
 mod find;
 mod item_operations;
 mod sync_options;
@@ -1775,14 +1776,14 @@ async fn store_replay(
     user: &str,
     device: &str,
     collection_id: &str,
-    keys: (&str, &str),
+    keys: (&str, &str, &str, &str),
     nodes: Vec<wbxml::Node>,
     version: ProtocolVersion,
 ) {
     use base64::Engine;
     let bytes = wbxml::encode_document(&wbxml::Document { nodes });
     let item = ItemState {
-        item_id: format!("{}>{}", keys.0, keys.1),
+        item_id: format!("{}>{}>{}>{}", keys.0, keys.1, keys.2, keys.3),
         hash: base64::engine::general_purpose::STANDARD.encode(bytes),
     };
     if let Err(error) = state
@@ -1805,7 +1806,7 @@ async fn load_replay(
     device: &str,
     collection_id: &str,
     version: ProtocolVersion,
-) -> Option<(String, String, Vec<wbxml::Node>)> {
+) -> Option<(String, String, String, String, Vec<wbxml::Node>)> {
     use base64::Engine;
     let items = state
         .state
@@ -1813,12 +1814,22 @@ async fn load_replay(
         .await
         .ok()?;
     let item = items.into_iter().next()?;
-    let (request_key, new_key) = item.item_id.split_once('>')?;
+    let mut parts = item.item_id.splitn(4, '>');
+    let request_key = parts.next()?;
+    let new_key = parts.next()?;
+    let fingerprint = parts.next()?;
+    let without_uploads = parts.next()?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(item.hash)
         .ok()?;
     let doc = wbxml::decode_document(&bytes).ok()?;
-    Some((request_key.to_owned(), new_key.to_owned(), doc.nodes))
+    Some((
+        request_key.to_owned(),
+        new_key.to_owned(),
+        fingerprint.to_owned(),
+        without_uploads.to_owned(),
+        doc.nodes,
+    ))
 }
 
 async fn wait_for_sync_changes(
@@ -1942,6 +1953,18 @@ async fn sync_mail(
     builder.start(air::COLLECTIONS);
 
     'collections: for mut collection in collections {
+        let request_fingerprint = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            format!("{collection:?}").as_bytes(),
+        )
+        .to_string();
+        let mut without_uploads = collection.clone();
+        without_uploads.commands.clear();
+        let without_uploads_fingerprint = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            format!("{without_uploads:?}").as_bytes(),
+        )
+        .to_string();
         let mut replay_capture: Option<(usize, String, String, String)> = None;
         let user = query.user.as_deref().unwrap_or_else(|| auth.username());
         let device_id = query.device_id.as_deref().unwrap_or("unknown");
@@ -1980,11 +2003,20 @@ async fn sync_mail(
             // [MS-ASCMD] lost response: the client resends the SyncKey it
             // sent last time. Answer with the same reply instead of Status 3,
             // without applying its commands again.
-            if let (Some(record), Some((request_key, new_key, nodes))) = (
+            if let (
+                Some(record),
+                Some((request_key, new_key, fingerprint, without_uploads, nodes)),
+            ) = (
                 previous_record.as_ref(),
                 load_replay(state, user, device_id, &collection.collection_id, version).await,
             ) {
-                if request_key == collection.sync_key && new_key == record.sync_key {
+                let exact = fingerprint == request_fingerprint;
+                let omitted =
+                    collection.commands.is_empty() && without_uploads == request_fingerprint;
+                if request_key == collection.sync_key
+                    && new_key == record.sync_key
+                    && (exact || omitted)
+                {
                     tracing::info!(
                         device_id,
                         collection = %collection.collection_id,
@@ -1992,7 +2024,20 @@ async fn sync_mail(
                         reply_key = %new_key,
                         "Sync: client resent its previous SyncKey, replaying the last reply"
                     );
-                    builder.extend(nodes);
+                    if exact {
+                        builder.extend(nodes);
+                    } else {
+                        let reply = wbxml::Document { nodes };
+                        builder.start(air::COLLECTION);
+                        for child in wbxml::eas::child_elements(&reply) {
+                            if !matches!(child.nodes.first(), Some(wbxml::Node::Start(token))
+                                if token.code_page == air::RESPONSES.code_page && token.token == air::RESPONSES.token)
+                            {
+                                builder.extend(child.nodes);
+                            }
+                        }
+                        builder.end();
+                    }
                     continue;
                 }
             }
@@ -2100,7 +2145,12 @@ async fn sync_mail(
                             user,
                             device_id,
                             &collection.collection_id,
-                            (&collection.sync_key, key),
+                            (
+                                &collection.sync_key,
+                                key,
+                                &request_fingerprint,
+                                &without_uploads_fingerprint,
+                            ),
                             nodes,
                             version,
                         )
@@ -2116,7 +2166,100 @@ async fn sync_mail(
             && !collection.collection_id.starts_with("note_")
             && !collection.collection_id.starts_with("task_");
         let mut failed_changes = Vec::new();
+        let mut add_responses: Vec<(
+            String,
+            Option<crate::jmap::client::DraftCreated>,
+            &'static str,
+        )> = Vec::new();
+        let mut added_ids = BTreeSet::new();
         if is_mail_collection {
+            let mut adds = Vec::new();
+            collection.commands.retain(|command| {
+                if matches!(command.kind, wbxml::eas::SyncClientCommandKind::Add) {
+                    adds.push(command.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            let mut client_ids = BTreeMap::new();
+            for command in &adds {
+                *client_ids
+                    .entry(command.client_id.clone())
+                    .or_insert(0usize) += 1;
+            }
+            for command in adds {
+                if !matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1)
+                    || collection.sync_key == "0"
+                    || !command.flag_valid
+                    || (command.flag_status.is_none() && !command.flag_fields.is_empty())
+                    || command.client_id.is_empty()
+                    || client_ids.get(&command.client_id) != Some(&1)
+                {
+                    add_responses.push((command.client_id, None, "6"));
+                    continue;
+                }
+                let identity = serde_json::to_vec(&(
+                    device_id,
+                    &collection.collection_id,
+                    &collection.sync_key,
+                    &command.client_id,
+                ))
+                .expect("serializing draft identity");
+                let marker = format!(
+                    "eas-draft-add-{}",
+                    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &identity).simple()
+                );
+                let content_marker = format!(
+                    "eas-draft-data-{}",
+                    uuid::Uuid::new_v5(
+                        &uuid::Uuid::NAMESPACE_OID,
+                        &wbxml::encode_document(&command.document)
+                    )
+                    .simple()
+                );
+                let flag = command.flag_status.map(|status| crate::model::MailFlag {
+                    status,
+                    fields: command.flag_fields.clone(),
+                });
+                let draft = match draft::create_properties(
+                    &command.document,
+                    &collection.collection_id,
+                    auth.username(),
+                    &marker,
+                    &content_marker,
+                    command.read,
+                    flag.as_ref(),
+                ) {
+                    Ok(properties) => properties,
+                    Err(_) => {
+                        add_responses.push((command.client_id, None, "6"));
+                        continue;
+                    }
+                };
+                match state
+                    .jmap
+                    .create_email_draft(
+                        auth,
+                        &collection.collection_id,
+                        (&marker, &content_marker),
+                        draft.properties,
+                        draft.mime,
+                        &draft.attachments,
+                    )
+                    .await
+                {
+                    Ok(Some(created)) => {
+                        added_ids.insert(created.id.clone());
+                        add_responses.push((command.client_id, Some(created), "1"));
+                    }
+                    Ok(None) => add_responses.push((command.client_id, None, "6")),
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to create draft");
+                        add_responses.push((command.client_id, None, "5"));
+                    }
+                }
+            }
             collection.commands.retain(|command| {
                 if matches!(command.kind, wbxml::eas::SyncClientCommandKind::Change)
                     && (!command.flag_valid || command.unsupported_mail_change)
@@ -2128,7 +2271,7 @@ async fn sync_mail(
                 }
             });
         }
-        let (client_commands_applied, client_state_changes) =
+        let (other_commands_applied, client_state_changes) =
             if is_mail_collection && !collection.commands.is_empty() {
                 match apply_mail_client_commands(
                     state,
@@ -2157,6 +2300,23 @@ async fn sync_mail(
             } else {
                 (false, Vec::new())
             };
+        let client_commands_applied = other_commands_applied || !added_ids.is_empty();
+        let added_states = if added_ids.is_empty() {
+            BTreeMap::new()
+        } else {
+            let ids: Vec<_> = added_ids.iter().cloned().collect();
+            match state.jmap.email_message_states(auth, &ids).await {
+                Ok(states) if states.len() == ids.len() => states,
+                _ => {
+                    builder.start(air::COLLECTION);
+                    builder.leaf(air::SYNC_KEY, &collection.sync_key);
+                    builder.leaf(air::COLLECTION_ID, &collection.collection_id);
+                    builder.leaf(air::STATUS, "5");
+                    builder.end();
+                    continue;
+                }
+            }
+        };
         let fetch_responses = if is_mail_collection && !collection.commands.is_empty() {
             resolve_fetch_commands(
                 state,
@@ -2175,10 +2335,15 @@ async fn sync_mail(
             const SCAN_LIMIT: usize = 0;
             // Stored newest first (records written before that order was kept
             // are in id order; the next Sync rewrites them).
-            let previous_order: Vec<String> = previous_record
+            let mut previous_order: Vec<String> = previous_record
                 .as_ref()
                 .map(|record| record.seen_ids.clone())
                 .unwrap_or_default();
+            for id in &added_ids {
+                if !previous_order.contains(id) {
+                    previous_order.push(id.clone());
+                }
+            }
             let previous_seen: BTreeSet<String> = previous_order.iter().cloned().collect();
             let previous_options = previous_record
                 .as_ref()
@@ -2467,6 +2632,9 @@ async fn sync_mail(
             };
             // What this device itself just set is already known to it.
             acknowledge_mail_changes(&mut previous_states, &client_state_changes);
+            for (id, metadata) in &added_states {
+                previous_states.insert(id.clone(), metadata.fingerprint());
+            }
             let mut state_changes: Vec<(String, EmailState)> = if collection.sync_key == "0" {
                 Vec::new()
             } else {
@@ -2722,7 +2890,13 @@ async fn sync_mail(
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "1");
-            write_mail_responses(&mut builder, fetch_responses, failed_changes, version);
+            write_mail_responses(
+                &mut builder,
+                fetch_responses,
+                failed_changes,
+                add_responses,
+                version,
+            );
             // Element order matters to a strict WBXML parser (iOS's
             // included) -- MoreAvailable must come AFTER Responses and
             // BEFORE Commands, confirmed against the working PHP z-push
@@ -2774,7 +2948,7 @@ async fn sync_mail(
                 builder.end();
             }
         } else {
-            if !client_state_changes.is_empty() {
+            if !client_state_changes.is_empty() || !added_states.is_empty() {
                 let items = match state
                     .state
                     .item_states(user, device_id, &collection.collection_id)
@@ -2796,6 +2970,9 @@ async fn sync_mail(
                     .map(|item| (item.item_id, item.hash))
                     .collect();
                 acknowledge_mail_changes(&mut items, &client_state_changes);
+                for (id, metadata) in &added_states {
+                    items.insert(id.clone(), metadata.fingerprint());
+                }
                 let items = items
                     .into_iter()
                     .map(|(item_id, hash)| ItemState { item_id, hash })
@@ -2847,10 +3024,18 @@ async fn sync_mail(
                                 .map(|record| record.jmap_state.clone())
                                 .unwrap_or_default()
                         },
-                        seen_ids: previous_record
-                            .as_ref()
-                            .map(|record| record.seen_ids.clone())
-                            .unwrap_or_default(),
+                        seen_ids: {
+                            let mut ids = previous_record
+                                .as_ref()
+                                .map(|record| record.seen_ids.clone())
+                                .unwrap_or_default();
+                            for id in &added_ids {
+                                if !ids.contains(id) {
+                                    ids.push(id.clone());
+                                }
+                            }
+                            ids
+                        },
                     })
                     .await
                 {
@@ -2881,7 +3066,13 @@ async fn sync_mail(
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "1");
-            write_mail_responses(&mut builder, fetch_responses, failed_changes, version);
+            write_mail_responses(
+                &mut builder,
+                fetch_responses,
+                failed_changes,
+                add_responses,
+                version,
+            );
         }
 
         builder.end();
@@ -2892,7 +3083,12 @@ async fn sync_mail(
                 user,
                 device_id,
                 &collection_id,
-                (&request_key, &new_key),
+                (
+                    &request_key,
+                    &new_key,
+                    &request_fingerprint,
+                    &without_uploads_fingerprint,
+                ),
                 nodes,
                 version,
             )
@@ -3083,14 +3279,40 @@ fn write_mail_responses(
     builder: &mut wbxml::eas::DocumentBuilder,
     results: Vec<FetchResult>,
     failed_changes: Vec<String>,
+    add_responses: Vec<(
+        String,
+        Option<crate::jmap::client::DraftCreated>,
+        &'static str,
+    )>,
     version: ProtocolVersion,
 ) {
-    use wbxml::eas::airsync as air;
+    use wbxml::eas::{airsync as air, airsync_base as base};
 
-    if results.is_empty() && failed_changes.is_empty() {
+    if results.is_empty() && failed_changes.is_empty() && add_responses.is_empty() {
         return;
     }
     builder.start(air::RESPONSES);
+    for (client_id, created, status) in add_responses {
+        builder.start(air::ADD);
+        builder.leaf(air::CLIENT_ID, client_id);
+        if let Some(created) = &created {
+            builder.leaf(air::SERVER_ID, &created.id);
+        }
+        builder.leaf(air::STATUS, status);
+        if let Some(created) = created.filter(|item| !item.attachments.is_empty()) {
+            builder.start(air::APPLICATION_DATA);
+            builder.start(base::ATTACHMENTS);
+            for (client_id, blob_id, name) in created.attachments {
+                builder.start(base::ATTACHMENT);
+                builder.leaf(base::CLIENT_ID, client_id);
+                builder.leaf(base::FILE_REFERENCE, format!("{blob_id}||{name}"));
+                builder.end();
+            }
+            builder.end();
+            builder.end();
+        }
+        builder.end();
+    }
     for server_id in failed_changes {
         builder.start(air::CHANGE);
         builder.leaf(air::SERVER_ID, server_id);
@@ -3383,7 +3605,7 @@ fn write_email_fields(
     if !email.to.is_empty() {
         builder.leaf(mail::DISPLAY_TO, email.to);
     }
-    builder.leaf(mail::IMPORTANCE, "1");
+    builder.leaf(mail::IMPORTANCE, email.importance.to_string());
     builder.leaf(mail::READ, if email.read { "1" } else { "0" });
     builder.leaf(
         mail::MESSAGE_CLASS,
@@ -3393,6 +3615,9 @@ fn write_email_fields(
             None => "IPM.Note",
         },
     );
+    if !email.reply_to.is_empty() {
+        builder.leaf(mail::REPLY_TO, email.reply_to);
+    }
     // Metadata only (no content -- see the project's logging constraint on
     // mail bodies): lets a body-not-rendering report be diagnosed without
     // needing to inspect an account's real mail.
@@ -3503,9 +3728,25 @@ fn write_email_fields(
             // AttMethod 1 = "Normal" attachment (a plain file, not an
             // embedded message/OLE object) -- the only kind this gateway
             // ever produces.
-            builder.leaf(base::METHOD, "1");
+            builder.leaf(
+                base::METHOD,
+                if attachment
+                    .content_type
+                    .eq_ignore_ascii_case("message/rfc822")
+                {
+                    "5"
+                } else {
+                    "1"
+                },
+            );
             builder.leaf(base::ESTIMATED_DATA_SIZE, attachment.size.to_string());
-            builder.leaf(base::IS_INLINE, "0");
+            if let Some(content_id) = &attachment.content_id {
+                builder.leaf(base::CONTENT_ID, content_id);
+            }
+            if let Some(location) = &attachment.content_location {
+                builder.leaf(base::CONTENT_LOCATION, location);
+            }
+            builder.leaf(base::IS_INLINE, if attachment.inline { "1" } else { "0" });
             builder.end();
         }
         builder.end();
@@ -6295,6 +6536,8 @@ mod tests {
             to: "recipient@example.com".to_owned(),
             cc: "cc@example.com".to_owned(),
             bcc: String::new(),
+            reply_to: String::new(),
+            importance: 1,
             preview: None,
             read: true,
             body: Some(EmailBody {
@@ -6308,6 +6551,9 @@ mod tests {
                 name: "file.txt".to_owned(),
                 content_type: "text/plain".to_owned(),
                 size: 10,
+                content_id: None,
+                content_location: None,
+                inline: false,
             }],
             blob_id: None,
             thread_id: None,
@@ -6381,6 +6627,8 @@ mod tests {
             to: String::new(),
             cc: String::new(),
             bcc: String::new(),
+            reply_to: String::new(),
+            importance: 1,
             preview: None,
             read: false,
             body: Some(EmailBody {
@@ -6432,6 +6680,8 @@ mod tests {
             to: String::new(),
             cc: String::new(),
             bcc: String::new(),
+            reply_to: String::new(),
+            importance: 1,
             preview: None,
             read: false,
             body: None,
@@ -6477,6 +6727,8 @@ mod tests {
             to: String::new(),
             cc: String::new(),
             bcc: String::new(),
+            reply_to: String::new(),
+            importance: 1,
             preview: None,
             read: false,
             body: Some(EmailBody {
@@ -6558,6 +6810,8 @@ mod tests {
             to: String::new(),
             cc: String::new(),
             bcc: String::new(),
+            reply_to: String::new(),
+            importance: 1,
             preview: None,
             read: false,
             body: None,
@@ -6567,6 +6821,9 @@ mod tests {
                 name: "invoice.pdf".to_owned(),
                 content_type: "application/pdf".to_owned(),
                 size: 1234,
+                content_id: None,
+                content_location: None,
+                inline: false,
             }],
             blob_id: None,
             thread_id: None,
