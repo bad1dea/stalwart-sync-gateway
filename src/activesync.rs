@@ -2981,7 +2981,7 @@ async fn resolve_fetch_commands(
     body_preferences: &[RequestedBodyPreference],
 ) -> Vec<(
     String,
-    anyhow::Result<Option<(crate::model::Email, Option<bytes::Bytes>)>>,
+    anyhow::Result<Option<(crate::model::Email, Option<MimeBody>)>>,
 )> {
     let mut results = Vec::new();
     for command in commands {
@@ -3004,7 +3004,7 @@ async fn resolve_fetch_commands(
 
 type FetchResult = (
     String,
-    anyhow::Result<Option<(crate::model::Email, Option<bytes::Bytes>)>>,
+    anyhow::Result<Option<(crate::model::Email, Option<MimeBody>)>>,
 );
 
 fn write_mail_responses(
@@ -3058,9 +3058,33 @@ fn write_mail_responses(
 }
 
 #[derive(Debug, Clone)]
+struct MimeBody {
+    data: bytes::Bytes,
+    full_size: usize,
+}
+
+impl MimeBody {
+    fn from_download(data: Vec<u8>, preference: &RequestedBodyPreference) -> Self {
+        let full_size = data.len();
+        let limit = preference
+            .truncation_size
+            .unwrap_or(full_size)
+            .min(full_size);
+        let data = if preference.all_or_none && limit < full_size {
+            bytes::Bytes::new()
+        } else if limit < full_size {
+            bytes::Bytes::copy_from_slice(&data[..limit])
+        } else {
+            bytes::Bytes::from(data)
+        };
+        Self { data, full_size }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct BodyPreference {
     requests: Vec<RequestedBodyPreference>,
-    mime_data: Option<bytes::Bytes>,
+    mime_data: Option<MimeBody>,
 }
 
 async fn body_preferences_for_email(
@@ -3082,13 +3106,17 @@ async fn body_preferences_for_email(
                         .is_none_or(|limit| body.value.len() <= limit))
         })
     });
-    let mime_data = if requests.iter().any(|pref| pref.body_type == 4) && !native_fits {
+    let mime_data = if let Some(preference) = requests
+        .iter()
+        .find(|pref| pref.body_type == 4 && !native_fits)
+    {
         let id = email
             .blob_id
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("message has no MIME blob"))?;
-        Some(bytes::Bytes::from(
+        Some(MimeBody::from_download(
             state.jmap.download_blob(auth, id, "message.eml").await?,
+            preference,
         ))
     } else {
         None
@@ -3240,14 +3268,13 @@ fn write_email_fields(
     if selected.is_some_and(|pref| pref.body_type == 4) {
         if let Some(mime) = mime {
             let pref = selected.unwrap();
-            let length = pref.truncation_size.unwrap_or(mime.len()).min(mime.len());
-            let truncated = length < mime.len();
+            let truncated = mime.data.len() < mime.full_size;
             builder.start(base::BODY);
             builder.leaf(base::TYPE, "4");
-            builder.leaf(base::ESTIMATED_DATA_SIZE, mime.len().to_string());
+            builder.leaf(base::ESTIMATED_DATA_SIZE, mime.full_size.to_string());
             builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
             if !truncated || !pref.all_or_none {
-                builder.opaque_leaf(base::DATA, mime.slice(..length));
+                builder.opaque_leaf(base::DATA, mime.data.clone());
             }
             if preview_limit > 0 {
                 builder.leaf(base::PREVIEW, preview_text);
@@ -3409,7 +3436,7 @@ fn converted_body(body: crate::model::EmailBody, target: u8) -> crate::model::Em
 
 fn select_body_preference(
     body: Option<&crate::model::EmailBody>,
-    mime: Option<&bytes::Bytes>,
+    mime: Option<&MimeBody>,
     requests: &[RequestedBodyPreference],
 ) -> Option<RequestedBodyPreference> {
     let size = |preference: &RequestedBodyPreference| match preference.body_type {
@@ -3418,7 +3445,7 @@ fn select_body_preference(
                 .value
                 .len()
         }),
-        4 => mime.map(bytes::Bytes::len),
+        4 => mime.map(|mime| mime.full_size),
         _ => None,
     };
     let fits = |preference: &RequestedBodyPreference, size: usize| {
@@ -5844,6 +5871,40 @@ mod tests {
         let (kind, text, _, _) = apply_body_preference(plain, Some(request));
         assert_eq!(kind, EmailBodyType::Html);
         assert!(text.contains("a&lt;&amp;"));
+    }
+
+    #[test]
+    fn mime_prefix_does_not_retain_the_full_download_allocation() {
+        let data = vec![b'x'; 1024 * 1024];
+        let original = data.as_ptr();
+        let request = BodyPreference {
+            body_type: 4,
+            truncation_size: Some(17),
+            ..Default::default()
+        };
+        let mime = super::MimeBody::from_download(data, &request);
+        assert_eq!(mime.full_size, 1024 * 1024);
+        assert_eq!(mime.data.as_ref(), &[b'x'; 17]);
+        assert_ne!(mime.data.as_ptr(), original);
+
+        let data = vec![b'y'; 1024];
+        let original = data.as_ptr();
+        let request = BodyPreference {
+            truncation_size: None,
+            ..request
+        };
+        let mime = super::MimeBody::from_download(data, &request);
+        assert_eq!(mime.data.as_ptr(), original);
+        assert_eq!(mime.data.len(), mime.full_size);
+
+        let request = BodyPreference {
+            truncation_size: Some(1),
+            all_or_none: true,
+            ..request
+        };
+        let mime = super::MimeBody::from_download(vec![b'z'; 1024], &request);
+        assert!(mime.data.is_empty());
+        assert_eq!(mime.full_size, 1024);
     }
 
     #[test]

@@ -3287,6 +3287,40 @@ mod e2e {
         assert_eq!(eas::find_text_after(&doc, base::TYPE), Some("2"));
         assert_eq!(eas::find_text_after(&doc, base::DATA), Some(html));
         assert!(!eas::contains_token(&doc, base::PREVIEW));
+        let mime_device = dev("mime-body");
+        let options = requested_body_options(&[Pref {
+            body_type: 4,
+            truncation_size: Some(64),
+            preview: Some(0),
+            ..Default::default()
+        }]);
+        let prime = live
+            .wbxml_version(
+                "Sync",
+                &mime_device,
+                sync_body_preferences("0", &folder, Some(&options), true),
+                "16.1",
+            )
+            .await;
+        let doc = live
+            .wbxml_version(
+                "Sync",
+                &mime_device,
+                sync_body_preferences(&sync_key(&prime), &folder, None, true),
+                "16.1",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&doc, base::TYPE), Some("4"));
+        assert_eq!(eas::find_opaque_after(&doc, base::DATA).unwrap().len(), 64);
+        assert!(
+            eas::find_text_after(&doc, base::ESTIMATED_DATA_SIZE)
+                .unwrap()
+                .parse::<usize>()
+                .unwrap()
+                > 64
+        );
+        assert_eq!(eas::find_text_after(&doc, base::TRUNCATED), Some("1"));
+        assert!(!eas::contains_token(&doc, base::PREVIEW));
         let r = live
             .call(
                 serde_json::json!([["Email/set",{"accountId":live.account,"destroy":[id]},"0"],
