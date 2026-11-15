@@ -9,7 +9,7 @@ use crate::{
     wbxml::{
         self,
         eas::{
-            self, airsync as air, email as mail, email2, find as f, item_operations as ops,
+            self, airsync as air, email as mail, email2, find as f, gal, item_operations as ops,
             DocumentBuilder,
         },
     },
@@ -24,6 +24,7 @@ use std::collections::BTreeSet;
 
 struct Request {
     search_id: String,
+    gal: bool,
     text: String,
     folder: Option<String>,
     deep: bool,
@@ -45,15 +46,30 @@ fn parse(document: &wbxml::Document) -> Result<Request, &'static str> {
     if criteria.len() != 1 {
         return Err("expected one search criterion");
     }
-    let criteria =
-        child(&execute, f::MAILBOX_SEARCH_CRITERION).ok_or("unsupported search criterion")?;
+    let (criteria, gal) = if let Some(criteria) = child(&execute, f::MAILBOX_SEARCH_CRITERION) {
+        (criteria, false)
+    } else if let Some(criteria) = child(&execute, f::GAL_SEARCH_CRITERION) {
+        (criteria, true)
+    } else {
+        return Err("unsupported search criterion");
+    };
     let query = child(&criteria, f::QUERY).ok_or("missing Query")?;
-    if eas::find_text_after(&query, air::CLASS) != Some("Email") {
-        return Err("unsupported search class");
-    }
-    let text = eas::find_text_after(&query, f::FREE_TEXT)
-        .filter(|text| !text.trim().is_empty())
-        .ok_or("missing FreeText")?;
+    let text = if gal {
+        let text = eas::find_text_after(&query, f::QUERY)
+            .ok_or("missing Query")?
+            .trim();
+        if !(4..=256).contains(&text.chars().count()) {
+            return Err("invalid GAL Query");
+        }
+        text
+    } else {
+        if eas::find_text_after(&query, air::CLASS) != Some("Email") {
+            return Err("unsupported search class");
+        }
+        eas::find_text_after(&query, f::FREE_TEXT)
+            .filter(|text| !text.trim().is_empty())
+            .ok_or("missing FreeText")?
+    };
     let options = child(&criteria, f::OPTIONS);
     let (start, end) = if let Some(options) = &options {
         let range = eas::find_text_after(options, f::RANGE).ok_or("missing Range")?;
@@ -69,6 +85,7 @@ fn parse(document: &wbxml::Document) -> Result<Request, &'static str> {
     };
     Ok(Request {
         search_id: search_id.to_ascii_lowercase(),
+        gal,
         text: text.to_owned(),
         folder: eas::find_text_after(&query, air::COLLECTION_ID).map(str::to_owned),
         deep: options
@@ -101,11 +118,15 @@ pub(super) async fn handle(
         Ok(request) => request,
         Err(_) => return error_response(state, "2"),
     };
-    let filter = match query::to_filter(&request.text) {
-        Ok(filter) => filter,
-        Err(_) => return error_response(state, "2"),
+    let reply = if request.gal {
+        execute_gal(state, auth, device, request).await
+    } else {
+        let filter = match query::to_filter(&request.text) {
+            Ok(filter) => filter,
+            Err(_) => return error_response(state, "2"),
+        };
+        execute(state, auth, device, request, filter).await
     };
-    let reply = execute(state, auth, device, request, filter).await;
     match reply {
         Ok(reply) => respond(state, reply),
         Err(error) => {
@@ -291,6 +312,111 @@ async fn execute(
         );
     }
     b.leaf(f::TOTAL, page.total.to_string());
+    b.end();
+    b.end();
+    Ok(b.finish())
+}
+
+async fn execute_gal(
+    state: &AppState,
+    auth: &AuthenticatedSession,
+    device: &EasQuery,
+    request: Request,
+) -> anyhow::Result<wbxml::Document> {
+    let term = request.text.to_lowercase();
+    let mut principals = state.jmap.all_principals(auth).await?;
+    principals.retain(|principal| {
+        let display = principal.display_name.to_lowercase();
+        display.starts_with(&term)
+            || display
+                .split_whitespace()
+                .any(|part| part.starts_with(&term))
+            || principal.alias.to_lowercase().starts_with(&term)
+            || principal
+                .email
+                .as_ref()
+                .is_some_and(|email| email.to_lowercase().starts_with(&term))
+    });
+    principals.sort_by_key(|principal| {
+        (
+            principal.display_name.to_lowercase(),
+            principal.alias.to_lowercase(),
+            principal.id.clone(),
+        )
+    });
+    let query_state = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        &serde_json::to_vec(&principals)?,
+    )
+    .to_string();
+    let filter = json!({"gal": term});
+    let user = auth.username();
+    let device = device.device_id.as_deref().unwrap_or("unknown");
+    let now = chrono::Utc::now().timestamp();
+    let mut sessions = state.state.item_states(user, device, SEARCHES).await?;
+    sessions.retain(|entry| {
+        serde_json::from_str::<SearchState>(&entry.hash)
+            .is_ok_and(|session| now - session.created < 900)
+    });
+    let previous = sessions
+        .iter()
+        .find(|item| item.item_id == request.search_id)
+        .and_then(|item| serde_json::from_str::<SearchState>(&item.hash).ok());
+    if request.start != 0
+        && previous
+            .as_ref()
+            .is_none_or(|session| session.filter != filter || session.query_state != query_state)
+    {
+        return Ok(restart_document());
+    }
+    if request.start == 0 {
+        sessions.retain(|item| item.item_id != request.search_id);
+        if sessions.len() >= 16 {
+            sessions.remove(0);
+        }
+        sessions.push(ItemState {
+            item_id: request.search_id,
+            hash: serde_json::to_string(&SearchState {
+                filter,
+                query_state,
+                created: now,
+            })?,
+        });
+        state
+            .state
+            .put_item_states(user, device, SEARCHES, sessions)
+            .await?;
+    }
+    let mut b = DocumentBuilder::new();
+    b.start(f::FIND);
+    b.leaf(f::STATUS, "1");
+    b.start(f::RESPONSE);
+    b.leaf(ops::STORE, "Mailbox");
+    b.leaf(f::STATUS, "1");
+    let page = principals
+        .iter()
+        .skip(request.start)
+        .take(request.end - request.start + 1);
+    let mut count = 0;
+    for principal in page {
+        b.start(f::RESULT);
+        b.start(f::PROPERTIES);
+        b.leaf(gal::DISPLAY_NAME, &principal.display_name);
+        b.leaf(gal::ALIAS, &principal.alias);
+        if let Some(email) = &principal.email {
+            b.leaf(gal::EMAIL_ADDRESS, email);
+        }
+        b.end();
+        b.end();
+        count += 1;
+    }
+    if count != 0 {
+        b.leaf(
+            f::RANGE,
+            format!("{}-{}", request.start, request.start + count - 1),
+        );
+    }
+    b.leaf(f::TOTAL, principals.len().to_string());
     b.end();
     b.end();
     Ok(b.finish())

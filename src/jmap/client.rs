@@ -806,6 +806,100 @@ impl JmapClient {
         Ok(Vec::new())
     }
 
+    pub async fn all_principals(
+        &self,
+        auth: &AuthenticatedSession,
+    ) -> anyhow::Result<Vec<PrincipalResult>> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::PRINCIPALS) else {
+            anyhow::bail!("JMAP principal capability is unavailable");
+        };
+        let maximum = auth
+            .session
+            .capabilities
+            .get(capabilities::CORE)
+            .and_then(|cap| cap.get("maxObjectsInGet"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(100)
+            .clamp(1, 100) as usize;
+        let mut position = 0usize;
+        let mut state: Option<String> = None;
+        let mut seen = std::collections::HashSet::new();
+        let mut principals = Vec::new();
+        loop {
+            let calls = vec![
+                MethodCall::new(
+                    "Principal/query",
+                    serde_json::json!({
+                        "accountId":account_id, "position":position, "limit":maximum, "calculateTotal":true
+                    }),
+                    "q",
+                ),
+                MethodCall::new(
+                    "Principal/get",
+                    serde_json::json!({
+                        "accountId":account_id,
+                        "#ids":{"resultOf":"q","name":"Principal/query","path":"/ids"},
+                        "properties":["id","name","email","description"]
+                    }),
+                    "g",
+                ),
+            ];
+            let response: JmapResponse<serde_json::Value> = self
+                .api_call(
+                    auth,
+                    &[
+                        capabilities::CORE.to_owned(),
+                        capabilities::PRINCIPALS.to_owned(),
+                    ],
+                    calls,
+                )
+                .await?;
+            let mut query = None;
+            let mut list = None;
+            for method in response.method_responses {
+                match method.0.as_str() {
+                    "Principal/query" => {
+                        query = Some(serde_json::from_value::<QueryResponse>(method.1)?)
+                    }
+                    "Principal/get" => {
+                        list = Some(
+                            serde_json::from_value::<GetResponse<PrincipalObject>>(method.1)?.list,
+                        )
+                    }
+                    "error" => anyhow::bail!("JMAP principal query failed"),
+                    _ => {}
+                }
+            }
+            let query = query.ok_or_else(|| anyhow::anyhow!("Principal/query response missing"))?;
+            let query_state = query
+                .query_state
+                .ok_or_else(|| anyhow::anyhow!("Principal/query state missing"))?;
+            if state.as_ref().is_some_and(|old| old != &query_state) {
+                anyhow::bail!("principal directory changed during search");
+            }
+            state = Some(query_state);
+            let list = list.ok_or_else(|| anyhow::anyhow!("Principal/get response missing"))?;
+            if list.len() != query.ids.len() {
+                anyhow::bail!("principal directory changed during search");
+            }
+            let count = query.ids.len();
+            if count > maximum
+                || query.ids.iter().any(|id| !seen.insert(id.clone()))
+                || list
+                    .iter()
+                    .any(|principal| !query.ids.contains(&principal.id))
+            {
+                anyhow::bail!("invalid Principal/query page");
+            }
+            principals.extend(list.into_iter().map(PrincipalResult::from));
+            position += count;
+            if count == 0 || query.total.is_some_and(|total| position as u64 >= total) {
+                break;
+            }
+        }
+        Ok(principals)
+    }
+
     /// Real bug, found live while implementing mail deletion detection:
     /// `emails_in_mailbox` is sorted newest-first and capped at `limit`,
     /// so an OLD message that's still on the server but has simply been
@@ -3012,8 +3106,10 @@ pub struct MailIdentity {
 /// `search_principals`'s doc comment for why `display_name` prefers
 /// `description` over `name` (the account's own email, not a human
 /// name).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PrincipalResult {
+    pub id: String,
+    pub alias: String,
     pub display_name: String,
     pub email: Option<String>,
 }
@@ -3021,6 +3117,8 @@ pub struct PrincipalResult {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PrincipalObject {
+    #[serde(default)]
+    id: String,
     #[serde(default)]
     name: String,
     #[serde(default)]
@@ -3032,6 +3130,8 @@ struct PrincipalObject {
 impl From<PrincipalObject> for PrincipalResult {
     fn from(value: PrincipalObject) -> Self {
         Self {
+            id: value.id,
+            alias: value.name.clone(),
             display_name: value
                 .description
                 .filter(|d| !d.is_empty())

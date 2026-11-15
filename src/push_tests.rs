@@ -2998,6 +2998,40 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_find_gal_matches_principal_prefixes() {
+        use eas::{find as f, gal};
+        let live = Live::new("E2E_USER2").await;
+        let device = dev("findgal");
+        let user = std::env::var("E2E_USER").unwrap();
+        let prefix: String = user.chars().take(4).collect();
+        assert_eq!(prefix.chars().count(), 4);
+        let sid = uuid::Uuid::new_v4().to_string();
+        let search = |term: &str, range: &str| {
+            live.req_version("Find", &device, "16.1")
+                .body(gal_find_body(&sid, term, range))
+                .send()
+        };
+        let response = search(&prefix.to_uppercase(), "0-0").await.unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+        assert!(eas::find_all_text_after(&doc, gal::EMAIL_ADDRESS).contains(&user));
+        assert_eq!(eas::find_text_after(&doc, f::RANGE), Some("0-0"));
+        let response = search("nonexistentdirectoryprefix", "1-2").await.unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "4"]);
+        let sid2 = uuid::Uuid::new_v4().to_string();
+        let response = live
+            .req_version("Find", &device, "16.1")
+            .body(gal_find_body(&sid2, "nonexistentdirectoryprefix", "0-9"))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("0"));
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_find_16_1_reads_native_jmap_metadata_and_keywords() {
         use eas::{airsync_base as base, email2, find as f};
         let live = Live::new("E2E_USER2").await;
@@ -6315,6 +6349,42 @@ async fn replay_never_serves_a_response_encoded_for_another_protocol_version() {
         .await
         .unwrap();
     assert_eq!(replay, response);
+}
+
+fn gal_find_body(id: &str, text: &str, range: &str) -> Vec<u8> {
+    use eas::find as f;
+    let mut b = eas::DocumentBuilder::new();
+    b.start(f::FIND);
+    b.leaf(f::SEARCH_ID, id);
+    b.start(f::EXECUTE_SEARCH);
+    b.start(f::GAL_SEARCH_CRITERION);
+    b.leaf(f::QUERY, text);
+    b.start(f::OPTIONS);
+    b.leaf(f::RANGE, range);
+    b.end();
+    b.end();
+    b.end();
+    b.end();
+    wbxml::encode_document(&b.finish())
+}
+
+#[tokio::test]
+async fn find_rejects_short_gal_queries() {
+    use eas::find as f;
+    let env = start_env(Opts::default()).await;
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(gal_find_body(
+            "7dc6ffa0-2aa5-43f6-b441-bdda13785428",
+            "abc",
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::STATUS), Some("2"));
 }
 
 fn find_body(id: &str, text: &str, folder: Option<&str>, range: &str) -> Vec<u8> {
