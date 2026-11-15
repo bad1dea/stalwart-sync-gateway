@@ -1924,6 +1924,11 @@ async fn sync_mail(
         return (StatusCode::BAD_REQUEST, "Sync missing Collections\n").into_response();
     }
 
+    let mut remaining = match sync_request::global_window(document) {
+        Ok(window) => window,
+        Err(status) => return sync_request::error(state, command, status),
+    };
+
     match sync_request::wait_seconds(document) {
         Ok(Some(seconds)) => wait_for_sync_changes(state, auth, query, &collections, seconds).await,
         Ok(None) => {}
@@ -1934,9 +1939,6 @@ async fn sync_mail(
 
     if let Some(device) = query.device_id.as_deref() {
         let push = state.push.user(&auth.username().to_ascii_lowercase());
-        for c in &collections {
-            push.folder_synced(device, &c.collection_id);
-        }
         if let Some(latency) = push.mark_synced(device) {
             tracing::info!(
                 device_id = device,
@@ -1952,7 +1954,23 @@ async fn sync_mail(
     builder.start(air::SYNC);
     builder.start(air::COLLECTIONS);
 
+    let mut previous_mark = builder.mark();
     'collections: for mut collection in collections {
+        remaining = remaining.saturating_sub(sync_request::response_changes(
+            builder.nodes_since(previous_mark),
+        ));
+        if remaining == 0 {
+            break;
+        }
+        previous_mark = builder.mark();
+        if let Some(device) = query.device_id.as_deref() {
+            state
+                .push
+                .user(&auth.username().to_ascii_lowercase())
+                .folder_synced(device, &collection.collection_id);
+        }
+        let requested_window = collection.window_size;
+        collection.window_size = collection.window_size.min(remaining);
         let request_fingerprint = uuid::Uuid::new_v5(
             &uuid::Uuid::NAMESPACE_OID,
             format!("{collection:?}").as_bytes(),
@@ -2840,7 +2858,7 @@ async fn sync_mail(
                     sync_key: new_sync_key.clone(),
                     // Mail records keep the device's Sync window here so Ping
                     // can judge "new" the same way Sync does.
-                    jmap_state: mail_record_state(collection.window_size, filter, &new_email_state),
+                    jmap_state: mail_record_state(requested_window, filter, &new_email_state),
                     // SyncKey 0 means the device threw its copy of the folder
                     // away: what it has now is exactly what this response
                     // sends. Merging the old list kept messages it no longer

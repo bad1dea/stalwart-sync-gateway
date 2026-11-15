@@ -88,6 +88,34 @@ fn root_settings(document: &Document) -> Vec<Document> {
         .collect()
 }
 
+pub(super) fn global_window(request: &Document) -> Result<usize, &'static str> {
+    let values: Vec<_> = eas::child_elements(request)
+        .into_iter()
+        .filter(|child| is(child, air::WINDOW_SIZE))
+        .collect();
+    if values.len() > 1 {
+        return Err("4");
+    }
+    match values.first() {
+        None => Ok(100),
+        Some(value) => {
+            let size = eas::find_text_after(value, air::WINDOW_SIZE)
+                .and_then(|text| text.parse::<usize>().ok())
+                .ok_or("4")?;
+            Ok(if size == 0 { 512 } else { size.min(512) })
+        }
+    }
+}
+
+pub(super) fn response_changes(nodes: Vec<Node>) -> usize {
+    let response = Document { nodes };
+    eas::child_elements(&response)
+        .into_iter()
+        .filter(|child| is(child, air::COMMANDS))
+        .map(|commands| eas::child_elements(&commands).len())
+        .sum()
+}
+
 pub(super) fn wait_seconds(request: &Document) -> Result<Option<u64>, (&'static str, Option<u64>)> {
     let values: Vec<_> = eas::child_elements(request)
         .into_iter()
@@ -281,6 +309,28 @@ mod wait_tests {
         b.end();
         b.finish()
     }
+    #[test]
+    fn validates_global_window() {
+        assert_eq!(global_window(&request(&[])), Ok(100));
+        assert_eq!(global_window(&request(&[(air::WINDOW_SIZE, "0")])), Ok(512));
+        assert_eq!(global_window(&request(&[(air::WINDOW_SIZE, "3")])), Ok(3));
+        assert_eq!(
+            global_window(&request(&[(air::WINDOW_SIZE, "900")])),
+            Ok(512)
+        );
+        assert_eq!(
+            global_window(&request(&[(air::WINDOW_SIZE, "bad")])),
+            Err("4")
+        );
+        assert_eq!(
+            global_window(&request(&[
+                (air::WINDOW_SIZE, "1"),
+                (air::WINDOW_SIZE, "2")
+            ])),
+            Err("4")
+        );
+    }
+
     #[test]
     fn validates_sync_wait_interval_and_limit() {
         assert_eq!(wait_seconds(&request(&[])), Ok(None));

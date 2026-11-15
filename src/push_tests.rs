@@ -4466,6 +4466,89 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_global_window_across_mailboxes() {
+        let live = Live::new("E2E_USER2").await;
+        let result = live
+            .call(serde_json::json!([["Mailbox/set", {
+            "accountId": live.account, "create": {
+                "a": {"name": format!("Global window A {}", std::process::id())},
+                "b": {"name": format!("Global window B {}", std::process::id())}
+            }
+        }, "0"]]))
+            .await;
+        let a = result[0][1]["created"]["a"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let b = result[0][1]["created"]["b"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut ids = live.seed(&a, 2, "global-a", false).await;
+        ids.extend(live.seed(&b, 2, "global-b", false).await);
+        let device = dev("global-window");
+        let prime_a = live
+            .wbxml_version("Sync", &device, sync_body("0", &a), "16.1")
+            .await;
+        let prime_b = live
+            .wbxml_version("Sync", &device, sync_body("0", &b), "16.1")
+            .await;
+        let mut request = eas::DocumentBuilder::new();
+        request.start(air::SYNC);
+        request.leaf(air::WINDOW_SIZE, "3");
+        request.start(air::COLLECTIONS);
+        for (folder, key) in [(&a, sync_key(&prime_a)), (&b, sync_key(&prime_b))] {
+            request.start(air::COLLECTION);
+            request.leaf(air::SYNC_KEY, key);
+            request.leaf(air::COLLECTION_ID, folder);
+            request.leaf(air::WINDOW_SIZE, "10");
+            request.end();
+        }
+        request.end();
+        request.end();
+        let response = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                wbxml::encode_document(&request.finish()),
+                "16.1",
+            )
+            .await;
+        let folders = eas::child_elements(&response).into_iter().find(|child|
+            matches!(child.nodes.first(), Some(wbxml::Node::Start(t)) if t.code_page == air::PAGE && t.token == air::COLLECTIONS.token)
+        ).unwrap();
+        let replies = eas::child_elements(&folders);
+        assert_eq!(replies.len(), 2);
+        assert_eq!(
+            eas::find_all_text_after(&replies[0], air::SERVER_ID).len(),
+            2
+        );
+        assert_eq!(
+            eas::find_all_text_after(&replies[1], air::SERVER_ID).len(),
+            1
+        );
+        assert!(eas::contains_token(&replies[1], air::MORE_AVAILABLE));
+        let next = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&replies[1]), &b),
+                "16.1",
+            )
+            .await;
+        assert_eq!(eas::find_all_text_after(&next, air::SERVER_ID).len(), 1);
+        let cleanup = live
+            .call(serde_json::json!([
+                ["Email/set", {"accountId":live.account, "destroy":ids}, "0"],
+                ["Mailbox/set", {"accountId":live.account, "destroy":[a,b]}, "1"]
+            ]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_draft_add_recovers_after_server_write_before_sync_checkpoint() {
         let live = Live::new("E2E_USER2").await;
         let boxes = live
@@ -5913,6 +5996,141 @@ async fn iphone_and_ipad_windows_are_reconciled_independently() {
     assert!(p2.soft.is_empty() && p2.adds.is_empty(), "{p2:?}");
     let a2 = sync_cmds(&env, "ipad", &a.key, Some("3"), "25").await;
     assert!(a2.soft.is_empty() && a2.adds.is_empty(), "{a2:?}");
+}
+
+#[tokio::test]
+async fn sync_global_window_is_shared_between_folders() {
+    use eas::airsync as air;
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.mock
+        .boxes
+        .lock()
+        .unwrap()
+        .insert("inbox".to_owned(), Vec::new());
+    for id in ["inbox-a", "inbox-b"] {
+        env.mock.add_mail("inbox", id);
+    }
+    for id in ["sent-a", "sent-b"] {
+        env.mock.add_mail("sent", id);
+    }
+    let device = "global-window";
+    let inbox_key = sync_cmds(&env, device, "0", None, "10").await.key;
+    let sent_response = env
+        .req("Sync", device)
+        .body(sync_body_window("0", "sent", "10"))
+        .send()
+        .await
+        .unwrap();
+    let sent_doc = wbxml::decode_document(&sent_response.bytes().await.unwrap()).unwrap();
+    let sent_key = eas::find_text_after(&sent_doc, air::SYNC_KEY).unwrap();
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.leaf(air::WINDOW_SIZE, "3");
+    b.start(air::COLLECTIONS);
+    for (id, key) in [("inbox", inbox_key.as_str()), ("sent", sent_key)] {
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, key);
+        b.leaf(air::COLLECTION_ID, id);
+        b.leaf(air::WINDOW_SIZE, "10");
+        b.end();
+    }
+    b.end();
+    b.end();
+    let response = env
+        .req("Sync", device)
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    let folders = eas::child_elements(&doc).into_iter()
+        .find(|child| matches!(child.nodes.first(), Some(wbxml::Node::Start(t)) if t.code_page == air::PAGE && t.token == air::COLLECTIONS.token))
+        .unwrap();
+    let replies = eas::child_elements(&folders);
+    assert_eq!(
+        replies.len(),
+        2,
+        "{}",
+        crate::activesync::wbxml_outline_for_tests(&doc)
+    );
+    assert_eq!(
+        eas::find_all_text_after(&replies[0], air::SERVER_ID).len(),
+        2
+    );
+    assert_eq!(
+        eas::find_all_text_after(&replies[1], air::SERVER_ID).len(),
+        1
+    );
+    assert!(eas::contains_token(&replies[1], air::MORE_AVAILABLE));
+    let key = eas::find_text_after(&replies[1], air::SYNC_KEY).unwrap();
+    let next = env
+        .req("Sync", device)
+        .body(sync_body_window(key, "sent", "10"))
+        .send()
+        .await
+        .unwrap();
+    let next = wbxml::decode_document(&next.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&next, air::SERVER_ID).len(), 1);
+}
+
+#[tokio::test]
+async fn global_window_leaves_unprocessed_folders_for_the_next_sync() {
+    use eas::airsync as air;
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.mock
+        .boxes
+        .lock()
+        .unwrap()
+        .insert("inbox".to_owned(), Vec::new());
+    for id in ["first-a", "first-b"] {
+        env.mock.add_mail("inbox", id);
+    }
+    env.mock.add_mail("sent", "later");
+    let device = "global-exhausted";
+    let inbox_key = sync_cmds(&env, device, "0", None, "10").await.key;
+    let sent_response = env
+        .req("Sync", device)
+        .body(sync_body("0", "sent"))
+        .send()
+        .await
+        .unwrap();
+    let sent_doc = wbxml::decode_document(&sent_response.bytes().await.unwrap()).unwrap();
+    let sent_key = eas::find_text_after(&sent_doc, air::SYNC_KEY).unwrap();
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.leaf(air::WINDOW_SIZE, "2");
+    b.start(air::COLLECTIONS);
+    for (folder, key) in [("inbox", inbox_key.as_str()), ("sent", sent_key)] {
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, key);
+        b.leaf(air::COLLECTION_ID, folder);
+        b.end();
+    }
+    b.end();
+    b.end();
+    let response = env
+        .req("Sync", device)
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let response = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        eas::find_all_text_after(&response, air::COLLECTION_ID),
+        vec!["inbox"]
+    );
+    assert_eq!(eas::find_all_text_after(&response, air::SERVER_ID).len(), 2);
+    let next = env
+        .req("Sync", device)
+        .body(sync_body(sent_key, "sent"))
+        .send()
+        .await
+        .unwrap();
+    let next = wbxml::decode_document(&next.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        eas::find_all_text_after(&next, air::SERVER_ID),
+        vec!["later"]
+    );
 }
 
 #[tokio::test]
