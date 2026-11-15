@@ -2812,6 +2812,19 @@ impl JmapClient {
         auth: &AuthenticatedSession,
         arguments: serde_json::Value,
     ) -> anyhow::Result<()> {
+        let updates: Vec<String> = arguments["update"]
+            .as_object()
+            .map(|items| items.keys().cloned().collect())
+            .unwrap_or_default();
+        let destroys: Vec<String> = arguments["destroy"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|id| id.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
         let response: JmapResponse<serde_json::Value> = self
             .api_call(
                 auth,
@@ -2822,7 +2835,28 @@ impl JmapClient {
 
         for method in response.method_responses {
             match method.0.as_str() {
-                "Email/set" => return Ok(()),
+                "Email/set" => {
+                    for id in &updates {
+                        if method.1["updated"].get(id).is_none() {
+                            let kind = method.1["notUpdated"][id]["type"]
+                                .as_str()
+                                .unwrap_or("unconfirmed");
+                            anyhow::bail!("JMAP did not update email ({kind})");
+                        }
+                    }
+                    for id in &destroys {
+                        let destroyed = method.1["destroyed"]
+                            .as_array()
+                            .is_some_and(|ids| ids.iter().any(|item| item.as_str() == Some(id)));
+                        let kind = method.1["notDestroyed"][id]["type"]
+                            .as_str()
+                            .unwrap_or("unconfirmed");
+                        if !destroyed && kind != "notFound" {
+                            anyhow::bail!("JMAP did not delete email ({kind})");
+                        }
+                    }
+                    return Ok(());
+                }
                 "error" => anyhow::bail!("JMAP method error in Email/set"),
                 other => {
                     tracing::debug!(method = other, "ignoring unexpected JMAP method response")

@@ -60,6 +60,7 @@ struct Mock {
     groupware: Mutex<std::collections::BTreeMap<String, Vec<serde_json::Value>>>,
     snapshot_changes: AtomicBool,
     identity_error: AtomicBool,
+    item_set_error: AtomicBool,
     download_error: AtomicBool,
     mail_structures: Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
     mail_bodies: Mutex<std::collections::BTreeMap<String, (String, bool)>>,
@@ -360,6 +361,26 @@ async fn mock_api(
                 serde_json::json!({"list": list})
             }
             "Email/set" => {
+                if m.item_set_error.load(Ordering::SeqCst) {
+                    let not_updated = args["update"]
+                        .as_object()
+                        .into_iter()
+                        .flat_map(|items| items.keys())
+                        .map(|id| (id.clone(), serde_json::json!({"type":"forbidden"})))
+                        .collect::<serde_json::Map<_, _>>();
+                    let not_destroyed = args["destroy"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|id| id.as_str())
+                        .map(|id| (id.to_owned(), serde_json::json!({"type":"forbidden"})))
+                        .collect::<serde_json::Map<_, _>>();
+                    responses.push(
+                        serde_json::json!(["Email/set", {"updated":{}, "destroyed":[],
+                        "notUpdated":not_updated,"notDestroyed":not_destroyed}, cid]),
+                    );
+                    continue;
+                }
                 let mut updated = serde_json::Map::new();
                 if let Some(updates) = args["update"].as_object() {
                     for (id, patch) in updates {
@@ -566,6 +587,7 @@ async fn start_mock() -> Arc<Mock> {
         groupware: Mutex::new(Default::default()),
         snapshot_changes: AtomicBool::new(false),
         identity_error: AtomicBool::new(false),
+        item_set_error: AtomicBool::new(false),
         download_error: AtomicBool::new(false),
         mail_structures: Mutex::new(Default::default()),
         mail_bodies: Mutex::new(Default::default()),
@@ -2799,6 +2821,73 @@ mod e2e {
             .await;
         assert!(result[0][1]["notDestroyed"].is_null());
         assert!(result[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_jmap_item_error_does_not_acknowledge_sync_change() {
+        use eas::email as mail;
+        let live = Live::new("E2E_USER2").await;
+        let result = live.call(serde_json::json!([["Mailbox/set",{
+            "accountId":live.account,"create":{"m":{"name":format!("Mutation failure {}",std::process::id())}}
+        },"0"]])).await;
+        let folder = result[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let ids = live.seed(&folder, 1, "mutation-failure", false).await;
+        let device = dev("mutation-failure");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let synced = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let key = sync_key(&synced);
+        let destroyed = live
+            .call(serde_json::json!([["Email/set",{
+            "accountId":live.account,"destroy":ids
+        },"0"]]))
+            .await;
+        assert!(destroyed[0][1]["notDestroyed"].is_null());
+        let rejected = live
+            .call(serde_json::json!([["Email/set",{
+            "accountId":live.account,"update":{&ids[0]:{"keywords/$seen":true}}
+        },"0"]]))
+            .await;
+        assert_eq!(rejected[0][1]["notUpdated"][&ids[0]]["type"], "notFound");
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, &key);
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.leaf(air::GET_CHANGES, "0");
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, &ids[0]);
+        b.start(air::APPLICATION_DATA);
+        b.leaf(mail::READ, "1");
+        b.end();
+        for _ in 0..5 {
+            b.end();
+        }
+        let doc = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("5"));
+        assert_eq!(sync_key(&doc), key);
+        let result = live
+            .call(serde_json::json!([["Mailbox/set",{
+            "accountId":live.account,"destroy":[folder]
+        },"0"]]))
+            .await;
+        assert!(result[0][1]["notDestroyed"].is_null());
     }
 
     #[tokio::test]
@@ -7533,4 +7622,78 @@ async fn partial_sync_replaces_the_previous_wait_setting() {
         let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
         assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("1"));
     }
+}
+
+#[tokio::test]
+async fn jmap_item_errors_do_not_acknowledge_mail_mutations() {
+    use eas::{airsync as air, email as mail};
+    let env = start_env(Opts::default()).await;
+    let prime = env
+        .req("Sync", "item-error")
+        .body(sync_body("0", "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let prime = wbxml::decode_document(&prime.bytes().await.unwrap()).unwrap();
+    let synced = env
+        .req("Sync", "item-error")
+        .body(sync_body(&sync_key(&prime), "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let synced = wbxml::decode_document(&synced.bytes().await.unwrap()).unwrap();
+    let mut key = sync_key(&synced);
+    for change in [true, false] {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, &key);
+        b.leaf(air::COLLECTION_ID, "inbox");
+        b.leaf(air::GET_CHANGES, "0");
+        b.leaf(air::DELETES_AS_MOVES, "0");
+        b.start(air::COMMANDS);
+        b.start(if change { air::CHANGE } else { air::DELETE });
+        b.leaf(air::SERVER_ID, "m1");
+        if change {
+            b.start(air::APPLICATION_DATA);
+            b.leaf(mail::READ, "1");
+            b.end();
+        }
+        for _ in 0..5 {
+            b.end();
+        }
+        let body = wbxml::encode_document(&b.finish());
+        env.mock.item_set_error.store(true, Ordering::SeqCst);
+        let response = env
+            .req("Sync", "item-error")
+            .body(body.clone())
+            .send()
+            .await
+            .unwrap();
+        let failed = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&failed, air::STATUS), Some("5"));
+        assert_eq!(sync_key(&failed), key);
+        assert!(env.mock.boxes.lock().unwrap()["inbox"].contains(&"m1".to_owned()));
+        if change {
+            assert!(!env
+                .mock
+                .keywords
+                .lock()
+                .unwrap()
+                .get("m1")
+                .is_some_and(|k| k.contains("$seen")));
+        }
+        env.mock.item_set_error.store(false, Ordering::SeqCst);
+        let response = env
+            .req("Sync", "item-error")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        let ok = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&ok, air::STATUS), Some("1"));
+        key = sync_key(&ok);
+    }
+    assert!(!env.mock.boxes.lock().unwrap()["inbox"].contains(&"m1".to_owned()));
 }
