@@ -3,6 +3,7 @@ mod item_operations;
 mod sync_options;
 mod sync_request;
 
+use crate::wbxml::eas::RequestedBodyPreference;
 use axum::{
     body::Bytes,
     extract::{Query, State},
@@ -863,8 +864,15 @@ async fn search(
     // size this gateway's own `apply_body_preference` tests are built
     // around) when the device didn't send its own BodyPreference.
     let body_pref = Some(BodyPreference {
-        body_type: Some(request.body_pref_type.unwrap_or(1)),
-        truncation_size: Some(request.body_pref_truncation_size.unwrap_or(500)),
+        requests: if request.body_preferences.is_empty() {
+            vec![RequestedBodyPreference {
+                body_type: 1,
+                truncation_size: Some(500),
+                ..Default::default()
+            }]
+        } else {
+            request.body_preferences.clone()
+        },
         mime_data: None,
     });
 
@@ -884,10 +892,21 @@ async fn search(
             builder.leaf(srch::TOTAL, "0");
         } else {
             let text = request.free_text.unwrap_or_default();
-            match state.jmap.search_emails(auth, &text, position, limit).await {
+            let results = async {
+                let (emails, total) = state
+                    .jmap
+                    .search_emails(auth, &text, position, limit)
+                    .await?;
+                let emails =
+                    prepare_mail_bodies(state, auth, emails, &body_pref.as_ref().unwrap().requests)
+                        .await?;
+                Ok::<_, anyhow::Error>((emails, total))
+            }
+            .await;
+            match results {
                 Ok((emails, total)) => {
                     builder.leaf(srch::STATUS, "1");
-                    for email in emails {
+                    for (email, preference) in emails {
                         let email_id = email.id.clone();
                         builder.start(srch::RESULT);
                         builder.leaf(air::CLASS, "Email");
@@ -900,7 +919,7 @@ async fn search(
                             &mut builder,
                             &email_id,
                             email,
-                            body_pref.clone(),
+                            Some(preference),
                             version,
                         );
                         builder.end();
@@ -1852,7 +1871,7 @@ async fn sync_mail(
     builder.start(air::SYNC);
     builder.start(air::COLLECTIONS);
 
-    for mut collection in collections {
+    'collections: for mut collection in collections {
         let mut replay_capture: Option<(usize, String, String, String)> = None;
         let user = query.user.as_deref().unwrap_or_else(|| auth.username());
         let device_id = query.device_id.as_deref().unwrap_or("unknown");
@@ -1917,7 +1936,10 @@ async fn sync_mail(
             continue;
         }
 
-        if collection.options_count > 1 || collection.options_class.as_deref() == Some("SMS") {
+        if collection.options_count > 1
+            || collection.options_class.as_deref() == Some("SMS")
+            || !collection.body_preferences_valid
+        {
             builder.start(air::COLLECTION);
             builder.leaf(air::SYNC_KEY, &collection.sync_key);
             builder.leaf(air::COLLECTION_ID, &collection.collection_id);
@@ -2066,8 +2088,13 @@ async fn sync_mail(
                 (false, Vec::new())
             };
         let fetch_responses = if is_mail_collection && !collection.commands.is_empty() {
-            resolve_fetch_commands(state, auth, &collection.commands, collection.body_pref_type)
-                .await
+            resolve_fetch_commands(
+                state,
+                auth,
+                &collection.commands,
+                &collection.body_preferences,
+            )
+            .await
         } else {
             Vec::new()
         };
@@ -2510,6 +2537,25 @@ async fn sync_mail(
                     .filter(|email| !previous_seen.contains(&email.id))
                     .collect()
             };
+            let emails_to_send = match prepare_mail_bodies(
+                state,
+                auth,
+                emails_to_send,
+                &collection.body_preferences,
+            )
+            .await
+            {
+                Ok(emails) => emails,
+                Err(error) => {
+                    tracing::warn!(%error, "Sync body preparation failed");
+                    builder.start(air::COLLECTION);
+                    builder.leaf(air::SYNC_KEY, &collection.sync_key);
+                    builder.leaf(air::COLLECTION_ID, &collection.collection_id);
+                    builder.leaf(air::STATUS, "5");
+                    builder.end();
+                    continue 'collections;
+                }
+            };
             let new_sync_key = if collection.sync_key == "0"
                 || !emails_to_send.is_empty()
                 || !to_remove.is_empty()
@@ -2604,7 +2650,13 @@ async fn sync_mail(
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "1");
-            write_mail_responses(&mut builder, fetch_responses, failed_changes, version);
+            write_mail_responses(
+                &mut builder,
+                fetch_responses,
+                failed_changes,
+                &collection.body_preferences,
+                version,
+            );
             // Element order matters to a strict WBXML parser (iOS's
             // included) -- MoreAvailable must come AFTER Responses and
             // BEFORE Commands, confirmed against the working PHP z-push
@@ -2631,18 +2683,9 @@ async fn sync_mail(
                 || !aged_sent.is_empty()
                 || !state_changes.is_empty()
             {
-                let body_pref = BodyPreference {
-                    body_type: collection.body_pref_type,
-                    truncation_size: collection.body_pref_truncation_size,
-                    // MIME (Type=4) is what a real device asks for when
-                    // actually opening a message (see
-                    // resolve_fetch_commands's own docs) -- the list-sync
-                    // Add path never needs a pre-fetched MIME blob.
-                    mime_data: None,
-                };
                 builder.start(air::COMMANDS);
-                for email in emails_to_send {
-                    write_email_add(&mut builder, email, Some(body_pref.clone()), version);
+                for (email, preference) in emails_to_send {
+                    write_email_add(&mut builder, email, Some(preference), version);
                 }
                 for id in &to_remove {
                     builder.start(air::DELETE);
@@ -2772,7 +2815,13 @@ async fn sync_mail(
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "1");
-            write_mail_responses(&mut builder, fetch_responses, failed_changes, version);
+            write_mail_responses(
+                &mut builder,
+                fetch_responses,
+                failed_changes,
+                &collection.body_preferences,
+                version,
+            );
         }
 
         builder.end();
@@ -2929,7 +2978,7 @@ async fn resolve_fetch_commands(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
     commands: &[wbxml::eas::SyncClientCommand],
-    body_pref_type: Option<u8>,
+    body_preferences: &[RequestedBodyPreference],
 ) -> Vec<(
     String,
     anyhow::Result<Option<(crate::model::Email, Option<bytes::Bytes>)>>,
@@ -2940,43 +2989,9 @@ async fn resolve_fetch_commands(
             let result = state.jmap.get_email_by_id(auth, &command.server_id).await;
             let result = match result {
                 Ok(Some(email)) => {
-                    // Real bug, found via a direct live wire comparison
-                    // against z-push for this exact scenario: opening a
-                    // message sends its OWN BodyPreference (Type=4/MIME,
-                    // MimeSupport=2 -- confirmed live from a real iPad),
-                    // completely separate from the list-sync's Type=1
-                    // preference. This gateway had no handling for Type=4
-                    // at all -- it fell through and sent the original
-                    // HTML untouched, no MIME envelope, which is very
-                    // likely why the message body showed as literal
-                    // "<!DOCTYPE html>..." source text rather than
-                    // rendering: iOS expected a MIME-wrapped part and got
-                    // raw markup with no MIME headers to make sense of it.
-                    // z-push's own selectBody() downloads the email's
-                    // raw RFC822 blob directly when MIME is requested
-                    // (config/z-push/jmap.php) rather than building one
-                    // by hand -- do the same here.
-                    let mime = if body_pref_type == Some(4) {
-                        match &email.blob_id {
-                            Some(blob_id) => {
-                                match state.jmap.download_blob(auth, blob_id, "message.eml").await {
-                                    Ok(bytes) => Some(bytes::Bytes::from(bytes)),
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            %error,
-                                            server_id = command.server_id,
-                                            "Sync Fetch: MIME blob download failed, falling back to non-MIME body"
-                                        );
-                                        None
-                                    }
-                                }
-                            }
-                            None => None,
-                        }
-                    } else {
-                        None
-                    };
-                    Ok(Some((email, mime)))
+                    body_preferences_for_email(state, auth, &email, body_preferences)
+                        .await
+                        .map(|preference| Some((email, preference.mime_data)))
                 }
                 Ok(None) => Ok(None),
                 Err(error) => Err(error),
@@ -2996,6 +3011,7 @@ fn write_mail_responses(
     builder: &mut wbxml::eas::DocumentBuilder,
     results: Vec<FetchResult>,
     failed_changes: Vec<String>,
+    body_preferences: &[RequestedBodyPreference],
     version: ProtocolVersion,
 ) {
     use wbxml::eas::airsync as air;
@@ -3017,10 +3033,9 @@ fn write_mail_responses(
             Ok(Some((email, mime))) => {
                 builder.leaf(air::STATUS, "1");
                 builder.start(air::APPLICATION_DATA);
-                let body_pref = mime.map(|mime_data| BodyPreference {
-                    body_type: Some(4),
-                    truncation_size: None,
-                    mime_data: Some(mime_data),
+                let body_pref = Some(BodyPreference {
+                    requests: body_preferences.to_vec(),
+                    mime_data: mime,
                 });
                 write_email_fields(builder, &server_id, email, body_pref, version);
                 builder.end();
@@ -3034,7 +3049,7 @@ fn write_mail_responses(
             }
             Err(error) => {
                 tracing::warn!(%error, server_id = server_id.as_str(), "Sync Fetch failed");
-                builder.leaf(air::STATUS, "3");
+                builder.leaf(air::STATUS, "5");
             }
         }
         builder.end();
@@ -3042,20 +3057,60 @@ fn write_mail_responses(
     builder.end();
 }
 
-/// The client's requested body shape for a list-sync Add, from
-/// AirSyncBase:BodyPreference on the Sync request's Collection > Options.
-/// `None` at the write_email_fields call site (ItemOperations Fetch, and
-/// Sync-embedded Fetch) means "always full body" -- correct there, since
-/// those are the explicit "user opened this message" fetches, not the
-/// list sync.
 #[derive(Debug, Clone)]
 struct BodyPreference {
-    body_type: Option<u8>,
-    truncation_size: Option<usize>,
-    /// Pre-fetched raw RFC822 MIME source, when body_type == Some(4). Has
-    /// to be fetched async (a JMAP blob download) before write_email_fields
-    /// runs, since that function isn't async -- see resolve_fetch_commands.
+    requests: Vec<RequestedBodyPreference>,
     mime_data: Option<bytes::Bytes>,
+}
+
+async fn body_preferences_for_email(
+    state: &AppState,
+    auth: &AuthenticatedSession,
+    email: &crate::model::Email,
+    requests: &[RequestedBodyPreference],
+) -> anyhow::Result<BodyPreference> {
+    let native_fits = email.body.as_ref().is_some_and(|body| {
+        let native_type = match body.body_type {
+            EmailBodyType::Plain => 1,
+            EmailBodyType::Html => 2,
+        };
+        requests.iter().any(|pref| {
+            pref.body_type == native_type
+                && (!pref.all_or_none
+                    || pref
+                        .truncation_size
+                        .is_none_or(|limit| body.value.len() <= limit))
+        })
+    });
+    let mime_data = if requests.iter().any(|pref| pref.body_type == 4) && !native_fits {
+        let id = email
+            .blob_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("message has no MIME blob"))?;
+        Some(bytes::Bytes::from(
+            state.jmap.download_blob(auth, id, "message.eml").await?,
+        ))
+    } else {
+        None
+    };
+    Ok(BodyPreference {
+        requests: requests.to_vec(),
+        mime_data,
+    })
+}
+
+async fn prepare_mail_bodies(
+    state: &AppState,
+    auth: &AuthenticatedSession,
+    emails: Vec<crate::model::Email>,
+    requests: &[RequestedBodyPreference],
+) -> anyhow::Result<Vec<(crate::model::Email, BodyPreference)>> {
+    let mut prepared = Vec::with_capacity(emails.len());
+    for email in emails {
+        let preference = body_preferences_for_email(state, auth, &email, requests).await?;
+        prepared.push((email, preference));
+    }
+    Ok(prepared)
 }
 
 fn write_email_add(
@@ -3162,30 +3217,58 @@ fn write_email_fields(
     // matching z-push's real appended order (Body, Attachments,
     // NativeBodyType) -- this gateway had it right after Body instead.
     let native_body_type = email.body.as_ref().map(|body| body.body_type);
-    let preview_text = email.preview.clone().unwrap_or_else(|| {
-        email
-            .body
-            .as_ref()
-            .map(plain_text_preview)
-            .unwrap_or_default()
-    });
-    if let Some(mime) = body_pref.as_ref().and_then(|pref| pref.mime_data.clone()) {
-        builder.start(base::BODY);
-        builder.leaf(base::TYPE, "4");
-        builder.leaf(base::ESTIMATED_DATA_SIZE, mime.len().to_string());
-        builder.leaf(base::TRUNCATED, "0");
-        builder.opaque_leaf(base::DATA, mime);
-        builder.leaf(base::PREVIEW, preview_text);
-        builder.end();
-    } else if let Some(body) = email.body {
-        let (out_type, out_value, full_len, truncated) = apply_body_preference(body, body_pref);
-        builder.start(base::BODY);
-        builder.leaf(base::TYPE, out_type.eas_value());
-        builder.leaf(base::ESTIMATED_DATA_SIZE, full_len.to_string());
-        builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
-        builder.leaf(base::DATA, out_value);
-        builder.leaf(base::PREVIEW, preview_text);
-        builder.end();
+    let requests = body_pref
+        .as_ref()
+        .map(|pref| pref.requests.as_slice())
+        .unwrap_or(&[]);
+    let mime = body_pref.as_ref().and_then(|pref| pref.mime_data.as_ref());
+    let selected = select_body_preference(email.body.as_ref(), mime, requests);
+    let preview_limit = selected.and_then(|pref| pref.preview).unwrap_or(255);
+    let preview_text: String = email
+        .preview
+        .clone()
+        .unwrap_or_else(|| {
+            email
+                .body
+                .as_ref()
+                .map(plain_text_preview)
+                .unwrap_or_default()
+        })
+        .chars()
+        .take(preview_limit)
+        .collect();
+    if selected.is_some_and(|pref| pref.body_type == 4) {
+        if let Some(mime) = mime {
+            let pref = selected.unwrap();
+            let length = pref.truncation_size.unwrap_or(mime.len()).min(mime.len());
+            let truncated = length < mime.len();
+            builder.start(base::BODY);
+            builder.leaf(base::TYPE, "4");
+            builder.leaf(base::ESTIMATED_DATA_SIZE, mime.len().to_string());
+            builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
+            if !truncated || !pref.all_or_none {
+                builder.opaque_leaf(base::DATA, mime.slice(..length));
+            }
+            if preview_limit > 0 {
+                builder.leaf(base::PREVIEW, preview_text);
+            }
+            builder.end();
+        }
+    } else if requests.is_empty() || selected.is_some() {
+        if let Some(body) = email.body {
+            let (out_type, out_value, full_len, truncated) = apply_body_preference(body, selected);
+            builder.start(base::BODY);
+            builder.leaf(base::TYPE, out_type.eas_value());
+            builder.leaf(base::ESTIMATED_DATA_SIZE, full_len.to_string());
+            builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
+            if !truncated || !selected.is_some_and(|pref| pref.all_or_none) {
+                builder.leaf(base::DATA, out_value);
+            }
+            if preview_limit > 0 {
+                builder.leaf(base::PREVIEW, preview_text);
+            }
+            builder.end();
+        }
     }
     if !email.attachments.is_empty() {
         builder.start(base::ATTACHMENTS);
@@ -3303,61 +3386,104 @@ fn eas_conversation_id(thread_id: &str) -> [u8; 16] {
     *uuid::Uuid::new_v5(&NAMESPACE, thread_id.as_bytes()).as_bytes()
 }
 
-/// Shapes a body per the client's BodyPreference (list-sync Add only --
-/// see `BodyPreference`'s docs for why Fetch responses always pass
-/// `None`/full body instead of calling this).
-///
-/// Real bug, confirmed live via the zoidberg A/B test: a real iPad's Sync
-/// request carried `BodyPreference { Type: 1 (plain), TruncationSize: 500
-/// }`, but every build up to this fix ignored it completely and always
-/// sent the full HTML body (11KB+, `Truncated: 0`) regardless -- the
-/// client silently discarded every such response without ever advancing
-/// its SyncKey off "0", so it kept re-fetching the exact same batch from
-/// scratch forever (visible in Traefik's access log: the identical
-/// response byte-count recurring every few seconds, never converging to
-/// the empty steady-state response a settled sync produces).
-///
-/// Returns (type actually sent, body text actually sent, true full
-/// length, whether truncation happened) -- EstimatedDataSize must report
-/// the true full length even when Data is cut short, so the client knows
-/// there's more to fetch via ItemOperations.
+fn converted_body(body: crate::model::EmailBody, target: u8) -> crate::model::EmailBody {
+    use crate::model::{EmailBody, EmailBodyType};
+    match (body.body_type, target) {
+        (EmailBodyType::Html, 1) => EmailBody {
+            body_type: EmailBodyType::Plain,
+            value: collapse_whitespace(&strip_html_tags(&body.value)),
+        },
+        (EmailBodyType::Plain, 2) => EmailBody {
+            body_type: EmailBodyType::Html,
+            value: format!(
+                "<html><body><pre>{}</pre></body></html>",
+                body.value
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+            ),
+        },
+        _ => body,
+    }
+}
+
+fn select_body_preference(
+    body: Option<&crate::model::EmailBody>,
+    mime: Option<&bytes::Bytes>,
+    requests: &[RequestedBodyPreference],
+) -> Option<RequestedBodyPreference> {
+    let size = |preference: &RequestedBodyPreference| match preference.body_type {
+        1 | 2 => body.map(|body| {
+            converted_body(body.clone(), preference.body_type)
+                .value
+                .len()
+        }),
+        4 => mime.map(bytes::Bytes::len),
+        _ => None,
+    };
+    let fits = |preference: &RequestedBodyPreference, size: usize| {
+        !preference.all_or_none || preference.truncation_size.is_none_or(|limit| size <= limit)
+    };
+    let native = body.and_then(|body| {
+        requests.iter().find(|preference| {
+            preference.body_type
+                == match body.body_type {
+                    EmailBodyType::Plain => 1,
+                    EmailBodyType::Html => 2,
+                }
+        })
+    });
+    if let Some(preference) = native {
+        if size(preference).is_some_and(|size| fits(preference, size)) {
+            return Some(*preference);
+        }
+    }
+    requests
+        .iter()
+        .filter_map(|preference| {
+            size(preference)
+                .filter(|size| fits(preference, *size))
+                .map(|size| {
+                    (
+                        preference.truncation_size.unwrap_or(size).min(size),
+                        *preference,
+                    )
+                })
+        })
+        .max_by_key(|(size, _)| *size)
+        .map(|(_, preference)| preference)
+        .or_else(|| native.copied())
+        .or_else(|| {
+            requests
+                .iter()
+                .find(|preference| size(preference).is_some())
+                .copied()
+        })
+}
+
 fn apply_body_preference(
     body: crate::model::EmailBody,
-    pref: Option<BodyPreference>,
+    preference: Option<RequestedBodyPreference>,
 ) -> (crate::model::EmailBodyType, String, usize, bool) {
-    use crate::model::EmailBodyType;
-
-    let Some(pref) = pref else {
-        let full_len = body.value.len();
-        return (body.body_type, body.value, full_len, false);
+    let body = match preference {
+        Some(pref) => converted_body(body, pref.body_type),
+        None => body,
     };
-
-    let (out_type, full_text) = match pref.body_type {
-        Some(1) if body.body_type == EmailBodyType::Html => {
-            // Collapse whitespace too, not just strip tags -- an HTML
-            // source's leading indentation/blank lines (from a <head>,
-            // template formatting, etc.) otherwise eats most of a small
-            // TruncationSize budget before any real text appears.
-            (
-                EmailBodyType::Plain,
-                collapse_whitespace(&strip_html_tags(&body.value)),
-            )
+    let full_len = body.value.len();
+    if let Some(limit) = preference
+        .and_then(|pref| pref.truncation_size)
+        .filter(|limit| *limit < full_len)
+    {
+        if preference.is_some_and(|pref| pref.all_or_none) {
+            return (body.body_type, String::new(), full_len, true);
         }
-        _ => (body.body_type, body.value),
-    };
-    let full_len = full_text.len();
-
-    match pref.truncation_size {
-        Some(limit) if limit < full_len => {
-            // Truncate on a char boundary, not a raw byte offset -- real
-            // message bodies routinely carry multi-byte UTF-8.
-            let mut end = limit;
-            while end > 0 && !full_text.is_char_boundary(end) {
-                end -= 1;
-            }
-            (out_type, full_text[..end].to_owned(), full_len, true)
+        let mut end = limit;
+        while end > 0 && !body.value.is_char_boundary(end) {
+            end -= 1;
         }
-        _ => (out_type, full_text, full_len, false),
+        (body.body_type, body.value[..end].to_owned(), full_len, true)
+    } else {
+        (body.body_type, body.value, full_len, false)
     }
 }
 
@@ -5466,9 +5592,10 @@ mod tests {
     use super::{
         apply_body_preference, decode_entity_at, eas_conversation_id, eas_datetime,
         eas_datetime_dashes, is_non_mail_collection_id, plain_text_preview, write_email_fields,
-        BodyPreference, ProtocolVersion,
+        ProtocolVersion,
     };
     use crate::model::{Email, EmailAttachment, EmailBody, EmailBodyType};
+    use crate::wbxml::eas::RequestedBodyPreference as BodyPreference;
     use crate::wbxml::eas::{airsync_base as base, DocumentBuilder};
     use crate::wbxml::Node;
 
@@ -5664,6 +5791,88 @@ mod tests {
     }
 
     #[test]
+    fn body_preferences_prefer_native_then_fallback_and_preserve_utf8_boundaries() {
+        let body = EmailBody {
+            body_type: EmailBodyType::Html,
+            value: "<p>éclair hello</p>".to_owned(),
+        };
+        let requests = [
+            BodyPreference {
+                body_type: 2,
+                truncation_size: Some(4),
+                all_or_none: true,
+                preview: Some(3),
+            },
+            BodyPreference {
+                body_type: 1,
+                truncation_size: Some(3),
+                ..Default::default()
+            },
+        ];
+        let selected = super::select_body_preference(Some(&body), None, &requests).unwrap();
+        assert_eq!(selected.body_type, 1);
+        let (kind, text, full_size, truncated) =
+            apply_body_preference(body.clone(), Some(selected));
+        assert_eq!(kind, EmailBodyType::Plain);
+        assert_eq!(text, "éc");
+        assert_eq!(full_size, "éclair hello".len());
+        assert!(truncated);
+        let requests = [
+            BodyPreference {
+                body_type: 1,
+                ..Default::default()
+            },
+            BodyPreference {
+                body_type: 2,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            super::select_body_preference(Some(&body), None, &requests)
+                .unwrap()
+                .body_type,
+            2
+        );
+        let plain = EmailBody {
+            body_type: EmailBodyType::Plain,
+            value: "a<&".to_owned(),
+        };
+        let request = BodyPreference {
+            body_type: 2,
+            ..Default::default()
+        };
+        let (kind, text, _, _) = apply_body_preference(plain, Some(request));
+        assert_eq!(kind, EmailBodyType::Html);
+        assert!(text.contains("a&lt;&amp;"));
+    }
+
+    #[test]
+    fn all_or_none_omits_an_oversized_body_and_is_ignored_without_a_limit() {
+        let body = EmailBody {
+            body_type: EmailBodyType::Plain,
+            value: "éclair".to_owned(),
+        };
+        let request = BodyPreference {
+            body_type: 1,
+            truncation_size: Some(1),
+            all_or_none: true,
+            preview: None,
+        };
+        let (_, text, size, truncated) = apply_body_preference(body.clone(), Some(request));
+        assert!(text.is_empty());
+        assert_eq!(size, "éclair".len());
+        assert!(truncated);
+        let request = BodyPreference {
+            truncation_size: None,
+            ..request
+        };
+        let (_, text, size, truncated) = apply_body_preference(body, Some(request));
+        assert_eq!(text, "éclair");
+        assert_eq!(size, text.len());
+        assert!(!truncated);
+    }
+
+    #[test]
     fn apply_body_preference_none_sends_full_body_untouched() {
         let body = EmailBody {
             body_type: EmailBodyType::Html,
@@ -5689,9 +5898,9 @@ mod tests {
             value: format!("<p>{long_text}</p>"),
         };
         let pref = BodyPreference {
-            body_type: Some(1),
+            body_type: 1,
             truncation_size: Some(500),
-            mime_data: None,
+            ..Default::default()
         };
         let (out_type, out_value, full_len, truncated) = apply_body_preference(body, Some(pref));
         assert_eq!(out_type, EmailBodyType::Plain);
@@ -5720,9 +5929,9 @@ mod tests {
                 .to_owned(),
         };
         let pref = BodyPreference {
-            body_type: Some(1),
+            body_type: 1,
             truncation_size: Some(500),
-            mime_data: None,
+            ..Default::default()
         };
         let (_, out_value, _, truncated) = apply_body_preference(body, Some(pref));
         assert_eq!(out_value, "Hello world");
@@ -5736,9 +5945,9 @@ mod tests {
             value: "short".to_owned(),
         };
         let pref = BodyPreference {
-            body_type: Some(1),
+            body_type: 1,
             truncation_size: Some(500),
-            mime_data: None,
+            ..Default::default()
         };
         let (_, out_value, full_len, truncated) = apply_body_preference(body, Some(pref));
         assert_eq!(out_value, "short");
@@ -6085,9 +6294,9 @@ mod tests {
             value: "<p>".to_owned() + &"x".repeat(1000) + "</p>",
         };
         let pref = BodyPreference {
-            body_type: Some(2),
+            body_type: 2,
             truncation_size: Some(10),
-            mime_data: None,
+            ..Default::default()
         };
         let (out_type, out_value, _, truncated) = apply_body_preference(body, Some(pref));
         assert_eq!(out_type, EmailBodyType::Html);

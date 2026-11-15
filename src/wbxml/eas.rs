@@ -338,6 +338,7 @@ pub mod airsync_base {
     pub const BODY_PREFERENCE: Token = tag(0x05, true);
     pub const TYPE: Token = tag(0x06, false);
     pub const TRUNCATION_SIZE: Token = tag(0x07, false);
+    pub const ALL_OR_NONE: Token = tag(0x08, false);
     pub const BODY: Token = tag(0x0a, false);
     pub const DATA: Token = tag(0x0b, false);
     pub const ESTIMATED_DATA_SIZE: Token = tag(0x0c, false);
@@ -1056,6 +1057,97 @@ pub mod find {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RequestedBodyPreference {
+    pub body_type: u8,
+    pub truncation_size: Option<usize>,
+    #[serde(default)]
+    pub all_or_none: bool,
+    pub preview: Option<usize>,
+}
+
+pub fn body_preferences(document: &Document) -> Result<Vec<RequestedBodyPreference>, &'static str> {
+    let mut preferences = Vec::new();
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut seen = [false; 5];
+    for (index, node) in document.nodes.iter().enumerate() {
+        match node {
+            Node::Start(token) => {
+                if same_token(*token, airsync_base::BODY_PREFERENCE) {
+                    if start.is_some() || !token.has_content {
+                        return Err("invalid BodyPreference");
+                    }
+                    start = Some((index, depth));
+                }
+                if token.has_content {
+                    depth += 1;
+                }
+            }
+            Node::End => {
+                depth = depth.checked_sub(1).ok_or("invalid body preference tree")?;
+                if start.is_some_and(|(_, level)| level == depth) {
+                    let (first, _) = start.take().unwrap();
+                    let doc = Document {
+                        nodes: document.nodes[first..=index].to_vec(),
+                    };
+                    let fields = child_elements(&doc);
+                    let text = |token| -> Result<Option<&str>, &'static str> {
+                        let mut matching = fields.iter().filter(|field| {
+                            matches!(field.nodes.first(),
+                            Some(Node::Start(t)) if same_token(*t, token))
+                        });
+                        let Some(field) = matching.next() else {
+                            return Ok(None);
+                        };
+                        if matching.next().is_some() {
+                            return Err("duplicate body preference field");
+                        }
+                        find_text_after(field, token)
+                            .map(Some)
+                            .ok_or("empty body preference field")
+                    };
+                    let body_type = text(airsync_base::TYPE)?
+                        .ok_or("missing body type")?
+                        .parse::<u8>()
+                        .map_err(|_| "invalid body type")?;
+                    if !(1..=4).contains(&body_type) || seen[body_type as usize] {
+                        return Err("invalid or duplicate body type");
+                    }
+                    seen[body_type as usize] = true;
+                    let truncation_size = text(airsync_base::TRUNCATION_SIZE)?
+                        .map(|value| value.parse::<u32>().map(|value| value as usize))
+                        .transpose()
+                        .map_err(|_| "invalid truncation size")?;
+                    let all_or_none = match text(airsync_base::ALL_OR_NONE)? {
+                        None | Some("0" | "false") => false,
+                        Some("1" | "true") => true,
+                        _ => return Err("invalid AllOrNone"),
+                    };
+                    let preview = text(airsync_base::PREVIEW)?
+                        .map(|value| value.parse::<usize>())
+                        .transpose()
+                        .map_err(|_| "invalid preview size")?;
+                    if preview.is_some_and(|value| value > 255) {
+                        return Err("invalid preview size");
+                    }
+                    preferences.push(RequestedBodyPreference {
+                        body_type,
+                        truncation_size,
+                        all_or_none,
+                        preview,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    if start.is_some() {
+        return Err("unclosed BodyPreference");
+    }
+    Ok(preferences)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncCollectionRequest {
     pub sync_key: String,
@@ -1066,12 +1158,8 @@ pub struct SyncCollectionRequest {
     pub commands: Vec<SyncClientCommand>,
     pub options_count: usize,
     pub options_class: Option<String>,
-    /// AirSyncBase:BodyPreference > Type, if the client sent one (real
-    /// EAS clients always do on the list-sync Options; a bare
-    /// scripted/test client typically doesn't). 1 = plain text, 2 = HTML.
-    pub body_pref_type: Option<u8>,
-    /// AirSyncBase:BodyPreference > TruncationSize, in characters.
-    pub body_pref_truncation_size: Option<usize>,
+    pub body_preferences: Vec<RequestedBodyPreference>,
+    pub body_preferences_valid: bool,
     /// Options > FilterType, if sent this request. Absent means "same as the
     /// previous Sync" ([MS-ASCMD] 2.2.3.125: Options persist).
     pub filter_type: Option<u8>,
@@ -1088,8 +1176,8 @@ impl Default for SyncCollectionRequest {
             commands: Vec::new(),
             options_count: 0,
             options_class: None,
-            body_pref_type: None,
-            body_pref_truncation_size: None,
+            body_preferences: Vec::new(),
+            body_preferences_valid: true,
             filter_type: None,
         }
     }
@@ -1222,21 +1310,10 @@ pub struct ItemOperationsFetchRequest {
     pub long_id: Option<String>,
     pub file_reference: Option<String>,
     pub range: Option<String>,
-    pub body_pref_type: Option<u8>,
-    pub body_pref_truncation_size: Option<usize>,
+    pub body_preferences: Vec<RequestedBodyPreference>,
 }
 
-/// Parses an `ItemOperations > Fetch` request, accepting EITHER the
-/// "Mailbox Store" shape (Store/CollectionId/ServerId -- what iOS sends
-/// to fetch a message opened from a prior Sync result) OR the
-/// Search-result shape (Store/`search:LongId` -- what a device sends to
-/// open a message found via `Search`, confirmed against the real
-/// [MS-ASCMD] Fetch (ItemOperations) schema: `search:LongId` is listed as
-/// an alternative to `airsync:CollectionId`+`airsync:ServerId`, not an
-/// addition to them). Requires Store plus at least one of
-/// (CollectionId+ServerId) or LongId; returns `None` otherwise. Ignores
-/// `Options` (body preference/truncation) -- the gateway always returns
-/// the full body regardless, same as Sync does.
+/// Direct child elements, retaining their complete WBXML subtrees.
 pub fn child_elements(document: &Document) -> Vec<Document> {
     let mut children = Vec::new();
     let mut depth = 0;
@@ -1289,9 +1366,7 @@ pub fn item_operations_fetch(document: &Document) -> Option<ItemOperationsFetchR
         long_id,
         file_reference,
         range: find_text_after(document, item_operations::RANGE).map(str::to_owned),
-        body_pref_type: find_text_after(document, airsync_base::TYPE).and_then(|s| s.parse().ok()),
-        body_pref_truncation_size: find_text_after(document, airsync_base::TRUNCATION_SIZE)
-            .and_then(|s| s.parse().ok()),
+        body_preferences: body_preferences(document).ok()?,
     })
 }
 
@@ -1311,16 +1386,7 @@ pub struct SearchRequest {
     /// "0-9" = the first 10 results) -- NOT yet converted to a
     /// position/limit pair, since that conversion is the caller's job.
     pub range: Option<(i64, i64)>,
-    /// `airsyncbase:BodyPreference > Type`, if the client sent one inside
-    /// `Options` -- structurally the exact same element Sync's own
-    /// Options carries (see `SyncCollectionRequest::body_pref_type`'s own
-    /// doc comment), reused here rather than duplicated. Search results
-    /// must NOT default to full body the way an explicit
-    /// user-opened-this-message ItemOperations Fetch does -- a search
-    /// hit list needs a lightweight preview, not every matched message's
-    /// complete body/attachments inline.
-    pub body_pref_type: Option<u8>,
-    pub body_pref_truncation_size: Option<usize>,
+    pub body_preferences: Vec<RequestedBodyPreference>,
 }
 
 /// Parses a `Search` request. Real devices send exactly one `Store` per
@@ -1337,16 +1403,13 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
         let (start, end) = raw.split_once('-')?;
         Some((start.parse().ok()?, end.parse().ok()?))
     });
-    let body_pref_type = find_text_after(document, airsync_base::TYPE).and_then(|t| t.parse().ok());
-    let body_pref_truncation_size =
-        find_text_after(document, airsync_base::TRUNCATION_SIZE).and_then(|t| t.parse().ok());
+    let body_preferences = body_preferences(document).ok()?;
     Some(SearchRequest {
         store_name,
         class,
         free_text,
         range,
-        body_pref_type,
-        body_pref_truncation_size,
+        body_preferences,
     })
 }
 
@@ -1480,6 +1543,7 @@ pub fn contains_token(document: &Document, token: Token) -> bool {
 pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
     let mut collections = Vec::new();
     let mut current: Option<SyncCollectionRequest> = None;
+    let mut collection_start = 0;
     let mut current_command: Option<SyncClientCommand> = None;
     let mut current_command_start: Option<usize> = None;
     let mut commands_depth: Option<usize> = None;
@@ -1492,6 +1556,7 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                 if token.code_page == airsync::PAGE && token.token == airsync::COLLECTION.token =>
             {
                 current = Some(SyncCollectionRequest::default());
+                collection_start = idx;
                 if token.has_content {
                     stack.push(*token);
                 }
@@ -1588,14 +1653,6 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             && token.token == airsync::FILTER_TYPE.token
                         {
                             collection.filter_type = text.parse().ok();
-                        } else if token.code_page == airsync_base::PAGE
-                            && token.token == airsync_base::TYPE.token
-                        {
-                            collection.body_pref_type = text.parse().ok();
-                        } else if token.code_page == airsync_base::PAGE
-                            && token.token == airsync_base::TRUNCATION_SIZE.token
-                        {
-                            collection.body_pref_truncation_size = text.parse().ok();
                         }
                     }
                 }
@@ -1635,7 +1692,17 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                     }
                 }
                 if ended.is_some_and(|token| same_token(token, airsync::COLLECTION)) {
-                    if let Some(collection) = current.take() {
+                    if let Some(mut collection) = current.take() {
+                        let doc = Document {
+                            nodes: document.nodes[collection_start..=idx].to_vec(),
+                        };
+                        for options in child_elements(&doc).into_iter().filter(|child|
+                            matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, airsync::OPTIONS))) {
+                            match body_preferences(&options) {
+                                Ok(preferences) => collection.body_preferences.extend(preferences),
+                                Err(_) => collection.body_preferences_valid = false,
+                            }
+                        }
                         if !collection.collection_id.is_empty() {
                             collections.push(collection);
                         }
@@ -2352,6 +2419,55 @@ mod tests {
     }
 
     #[test]
+    fn body_preferences_keep_separate_formats_and_reject_invalid_fields() {
+        let build = |types: &[&str], preview: &str| {
+            let mut b = DocumentBuilder::new();
+            b.start(airsync::OPTIONS);
+            for body_type in types {
+                b.start(airsync_base::BODY_PREFERENCE);
+                b.leaf(airsync_base::TYPE, *body_type);
+                b.leaf(
+                    airsync_base::TRUNCATION_SIZE,
+                    if *body_type == "2" { "50" } else { "20" },
+                );
+                b.leaf(
+                    airsync_base::ALL_OR_NONE,
+                    if *body_type == "2" { "1" } else { "0" },
+                );
+                b.leaf(airsync_base::PREVIEW, preview);
+                b.end();
+            }
+            b.end();
+            b.finish()
+        };
+        let prefs = super::body_preferences(&build(&["2", "1"], "3")).unwrap();
+        assert_eq!(prefs.len(), 2);
+        assert_eq!(prefs[0].body_type, 2);
+        assert_eq!(prefs[0].truncation_size, Some(50));
+        assert!(prefs[0].all_or_none);
+        assert_eq!(prefs[1].body_type, 1);
+        assert_eq!(prefs[1].truncation_size, Some(20));
+        assert!(!prefs[1].all_or_none);
+        assert_eq!(prefs[1].preview, Some(3));
+        for (types, preview) in [
+            (vec!["1", "1"], "0"),
+            (vec!["0"], "0"),
+            (vec!["5"], "0"),
+            (vec!["1"], "256"),
+            (vec!["1"], "-1"),
+        ] {
+            assert!(super::body_preferences(&build(&types, preview)).is_err());
+        }
+        let mut b = DocumentBuilder::new();
+        b.start(airsync::OPTIONS);
+        b.start(airsync_base::BODY_PREFERENCE);
+        b.leaf(airsync_base::PREVIEW, "3");
+        b.end();
+        b.end();
+        assert!(super::body_preferences(&b.finish()).is_err());
+    }
+
+    #[test]
     fn parses_calendar_add_with_two_attendees() {
         // Exercises extract_calendar_fields()'s Attendees accumulator --
         // two sibling Attendee blocks must produce two separate
@@ -2503,8 +2619,11 @@ mod tests {
         let collections = sync_collections(&builder.finish());
 
         assert_eq!(collections.len(), 1);
-        assert_eq!(collections[0].body_pref_type, Some(1));
-        assert_eq!(collections[0].body_pref_truncation_size, Some(500));
+        assert_eq!(collections[0].body_preferences[0].body_type, 1);
+        assert_eq!(
+            collections[0].body_preferences[0].truncation_size,
+            Some(500)
+        );
     }
 
     #[test]
@@ -2522,8 +2641,7 @@ mod tests {
         let collections = sync_collections(&builder.finish());
 
         assert_eq!(collections.len(), 1);
-        assert_eq!(collections[0].body_pref_type, None);
-        assert_eq!(collections[0].body_pref_truncation_size, None);
+        assert!(collections[0].body_preferences.is_empty());
     }
 
     #[test]

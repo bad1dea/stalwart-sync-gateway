@@ -5,7 +5,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 
-use super::{write_email_fields, BodyPreference, ProtocolVersion};
+use super::{body_preferences_for_email, write_email_fields, ProtocolVersion};
 use crate::{
     http_server::AppState,
     jmap::client::AuthenticatedSession,
@@ -182,21 +182,20 @@ async fn fetch_item(
         .unwrap();
     match state.jmap.get_email_by_id(auth, target).await {
         Ok(Some(email)) => {
-            let mime = if fetch.body_pref_type == Some(4) {
-                let Some(blob_id) = email.blob_id.as_deref() else {
+            let preference = match body_preferences_for_email(
+                state,
+                auth,
+                &email,
+                &fetch.body_preferences,
+            )
+            .await
+            {
+                Ok(preference) => preference,
+                Err(error) => {
+                    tracing::warn!(%error, "ItemOperations body preparation failed");
                     builder.leaf(ops::STATUS, "14");
                     return;
-                };
-                match state.jmap.download_blob(auth, blob_id, "message.eml").await {
-                    Ok(data) => Some(bytes::Bytes::from(data)),
-                    Err(error) => {
-                        tracing::warn!(%error, "ItemOperations MIME fetch failed");
-                        builder.leaf(ops::STATUS, "14");
-                        return;
-                    }
                 }
-            } else {
-                None
             };
             builder.leaf(ops::STATUS, "1");
             if let Some(id) = fetch.collection_id {
@@ -208,12 +207,7 @@ async fn fetch_item(
                 builder.leaf(air::SERVER_ID, target);
             }
             builder.start(ops::PROPERTIES);
-            let preference = fetch.body_pref_type.map(|body_type| BodyPreference {
-                body_type: Some(body_type),
-                truncation_size: fetch.body_pref_truncation_size,
-                mime_data: mime,
-            });
-            write_email_fields(builder, target, email, preference, version);
+            write_email_fields(builder, target, email, Some(preference), version);
             builder.end();
         }
         Ok(None) => {

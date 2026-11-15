@@ -5,7 +5,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 struct Options {
     filter_type: Option<u8>,
+    #[serde(default)]
+    body_preferences: Vec<crate::wbxml::eas::RequestedBodyPreference>,
+    #[serde(default, skip_serializing)]
     body_type: Option<u8>,
+    #[serde(default, skip_serializing)]
     truncation_size: Option<usize>,
 }
 
@@ -25,8 +29,9 @@ pub(super) async fn apply(
     let options = if collection.options_count > 0 {
         let options = Options {
             filter_type: collection.filter_type,
-            body_type: collection.body_pref_type,
-            truncation_size: collection.body_pref_truncation_size,
+            body_preferences: collection.body_preferences.clone(),
+            body_type: None,
+            truncation_size: None,
         };
         state
             .state
@@ -53,8 +58,18 @@ pub(super) async fn apply(
     };
     if let Some(options) = options {
         collection.filter_type = Some(options.filter_type.unwrap_or(0));
-        collection.body_pref_type = options.body_type;
-        collection.body_pref_truncation_size = options.truncation_size;
+        collection.body_preferences = options.body_preferences;
+        if collection.body_preferences.is_empty() {
+            if let Some(body_type) = options.body_type {
+                collection
+                    .body_preferences
+                    .push(crate::wbxml::eas::RequestedBodyPreference {
+                        body_type,
+                        truncation_size: options.truncation_size,
+                        ..Default::default()
+                    });
+            }
+        }
     } else {
         collection.filter_type = Some(collection.filter_type.unwrap_or(legacy_filter));
     }
