@@ -316,7 +316,7 @@ pub mod email {
     pub const FROM: Token = tag(0x18, false);
     pub const FLAG: Token = tag(0x3a, false);
     pub const FLAG_STATUS: Token = tag(0x3b, false);
-    pub const COMPLETE_TIME: Token = tag(0x3c, false);
+    pub const COMPLETE_TIME: Token = tag(0x3e, false);
     pub const FLAG_TYPE: Token = tag(0x3d, false);
 
     pub const fn tag(token: u8, has_content: bool) -> Token {
@@ -2642,6 +2642,12 @@ mod tests {
         b.end();
         assert!(super::extract_calendar_fields(&b.finish().nodes).unsupported_location);
         assert_eq!(super::extract_calendar_fields(&[]).location, None);
+    }
+
+    #[test]
+    fn email_complete_time_uses_the_microsoft_wbxml_token() {
+        assert_eq!(email::COMPLETE_TIME.code_page, 2);
+        assert_eq!(email::COMPLETE_TIME.token, 0x3e);
     }
 
     #[test]
