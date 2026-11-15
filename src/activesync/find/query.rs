@@ -165,7 +165,7 @@ impl Parser {
                 if word.starts_with('"') {
                     return condition("text", &word);
                 }
-                if let Some(index) = word.find(['<', '>', '=']) {
+                if let Some(index) = comparison_index(&word) {
                     let property = &word[..index];
                     let rest = &word[index..];
                     let width = if rest.starts_with(">=")
@@ -200,6 +200,23 @@ impl Parser {
             _ => Err("unexpected search operator"),
         }
     }
+}
+
+fn comparison_index(word: &str) -> Option<usize> {
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, ch) in word.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if quoted && ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            quoted = !quoted;
+        } else if !quoted && matches!(ch, '<' | '>' | '=') {
+            return Some(index);
+        }
+    }
+    None
 }
 
 fn combine(operator: &str, mut left: Value, right: Value) -> Value {
@@ -297,6 +314,10 @@ mod tests {
     }
     #[test]
     fn quoted_terms_are_not_property_restrictions_or_operators() {
+        assert_eq!(
+            to_filter(r#"subject:"a=b""#).unwrap(),
+            json!({"subject": "\"a=b\""})
+        );
         assert_eq!(
             to_filter("\"from:a\"").unwrap(),
             json!({"text": "\"from:a\""})
