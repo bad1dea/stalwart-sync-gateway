@@ -1267,6 +1267,8 @@ pub struct CalendarFields {
     pub end_time: Option<String>,
     pub all_day_event: Option<bool>,
     pub attendees: Vec<AttendeeField>,
+    pub attendees_present: bool,
+    pub unsupported_attendees: bool,
 }
 
 /// One `calendar:Attendee` from a client Add/Change -- sent when the
@@ -1933,6 +1935,7 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     let mut body_count = 0;
     let mut type_count = 0;
     let mut data_count = 0;
+    let mut attendees_count = 0;
 
     for node in nodes {
         match node {
@@ -1963,8 +1966,28 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                         fields.body_type = None;
                     }
                 }
-                if same_token(*token, calendar::ATTENDEE) {
-                    current_attendee = Some(AttendeeField::default());
+                if same_token(*token, calendar::ATTENDEES)
+                    && path
+                        .last()
+                        .is_some_and(|t| same_token(*t, airsync::APPLICATION_DATA))
+                {
+                    attendees_count += 1;
+                    fields.attendees_present = true;
+                }
+                if same_token(*token, calendar::ATTENDEE)
+                    && path.windows(2).any(|pair| {
+                        same_token(pair[0], airsync::APPLICATION_DATA)
+                            && same_token(pair[1], calendar::ATTENDEES)
+                    })
+                    && path
+                        .last()
+                        .is_some_and(|t| same_token(*t, calendar::ATTENDEES))
+                {
+                    if !token.has_content {
+                        fields.unsupported_attendees = true;
+                    } else {
+                        current_attendee = Some(AttendeeField::default());
+                    }
                 }
                 if path
                     .last()
@@ -2035,6 +2058,8 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                     if let Some(attendee) = current_attendee.take() {
                         if !attendee.email.is_empty() {
                             fields.attendees.push(attendee);
+                        } else {
+                            fields.unsupported_attendees = true;
                         }
                     }
                 }
@@ -2048,6 +2073,7 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
         }
     }
 
+    fields.unsupported_attendees |= attendees_count > 1;
     fields.unsupported_body |= body_count > 1
         || type_count > 1
         || data_count > 1

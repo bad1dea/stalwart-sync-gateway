@@ -3166,6 +3166,143 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_calendar_attendees_can_be_cleared_without_losing_organizer() {
+        use eas::calendar as cal;
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let result = live
+            .call_using(
+                serde_json::json!([["Calendar/get",{"accountId":live.account},"0"]]),
+                &using,
+            )
+            .await;
+        let calendar = result[0][1]["list"][0]["id"].as_str().unwrap().to_owned();
+        let folder = format!("cal_{calendar}");
+        let owner = live.user.clone();
+        let result = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set",{
+            "accountId":live.account,"create":{"e":{
+                "@type":"Event","calendarIds":{&calendar:true},"title":"Attendee fixture",
+                "start":"2026-11-15T10:00:00","duration":"PT1H",
+                "replyTo":{"imip":format!("mailto:{owner}")},
+                "participants":{
+                    "owner":{"@type":"Participant","name":"Organizer name","email":owner,
+                        "calendarAddress":format!("mailto:{owner}"),"roles":{"owner":true},
+                        "sendTo":{"imip":format!("mailto:{owner}")}},
+                    "guest/~":{"@type":"Participant","name":"Guest","email":"guest@example.test",
+                        "calendarAddress":"mailto:guest@example.test","roles":{"attendee":true},
+                        "sendTo":{"imip":"mailto:guest@example.test"}}
+                }
+            }}
+        },"0"]]),
+                &using,
+            )
+            .await;
+        let id = result[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut devices = Vec::new();
+        for prefix in ["attendees-a", "attendees-b"] {
+            let device = dev(prefix);
+            let prime = live
+                .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+                .await;
+            let doc = live
+                .wbxml_version(
+                    "Sync",
+                    &device,
+                    sync_body(&sync_key(&prime), &folder),
+                    "16.1",
+                )
+                .await;
+            devices.push((device, sync_key(&doc)));
+        }
+        for mode in ["omit", "invalid", "clear"] {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(air::SYNC);
+            b.start(air::COLLECTIONS);
+            b.start(air::COLLECTION);
+            b.leaf(air::SYNC_KEY, &devices[0].1);
+            b.leaf(air::COLLECTION_ID, &folder);
+            b.start(air::COMMANDS);
+            b.start(air::CHANGE);
+            b.leaf(air::SERVER_ID, &id);
+            b.start(air::APPLICATION_DATA);
+            match mode {
+                "omit" => b.leaf(cal::SUBJECT, "Changed subject"),
+                "invalid" => {
+                    b.leaf(cal::SUBJECT, "Must not apply");
+                    b.start(cal::ATTENDEES);
+                    b.start(cal::ATTENDEE);
+                    b.leaf(cal::ATTENDEE_NAME, "Missing email");
+                    b.end();
+                    b.end();
+                }
+                _ => b.empty_tag(cal::ATTENDEES),
+            }
+            for _ in 0..6 {
+                b.end();
+            }
+            let doc = live
+                .wbxml_version(
+                    "Sync",
+                    &devices[0].0,
+                    wbxml::encode_document(&b.finish()),
+                    "16.1",
+                )
+                .await;
+            let statuses = eas::find_all_text_after(&doc, air::STATUS);
+            if mode == "invalid" {
+                assert!(statuses.contains(&"6".to_owned()));
+            } else {
+                assert!(statuses.iter().all(|status| status == "1"));
+            }
+            devices[0].1 = sync_key(&doc);
+            let native=live.call_using(serde_json::json!([["CalendarEvent/get",{
+                "accountId":live.account,"ids":[&id],"properties":["id","title","participants","replyTo"]
+            },"0"]]),&using).await;
+            let event = &native[0][1]["list"][0];
+            assert_eq!(event["title"], "Changed subject");
+            assert_eq!(event["participants"]["owner"]["name"], "Organizer name");
+            assert_eq!(event["participants"]["guest/~"].is_null(), mode == "clear");
+            assert!(event["replyTo"]["imip"].as_str().is_some());
+        }
+        let doc = live
+            .wbxml_version(
+                "Sync",
+                &devices[1].0,
+                sync_body(&devices[1].1, &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&doc, air::SERVER_ID),
+            Some(id.as_str())
+        );
+        assert_eq!(eas::find_text_after(&doc, cal::MEETING_STATUS), Some("0"));
+        assert!(doc
+            .nodes
+            .iter()
+            .any(|node| matches!(node,wbxml::Node::Start(t)
+            if t.code_page==cal::PAGE && t.token==cal::ATTENDEES.token && !t.has_content)));
+        let result = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set",{
+            "accountId":live.account,"destroy":[id]
+        },"0"]]),
+                &using,
+            )
+            .await;
+        assert!(result[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_calendar_descriptions_round_trip_between_devices() {
         use eas::{airsync_base as base, calendar as cal, RequestedBodyPreference as Pref};
         let live = Live::new("E2E_USER2").await;

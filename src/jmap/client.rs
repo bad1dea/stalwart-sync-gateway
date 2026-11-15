@@ -1766,6 +1766,34 @@ impl JmapClient {
                 serde_json::Value::Bool(all_day),
             );
         }
+        if fields.attendees_present && fields.attendees.is_empty() {
+            if let Some(id) = id {
+                let response: JmapResponse<serde_json::Value> = self.api_call(
+                    auth,
+                    &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
+                    vec![MethodCall::new("CalendarEvent/get", serde_json::json!({
+                        "accountId": account_id, "ids": [id], "properties": ["id", "participants"]
+                    }), "0")],
+                ).await?;
+                let object = response
+                    .method_responses
+                    .iter()
+                    .find(|method| method.0 == "CalendarEvent/get")
+                    .and_then(|method| method.1["list"].as_array())
+                    .and_then(|list| list.iter().find(|object| object["id"] == id))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("CalendarEvent/get omitted the event being edited")
+                    })?;
+                if let Some(participants) = object["participants"].as_object() {
+                    for (key, participant) in participants {
+                        if participant["roles"]["owner"] != true {
+                            let key = key.replace('~', "~0").replace('/', "~1");
+                            event.insert(format!("participants/{key}"), serde_json::Value::Null);
+                        }
+                    }
+                }
+            }
+        }
         if !fields.attendees.is_empty() {
             // Confirmed live 2026-08-25: Stalwart silently drops
             // `participants` entirely unless a top-level `replyTo` is

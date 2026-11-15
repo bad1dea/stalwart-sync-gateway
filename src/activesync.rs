@@ -4232,7 +4232,10 @@ async fn sync_calendar_collection(
     let mut change_responses: Vec<(String, &'static str)> = Vec::new();
 
     for command in &collection.commands {
-        if command.calendar.unsupported_location || command.calendar.unsupported_body {
+        if command.calendar.unsupported_location
+            || command.calendar.unsupported_body
+            || command.calendar.unsupported_attendees
+        {
             match command.kind {
                 wbxml::eas::SyncClientCommandKind::Add => {
                     add_responses.push((command.client_id.clone(), None, "6"));
@@ -4594,6 +4597,9 @@ fn write_calendar_command(
             builder.end();
         }
         builder.end();
+    } else if tag.code_page == air::PAGE && tag.token == air::CHANGE.token {
+        builder.leaf(cal::MEETING_STATUS, "0");
+        builder.empty_tag(cal::ATTENDEES);
     }
     builder.end();
     builder.end();
