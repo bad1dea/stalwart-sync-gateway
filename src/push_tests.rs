@@ -3229,6 +3229,7 @@ mod e2e {
                         "sendTo":{"imip":format!("mailto:{owner}")}},
                     "guest/~":{"@type":"Participant","name":"Guest","email":"guest@example.test",
                         "calendarAddress":"mailto:guest@example.test","roles":{"attendee":true},
+                        "participationStatus":"accepted",
                         "sendTo":{"imip":"mailto:guest@example.test"}}
                 }
             }}
@@ -3256,7 +3257,7 @@ mod e2e {
                 .await;
             devices.push((device, sync_key(&doc)));
         }
-        for mode in ["omit", "invalid", "clear"] {
+        for mode in ["omit", "invalid", "duplicate", "edit", "clear"] {
             let mut b = eas::DocumentBuilder::new();
             b.start(air::SYNC);
             b.start(air::COLLECTIONS);
@@ -3277,6 +3278,29 @@ mod e2e {
                     b.end();
                     b.end();
                 }
+                "duplicate" => {
+                    b.leaf(cal::SUBJECT, "Must not apply");
+                    b.start(cal::ATTENDEES);
+                    for email in ["guest@example.test", "GUEST@example.test"] {
+                        b.start(cal::ATTENDEE);
+                        b.leaf(cal::ATTENDEE_EMAIL, email);
+                        b.end();
+                    }
+                    b.end();
+                }
+                "edit" => {
+                    b.start(cal::ATTENDEES);
+                    b.start(cal::ATTENDEE);
+                    b.leaf(cal::ATTENDEE_EMAIL, "guest@example.test");
+                    b.leaf(cal::ATTENDEE_NAME, "Renamed guest");
+                    b.leaf(cal::ATTENDEE_TYPE, "2");
+                    b.end();
+                    b.start(cal::ATTENDEE);
+                    b.leaf(cal::ATTENDEE_EMAIL, "new@example.test");
+                    b.leaf(cal::ATTENDEE_NAME, "New guest");
+                    b.end();
+                    b.end();
+                }
                 _ => b.empty_tag(cal::ATTENDEES),
             }
             for _ in 0..6 {
@@ -3291,7 +3315,7 @@ mod e2e {
                 )
                 .await;
             let statuses = eas::find_all_text_after(&doc, air::STATUS);
-            if mode == "invalid" {
+            if mode == "invalid" || mode == "duplicate" {
                 assert!(statuses.contains(&"6".to_owned()));
             } else {
                 assert!(statuses.iter().all(|status| status == "1"));
@@ -3304,6 +3328,38 @@ mod e2e {
             assert_eq!(event["title"], "Changed subject");
             assert_eq!(event["participants"]["owner"]["name"], "Organizer name");
             assert_eq!(event["participants"]["guest/~"].is_null(), mode == "clear");
+            if mode == "edit" {
+                assert_eq!(event["participants"]["guest/~"]["name"], "Renamed guest");
+                assert_eq!(
+                    event["participants"]["guest/~"]["participationStatus"],
+                    "accepted"
+                );
+                assert_eq!(event["participants"]["guest/~"]["roles"]["optional"], true);
+                assert!(event["participants"]
+                    .as_object()
+                    .unwrap()
+                    .values()
+                    .any(|p| p["email"] == "new@example.test"));
+                let peer = live
+                    .wbxml_version(
+                        "Sync",
+                        &devices[1].0,
+                        sync_body(&devices[1].1, &folder),
+                        "16.1",
+                    )
+                    .await;
+                assert_eq!(
+                    eas::find_text_after(&peer, air::SERVER_ID),
+                    Some(id.as_str())
+                );
+                let names = eas::find_all_text_after(&peer, cal::ATTENDEE_NAME);
+                assert!(names.contains(&"Renamed guest".to_owned()));
+                assert!(names.contains(&"New guest".to_owned()));
+                devices[1].1 = sync_key(&peer);
+            }
+            if mode == "clear" {
+                assert_eq!(event["participants"].as_object().unwrap().len(), 1);
+            }
             assert!(event["replyTo"]["imip"].as_str().is_some());
         }
         let doc = live

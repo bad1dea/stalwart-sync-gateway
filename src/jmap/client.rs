@@ -1888,7 +1888,123 @@ impl JmapClient {
                 }
             }
         }
-        if !fields.attendees.is_empty() {
+        if let Some(id) = id.filter(|_| !fields.attendees.is_empty()) {
+            let response: JmapResponse<serde_json::Value> = self.api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
+                vec![MethodCall::new("CalendarEvent/get", serde_json::json!({
+                    "accountId": account_id, "ids": [id], "properties": ["id", "participants", "replyTo"]
+                }), "0")],
+            ).await?;
+            let object = response
+                .method_responses
+                .iter()
+                .find(|method| method.0 == "CalendarEvent/get")
+                .and_then(|method| method.1["list"].as_array())
+                .and_then(|list| list.iter().find(|object| object["id"] == id))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("CalendarEvent/get omitted the event being edited")
+                })?;
+            let mut remaining: BTreeMap<String, &crate::wbxml::eas::AttendeeField> =
+                BTreeMap::new();
+            for attendee in &fields.attendees {
+                if remaining
+                    .insert(attendee.email.to_lowercase(), attendee)
+                    .is_some()
+                {
+                    anyhow::bail!("duplicate calendar attendee");
+                }
+            }
+            let participants = object["participants"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            let mut owner_email = None;
+            let mut changes = serde_json::Map::new();
+            let mut existing_emails = std::collections::HashSet::new();
+            for (key, participant) in &participants {
+                if participant["roles"]["owner"] == true {
+                    owner_email = participant["email"].as_str().map(str::to_owned);
+                    continue;
+                }
+                let email = participant["email"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("calendar participant has no email"))?;
+                if !existing_emails.insert(email.to_lowercase()) {
+                    anyhow::bail!("ambiguous calendar participants");
+                }
+                let patch_key =
+                    format!("participants/{}", key.replace('~', "~0").replace('/', "~1"));
+                if let Some(attendee) = remaining.remove(&email.to_lowercase()) {
+                    if let Some(name) = &attendee.name {
+                        changes.insert(format!("{patch_key}/name"), serde_json::json!(name));
+                    }
+                    if participant["roles"].is_object() {
+                        changes.insert(
+                            format!("{patch_key}/roles/optional"),
+                            if attendee.optional {
+                                serde_json::Value::Bool(true)
+                            } else {
+                                serde_json::Value::Null
+                            },
+                        );
+                    } else if attendee.optional {
+                        changes.insert(
+                            format!("{patch_key}/roles"),
+                            serde_json::json!({"attendee":true, "optional":true}),
+                        );
+                    }
+                } else {
+                    changes.insert(patch_key, serde_json::Value::Null);
+                }
+            }
+            let owner_email = owner_email.unwrap_or_else(|| auth.authorization.username.to_owned());
+            if !participants.values().any(|p| p["roles"]["owner"] == true) {
+                let key = format!("owner-{}", uuid::Uuid::new_v4().simple());
+                changes.insert(format!("participants/{key}"), serde_json::json!({
+                    "@type":"Participant", "email":owner_email,
+                    "calendarAddress":format!("mailto:{owner_email}"), "roles":{"owner":true},
+                    "participationStatus":"accepted", "sendTo":{"imip":format!("mailto:{owner_email}")}
+                }));
+            }
+            for attendee in remaining.values() {
+                let key = format!("att-{}", uuid::Uuid::new_v4().simple());
+                let mut roles = serde_json::json!({"attendee":true});
+                if attendee.optional {
+                    roles["optional"] = serde_json::Value::Bool(true);
+                }
+                let mut participant = serde_json::json!({
+                    "@type":"Participant", "email":attendee.email,
+                    "calendarAddress":format!("mailto:{}", attendee.email),
+                    "roles":roles, "participationStatus":"needs-action", "expectReply":true,
+                    "sendTo":{"imip":format!("mailto:{}", attendee.email)}
+                });
+                if let Some(name) = &attendee.name {
+                    participant["name"] = serde_json::json!(name);
+                }
+                changes.insert(format!("participants/{key}"), participant);
+            }
+            if object["replyTo"].is_null() {
+                event.insert(
+                    "replyTo".to_owned(),
+                    serde_json::json!({"imip":format!("mailto:{owner_email}")}),
+                );
+            }
+            if object["participants"].is_object() {
+                event.extend(changes);
+            } else {
+                let mut new_participants = serde_json::Map::new();
+                for (key, value) in changes {
+                    new_participants
+                        .insert(key.strip_prefix("participants/").unwrap().to_owned(), value);
+                }
+                event.insert(
+                    "participants".to_owned(),
+                    serde_json::Value::Object(new_participants),
+                );
+            }
+        }
+        if !fields.attendees.is_empty() && id.is_none() {
             // Confirmed live 2026-08-25: Stalwart silently drops
             // `participants` entirely unless a top-level `replyTo` is
             // ALSO present (JSCalendar RFC 8984 §4.4.1 -- a companion

@@ -2073,7 +2073,12 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
         }
     }
 
-    fields.unsupported_attendees |= attendees_count > 1;
+    let mut attendee_emails = std::collections::HashSet::new();
+    fields.unsupported_attendees |= attendees_count > 1
+        || fields
+            .attendees
+            .iter()
+            .any(|attendee| !attendee_emails.insert(attendee.email.to_lowercase()));
     fields.unsupported_body |= body_count > 1
         || type_count > 1
         || data_count > 1
