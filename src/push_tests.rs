@@ -4389,6 +4389,83 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_mail_mixed_changes_respect_window() {
+        let live = Live::new("E2E_USER2").await;
+        let created = live.call(serde_json::json!([["Mailbox/set",{
+            "accountId":live.account, "create":{"m":{"name":format!("Window test {}",std::process::id())}}
+        },"0"]])).await;
+        let folder = created[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let ids = live.seed(&folder, 4, "window-fixture", false).await;
+        let device = dev("mixed-window");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body_window("0", &folder, "2"), "16.1")
+            .await;
+        let mut key = sync_key(&prime);
+        let mut received = Vec::new();
+        loop {
+            let response = live
+                .wbxml_version(
+                    "Sync",
+                    &device,
+                    sync_body_window(&key, &folder, "2"),
+                    "16.1",
+                )
+                .await;
+            received.extend(eas::find_all_text_after(&response, air::SERVER_ID));
+            key = sync_key(&response);
+            if !eas::contains_token(&response, air::MORE_AVAILABLE) {
+                break;
+            }
+        }
+        assert_eq!(received.len(), 4);
+        let changed = live
+            .call(serde_json::json!([["Email/set",{
+            "accountId":live.account,
+            "destroy":[&ids[0], &ids[1]],
+            "update":{&ids[2]:{"keywords/$seen":true}, &ids[3]:{"keywords/$seen":true}}
+        },"0"]]))
+            .await;
+        assert!(changed[0][1]["notDestroyed"].is_null());
+        assert!(changed[0][1]["notUpdated"].is_null());
+        let added = live.seed(&folder, 1, "window-new", false).await.remove(0);
+        let mut commands = Vec::new();
+        for _ in 0..10 {
+            let response = live
+                .wbxml_version(
+                    "Sync",
+                    &device,
+                    sync_body_window(&key, &folder, "2"),
+                    "16.1",
+                )
+                .await;
+            let values = eas::find_all_text_after(&response, air::SERVER_ID);
+            assert!(values.len() <= 2, "more commands than the requested window");
+            commands.extend(values);
+            key = sync_key(&response);
+            if !eas::contains_token(&response, air::MORE_AVAILABLE) {
+                break;
+            }
+        }
+        commands.sort();
+        let mut expected = ids.clone();
+        expected.push(added.clone());
+        expected.sort();
+        assert_eq!(commands, expected);
+        let cleanup = live
+            .call(serde_json::json!([
+                ["Email/set",{"accountId":live.account,"destroy":[&ids[2], &ids[3], added]},"0"],
+                ["Mailbox/set",{"accountId":live.account,"destroy":[folder]},"1"]
+            ]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_draft_add_recovers_after_server_write_before_sync_checkpoint() {
         let live = Live::new("E2E_USER2").await;
         let boxes = live
@@ -5836,6 +5913,50 @@ async fn iphone_and_ipad_windows_are_reconciled_independently() {
     assert!(p2.soft.is_empty() && p2.adds.is_empty(), "{p2:?}");
     let a2 = sync_cmds(&env, "ipad", &a.key, Some("3"), "25").await;
     assert!(a2.soft.is_empty() && a2.adds.is_empty(), "{a2:?}");
+}
+
+#[tokio::test]
+async fn mail_changes_share_the_window_and_are_not_lost() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    for id in ["delete-a", "delete-b", "read-a", "read-b"] {
+        env.mock.add_mail("inbox", id);
+    }
+    let (mut key, _) = initial_sync(&env, "ipad", None).await;
+    for id in ["delete-a", "delete-b"] {
+        env.mock.remove_mail("inbox", id);
+    }
+    for id in ["read-a", "read-b"] {
+        env.mock.set_read(id, true);
+    }
+    env.mock.add_mail("inbox", "new-a");
+    let mut adds = Vec::new();
+    let mut deletes = Vec::new();
+    let mut changes = Vec::new();
+    for _ in 0..10 {
+        let r = sync_cmds(&env, "ipad", &key, None, "2").await;
+        assert!(
+            r.adds.len() + r.deletes.len() + r.soft.len() + r.changes.len() <= 2,
+            "{r:?}"
+        );
+        adds.extend(r.adds);
+        deletes.extend(r.deletes);
+        changes.extend(r.changes);
+        key = r.key;
+        if !r.more {
+            break;
+        }
+    }
+    adds.sort();
+    deletes.sort();
+    changes.sort();
+    assert_eq!(adds, ["new-a"]);
+    assert_eq!(deletes, ["delete-a", "delete-b"]);
+    assert_eq!(changes, ["read-a", "read-b"]);
+    let quiet = sync_cmds(&env, "ipad", &key, None, "2").await;
+    assert!(
+        quiet.adds.is_empty() && quiet.deletes.is_empty() && quiet.changes.is_empty(),
+        "{quiet:?}"
+    );
 }
 
 #[tokio::test]

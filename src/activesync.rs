@@ -2544,7 +2544,7 @@ async fn sync_mail(
                 }
                 ids.into_iter().collect()
             };
-            let to_remove: BTreeSet<String> = if candidate_missing.is_empty() {
+            let mut to_remove: BTreeSet<String> = if candidate_missing.is_empty() {
                 BTreeSet::new()
             } else {
                 match state
@@ -2572,6 +2572,15 @@ async fn sync_mail(
                     }
                 }
             };
+
+            let delete_budget = collection
+                .window_size
+                .clamp(1, 100)
+                .saturating_sub(page.len());
+            if to_remove.len() > delete_budget {
+                has_more = true;
+                to_remove = to_remove.into_iter().take(delete_budget).collect();
+            }
 
             // Held messages that have aged out of the device's FilterType
             // window: still in the folder (so not deleted), received before the
@@ -2601,7 +2610,7 @@ async fn sync_mail(
             let aged_budget = collection
                 .window_size
                 .clamp(1, 100)
-                .saturating_sub(page.len());
+                .saturating_sub(page.len() + to_remove.len());
             let aged_sent: Vec<String> = aged_out.iter().take(aged_budget).cloned().collect();
             if aged_out.len() > aged_sent.len() {
                 has_more = true;
@@ -2724,6 +2733,20 @@ async fn sync_mail(
             // No Change for a message removed in this same reply.
             state_changes.retain(|(id, _)| !aged_set.contains(id));
             outside_updates.retain(|(id, _)| !aged_set.contains(id));
+            let change_budget = collection
+                .window_size
+                .clamp(1, 100)
+                .saturating_sub(page.len() + to_remove.len() + aged_sent.len());
+            if state_changes.len() > change_budget {
+                state_changes.truncate(change_budget);
+                has_more = true;
+                if let Some(since) = &since_state {
+                    new_email_state = since.clone();
+                }
+            }
+            let sent_changes: BTreeSet<&str> =
+                state_changes.iter().map(|(id, _)| id.as_str()).collect();
+            outside_updates.retain(|(id, _)| sent_changes.contains(id.as_str()));
             if !state_changes.is_empty() {
                 tracing::info!(
                     device_id,
