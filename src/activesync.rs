@@ -874,6 +874,7 @@ async fn search(
             request.body_preferences.clone()
         },
         mime_data: None,
+        text_body: None,
     });
 
     let mut builder = wbxml::eas::DocumentBuilder::new();
@@ -2650,13 +2651,7 @@ async fn sync_mail(
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "1");
-            write_mail_responses(
-                &mut builder,
-                fetch_responses,
-                failed_changes,
-                &collection.body_preferences,
-                version,
-            );
+            write_mail_responses(&mut builder, fetch_responses, failed_changes, version);
             // Element order matters to a strict WBXML parser (iOS's
             // included) -- MoreAvailable must come AFTER Responses and
             // BEFORE Commands, confirmed against the working PHP z-push
@@ -2815,13 +2810,7 @@ async fn sync_mail(
             builder.leaf(air::SYNC_KEY, new_sync_key);
             builder.leaf(air::COLLECTION_ID, collection.collection_id);
             builder.leaf(air::STATUS, "1");
-            write_mail_responses(
-                &mut builder,
-                fetch_responses,
-                failed_changes,
-                &collection.body_preferences,
-                version,
-            );
+            write_mail_responses(&mut builder, fetch_responses, failed_changes, version);
         }
 
         builder.end();
@@ -2981,7 +2970,7 @@ async fn resolve_fetch_commands(
     body_preferences: &[RequestedBodyPreference],
 ) -> Vec<(
     String,
-    anyhow::Result<Option<(crate::model::Email, Option<MimeBody>)>>,
+    anyhow::Result<Option<(crate::model::Email, BodyPreference)>>,
 )> {
     let mut results = Vec::new();
     for command in commands {
@@ -2991,7 +2980,7 @@ async fn resolve_fetch_commands(
                 Ok(Some(email)) => {
                     body_preferences_for_email(state, auth, &email, body_preferences)
                         .await
-                        .map(|preference| Some((email, preference.mime_data)))
+                        .map(|preference| Some((email, preference)))
                 }
                 Ok(None) => Ok(None),
                 Err(error) => Err(error),
@@ -3004,14 +2993,13 @@ async fn resolve_fetch_commands(
 
 type FetchResult = (
     String,
-    anyhow::Result<Option<(crate::model::Email, Option<MimeBody>)>>,
+    anyhow::Result<Option<(crate::model::Email, BodyPreference)>>,
 );
 
 fn write_mail_responses(
     builder: &mut wbxml::eas::DocumentBuilder,
     results: Vec<FetchResult>,
     failed_changes: Vec<String>,
-    body_preferences: &[RequestedBodyPreference],
     version: ProtocolVersion,
 ) {
     use wbxml::eas::airsync as air;
@@ -3030,14 +3018,10 @@ fn write_mail_responses(
         builder.start(air::FETCH);
         builder.leaf(air::SERVER_ID, server_id.clone());
         match result {
-            Ok(Some((email, mime))) => {
+            Ok(Some((email, preference))) => {
                 builder.leaf(air::STATUS, "1");
                 builder.start(air::APPLICATION_DATA);
-                let body_pref = Some(BodyPreference {
-                    requests: body_preferences.to_vec(),
-                    mime_data: mime,
-                });
-                write_email_fields(builder, &server_id, email, body_pref, version);
+                write_email_fields(builder, &server_id, email, Some(preference), version);
                 builder.end();
             }
             Ok(None) => {
@@ -3081,10 +3065,49 @@ impl MimeBody {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct BodyPreference {
     requests: Vec<RequestedBodyPreference>,
     mime_data: Option<MimeBody>,
+    text_body: Option<PreparedTextBody>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedTextBody {
+    body_type: EmailBodyType,
+    data: Option<String>,
+    full_size: usize,
+    truncated: bool,
+    preview: Option<String>,
+}
+
+fn prepare_text_body(
+    body: crate::model::EmailBody,
+    preference: Option<RequestedBodyPreference>,
+    native_preview: Option<&str>,
+) -> PreparedTextBody {
+    let preview_limit = preference.and_then(|pref| pref.preview).unwrap_or(255);
+    let preview = (preview_limit > 0).then(|| {
+        native_preview
+            .map(str::to_owned)
+            .unwrap_or_else(|| plain_text_preview(&body))
+            .chars()
+            .take(preview_limit)
+            .collect()
+    });
+    let (body_type, value, full_size, truncated) = apply_body_preference(body, preference);
+    let data = if truncated && preference.is_some_and(|pref| pref.all_or_none) {
+        None
+    } else {
+        Some(value)
+    };
+    PreparedTextBody {
+        body_type,
+        data,
+        full_size,
+        truncated,
+        preview,
+    }
 }
 
 async fn body_preferences_for_email(
@@ -3093,7 +3116,23 @@ async fn body_preferences_for_email(
     email: &crate::model::Email,
     requests: &[RequestedBodyPreference],
 ) -> anyhow::Result<BodyPreference> {
-    let native_fits = email.body.as_ref().is_some_and(|body| {
+    let complete_body = if email.body.as_ref().is_some_and(|body| body.is_truncated)
+        && (requests.is_empty() || requests.iter().any(|pref| matches!(pref.body_type, 1 | 2)))
+    {
+        let body = state
+            .jmap
+            .email_body_by_id(auth, &email.id, 0)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("JMAP omitted the complete message body"))?;
+        if body.is_truncated {
+            anyhow::bail!("JMAP returned a truncated body for an unlimited request");
+        }
+        Some(body)
+    } else {
+        None
+    };
+    let body = complete_body.as_ref().or(email.body.as_ref());
+    let native_fits = body.is_some_and(|body| {
         let native_type = match body.body_type {
             EmailBodyType::Plain => 1,
             EmailBodyType::Html => 2,
@@ -3121,9 +3160,18 @@ async fn body_preferences_for_email(
     } else {
         None
     };
+    let selected = select_body_preference(body, mime_data.as_ref(), requests);
+    let text_body = complete_body
+        .filter(|_| selected.is_none_or(|pref| matches!(pref.body_type, 1 | 2)))
+        .map(|body| prepare_text_body(body, selected, email.preview.as_deref()));
     Ok(BodyPreference {
-        requests: requests.to_vec(),
+        requests: if text_body.is_some() || selected.is_some_and(|pref| pref.body_type == 4) {
+            selected.into_iter().collect()
+        } else {
+            requests.to_vec()
+        },
         mime_data,
+        text_body,
     })
 }
 
@@ -3245,28 +3293,14 @@ fn write_email_fields(
     // matching z-push's real appended order (Body, Attachments,
     // NativeBodyType) -- this gateway had it right after Body instead.
     let native_body_type = email.body.as_ref().map(|body| body.body_type);
-    let requests = body_pref
-        .as_ref()
-        .map(|pref| pref.requests.as_slice())
-        .unwrap_or(&[]);
-    let mime = body_pref.as_ref().and_then(|pref| pref.mime_data.as_ref());
-    let selected = select_body_preference(email.body.as_ref(), mime, requests);
-    let preview_limit = selected.and_then(|pref| pref.preview).unwrap_or(255);
-    let preview_text: String = email
-        .preview
-        .clone()
-        .unwrap_or_else(|| {
-            email
-                .body
-                .as_ref()
-                .map(plain_text_preview)
-                .unwrap_or_default()
-        })
-        .chars()
-        .take(preview_limit)
-        .collect();
+    let preference = body_pref.unwrap_or_default();
+    let selected = select_body_preference(
+        email.body.as_ref(),
+        preference.mime_data.as_ref(),
+        &preference.requests,
+    );
     if selected.is_some_and(|pref| pref.body_type == 4) {
-        if let Some(mime) = mime {
+        if let Some(mime) = preference.mime_data {
             let pref = selected.unwrap();
             let truncated = mime.data.len() < mime.full_size;
             builder.start(base::BODY);
@@ -3274,25 +3308,42 @@ fn write_email_fields(
             builder.leaf(base::ESTIMATED_DATA_SIZE, mime.full_size.to_string());
             builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
             if !truncated || !pref.all_or_none {
-                builder.opaque_leaf(base::DATA, mime.data.clone());
+                builder.opaque_leaf(base::DATA, mime.data);
             }
+            let preview_limit = pref.preview.unwrap_or(255);
             if preview_limit > 0 {
-                builder.leaf(base::PREVIEW, preview_text);
+                let preview: String = email
+                    .preview
+                    .unwrap_or_else(|| {
+                        email
+                            .body
+                            .as_ref()
+                            .map(plain_text_preview)
+                            .unwrap_or_default()
+                    })
+                    .chars()
+                    .take(preview_limit)
+                    .collect();
+                builder.leaf(base::PREVIEW, preview);
             }
             builder.end();
         }
-    } else if requests.is_empty() || selected.is_some() {
-        if let Some(body) = email.body {
-            let (out_type, out_value, full_len, truncated) = apply_body_preference(body, selected);
+    } else if preference.requests.is_empty() || selected.is_some() {
+        let prepared = preference.text_body.or_else(|| {
+            email
+                .body
+                .map(|body| prepare_text_body(body, selected, email.preview.as_deref()))
+        });
+        if let Some(body) = prepared {
             builder.start(base::BODY);
-            builder.leaf(base::TYPE, out_type.eas_value());
-            builder.leaf(base::ESTIMATED_DATA_SIZE, full_len.to_string());
-            builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
-            if !truncated || !selected.is_some_and(|pref| pref.all_or_none) {
-                builder.leaf(base::DATA, out_value);
+            builder.leaf(base::TYPE, body.body_type.eas_value());
+            builder.leaf(base::ESTIMATED_DATA_SIZE, body.full_size.to_string());
+            builder.leaf(base::TRUNCATED, if body.truncated { "1" } else { "0" });
+            if let Some(data) = body.data {
+                builder.leaf(base::DATA, data);
             }
-            if preview_limit > 0 {
-                builder.leaf(base::PREVIEW, preview_text);
+            if let Some(preview) = body.preview {
+                builder.leaf(base::PREVIEW, preview);
             }
             builder.end();
         }
@@ -3417,10 +3468,12 @@ fn converted_body(body: crate::model::EmailBody, target: u8) -> crate::model::Em
     use crate::model::{EmailBody, EmailBodyType};
     match (body.body_type, target) {
         (EmailBodyType::Html, 1) => EmailBody {
+            is_truncated: body.is_truncated,
             body_type: EmailBodyType::Plain,
             value: collapse_whitespace(&strip_html_tags(&body.value)),
         },
         (EmailBodyType::Plain, 2) => EmailBody {
+            is_truncated: body.is_truncated,
             body_type: EmailBodyType::Html,
             value: format!(
                 "<html><body><pre>{}</pre></body></html>",
@@ -3510,7 +3563,7 @@ fn apply_body_preference(
         }
         (body.body_type, body.value[..end].to_owned(), full_len, true)
     } else {
-        (body.body_type, body.value, full_len, false)
+        (body.body_type, body.value, full_len, body.is_truncated)
     }
 }
 
@@ -5727,6 +5780,7 @@ mod tests {
     #[test]
     fn plain_text_preview_strips_html_tags_and_collapses_whitespace() {
         let body = EmailBody {
+            is_truncated: false,
             body_type: EmailBodyType::Html,
             value: "<html>\n<body>\n<p>Hi   Raj,</p>\n<div><br>\n</div>\n<div>Please put below in the system.</div>\n</body>\n</html>".to_owned(),
         };
@@ -5739,6 +5793,7 @@ mod tests {
     #[test]
     fn plain_text_preview_passes_plain_text_through() {
         let body = EmailBody {
+            is_truncated: false,
             body_type: EmailBodyType::Plain,
             value: "Hello  world".to_owned(),
         };
@@ -5753,6 +5808,7 @@ mod tests {
         // first text in the document, it became the entire preview
         // (e.g. "@import url(...) :root { color-scheme: ... }").
         let body = EmailBody {
+            is_truncated: false,
             body_type: EmailBodyType::Html,
             value: "<html><head><style>@import url(\"https://example.com/x.css\"); :root { color-scheme: light dark; }</style><script>track();</script></head><body><p>Invoice attached, thanks!</p></body></html>".to_owned(),
         };
@@ -5769,6 +5825,7 @@ mod tests {
         // -- visible as fragments of raw markup in an otherwise-stripped
         // preview.
         let body = EmailBody {
+            is_truncated: false,
             body_type: EmailBodyType::Html,
             value: r#"<div style="width:5px>2px?10px:0" data-x="a>b" onclick="if(x>1)y()">Real text</div>"#.to_owned(),
         };
@@ -5782,6 +5839,7 @@ mod tests {
         // strip_html_tags only ever removed markup, entity references
         // (text content, not tags) passed straight through undecoded.
         let body = EmailBody {
+            is_truncated: false,
             body_type: EmailBodyType::Html,
             value: "Raj Singh&nbsp; Director of Sales &amp; Support".to_owned(),
         };
@@ -5820,6 +5878,7 @@ mod tests {
     #[test]
     fn body_preferences_prefer_native_then_fallback_and_preserve_utf8_boundaries() {
         let body = EmailBody {
+            is_truncated: false,
             body_type: EmailBodyType::Html,
             value: "<p>éclair hello</p>".to_owned(),
         };
@@ -5861,6 +5920,7 @@ mod tests {
             2
         );
         let plain = EmailBody {
+            is_truncated: false,
             body_type: EmailBodyType::Plain,
             value: "a<&".to_owned(),
         };
@@ -5871,6 +5931,32 @@ mod tests {
         let (kind, text, _, _) = apply_body_preference(plain, Some(request));
         assert_eq!(kind, EmailBodyType::Html);
         assert!(text.contains("a&lt;&amp;"));
+    }
+
+    #[test]
+    fn prepared_text_retains_only_the_requested_prefix_and_full_size() {
+        let value = "x".repeat(100_000);
+        let body = EmailBody {
+            body_type: EmailBodyType::Plain,
+            value,
+            is_truncated: false,
+        };
+        let prepared = super::prepare_text_body(
+            body,
+            Some(BodyPreference {
+                body_type: 1,
+                truncation_size: Some(17),
+                preview: Some(0),
+                ..Default::default()
+            }),
+            None,
+        );
+        assert_eq!(prepared.full_size, 100_000);
+        let data = prepared.data.unwrap();
+        assert_eq!(data.len(), 17);
+        assert!(data.capacity() < prepared.full_size);
+        assert!(prepared.truncated);
+        assert!(prepared.preview.is_none());
     }
 
     #[test]
@@ -5910,6 +5996,7 @@ mod tests {
     #[test]
     fn all_or_none_omits_an_oversized_body_and_is_ignored_without_a_limit() {
         let body = EmailBody {
+            is_truncated: false,
             body_type: EmailBodyType::Plain,
             value: "éclair".to_owned(),
         };
@@ -5936,6 +6023,7 @@ mod tests {
     #[test]
     fn apply_body_preference_none_sends_full_body_untouched() {
         let body = EmailBody {
+            is_truncated: false,
             body_type: EmailBodyType::Html,
             value: "<p>Hello there</p>".to_owned(),
         };
@@ -5955,6 +6043,7 @@ mod tests {
         // SyncKey off "0".
         let long_text = "word ".repeat(200); // 1000 chars, well over 500
         let body = EmailBody {
+            is_truncated: false,
             body_type: EmailBodyType::Html,
             value: format!("<p>{long_text}</p>"),
         };
@@ -5985,6 +6074,7 @@ mod tests {
         // text -- e.g. a real synced message's first 80 characters were
         // literally "\n\n\n\n    \n    \n    \n    \n    \n\n    \n\n\n\n\n    \n ...".
         let body = EmailBody {
+            is_truncated: false,
             body_type: EmailBodyType::Html,
             value: "<html>\n<head>\n    \n    \n</head>\n<body>\n\n\nHello world\n</body>\n</html>"
                 .to_owned(),
@@ -6002,6 +6092,7 @@ mod tests {
     #[test]
     fn apply_body_preference_short_body_under_truncation_size_is_not_truncated() {
         let body = EmailBody {
+            is_truncated: false,
             body_type: EmailBodyType::Plain,
             value: "short".to_owned(),
         };
@@ -6047,6 +6138,7 @@ mod tests {
             preview: None,
             read: true,
             body: Some(EmailBody {
+                is_truncated: false,
                 body_type: EmailBodyType::Plain,
                 value: "Hello".to_owned(),
             }),
@@ -6131,6 +6223,7 @@ mod tests {
             preview: None,
             read: false,
             body: Some(EmailBody {
+                is_truncated: false,
                 body_type: EmailBodyType::Plain,
                 value: "Hello".to_owned(),
             }),
@@ -6224,6 +6317,7 @@ mod tests {
             preview: None,
             read: false,
             body: Some(EmailBody {
+                is_truncated: false,
                 body_type: EmailBodyType::Plain,
                 value: "Hello world".to_owned(),
             }),
@@ -6351,6 +6445,7 @@ mod tests {
     #[test]
     fn apply_body_preference_html_requested_keeps_html_but_still_truncates() {
         let body = EmailBody {
+            is_truncated: false,
             body_type: EmailBodyType::Html,
             value: "<p>".to_owned() + &"x".repeat(1000) + "</p>",
         };

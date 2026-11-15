@@ -61,6 +61,10 @@ struct Mock {
     snapshot_changes: AtomicBool,
     identity_error: AtomicBool,
     download_error: AtomicBool,
+    mail_bodies: Mutex<std::collections::BTreeMap<String, (String, bool)>>,
+    body_get_limits: Mutex<Vec<(String, usize)>>,
+    body_get_error: AtomicBool,
+    body_get_incomplete: AtomicBool,
     identities: Mutex<Vec<serde_json::Value>>,
 }
 
@@ -421,6 +425,10 @@ async fn mock_api(
                 })
             }
             "Email/get" => {
+                if args["maxBodyValueBytes"] == 0 && m.body_get_error.load(Ordering::SeqCst) {
+                    responses.push(serde_json::json!(["error", {"type":"serverFail"}, cid]));
+                    continue;
+                }
                 let ids: Vec<String> = if let Some(arr) = args["ids"].as_array() {
                     arr.iter().map(|v| v.as_str().unwrap().to_owned()).collect()
                 } else if args["#ids"]["resultOf"] == "c" {
@@ -442,6 +450,44 @@ async fn mock_api(
                                 keyword_map.get(&id).unwrap_or(&Default::default()),
                                 &m.date_of(&id),
                             );
+                            if let Some((value, html)) = m.mail_bodies.lock().unwrap().get(&id) {
+                                let requested =
+                                    args["maxBodyValueBytes"].as_u64().unwrap_or(0) as usize;
+                                if args["fetchAllBodyValues"] == true {
+                                    m.body_get_limits
+                                        .lock()
+                                        .unwrap()
+                                        .push((id.clone(), requested));
+                                }
+                                let limit = if requested == 0
+                                    && m.body_get_incomplete.load(Ordering::SeqCst)
+                                {
+                                    65536
+                                } else {
+                                    requested
+                                };
+                                let mut end = if limit == 0 {
+                                    value.len()
+                                } else {
+                                    limit.min(value.len())
+                                };
+                                while !value.is_char_boundary(end) {
+                                    end -= 1;
+                                }
+                                email["bodyValues"] = serde_json::json!({"1":{
+                                    "value":&value[..end], "isTruncated":end < value.len()
+                                }});
+                                email["textBody"] = if *html {
+                                    serde_json::json!([])
+                                } else {
+                                    serde_json::json!([{"partId":"1"}])
+                                };
+                                email["htmlBody"] = if *html {
+                                    serde_json::json!([{"partId":"1"}])
+                                } else {
+                                    serde_json::json!([])
+                                };
+                            }
                             if mb == "notes" {
                                 email["keywords"] = serde_json::json!({format!("noteid-{id}"): true, "$note": true});
                             }
@@ -516,6 +562,10 @@ async fn start_mock() -> Arc<Mock> {
         snapshot_changes: AtomicBool::new(false),
         identity_error: AtomicBool::new(false),
         download_error: AtomicBool::new(false),
+        mail_bodies: Mutex::new(Default::default()),
+        body_get_limits: Mutex::new(Vec::new()),
+        body_get_error: AtomicBool::new(false),
+        body_get_incomplete: AtomicBool::new(false),
         identities: Mutex::new(vec![
             serde_json::json!({"id": "i1", "name": "Owner", "email": "owner@example.test"}),
             serde_json::json!({"id": "i2", "name": "Alias", "email": "alias@example.test"}),
@@ -3333,6 +3383,106 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_large_jmap_text_is_not_reported_as_complete_at_64k() {
+        use eas::{airsync_base as base, item_operations as ops, RequestedBodyPreference as Pref};
+        let live = Live::new("E2E_USER2").await;
+        let r=live.call(serde_json::json!([["Mailbox/set",{
+            "accountId":live.account,"create":{"m":{"name":format!("Large body {}",std::process::id())}}
+        },"0"]])).await;
+        let folder = r[0][1]["created"]["m"]["id"].as_str().unwrap().to_owned();
+        let plain = format!("{}END_AFTER_64K", "é ".repeat(40_000));
+        let html = format!("<p>{plain}</p>");
+        let r = live
+            .call(serde_json::json!([["Email/set",{
+            "accountId":live.account,"create":{"m":{"mailboxIds":{&folder:true},"keywords":{},
+            "from":[{"email":"test@example.test"}],"to":[{"email":live.user}],
+            "subject":"Large body","bodyValues":{"b":{"value":html}},
+            "htmlBody":[{"partId":"b","type":"text/html"}]}}
+        },"0"]]))
+            .await;
+        let id = r[0][1]["created"]["m"]["id"].as_str().unwrap().to_owned();
+        let r = live
+            .call(serde_json::json!([["Email/get",{
+            "accountId":live.account,"ids":[&id],"properties":["id","htmlBody","bodyValues"],
+            "fetchAllBodyValues":true,"maxBodyValueBytes":65536
+        },"0"]]))
+            .await;
+        assert!(r[0][1]["list"][0]["bodyValues"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|body| body["isTruncated"] == true));
+        let options = requested_body_options(&[
+            Pref {
+                body_type: 2,
+                truncation_size: Some(65_540),
+                all_or_none: true,
+                preview: Some(0),
+            },
+            Pref {
+                body_type: 1,
+                truncation_size: Some(4),
+                preview: Some(3),
+                ..Default::default()
+            },
+        ]);
+        let device = dev("large-text");
+        let prime = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body_preferences("0", &folder, Some(&options), true),
+                "16.1",
+            )
+            .await;
+        let doc = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body_preferences(&sync_key(&prime), &folder, None, true),
+                "16.1",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&doc, base::TYPE), Some("1"));
+        assert_eq!(eas::find_text_after(&doc, base::DATA), Some("é "));
+        assert_eq!(
+            eas::find_text_after(&doc, base::ESTIMATED_DATA_SIZE),
+            Some(plain.len().to_string()).as_deref()
+        );
+        let mut b = eas::DocumentBuilder::new();
+        b.start(ops::ITEM_OPERATIONS);
+        b.start(ops::FETCH);
+        b.leaf(ops::STORE, "Mailbox");
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.leaf(air::SERVER_ID, &id);
+        b.end();
+        b.end();
+        let doc = live
+            .wbxml_version(
+                "ItemOperations",
+                &device,
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&doc, base::DATA), Some(html.as_str()));
+        assert_eq!(
+            eas::find_text_after(&doc, base::ESTIMATED_DATA_SIZE),
+            Some(html.len().to_string()).as_deref()
+        );
+        assert_eq!(eas::find_text_after(&doc, base::TRUNCATED), Some("0"));
+        let r = live
+            .call(
+                serde_json::json!([["Email/set",{"accountId":live.account,"destroy":[id]},"0"],
+            ["Mailbox/set",{"accountId":live.account,"destroy":[folder]},"1"]]),
+            )
+            .await;
+        assert!(r[0][1]["notDestroyed"].is_null());
+        assert!(r[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_lost_response_is_replayed() {
         let live = Live::new("E2E_USER").await;
         let d = dev("replay");
@@ -6049,4 +6199,250 @@ async fn search_and_sync_fetch_use_the_requested_body_preferences() {
         Some(&MIME_BYTES[..5])
     );
     assert_eq!(eas::find_text_after(&doc, base::TRUNCATED), Some("1"));
+}
+
+#[tokio::test]
+async fn large_text_is_completed_before_format_selection_and_all_fetch_paths() {
+    use eas::{
+        airsync as air, airsync_base as base, item_operations as ops, search as srch,
+        RequestedBodyPreference as Pref,
+    };
+    let env = start_env(Opts::default()).await;
+    env.mock
+        .boxes
+        .lock()
+        .unwrap()
+        .insert("inbox".to_owned(), vec!["large".to_owned()]);
+    let plain = format!("{}END_AFTER_64K", "é ".repeat(40_000));
+    let html = format!("<p>{plain}</p>");
+    env.mock
+        .mail_bodies
+        .lock()
+        .unwrap()
+        .insert("large".to_owned(), (html.clone(), true));
+    let options = requested_body_options(&[
+        Pref {
+            body_type: 2,
+            truncation_size: Some(65_540),
+            all_or_none: true,
+            preview: Some(0),
+        },
+        Pref {
+            body_type: 1,
+            truncation_size: Some(4),
+            preview: Some(3),
+            ..Default::default()
+        },
+    ]);
+    let response = env
+        .req("Sync", "client")
+        .body(sync_body_preferences("0", "inbox", Some(&options), true))
+        .send()
+        .await
+        .unwrap();
+    let prime = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    let response = env
+        .req("Sync", "client")
+        .body(sync_body_preferences(
+            &sync_key(&prime),
+            "inbox",
+            None,
+            true,
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, base::TYPE), Some("1"));
+    assert_eq!(eas::find_text_after(&doc, base::DATA), Some("é "));
+    assert_eq!(eas::find_text_after(&doc, base::PREVIEW), Some("é é"));
+    assert_eq!(
+        eas::find_text_after(&doc, base::ESTIMATED_DATA_SIZE),
+        Some(plain.len().to_string()).as_deref()
+    );
+    assert!(env
+        .mock
+        .body_get_limits
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(id, limit)| id == "large" && *limit == 0));
+    let key = sync_key(&doc);
+
+    let fetch = |options: Option<wbxml::Document>| {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(ops::ITEM_OPERATIONS);
+        b.start(ops::FETCH);
+        b.leaf(ops::STORE, "Mailbox");
+        b.leaf(air::COLLECTION_ID, "inbox");
+        b.leaf(air::SERVER_ID, "large");
+        if let Some(options) = options {
+            b.start(ops::OPTIONS);
+            for child in eas::child_elements(&options) {
+                b.extend(child.nodes);
+            }
+            b.end();
+        }
+        b.end();
+        b.end();
+        wbxml::encode_document(&b.finish())
+    };
+    let response = env
+        .req("ItemOperations", "client")
+        .body(fetch(None))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, base::DATA), Some(html.as_str()));
+    assert_eq!(eas::find_text_after(&doc, base::TRUNCATED), Some("0"));
+    let options = requested_body_options(&[Pref {
+        body_type: 2,
+        truncation_size: Some(65_540),
+        all_or_none: true,
+        preview: Some(0),
+    }]);
+    let response = env
+        .req("ItemOperations", "client")
+        .body(fetch(Some(options)))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert!(!eas::contains_token(&doc, base::DATA));
+    assert_eq!(
+        eas::find_text_after(&doc, base::ESTIMATED_DATA_SIZE),
+        Some(html.len().to_string()).as_deref()
+    );
+    assert_eq!(eas::find_text_after(&doc, base::TRUNCATED), Some("1"));
+
+    let options = requested_body_options(&[Pref {
+        body_type: 1,
+        preview: Some(0),
+        ..Default::default()
+    }]);
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, key);
+    b.leaf(air::COLLECTION_ID, "inbox");
+    b.leaf(air::GET_CHANGES, "0");
+    b.extend(options.nodes);
+    b.start(air::COMMANDS);
+    b.start(air::FETCH);
+    b.leaf(air::SERVER_ID, "large");
+    for _ in 0..5 {
+        b.end();
+    }
+    let response = env
+        .req("Sync", "client")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, base::DATA), Some(plain.as_str()));
+    assert_eq!(eas::find_text_after(&doc, base::TRUNCATED), Some("0"));
+
+    let mut b = eas::DocumentBuilder::new();
+    b.start(srch::SEARCH);
+    b.start(srch::STORE);
+    b.leaf(srch::NAME, "Mailbox");
+    b.start(srch::QUERY);
+    b.leaf(srch::FREE_TEXT, "large");
+    b.end();
+    b.start(srch::OPTIONS);
+    let options = requested_body_options(&[Pref {
+        body_type: 2,
+        preview: Some(0),
+        ..Default::default()
+    }]);
+    for child in eas::child_elements(&options) {
+        b.extend(child.nodes);
+    }
+    b.end();
+    b.end();
+    b.end();
+    let response = env
+        .req("Search", "client")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, base::DATA), Some(html.as_str()));
+    assert_eq!(eas::find_text_after(&doc, base::TRUNCATED), Some("0"));
+}
+
+#[tokio::test]
+async fn failed_or_incomplete_full_text_fetch_does_not_acknowledge_the_message() {
+    use eas::{airsync as air, airsync_base as base, RequestedBodyPreference as Pref};
+    let env = start_env(Opts::default()).await;
+    env.mock
+        .boxes
+        .lock()
+        .unwrap()
+        .insert("inbox".to_owned(), vec!["large".to_owned()]);
+    env.mock
+        .mail_bodies
+        .lock()
+        .unwrap()
+        .insert("large".to_owned(), ("x".repeat(100_000), false));
+    let options = requested_body_options(&[Pref {
+        body_type: 1,
+        truncation_size: Some(2),
+        ..Default::default()
+    }]);
+    let response = env
+        .req("Sync", "client")
+        .body(sync_body_preferences("0", "inbox", Some(&options), true))
+        .send()
+        .await
+        .unwrap();
+    let prime = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    let key = sync_key(&prime);
+    let body = sync_body_preferences(&key, "inbox", None, true);
+    env.mock.body_get_error.store(true, Ordering::SeqCst);
+    for incomplete in [false, true] {
+        if incomplete {
+            env.mock.body_get_error.store(false, Ordering::SeqCst);
+            env.mock.body_get_incomplete.store(true, Ordering::SeqCst);
+        }
+        let response = env
+            .req("Sync", "client")
+            .body(body.clone())
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("5"));
+        assert_eq!(sync_key(&doc), key);
+        assert!(env
+            .state
+            .get("u@test", "client", "inbox")
+            .await
+            .unwrap()
+            .unwrap()
+            .seen_ids
+            .is_empty());
+    }
+    env.mock.body_get_incomplete.store(false, Ordering::SeqCst);
+    let response = env
+        .req("Sync", "client")
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    let first = response.bytes().await.unwrap();
+    let doc = wbxml::decode_document(&first).unwrap();
+    assert_eq!(eas::find_text_after(&doc, base::DATA), Some("xx"));
+    assert_eq!(
+        eas::find_text_after(&doc, base::ESTIMATED_DATA_SIZE),
+        Some("100000")
+    );
+    let calls = env.mock.body_get_limits.lock().unwrap().len();
+    let response = env.req("Sync", "client").body(body).send().await.unwrap();
+    assert_eq!(response.bytes().await.unwrap(), first);
+    assert_eq!(env.mock.body_get_limits.lock().unwrap().len(), calls);
 }

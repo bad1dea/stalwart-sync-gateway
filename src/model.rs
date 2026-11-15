@@ -119,6 +119,7 @@ pub struct EmailAttachment {
 pub struct EmailBody {
     pub body_type: EmailBodyType,
     pub value: String,
+    pub is_truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

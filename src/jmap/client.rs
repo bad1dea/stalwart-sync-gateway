@@ -2076,6 +2076,50 @@ impl JmapClient {
         Ok(None)
     }
 
+    /// Fetches decoded text bodies; zero means no byte limit (RFC 8621).
+    pub async fn email_body_by_id(
+        &self,
+        auth: &AuthenticatedSession,
+        email_id: &str,
+        max_bytes: usize,
+    ) -> anyhow::Result<Option<EmailBody>> {
+        let account_id = auth
+            .session
+            .primary_account_for(capabilities::MAIL)
+            .ok_or_else(|| anyhow::anyhow!("JMAP Mail capability is unavailable"))?;
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Email/get",
+                    serde_json::json!({
+                        "accountId": account_id, "ids": [email_id],
+                        "properties": ["id", "textBody", "htmlBody", "bodyValues"],
+                        "fetchAllBodyValues": true, "maxBodyValueBytes": max_bytes
+                    }),
+                    "body",
+                )],
+            )
+            .await?;
+        for method in response.method_responses {
+            match method.0.as_str() {
+                "Email/get" => {
+                    let get: GetResponse<EmailObject> = serde_json::from_value(method.1)
+                        .context("invalid Email/get body response")?;
+                    return Ok(get
+                        .list
+                        .into_iter()
+                        .find(|email| email.id == email_id)
+                        .and_then(|mut email| select_body(&mut email)));
+                }
+                "error" => anyhow::bail!("JMAP method error fetching the message body"),
+                _ => {}
+            }
+        }
+        anyhow::bail!("Email/get body response was missing")
+    }
+
     pub async fn update_email_state(
         &self,
         auth: &AuthenticatedSession,
@@ -2935,14 +2979,17 @@ struct EmailBodyPart {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct EmailBodyValue {
     #[serde(default)]
     value: String,
+    #[serde(default)]
+    is_truncated: bool,
 }
 
 impl From<EmailObject> for Email {
-    fn from(value: EmailObject) -> Self {
-        let body = select_body(&value);
+    fn from(mut value: EmailObject) -> Self {
+        let body = select_body(&mut value);
         let attachments = value
             .attachments
             .into_iter()
@@ -2983,29 +3030,36 @@ impl From<EmailObject> for Email {
     }
 }
 
-fn select_body(email: &EmailObject) -> Option<EmailBody> {
-    if let Some(value) = body_value_for(&email.html_body, &email.body_values) {
-        return Some(EmailBody {
-            body_type: EmailBodyType::Html,
-            value,
-        });
-    }
-    body_value_for(&email.text_body, &email.body_values).map(|value| EmailBody {
-        body_type: EmailBodyType::Plain,
-        value,
+fn select_body(email: &mut EmailObject) -> Option<EmailBody> {
+    body_value_for(
+        &email.html_body,
+        &mut email.body_values,
+        EmailBodyType::Html,
+    )
+    .or_else(|| {
+        body_value_for(
+            &email.text_body,
+            &mut email.body_values,
+            EmailBodyType::Plain,
+        )
     })
 }
 
 fn body_value_for(
     parts: &[EmailBodyPart],
-    values: &BTreeMap<String, EmailBodyValue>,
-) -> Option<String> {
+    values: &mut BTreeMap<String, EmailBodyValue>,
+    body_type: EmailBodyType,
+) -> Option<EmailBody> {
     parts.iter().find_map(|part| {
-        part.part_id
-            .as_ref()
-            .and_then(|id| values.get(id))
-            .map(|body| body.value.clone())
-            .filter(|value| !value.is_empty())
+        let body = values.get_mut(part.part_id.as_ref()?)?;
+        if body.value.is_empty() && !body.is_truncated {
+            return None;
+        }
+        Some(EmailBody {
+            body_type,
+            value: std::mem::take(&mut body.value),
+            is_truncated: body.is_truncated,
+        })
     })
 }
 
@@ -3548,6 +3602,27 @@ mod tests {
         eas_compact_duration, eas_compact_to_local_iso, local_to_utc_eas,
         parse_iso8601_duration_seconds,
     };
+
+    #[test]
+    fn jmap_body_truncation_is_preserved_even_for_an_empty_prefix() {
+        let mut email: super::EmailObject = serde_json::from_value(serde_json::json!({
+            "id":"large", "htmlBody":[{"partId":"h"}],
+            "textBody":[{"partId":"p"}],
+            "bodyValues":{"h":{"value":"","isTruncated":true},"p":{"value":"fallback","isTruncated":false}}
+        })).unwrap();
+        let body = super::select_body(&mut email).unwrap();
+        assert_eq!(body.body_type, crate::model::EmailBodyType::Html);
+        assert!(body.is_truncated);
+        assert!(body.value.is_empty());
+        let mut email: super::EmailObject = serde_json::from_value(serde_json::json!({
+            "id":"normal","textBody":[{"partId":"p"}],"bodyValues":{"p":{"value":"complete"}}
+        }))
+        .unwrap();
+        let body = super::select_body(&mut email).unwrap();
+        assert_eq!(body.value, "complete");
+        assert!(!body.is_truncated);
+        assert!(email.body_values["p"].value.is_empty());
+    }
 
     #[test]
     fn eas_compact_to_local_iso_reformats_without_offset() {
