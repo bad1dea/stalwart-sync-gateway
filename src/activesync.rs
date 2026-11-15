@@ -2475,7 +2475,7 @@ async fn sync_mail(
                     .filter(|email| previous_seen.contains(&email.id))
                     .filter(|email| {
                         previous_states.get(&email.id).map(String::as_str)
-                            != Some(email.message_state().fingerprint())
+                            != Some(email.message_state().fingerprint().as_str())
                     })
                     .map(|email| (email.id.clone(), email.message_state()))
                     .collect()
@@ -2506,9 +2506,9 @@ async fn sync_mail(
                         Ok(current) => {
                             for (id, read) in current {
                                 if previous_states.get(&id).map(String::as_str)
-                                    != Some(read.fingerprint())
+                                    != Some(read.fingerprint().as_str())
                                 {
-                                    state_changes.push((id.clone(), read));
+                                    state_changes.push((id.clone(), read.clone()));
                                     outside_updates.push((id, read));
                                 }
                             }
@@ -2538,9 +2538,9 @@ async fn sync_mail(
                     })
                     .filter(|(id, (read, _))| {
                         previous_states.get(id.as_str()).map(String::as_str)
-                            != Some(read.fingerprint())
+                            != Some(read.fingerprint().as_str())
                     })
-                    .map(|(id, (read, _))| (id.clone(), *read))
+                    .map(|(id, (read, _))| (id.clone(), read.clone()))
                     .collect();
                 if drift.len() > CHANGES_CAP {
                     has_more = true;
@@ -2549,7 +2549,7 @@ async fn sync_mail(
                     }
                 }
                 for (id, read) in drift.into_iter().take(CHANGES_CAP) {
-                    state_changes.push((id.clone(), read));
+                    state_changes.push((id.clone(), read.clone()));
                     outside_updates.push((id, read));
                 }
             }
@@ -2769,7 +2769,7 @@ async fn sync_mail(
                     builder.end();
                 }
                 for (id, read) in &state_changes {
-                    write_email_state_change(&mut builder, id, *read);
+                    write_email_state_change(&mut builder, id, read.clone());
                 }
                 builder.end();
             }
@@ -2936,20 +2936,26 @@ async fn apply_mail_client_commands(
     collection_id: &str,
     commands: &[wbxml::eas::SyncClientCommand],
     deletes_as_moves: bool,
-) -> anyhow::Result<(bool, Vec<(String, Option<bool>, Option<bool>)>)> {
+) -> anyhow::Result<(bool, Vec<(String, EmailState)>)> {
     let mut applied = false;
     let mut metadata_changes = Vec::new();
     for command in commands {
         match command.kind {
             wbxml::eas::SyncClientCommandKind::Change => {
-                let flagged = command.flag_status.map(|status| status == 2);
-                if command.read.is_some() || flagged.is_some() {
-                    state
+                let flag = command
+                    .flag_status
+                    .or_else(|| (!command.flag_fields.is_empty()).then_some(u8::MAX))
+                    .map(|status| crate::model::MailFlag {
+                        status,
+                        fields: command.flag_fields.clone(),
+                    });
+                if command.read.is_some() || flag.is_some() {
+                    let metadata = state
                         .jmap
-                        .update_email_state(auth, &command.server_id, command.read, flagged)
+                        .update_email_state(auth, &command.server_id, command.read, flag.as_ref())
                         .await?;
                     applied = true;
-                    metadata_changes.push((command.server_id.clone(), command.read, flagged));
+                    metadata_changes.push((command.server_id.clone(), metadata));
                 }
             }
             wbxml::eas::SyncClientCommandKind::Delete => {
@@ -2960,7 +2966,7 @@ async fn apply_mail_client_commands(
                 applied = true;
             }
             wbxml::eas::SyncClientCommandKind::Add => {
-                anyhow::bail!("mail draft creation is not implemented");
+                anyhow::bail!("mail draft creation is not implemented")
             }
             wbxml::eas::SyncClientCommandKind::Fetch => {}
         }
@@ -2970,21 +2976,11 @@ async fn apply_mail_client_commands(
 
 fn acknowledge_mail_changes(
     previous: &mut BTreeMap<String, String>,
-    changes: &[(String, Option<bool>, Option<bool>)],
+    changes: &[(String, EmailState)],
 ) {
-    for (id, read, flagged) in changes {
+    for (id, metadata) in changes {
         if let Some(hash) = previous.get_mut(id) {
-            let mut metadata = EmailState {
-                read: hash.starts_with('1'),
-                flagged: hash.ends_with(";flagged"),
-            };
-            if let Some(read) = read {
-                metadata.read = *read;
-            }
-            if let Some(flagged) = flagged {
-                metadata.flagged = *flagged;
-            }
-            *hash = metadata.fingerprint().to_owned();
+            *hash = metadata.fingerprint();
         }
     }
 }
@@ -2997,9 +2993,24 @@ fn read_hash(read: bool) -> &'static str {
     }
 }
 
-fn write_email_flag(builder: &mut wbxml::eas::DocumentBuilder, flagged: bool) {
+fn write_email_flag(builder: &mut wbxml::eas::DocumentBuilder, metadata: &EmailState) {
     use wbxml::eas::email as mail;
-    if flagged {
+    if let Some(flag) = &metadata.flag {
+        builder.start(mail::FLAG);
+        builder.leaf(mail::FLAG_STATUS, flag.status.to_string());
+        for (page, token, value) in &flag.fields {
+            builder.leaf(
+                wbxml::token::Token {
+                    code_page: *page,
+                    token: *token,
+                    has_content: false,
+                    has_attributes: false,
+                },
+                value,
+            );
+        }
+        builder.end();
+    } else if metadata.flagged {
         builder.start(mail::FLAG);
         builder.leaf(mail::FLAG_STATUS, "2");
         builder.leaf(mail::FLAG_TYPE, "Flag for follow up");
@@ -3019,7 +3030,7 @@ fn write_email_state_change(
     builder.leaf(air::SERVER_ID, id.to_owned());
     builder.start(air::APPLICATION_DATA);
     builder.leaf(mail::READ, read_hash(metadata.read));
-    write_email_flag(builder, metadata.flagged);
+    write_email_flag(builder, &metadata);
     builder.end();
     builder.end();
 }
@@ -3314,6 +3325,7 @@ fn write_email_fields(
     version: ProtocolVersion,
 ) {
     use wbxml::eas::{airsync_base as base, email as mail, email2};
+    let message_state = email.message_state();
 
     // Field order matches the real z-push-stalwart-jmap source (PR #187,
     // pinned in config/z-push/Dockerfile: src/lib/syncobjects/
@@ -3536,7 +3548,7 @@ fn write_email_fields(
             );
         }
     }
-    write_email_flag(builder, email.keywords.iter().any(|k| k == "$flagged"));
+    write_email_flag(builder, &message_state);
     if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
         if !email.bcc.is_empty() {
             builder.leaf(email2::BCC, &email.bcc);
@@ -5744,7 +5756,7 @@ fn mail_changes_reason(
         }
         if read_states
             .get(id)
-            .is_some_and(|stored| stored != read.fingerprint())
+            .is_some_and(|stored| stored.as_str() != read.fingerprint())
         {
             return Some("read state changed (changes)");
         }

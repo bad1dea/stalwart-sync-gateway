@@ -1106,7 +1106,7 @@ impl JmapClient {
         let older_drift = seen_state.iter().any(|(id, read)| {
             message_states
                 .get(id)
-                .is_some_and(|stored| stored != read.fingerprint())
+                .is_some_and(|stored| stored.as_str() != read.fingerprint())
         });
         if older_drift {
             return Ok(Some("read state changed (older message)"));
@@ -1120,7 +1120,7 @@ impl JmapClient {
             // a message outside its window is not a change it can receive.
             message_states
                 .get(id)
-                .is_some_and(|stored| stored != read.fingerprint())
+                .is_some_and(|stored| stored.as_str() != read.fingerprint())
         });
         Ok(drift.then_some("read state changed (newest messages)"))
     }
@@ -2441,32 +2441,122 @@ impl JmapClient {
         auth: &AuthenticatedSession,
         email_id: &str,
         read: Option<bool>,
-        flagged: Option<bool>,
-    ) -> anyhow::Result<()> {
+        flag: Option<&crate::model::MailFlag>,
+    ) -> anyhow::Result<EmailState> {
         let account_id = auth
             .session
             .primary_account_for(capabilities::MAIL)
             .context("JMAP Mail capability is not available")?;
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Email/get",
+                    serde_json::json!({
+                        "accountId":account_id, "ids":[email_id], "properties":["id","keywords"]
+                    }),
+                    "get",
+                )],
+            )
+            .await?;
+        let result = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "Email/get")
+            .ok_or_else(|| anyhow::anyhow!("JMAP Email/get response was missing"))?;
+        let state = result.1["state"]
+            .as_str()
+            .context("Email/get omitted state")?;
+        let object = result.1["list"]
+            .as_array()
+            .and_then(|list| list.iter().find(|item| item["id"] == email_id))
+            .context("Email/get omitted the message being updated")?;
+        let mut keywords: BTreeMap<String, bool> =
+            serde_json::from_value(object["keywords"].clone())?;
         let mut patch = serde_json::Map::new();
-        for (keyword, value) in [("$seen", read), ("$flagged", flagged)] {
-            if let Some(value) = value {
-                patch.insert(
-                    format!("keywords/{keyword}"),
-                    if value {
-                        serde_json::Value::Bool(true)
-                    } else {
-                        serde_json::Value::Null
-                    },
-                );
+        if let Some(read) = read {
+            patch.insert(
+                "keywords/$seen".to_owned(),
+                if read {
+                    serde_json::json!(true)
+                } else {
+                    serde_json::Value::Null
+                },
+            );
+            if read {
+                keywords.insert("$seen".to_owned(), true);
+            } else {
+                keywords.remove("$seen");
+            }
+        }
+        if let Some(flag) = flag {
+            let existing = EmailState::from_keywords(&keywords);
+            let mut merged = flag.clone();
+            if flag.status == u8::MAX || flag.status == 1 {
+                let previous = existing.flag.or_else(|| {
+                    existing.flagged.then(|| crate::model::MailFlag {
+                        status: 2,
+                        fields: vec![(
+                            crate::wbxml::eas::email::PAGE,
+                            crate::wbxml::eas::email::FLAG_TYPE.token,
+                            "Flag for follow up".to_owned(),
+                        )],
+                    })
+                });
+                if let Some(previous) = previous {
+                    merged = previous;
+                    if flag.status == 1 {
+                        merged.status = 1;
+                    }
+                    for field in &flag.fields {
+                        merged
+                            .fields
+                            .retain(|old| old.0 != field.0 || old.1 != field.1);
+                        merged.fields.push(field.clone());
+                    }
+                } else if flag.status == u8::MAX {
+                    anyhow::bail!("cannot update metadata on an unflagged email");
+                }
+            }
+            let flag = &merged;
+            for key in keywords
+                .keys()
+                .filter(|key| key.starts_with(crate::model::FLAG_KEYWORD_PREFIX))
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                patch.insert(format!("keywords/{key}"), serde_json::Value::Null);
+                keywords.remove(&key);
+            }
+            if flag.status != 0 {
+                for key in flag.keywords()? {
+                    patch.insert(format!("keywords/{key}"), serde_json::json!(true));
+                    keywords.insert(key, true);
+                }
+            }
+            patch.insert(
+                "keywords/$flagged".to_owned(),
+                if flag.status == 2 {
+                    serde_json::json!(true)
+                } else {
+                    serde_json::Value::Null
+                },
+            );
+            if flag.status == 2 {
+                keywords.insert("$flagged".to_owned(), true);
+            } else {
+                keywords.remove("$flagged");
             }
         }
         self.email_set(
             auth,
             serde_json::json!({
-                "accountId": account_id, "update": {email_id: patch}
+                "accountId":account_id, "ifInState":state, "update":{email_id:patch}
             }),
         )
-        .await
+        .await?;
+        Ok(EmailState::from_keywords(&keywords))
     }
 
     pub async fn delete_email(

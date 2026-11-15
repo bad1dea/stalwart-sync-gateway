@@ -4232,6 +4232,70 @@ mod e2e {
         },"0"]]))
             .await;
         assert_eq!(r[0][1]["list"][0]["keywords"]["$flagged"], true);
+        let peer = dev("flag-peer");
+        let peer0 = live
+            .wbxml_version("Sync", &peer, sync_body("0", &folder), "16.1")
+            .await;
+        let peer1 = live
+            .wbxml_version("Sync", &peer, sync_body(&sync_key(&peer0), &folder), "16.1")
+            .await;
+        assert_eq!(
+            eas::find_text_after(&peer1, eas::tasks::DUE_DATE),
+            Some("2026-11-14T12:00:00.000Z")
+        );
+        let updated = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                flag_metadata_body(&sync_key(&doc), &folder, &ids[0]),
+                "16.1",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&updated, air::STATUS), Some("1"));
+        let peer_update = live
+            .wbxml_version("Sync", &peer, sync_body(&sync_key(&peer1), &folder), "16.1")
+            .await;
+        assert_eq!(
+            eas::find_text_after(&peer_update, eas::tasks::REMINDER_TIME),
+            Some("2026-11-15T10:00:00.000Z")
+        );
+        assert_eq!(
+            eas::find_text_after(&peer_update, eas::tasks::DUE_DATE),
+            Some("2026-11-14T12:00:00.000Z")
+        );
+        let finished = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                complete_flag_body(&sync_key(&updated), &folder, &ids[0]),
+                "16.1",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&finished, air::STATUS), Some("1"));
+        let peer2 = live
+            .wbxml_version(
+                "Sync",
+                &peer,
+                sync_body(&sync_key(&peer_update), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&peer2, eas::email::FLAG_STATUS),
+            Some("1")
+        );
+        assert_eq!(
+            eas::find_text_after(&peer2, eas::tasks::DATE_COMPLETED),
+            Some("2026-11-15T11:31:00.000Z")
+        );
+        assert_eq!(
+            eas::find_text_after(&peer2, eas::tasks::DUE_DATE),
+            Some("2026-11-14T12:00:00.000Z")
+        );
+        assert_eq!(
+            eas::find_text_after(&peer2, eas::tasks::REMINDER_TIME),
+            Some("2026-11-15T10:00:00.000Z")
+        );
         let r = live
             .call(serde_json::json!([["Email/set", {
             "accountId": live.account, "destroy": ids
@@ -6148,6 +6212,126 @@ fn mixed_flag_request(key: &str, folder: &str, bad: &str, good: &str) -> Vec<u8>
     wbxml::encode_document(&b.finish())
 }
 
+fn flag_metadata_body(key: &str, folder: &str, id: &str) -> Vec<u8> {
+    use eas::{airsync as air, email as mail, tasks};
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, key);
+    b.leaf(air::COLLECTION_ID, folder);
+    b.leaf(air::GET_CHANGES, "0");
+    b.start(air::COMMANDS);
+    b.start(air::CHANGE);
+    b.leaf(air::SERVER_ID, id);
+    b.start(air::APPLICATION_DATA);
+    b.start(mail::FLAG);
+    b.leaf(tasks::REMINDER_SET, "1");
+    b.leaf(tasks::REMINDER_TIME, "2026-11-15T10:00:00.000Z");
+    for _ in 0..7 {
+        b.end();
+    }
+    wbxml::encode_document(&b.finish())
+}
+
+fn complete_flag_body(key: &str, folder: &str, id: &str) -> Vec<u8> {
+    use eas::{airsync as air, email as mail, tasks};
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, key);
+    b.leaf(air::COLLECTION_ID, folder);
+    b.leaf(air::GET_CHANGES, "0");
+    b.start(air::COMMANDS);
+    b.start(air::CHANGE);
+    b.leaf(air::SERVER_ID, id);
+    b.start(air::APPLICATION_DATA);
+    b.start(mail::FLAG);
+    b.leaf(mail::FLAG_STATUS, "1");
+    b.leaf(mail::COMPLETE_TIME, "2026-11-15T11:30:00.000Z");
+    b.leaf(tasks::DATE_COMPLETED, "2026-11-15T11:31:00.000Z");
+    for _ in 0..7 {
+        b.end();
+    }
+    wbxml::encode_document(&b.finish())
+}
+
+#[tokio::test]
+async fn partial_flag_metadata_preserves_other_fields() {
+    use eas::{airsync as air, email as mail, tasks};
+    let env = start_env(Opts::default()).await;
+    let (a0, _, _) = env.sync_detail("iphone", "0").await;
+    let (a, _, _) = env.sync_detail("iphone", &a0).await;
+    let (b0, _, _) = env.sync_detail("ipad", "0").await;
+    let (b, _, _) = env.sync_detail("ipad", &b0).await;
+    let response = env
+        .req("Sync", "iphone")
+        .body(flag_change_body(&a, "inbox", "m1", Some("2"), None, false))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    let response = env
+        .req("Sync", "iphone")
+        .body(flag_metadata_body(&sync_key(&doc), "inbox", "m1"))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("1"));
+    let response = env
+        .req("Sync", "ipad")
+        .body(sync_body(&b, "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, mail::FLAG_STATUS), Some("2"));
+    assert_eq!(
+        eas::find_text_after(&doc, tasks::DUE_DATE),
+        Some("2026-11-14T12:00:00.000Z")
+    );
+    assert_eq!(
+        eas::find_text_after(&doc, tasks::REMINDER_TIME),
+        Some("2026-11-15T10:00:00.000Z")
+    );
+}
+
+#[tokio::test]
+async fn complete_flag_syncs_between_devices() {
+    use eas::{airsync as air, email as mail, tasks};
+    let env = start_env(Opts::default()).await;
+    let (a0, _, _) = env.sync_detail("iphone", "0").await;
+    let (a, _, _) = env.sync_detail("iphone", &a0).await;
+    let (b0, _, _) = env.sync_detail("ipad", "0").await;
+    let (b, _, _) = env.sync_detail("ipad", &b0).await;
+    let response = env
+        .req("Sync", "iphone")
+        .body(complete_flag_body(&a, "inbox", "m1"))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("1"));
+    let response = env
+        .req("Sync", "ipad")
+        .body(sync_body(&b, "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, mail::FLAG_STATUS), Some("1"));
+    assert_eq!(
+        eas::find_text_after(&doc, mail::COMPLETE_TIME),
+        Some("2026-11-15T11:30:00.000Z")
+    );
+    assert_eq!(
+        eas::find_text_after(&doc, tasks::DATE_COMPLETED),
+        Some("2026-11-15T11:31:00.000Z")
+    );
+}
+
 fn flag_change_body(
     key: &str,
     folder: &str,
@@ -6233,12 +6417,10 @@ async fn native_jmap_flags_push_between_devices_and_survive_replay_and_restart()
                 .await
                 .unwrap();
             assert_eq!(bytes, replay);
-            assert_eq!(
-                env.mock.keywords.lock().unwrap()["m1"],
-                ["$seen".to_owned(), "$flagged".to_owned()]
-                    .into_iter()
-                    .collect()
-            );
+            let keywords = env.mock.keywords.lock().unwrap()["m1"].clone();
+            assert!(keywords.contains("$seen"));
+            assert!(keywords.contains("$flagged"));
+            assert!(keywords.iter().any(|key| key.starts_with("easflag-")));
             sync_key(&doc)
         };
         let (ping, akey) = tokio::join!(ping, upload);
@@ -6254,6 +6436,10 @@ async fn native_jmap_flags_push_between_devices_and_survive_replay_and_restart()
         let doc = wbxml::decode_document(&bytes).unwrap();
         assert_eq!(eas::find_all_text_after(&doc, mail::FLAG_STATUS), vec!["2"]);
         assert_eq!(eas::find_text_after(&doc, mail::READ), Some("1"));
+        assert_eq!(
+            eas::find_text_after(&doc, eas::tasks::DUE_DATE),
+            Some("2026-11-14T12:00:00.000Z")
+        );
         let replay = env
             .req("Sync", "ipad")
             .header("MS-ASProtocolVersion", version)
@@ -6279,6 +6465,7 @@ async fn native_jmap_flags_push_between_devices_and_survive_replay_and_restart()
         let keywords = env.mock.keywords.lock().unwrap()["m1"].clone();
         assert!(keywords.contains("$seen"));
         assert!(!keywords.contains("$flagged"));
+        assert!(!keywords.iter().any(|key| key.starts_with("easflag-")));
         let response = env
             .req("Sync", "ipad")
             .header("MS-ASProtocolVersion", version)

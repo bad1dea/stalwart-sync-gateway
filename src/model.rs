@@ -81,36 +81,125 @@ pub enum SmimeKind {
     MultipartSigned,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MailFlag {
+    pub status: u8,
+    pub fields: Vec<(u8, u8, String)>,
+}
+
+pub const FLAG_KEYWORD_PREFIX: &str = "easflag-";
+
+impl MailFlag {
+    pub fn keywords(&self) -> anyhow::Result<Vec<String>> {
+        let bytes = serde_json::to_vec(self)?;
+        if bytes.len() > 3200 {
+            anyhow::bail!("flag metadata is too large");
+        }
+        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        Ok(hex
+            .as_bytes()
+            .chunks(110)
+            .enumerate()
+            .map(|(index, chunk)| {
+                format!(
+                    "{FLAG_KEYWORD_PREFIX}{index:04x}-{}",
+                    std::str::from_utf8(chunk).unwrap()
+                )
+            })
+            .collect())
+    }
+
+    fn from_keywords<'a>(keywords: impl Iterator<Item = &'a str>) -> Option<Self> {
+        let mut parts = std::collections::BTreeMap::new();
+        for keyword in keywords {
+            let Some(part) = keyword.strip_prefix(FLAG_KEYWORD_PREFIX) else {
+                continue;
+            };
+            let (index, hex) = part.split_once('-')?;
+            if index.len() != 4 || hex.len() % 2 != 0 || hex.len() > 110 {
+                return None;
+            }
+            let index = usize::from_str_radix(index, 16).ok()?;
+            if parts.insert(index, hex).is_some() {
+                return None;
+            }
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        for (expected, (index, hex)) in parts.into_iter().enumerate() {
+            if expected != index {
+                return None;
+            }
+            for pair in hex.as_bytes().chunks(2) {
+                bytes.push(u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?);
+            }
+        }
+        serde_json::from_slice(&bytes).ok()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EmailState {
     pub read: bool,
     pub flagged: bool,
+    pub flag: Option<MailFlag>,
 }
 
 impl EmailState {
     pub fn from_keywords(keywords: &std::collections::BTreeMap<String, bool>) -> Self {
+        let read = keywords.get("$seen").copied().unwrap_or(false);
+        let flagged = keywords.get("$flagged").copied().unwrap_or(false);
+        Self::from_keyword_iter(
+            read,
+            flagged,
+            keywords
+                .iter()
+                .filter(|(_, value)| **value)
+                .map(|(key, _)| key.as_str()),
+        )
+    }
+
+    fn from_keyword_iter<'a>(
+        read: bool,
+        flagged: bool,
+        keywords: impl Iterator<Item = &'a str>,
+    ) -> Self {
+        let flag = MailFlag::from_keywords(keywords)
+            .filter(|flag| (flag.status == 2 && flagged) || (flag.status == 1 && !flagged));
         Self {
-            read: keywords.get("$seen").copied().unwrap_or(false),
-            flagged: keywords.get("$flagged").copied().unwrap_or(false),
+            read,
+            flagged,
+            flag,
         }
     }
 
-    pub fn fingerprint(self) -> &'static str {
-        match (self.read, self.flagged) {
-            (false, false) => "0",
-            (true, false) => "1",
-            (false, true) => "0;flagged",
-            (true, true) => "1;flagged",
+    pub fn fingerprint(&self) -> String {
+        let mut value = if self.read {
+            "1".to_owned()
+        } else {
+            "0".to_owned()
+        };
+        if self.flagged {
+            value.push_str(";flagged");
         }
+        if let Some(flag) = &self.flag {
+            if let Ok(encoded) = serde_json::to_vec(flag) {
+                value.push_str(";flag:");
+                value.push_str(
+                    &uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &encoded).to_string(),
+                );
+            }
+        }
+        value
     }
 }
 
 impl Email {
     pub fn message_state(&self) -> EmailState {
-        EmailState {
-            read: self.read,
-            flagged: self.keywords.iter().any(|k| k == "$flagged"),
-        }
+        let flagged = self.keywords.iter().any(|k| k == "$flagged");
+        EmailState::from_keyword_iter(self.read, flagged, self.keywords.iter().map(String::as_str))
     }
 }
 
@@ -222,3 +311,27 @@ pub struct Note {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateToken(pub String);
+
+#[cfg(test)]
+mod flag_tests {
+    use super::*;
+
+    #[test]
+    fn flag_keywords_round_trip_and_detect_missing_chunks() {
+        let flag = MailFlag {
+            status: 2,
+            fields: vec![(9, 32, "Follow up 🐱".repeat(40))],
+        };
+        let keys = flag.keywords().unwrap();
+        assert!(keys.len() > 2);
+        assert!(keys.iter().all(|key| key.len() <= 128));
+        assert_eq!(
+            MailFlag::from_keywords(keys.iter().map(String::as_str)),
+            Some(flag)
+        );
+        assert_eq!(
+            MailFlag::from_keywords(keys.iter().skip(1).map(String::as_str)),
+            None
+        );
+    }
+}
