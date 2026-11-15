@@ -56,7 +56,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, &'static str> {
                     value.push(c);
                     value.push(chars.next().ok_or("unfinished escape")?);
                 }
-                '<' | '>' | '=' if !in_quote => return Err("unsupported search comparison"),
+
                 _ => value.push(c),
             }
             if !in_quote
@@ -165,6 +165,23 @@ impl Parser {
                 if word.starts_with('"') {
                     return condition("text", &word);
                 }
+                if let Some(index) = word.find(['<', '>', '=']) {
+                    let property = &word[..index];
+                    let rest = &word[index..];
+                    let width = if rest.starts_with(">=")
+                        || rest.starts_with("<=")
+                        || rest.starts_with("<>")
+                    {
+                        2
+                    } else {
+                        1
+                    };
+                    let (operator, value) = rest.split_at(width);
+                    if !property.eq_ignore_ascii_case("size") {
+                        return Err("unsupported search comparison");
+                    }
+                    return size_condition(operator, value);
+                }
                 if let Some((property, value)) = word.split_once(':') {
                     let value = if value.is_empty() {
                         let Some(Token::Word(value)) = self.tokens.get(self.position) else {
@@ -194,6 +211,23 @@ fn combine(operator: &str, mut left: Value, right: Value) -> Value {
     }
 }
 
+fn size_condition(operator: &str, value: &str) -> Result<Value, &'static str> {
+    let size = value.parse::<u64>().map_err(|_| "invalid size")?;
+    // JMAP UnsignedInt is limited to the interoperable JSON integer range.
+    if size >= 9_007_199_254_740_991 {
+        return Err("size is too large");
+    }
+    Ok(match operator {
+        ":" | "=" => json!({"minSize": size, "maxSize": size + 1}),
+        ">=" => json!({"minSize": size}),
+        ">" => json!({"minSize": size + 1}),
+        "<" => json!({"maxSize": size}),
+        "<=" => json!({"maxSize": size + 1}),
+        "<>" => json!({"operator": "NOT", "conditions": [{"minSize": size, "maxSize": size + 1}]}),
+        _ => return Err("invalid size comparison"),
+    })
+}
+
 fn condition(property: &str, value: &str) -> Result<Value, &'static str> {
     if value.is_empty() || value == "\"\"" || value.contains('*') || value.contains('?') {
         return Err("unsupported or empty search value");
@@ -203,6 +237,7 @@ fn condition(property: &str, value: &str) -> Result<Value, &'static str> {
         return Err("phrase search is unavailable");
     }
     match property {
+        "size" => size_condition(":", value),
         "text" | "subject" | "body" | "from" | "to" | "cc" | "bcc" => Ok(json!({property: value})),
         "participants" => Ok(json!({"operator": "OR", "conditions": [
             {"from": value}, {"to": value}, {"cc": value}, {"bcc": value}]})),
@@ -278,6 +313,33 @@ mod tests {
     }
 
     #[test]
+    fn translates_size_boundaries_without_off_by_one_errors() {
+        for (query, filter) in [
+            ("size:7", json!({"minSize":7,"maxSize":8})),
+            ("size=7", json!({"minSize":7,"maxSize":8})),
+            ("size>7", json!({"minSize":8})),
+            ("size>=7", json!({"minSize":7})),
+            ("size<7", json!({"maxSize":7})),
+            ("size<=7", json!({"maxSize":8})),
+            (
+                "size<>7",
+                json!({"operator":"NOT","conditions":[{"minSize":7,"maxSize":8}]}),
+            ),
+        ] {
+            assert_eq!(to_filter(query).unwrap(), filter);
+        }
+        for query in [
+            "size>",
+            "size>=-1",
+            "size>1kb",
+            "size=9007199254740991",
+            "subject=x",
+        ] {
+            assert!(to_filter(query).is_err(), "{query}");
+        }
+    }
+
+    #[test]
     fn rejects_queries_that_cannot_be_translated() {
         for query in [
             "",
@@ -292,7 +354,6 @@ mod tests {
             "\"hello world\"",
             "-from:a",
             "+subject:a",
-            "size>=1024",
             "received<2026-01-01",
             "a NEAR b",
             "subject:\"unfinished",

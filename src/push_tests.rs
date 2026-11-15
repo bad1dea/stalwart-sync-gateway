@@ -2777,6 +2777,72 @@ mod e2e {
         let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
         assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["2"]);
 
+        let sizes = live
+            .call(serde_json::json!([["Email/get", {
+            "accountId": live.account, "ids": ids, "properties": ["id", "size"]
+        }, "0"]]))
+            .await;
+        let entries = sizes[0][1]["list"].as_array().unwrap();
+        let size = entries[0]["size"].as_u64().unwrap();
+        for (operator, expected) in [
+            (
+                "=",
+                entries
+                    .iter()
+                    .filter(|e| e["size"].as_u64().unwrap() == size)
+                    .count(),
+            ),
+            (
+                ">",
+                entries
+                    .iter()
+                    .filter(|e| e["size"].as_u64().unwrap() > size)
+                    .count(),
+            ),
+            (
+                ">=",
+                entries
+                    .iter()
+                    .filter(|e| e["size"].as_u64().unwrap() >= size)
+                    .count(),
+            ),
+            (
+                "<",
+                entries
+                    .iter()
+                    .filter(|e| e["size"].as_u64().unwrap() < size)
+                    .count(),
+            ),
+            (
+                "<=",
+                entries
+                    .iter()
+                    .filter(|e| e["size"].as_u64().unwrap() <= size)
+                    .count(),
+            ),
+            (
+                "<>",
+                entries
+                    .iter()
+                    .filter(|e| e["size"].as_u64().unwrap() != size)
+                    .count(),
+            ),
+        ] {
+            let response = send(format!("subject:{tag} size{operator}{size}"), "0-9")
+                .await
+                .unwrap();
+            let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+            assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+            assert_eq!(
+                eas::find_text_after(&doc, f::TOTAL)
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap(),
+                expected,
+                "{operator}"
+            );
+        }
+
         let r = live
             .call(serde_json::json!([["Email/set", {
             "accountId": live.account, "destroy": ids
