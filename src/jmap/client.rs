@@ -2782,6 +2782,45 @@ impl JmapClient {
             }),
         )
         .await?;
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Email/get",
+                    serde_json::json!({
+                        "accountId":account_id, "ids":[email_id], "properties":["id","keywords"]
+                    }),
+                    "verify",
+                )],
+            )
+            .await?;
+        let verified = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "Email/get")
+            .and_then(|method| method.1["list"].as_array())
+            .and_then(|items| items.iter().find(|item| item["id"] == email_id))
+            .context("updated email could not be verified")?;
+        let observed: BTreeMap<String, bool> =
+            serde_json::from_value(verified["keywords"].clone())?;
+        let has = |map: &BTreeMap<String, bool>, key: &str| map.get(key).copied().unwrap_or(false);
+        let flags = |map: &BTreeMap<String, bool>| -> BTreeSet<String> {
+            map.iter()
+                .filter(|(key, value)| {
+                    **value && key.starts_with(crate::model::FLAG_KEYWORD_PREFIX)
+                })
+                .map(|(key, _)| key.clone())
+                .collect()
+        };
+        if (read.is_some() && has(&observed, "$seen") != has(&keywords, "$seen"))
+            || (flag.is_some()
+                && (has(&observed, "$flagged") != has(&keywords, "$flagged")
+                    || flags(&observed) != flags(&keywords)))
+        {
+            anyhow::bail!("JMAP did not retain the requested email state");
+        }
+        let keywords = observed;
         Ok(EmailState::from_keywords(&keywords))
     }
 

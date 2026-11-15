@@ -61,6 +61,7 @@ struct Mock {
     snapshot_changes: AtomicBool,
     identity_error: AtomicBool,
     item_set_error: AtomicBool,
+    drop_flag_keywords: AtomicBool,
     download_error: AtomicBool,
     mail_structures: Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
     mail_bodies: Mutex<std::collections::BTreeMap<String, (String, bool)>>,
@@ -392,7 +393,11 @@ async fn mock_api(
                                 let mut all = m.keywords.lock().unwrap();
                                 let keywords = all.entry(id.to_owned()).or_default();
                                 if value == true {
-                                    keywords.insert(keyword);
+                                    if !m.drop_flag_keywords.load(Ordering::SeqCst)
+                                        || !keyword.starts_with(crate::model::FLAG_KEYWORD_PREFIX)
+                                    {
+                                        keywords.insert(keyword);
+                                    }
                                 } else {
                                     keywords.remove(&keyword);
                                 }
@@ -588,6 +593,7 @@ async fn start_mock() -> Arc<Mock> {
         snapshot_changes: AtomicBool::new(false),
         identity_error: AtomicBool::new(false),
         item_set_error: AtomicBool::new(false),
+        drop_flag_keywords: AtomicBool::new(false),
         download_error: AtomicBool::new(false),
         mail_structures: Mutex::new(Default::default()),
         mail_bodies: Mutex::new(Default::default()),
@@ -4549,6 +4555,96 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_hidden_keyword_metadata_is_not_acknowledged() {
+        use eas::{email, tasks};
+        let live = Live::new("E2E_USER2").await;
+        let created = live
+            .call(serde_json::json!([["Mailbox/set",{"accountId":live.account,
+            "create":{"m":{"name":format!("Flag capacity {}",std::process::id())}}},"0"]]))
+            .await;
+        let folder = created[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let ids = live.seed(&folder, 2, "flag-capacity", false).await;
+        let mut patch = serde_json::Map::new();
+        for n in 0..110 {
+            patch.insert(
+                format!("keywords/eas-pressure-{}-{n}", std::process::id()),
+                serde_json::json!(true),
+            );
+        }
+        let updated = live
+            .call(serde_json::json!([["Email/set",{"accountId":live.account,
+            "update":{&ids[0]:patch}},"0"]]))
+            .await;
+        assert!(updated[0][1]["updated"].get(&ids[0]).is_some());
+        let device = dev("flag-capacity");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let sync = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let key = sync_key(&sync);
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, &key);
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.leaf(air::GET_CHANGES, "0");
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, &ids[1]);
+        b.start(air::APPLICATION_DATA);
+        b.start(email::FLAG);
+        b.leaf(email::FLAG_STATUS, "2");
+        b.leaf(email::FLAG_TYPE, "Flag for follow up");
+        b.leaf(
+            tasks::SUBJECT,
+            format!("unique fixture {}", std::process::id()),
+        );
+        for token in [
+            tasks::START_DATE,
+            tasks::UTC_START_DATE,
+            tasks::DUE_DATE,
+            tasks::UTC_DUE_DATE,
+        ] {
+            b.leaf(token, "2026-11-14T12:00:00.000Z");
+        }
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        let result = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert_eq!(eas::find_text_after(&result, air::STATUS), Some("5"));
+        assert_eq!(
+            eas::find_text_after(&result, air::SYNC_KEY),
+            Some(key.as_str())
+        );
+        let cleanup = live
+            .call(serde_json::json!([
+                ["Email/set",{"accountId":live.account,"destroy":ids},"0"],
+                ["Mailbox/set",{"accountId":live.account,"destroy":[folder]},"1"]
+            ]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_draft_add_recovers_after_server_write_before_sync_checkpoint() {
         let live = Live::new("E2E_USER2").await;
         let boxes = live
@@ -6872,6 +6968,40 @@ async fn user_information_uses_versioned_accounts_and_backend_addresses() {
         vec!["1", "110"]
     );
     assert!(!eas::contains_token(&doc, set::SMTP_ADDRESS));
+}
+
+#[tokio::test]
+async fn flag_update_is_not_acknowledged_when_the_server_hides_metadata() {
+    use eas::airsync as air;
+    let env = Arc::new(start_env(Opts::default()).await);
+    let (key, _) = initial_sync(&env, "flag-verification", None).await;
+    env.mock.drop_flag_keywords.store(true, Ordering::SeqCst);
+    let body = flag_change_body(&key, "inbox", "m1", Some("2"), None, false);
+    let response = env
+        .req("Sync", "flag-verification")
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("5"));
+    assert_eq!(
+        eas::find_text_after(&doc, air::SYNC_KEY),
+        Some(key.as_str())
+    );
+    env.mock.drop_flag_keywords.store(false, Ordering::SeqCst);
+    let response = env
+        .req("Sync", "flag-verification")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("1"));
+    assert_ne!(
+        eas::find_text_after(&doc, air::SYNC_KEY),
+        Some(key.as_str())
+    );
 }
 
 #[tokio::test]
