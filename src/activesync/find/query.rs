@@ -177,10 +177,13 @@ impl Parser {
                         1
                     };
                     let (operator, value) = rest.split_at(width);
-                    if !property.eq_ignore_ascii_case("size") {
-                        return Err("unsupported search comparison");
+                    if property.eq_ignore_ascii_case("size") {
+                        return size_condition(operator, value);
                     }
-                    return size_condition(operator, value);
+                    if property.eq_ignore_ascii_case("received") {
+                        return received_condition(operator, value);
+                    }
+                    return Err("unsupported search comparison");
                 }
                 if let Some((property, value)) = word.split_once(':') {
                     let value = if value.is_empty() {
@@ -245,9 +248,101 @@ fn size_condition(operator: &str, value: &str) -> Result<Value, &'static str> {
     })
 }
 
+fn received_condition(operator: &str, value: &str) -> Result<Value, &'static str> {
+    use chrono::{Datelike, Months};
+    let today = chrono::Utc::now().date_naive();
+    let value = value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .unwrap_or(value);
+    let (start, end) = match value.to_ascii_lowercase().as_str() {
+        "today" => (today, today.succ_opt().ok_or("date out of range")?),
+        "yesterday" => (today.pred_opt().ok_or("date out of range")?, today),
+        "this week" => {
+            let start = today
+                .checked_sub_days(chrono::Days::new(
+                    today.weekday().num_days_from_monday() as u64
+                ))
+                .ok_or("date out of range")?;
+            (
+                start,
+                start
+                    .checked_add_days(chrono::Days::new(7))
+                    .ok_or("date out of range")?,
+            )
+        }
+        "this month" => {
+            let start = today.with_day(1).ok_or("date out of range")?;
+            (
+                start,
+                start
+                    .checked_add_months(Months::new(1))
+                    .ok_or("date out of range")?,
+            )
+        }
+        "last month" => {
+            let end = today.with_day(1).ok_or("date out of range")?;
+            (
+                end.checked_sub_months(Months::new(1))
+                    .ok_or("date out of range")?,
+                end,
+            )
+        }
+        "this year" => {
+            let start = today.with_ordinal(1).ok_or("date out of range")?;
+            (
+                start,
+                start
+                    .checked_add_months(Months::new(12))
+                    .ok_or("date out of range")?,
+            )
+        }
+        "last year" => {
+            let end = today.with_ordinal(1).ok_or("date out of range")?;
+            (
+                end.checked_sub_months(Months::new(12))
+                    .ok_or("date out of range")?,
+                end,
+            )
+        }
+        _ => {
+            let day = if value.len() > 10 {
+                chrono::DateTime::parse_from_rfc3339(value)
+                    .map_err(|_| "invalid received date")?
+                    .date_naive()
+            } else {
+                chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                    .map_err(|_| "invalid received date")?
+            };
+            (day, day.succ_opt().ok_or("date out of range")?)
+        }
+    };
+    if start.year() < 1 || end.year() > 9999 {
+        return Err("date out of range");
+    }
+    let start = format!("{}T00:00:00Z", start.format("%Y-%m-%d"));
+    let end = format!("{}T00:00:00Z", end.format("%Y-%m-%d"));
+    // Some Stalwart versions treat "after" as exclusive. Negating the
+    // exclusive "before" filter preserves the inclusive boundary.
+    let at_or_after = |date: &str| json!({"operator":"NOT", "conditions":[{"before":date}]});
+    let within = json!({"operator":"AND", "conditions":[at_or_after(&start), {"before":end}]});
+    Ok(match operator {
+        ":" | "=" => within,
+        ">=" => at_or_after(&start),
+        ">" => at_or_after(&end),
+        "<" => json!({"before": start}),
+        "<=" => json!({"before": end}),
+        "<>" => json!({"operator":"NOT", "conditions":[within]}),
+        _ => return Err("invalid date comparison"),
+    })
+}
+
 fn condition(property: &str, value: &str) -> Result<Value, &'static str> {
     if value.is_empty() || value == "\"\"" || value.contains('*') || value.contains('?') {
         return Err("unsupported or empty search value");
+    }
+    if property == "received" {
+        return received_condition(":", value);
     }
     // Stalwart 0.16.19's native index does not preserve phrase order.
     if value.starts_with('"') && value.chars().any(char::is_whitespace) {
@@ -361,6 +456,40 @@ mod tests {
     }
 
     #[test]
+    fn received_date_filters_use_utc_day_boundaries() {
+        let not_before = |day: &str| json!({"operator":"NOT","conditions":[{"before":day}]});
+        let start = "2026-02-28T00:00:00Z";
+        let end = "2026-03-01T00:00:00Z";
+        let within = json!({"operator":"AND","conditions":[not_before(start),{"before":end}]});
+        for (query, expected) in [
+            ("received:2026-02-28", within.clone()),
+            ("received>2024-02-29", not_before("2024-03-01T00:00:00Z")),
+            ("received>=2026-01-01", not_before("2026-01-01T00:00:00Z")),
+            (
+                "received<2026-01-01",
+                json!({"before":"2026-01-01T00:00:00Z"}),
+            ),
+            (
+                "received<=2026-01-01",
+                json!({"before":"2026-01-02T00:00:00Z"}),
+            ),
+            (
+                "received<>2026-02-28",
+                json!({"operator":"NOT","conditions":[within]}),
+            ),
+        ] {
+            assert_eq!(to_filter(query).unwrap(), expected);
+        }
+        assert_eq!(
+            to_filter("received:2026-02-28T15:45:00Z").unwrap(),
+            to_filter("received:2026-02-28").unwrap()
+        );
+        assert!(to_filter("received:2026-02-30").is_err());
+        assert!(to_filter("sent:2026-01-01").is_err());
+        assert!(to_filter(r#"received:"this month""#).is_ok());
+    }
+
+    #[test]
     fn rejects_queries_that_cannot_be_translated() {
         for query in [
             "",
@@ -375,7 +504,6 @@ mod tests {
             "\"hello world\"",
             "-from:a",
             "+subject:a",
-            "received<2026-01-01",
             "a NEAR b",
             "subject:\"unfinished",
         ] {

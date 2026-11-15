@@ -2803,6 +2803,112 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_find_received_date_boundaries_match_stalwart() {
+        use eas::find as f;
+        let live = Live::new("E2E_USER2").await;
+        let device = dev("find-received");
+        let tag = format!("datefixture{}", std::process::id());
+        let result = live
+            .call(serde_json::json!([["Mailbox/set",{
+            "accountId":live.account,"create":{"m":{"name":&tag}}
+        },"0"]]))
+            .await;
+        let folder = result[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut create = serde_json::Map::new();
+        for (i, received) in [
+            "2024-02-28T23:59:59Z",
+            "2024-02-29T00:00:00Z",
+            "2024-02-29T23:59:59Z",
+            "2024-03-01T00:00:00Z",
+        ]
+        .iter()
+        .enumerate()
+        {
+            create.insert(
+                format!("m{i}"),
+                serde_json::json!({
+                    "mailboxIds":{&folder:true},"keywords":{},"receivedAt":received,
+                    "subject":&tag,"bodyValues":{"b":{"value":"test"}},
+                    "textBody":[{"partId":"b","type":"text/plain"}]
+                }),
+            );
+        }
+        let result = live
+            .call(serde_json::json!([["Email/set",{
+            "accountId":live.account,"create":create
+        },"0"]]))
+            .await;
+        let ids: Vec<_> = result[0][1]["created"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|item| item["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(ids.len(), 4);
+        let fetched = live
+            .call(serde_json::json!([["Email/get",{
+            "accountId":live.account,"ids":ids,"properties":["id","receivedAt"]
+        },"0"]]))
+            .await;
+        let dates: Vec<_> = fetched[0][1]["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["receivedAt"].as_str().unwrap()[..10].to_owned())
+            .collect();
+        assert_eq!(
+            dates
+                .iter()
+                .filter(|date| date.as_str() == "2024-02-29")
+                .count(),
+            2
+        );
+        for (operator, expected) in [
+            ("=", 2),
+            (">", 1),
+            (">=", 3),
+            ("<", 1),
+            ("<=", 3),
+            ("<>", 2),
+        ] {
+            let search_id = uuid::Uuid::new_v4().to_string();
+            let response = live
+                .req_version("Find", &device, "16.1")
+                .body(find_body(
+                    &search_id,
+                    &format!("subject:{tag} received{operator}2024-02-29"),
+                    Some(&folder),
+                    "0-9",
+                ))
+                .send()
+                .await
+                .unwrap();
+            let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+            assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+            assert_eq!(
+                eas::find_text_after(&doc, f::TOTAL)
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap(),
+                expected,
+                "{operator}"
+            );
+        }
+        let result = live
+            .call(serde_json::json!([
+                ["Email/set",{"accountId":live.account,"destroy":ids},"0"],
+                ["Mailbox/set",{"accountId":live.account,"destroy":[folder]},"1"]
+            ]))
+            .await;
+        assert!(result[0][1]["notDestroyed"].is_null());
+        assert!(result[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_find_16_1_reads_native_jmap_metadata_and_keywords() {
         use eas::{airsync_base as base, email2, find as f};
         let live = Live::new("E2E_USER2").await;
@@ -2863,7 +2969,7 @@ mod e2e {
 
         let sizes = live
             .call(serde_json::json!([["Email/get", {
-            "accountId": live.account, "ids": ids, "properties": ["id", "size"]
+            "accountId": live.account, "ids": ids, "properties": ["id", "size", "receivedAt"]
         }, "0"]]))
             .await;
         let entries = sizes[0][1]["list"].as_array().unwrap();
@@ -2927,6 +3033,37 @@ mod e2e {
             );
         }
 
+        let date = &entries[0]["receivedAt"].as_str().unwrap()[..10];
+        for operator in ["=", ">", ">=", "<", "<=", "<>"] {
+            let expected = entries
+                .iter()
+                .filter(|entry| {
+                    let day = &entry["receivedAt"].as_str().unwrap()[..10];
+                    match operator {
+                        "=" => day == date,
+                        ">" => day > date,
+                        ">=" => day >= date,
+                        "<" => day < date,
+                        "<=" => day <= date,
+                        "<>" => day != date,
+                        _ => unreachable!(),
+                    }
+                })
+                .count();
+            let response = send(format!("subject:{tag} received{operator}{date}"), "0-9")
+                .await
+                .unwrap();
+            let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+            assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+            assert_eq!(
+                eas::find_text_after(&doc, f::TOTAL)
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap(),
+                expected,
+                "{operator}"
+            );
+        }
         let r = live
             .call(serde_json::json!([["Email/set", {
             "accountId": live.account, "destroy": ids
