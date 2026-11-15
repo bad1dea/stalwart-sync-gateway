@@ -4189,6 +4189,71 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_draft_bcc_is_returned_on_sync_and_fetch() {
+        use eas::{email2, item_operations as ops};
+        let live = Live::new("E2E_USER2").await;
+        let boxes = live
+            .call(serde_json::json!([["Mailbox/get",{"accountId":live.account},"0"]]))
+            .await;
+        let folder = boxes[0][1]["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["role"] == "drafts")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let created = live.call(serde_json::json!([["Email/set",{
+            "accountId":live.account,"create":{"e":{"mailboxIds":{&folder:true},"keywords":{"$draft":true},
+                "subject":"draft-bcc-fixture","bcc":[{"name":"Hidden","email":"hidden@example.test"}],
+                "bodyValues":{"b":{"value":"test"}},"textBody":[{"partId":"b","type":"text/plain"}]}}
+        },"0"]])).await;
+        let id = created[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let device = dev("draft-bcc");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let sync = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&sync, email2::BCC)
+            .iter()
+            .any(|value| value.contains("hidden@example.test")));
+        let mut b = eas::DocumentBuilder::new();
+        b.start(ops::ITEM_OPERATIONS);
+        b.start(ops::FETCH);
+        b.leaf(ops::STORE, "Mailbox");
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.leaf(air::SERVER_ID, &id);
+        b.end();
+        b.end();
+        let fetched = live
+            .wbxml_version(
+                "ItemOperations",
+                &device,
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_text_after(&fetched, email2::BCC)
+            .is_some_and(|value| value.contains("hidden@example.test")));
+        let result = live
+            .call(serde_json::json!([["Email/set",{"accountId":live.account,"destroy":[id]},"0"]]))
+            .await;
+        assert!(result[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_unsupported_draft_change_returns_item_error() {
         let live = Live::new("E2E_USER2").await;
         let r = live.call(serde_json::json!([["Mailbox/set", {
