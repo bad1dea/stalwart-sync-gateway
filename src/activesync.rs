@@ -4232,7 +4232,7 @@ async fn sync_calendar_collection(
     let mut change_responses: Vec<(String, &'static str)> = Vec::new();
 
     for command in &collection.commands {
-        if command.calendar.unsupported_location {
+        if command.calendar.unsupported_location || command.calendar.unsupported_body {
             match command.kind {
                 wbxml::eas::SyncClientCommandKind::Add => {
                     add_responses.push((command.client_id.clone(), None, "6"));
@@ -4432,12 +4432,24 @@ async fn sync_calendar_collection(
         builder.start(air::COMMANDS);
         for id in &to_add {
             if let Some((_, event)) = current_by_id.get(id) {
-                write_calendar_command(builder, air::ADD, event, version);
+                write_calendar_command(
+                    builder,
+                    air::ADD,
+                    event,
+                    version,
+                    &collection.body_preferences,
+                );
             }
         }
         for id in &to_change {
             if let Some((_, event)) = current_by_id.get(id) {
-                write_calendar_command(builder, air::CHANGE, event, version);
+                write_calendar_command(
+                    builder,
+                    air::CHANGE,
+                    event,
+                    version,
+                    &collection.body_preferences,
+                );
             }
         }
         for id in &to_remove {
@@ -4455,6 +4467,10 @@ async fn sync_calendar_collection(
 fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     event.title.hash(&mut hasher);
+    if let Some(body) = &event.description {
+        body.body_type.eas_value().hash(&mut hasher);
+        body.value.hash(&mut hasher);
+    }
     event.location.hash(&mut hasher);
     event.start_utc.hash(&mut hasher);
     event.end_utc.hash(&mut hasher);
@@ -4471,6 +4487,7 @@ fn write_calendar_command(
     tag: wbxml::token::Token,
     event: &crate::model::CalendarEvent,
     version: ProtocolVersion,
+    requests: &[RequestedBodyPreference],
 ) {
     use wbxml::eas::{airsync as air, calendar as cal};
 
@@ -4494,6 +4511,29 @@ fn write_calendar_command(
         builder.leaf(cal::START_TIME, start.clone());
     }
     builder.leaf(cal::SUBJECT, event.title.clone());
+    let empty_body = crate::model::EmailBody {
+        body_type: EmailBodyType::Plain,
+        value: String::new(),
+        is_truncated: false,
+    };
+    let description = event.description.as_ref().or_else(|| {
+        (tag.code_page == air::PAGE && tag.token == air::CHANGE.token).then_some(&empty_body)
+    });
+    if let Some(body) = description {
+        use wbxml::eas::airsync_base as base;
+        let preference = select_body_preference(Some(body), None, requests);
+        if requests.is_empty() || preference.is_some() {
+            let (kind, data, size, truncated) = apply_body_preference(body.clone(), preference);
+            builder.start(base::BODY);
+            builder.leaf(base::TYPE, kind.eas_value());
+            builder.leaf(base::ESTIMATED_DATA_SIZE, size.to_string());
+            builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
+            if !truncated || !preference.is_some_and(|pref| pref.all_or_none) {
+                builder.leaf(base::DATA, data);
+            }
+            builder.end();
+        }
+    }
     if let Some(name) = &event.organizer_name {
         builder.leaf(cal::ORGANIZER_NAME, name.clone());
     }
@@ -5804,7 +5844,7 @@ mod tests {
                     ..Default::default()
                 };
                 let mut b = eas::DocumentBuilder::new();
-                super::write_calendar_command(&mut b, air::CHANGE, &event, version);
+                super::write_calendar_command(&mut b, air::CHANGE, &event, version, &[]);
                 let doc = wbxml::decode_document(&wbxml::encode_document(&b.finish())).unwrap();
                 assert_eq!(
                     eas::contains_token(&doc, cal::LOCATION),

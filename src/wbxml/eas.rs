@@ -1260,6 +1260,9 @@ pub struct CalendarFields {
     pub subject: Option<String>,
     pub location: Option<String>,
     pub unsupported_location: bool,
+    pub body: Option<String>,
+    pub body_type: Option<u8>,
+    pub unsupported_body: bool,
     pub start_time: Option<String>,
     pub end_time: Option<String>,
     pub all_day_event: Option<bool>,
@@ -1927,12 +1930,38 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     let mut fields = CalendarFields::default();
     let mut path: Vec<Token> = Vec::new();
     let mut current_attendee: Option<AttendeeField> = None;
+    let mut body_count = 0;
+    let mut type_count = 0;
+    let mut data_count = 0;
 
     for node in nodes {
         match node {
             Node::Start(token) => {
                 if same_token(*token, calendar::SUBJECT) {
                     fields.subject = Some(String::new());
+                }
+                if same_token(*token, airsync_base::BODY)
+                    && path
+                        .last()
+                        .is_some_and(|t| same_token(*t, airsync::APPLICATION_DATA))
+                {
+                    body_count += 1;
+                    fields.body = Some(String::new());
+                    fields.body_type = Some(1);
+                } else if path.windows(2).any(|pair| {
+                    same_token(pair[0], airsync::APPLICATION_DATA)
+                        && same_token(pair[1], airsync_base::BODY)
+                }) && path
+                    .last()
+                    .is_some_and(|t| same_token(*t, airsync_base::BODY))
+                {
+                    if same_token(*token, airsync_base::DATA) {
+                        data_count += 1;
+                        fields.body = Some(String::new());
+                    } else if same_token(*token, airsync_base::TYPE) {
+                        type_count += 1;
+                        fields.body_type = None;
+                    }
                 }
                 if same_token(*token, calendar::ATTENDEE) {
                     current_attendee = Some(AttendeeField::default());
@@ -1969,7 +1998,21 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                     }
                     continue;
                 }
-                if same_token(top, calendar::SUBJECT) {
+                if path.windows(2).any(|pair| {
+                    same_token(pair[0], airsync::APPLICATION_DATA)
+                        && same_token(pair[1], airsync_base::BODY)
+                }) {
+                    if same_token(top, airsync_base::DATA) {
+                        fields.body = Some(text.clone());
+                    } else if same_token(top, airsync_base::TYPE) {
+                        fields.body_type = text.parse::<u8>().ok();
+                        if !matches!(fields.body_type, Some(1 | 2)) {
+                            fields.unsupported_body = true;
+                        }
+                    } else if same_token(top, airsync_base::TRUNCATED) && text != "0" {
+                        fields.unsupported_body = true;
+                    }
+                } else if same_token(top, calendar::SUBJECT) {
                     fields.subject = Some(text.clone());
                 } else if same_token(top, calendar::LOCATION)
                     || (same_token(top, airsync_base::DISPLAY_NAME)
@@ -1997,10 +2040,18 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                 }
                 path.pop();
             }
-            Node::Opaque(_) => {}
+            Node::Opaque(_) => {
+                if path.iter().any(|t| same_token(*t, airsync_base::BODY)) {
+                    fields.unsupported_body = true;
+                }
+            }
         }
     }
 
+    fields.unsupported_body |= body_count > 1
+        || type_count > 1
+        || data_count > 1
+        || (type_count > 0 && fields.body_type.is_none());
     fields
 }
 
@@ -2380,6 +2431,35 @@ mod tests {
         assert_eq!(command.task.subject.as_deref(), Some("Renew passport"));
         assert_eq!(command.task.complete, Some(false));
         assert_eq!(command.task.due_date.as_deref(), Some("20260905T090000Z"));
+    }
+
+    #[test]
+    fn calendar_body_distinguishes_clear_html_and_invalid_formats() {
+        let make = |kind: Option<&str>, data: Option<&str>, duplicate: bool| {
+            let mut b = DocumentBuilder::new();
+            b.start(airsync::APPLICATION_DATA);
+            b.start(airsync_base::BODY);
+            if let Some(kind) = kind {
+                b.leaf(airsync_base::TYPE, kind);
+            }
+            if let Some(data) = data {
+                b.leaf(airsync_base::DATA, data);
+            }
+            if duplicate {
+                b.leaf(airsync_base::DATA, "second");
+            }
+            b.end();
+            b.end();
+            super::extract_calendar_fields(&b.finish().nodes)
+        };
+        let html = make(Some("2"), Some("<p>hello</p>"), false);
+        assert_eq!(html.body.as_deref(), Some("<p>hello</p>"));
+        assert_eq!(html.body_type, Some(2));
+        assert!(!html.unsupported_body);
+        assert_eq!(make(Some("1"), None, false).body.as_deref(), Some(""));
+        assert!(make(Some("3"), Some("bad"), false).unsupported_body);
+        assert!(make(Some("1"), Some("bad"), true).unsupported_body);
+        assert!(super::extract_calendar_fields(&[]).body.is_none());
     }
 
     #[test]

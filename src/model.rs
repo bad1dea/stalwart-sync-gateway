@@ -164,6 +164,7 @@ pub struct CalendarEvent {
     pub id: String,
     pub calendar_ids: Vec<String>,
     pub title: String,
+    pub description: Option<EmailBody>,
     pub location: Option<String>,
     /// UTC, compact EAS DateTime form (already converted from JSCalendar's
     /// local `start` + `timeZone` -- see jmap::client's

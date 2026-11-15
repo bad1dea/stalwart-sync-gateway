@@ -1566,6 +1566,8 @@ impl JmapClient {
                     "id",
                     "@type",
                     "title",
+                    "description",
+                    "descriptionContentType",
                     "start",
                     "timeZone",
                     "duration",
@@ -1626,6 +1628,17 @@ impl JmapClient {
             event.insert(
                 "title".to_owned(),
                 serde_json::Value::String(subject.clone()),
+            );
+        }
+        if let Some(body) = &fields.body {
+            event.insert("description".to_owned(), serde_json::json!(body));
+            event.insert(
+                "descriptionContentType".to_owned(),
+                serde_json::json!(if fields.body_type == Some(2) {
+                    "text/html"
+                } else {
+                    "text/plain"
+                }),
             );
         }
         if let Some(location) = &fields.location {
@@ -3398,6 +3411,10 @@ struct CalendarEventObject {
     #[serde(default)]
     title: String,
     #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    description_content_type: Option<String>,
+    #[serde(default)]
     start: Option<String>,
     #[serde(default)]
     time_zone: Option<String>,
@@ -3492,6 +3509,26 @@ impl From<CalendarEventObject> for CalendarEvent {
             id: value.id,
             calendar_ids: Vec::new(),
             title: value.title,
+            description: value.description.map(|description| {
+                let content_type = value
+                    .description_content_type
+                    .as_deref()
+                    .unwrap_or("text/plain")
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                let body_type = if content_type.eq_ignore_ascii_case("text/html") {
+                    EmailBodyType::Html
+                } else {
+                    EmailBodyType::Plain
+                };
+                EmailBody {
+                    body_type,
+                    value: description,
+                    is_truncated: false,
+                }
+            }),
             location,
             start_utc,
             end_utc,

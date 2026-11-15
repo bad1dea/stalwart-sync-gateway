@@ -2940,6 +2940,227 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_calendar_descriptions_round_trip_between_devices() {
+        use eas::{airsync_base as base, calendar as cal, RequestedBodyPreference as Pref};
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let result = live
+            .call_using(
+                serde_json::json!([["Calendar/get",{"accountId":live.account},"0"]]),
+                &using,
+            )
+            .await;
+        let calendar = result[0][1]["list"][0]["id"].as_str().unwrap().to_owned();
+        let folder = format!("cal_{calendar}");
+        let result = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set",{
+            "accountId":live.account, "create":{"e":{
+                "@type":"Event","calendarIds":{&calendar:true},"title":"Description fixture",
+                "start":"2026-11-15T10:00:00","duration":"PT1H",
+                "description":"<p>Initial &amp; details</p>","descriptionContentType":"text/html"
+            }}
+        },"0"]]),
+                &using,
+            )
+            .await;
+        let id = result[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let options = requested_body_options(&[Pref {
+            body_type: 2,
+            ..Default::default()
+        }]);
+        let mut devices = Vec::new();
+        for prefix in ["calendar-description-a", "calendar-description-b"] {
+            let device = dev(prefix);
+            let prime = live
+                .wbxml_version(
+                    "Sync",
+                    &device,
+                    sync_body_preferences("0", &folder, Some(&options), true),
+                    "16.1",
+                )
+                .await;
+            let doc = live
+                .wbxml_version(
+                    "Sync",
+                    &device,
+                    sync_body_preferences(&sync_key(&prime), &folder, None, true),
+                    "16.1",
+                )
+                .await;
+            let collection = eas::child_elements(&doc).into_iter().flat_map(|n|eas::child_elements(&n))
+                .find(|n|matches!(n.nodes.first(),Some(wbxml::Node::Start(t)) if t.code_page == air::PAGE && t.token == air::COLLECTION.token)).unwrap();
+            let commands = eas::child_elements(&collection).into_iter()
+                .find(|n|matches!(n.nodes.first(),Some(wbxml::Node::Start(t)) if t.code_page == air::PAGE && t.token == air::COMMANDS.token)).unwrap();
+            let item = eas::child_elements(&commands)
+                .into_iter()
+                .find(|n| eas::find_text_after(n, air::SERVER_ID) == Some(id.as_str()))
+                .unwrap();
+            assert_eq!(eas::find_text_after(&item, base::TYPE), Some("2"));
+            assert_eq!(
+                eas::find_text_after(&item, base::DATA),
+                Some("<p>Initial &amp; details</p>")
+            );
+            devices.push((device, sync_key(&doc)));
+        }
+        for (kind, data, expected_type, expected_data) in [
+            (
+                "2",
+                "<p>Updated details</p>",
+                "text/html",
+                "<p>Updated details</p>",
+            ),
+            ("1", "", "text/plain", ""),
+        ] {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(air::SYNC);
+            b.start(air::COLLECTIONS);
+            b.start(air::COLLECTION);
+            b.leaf(air::SYNC_KEY, &devices[0].1);
+            b.leaf(air::COLLECTION_ID, &folder);
+            b.start(air::COMMANDS);
+            b.start(air::CHANGE);
+            b.leaf(air::SERVER_ID, &id);
+            b.start(air::APPLICATION_DATA);
+            b.start(base::BODY);
+            b.leaf(base::TYPE, kind);
+            b.leaf(base::DATA, data);
+            b.end();
+            for _ in 0..6 {
+                b.end();
+            }
+            let doc = live
+                .wbxml_version(
+                    "Sync",
+                    &devices[0].0,
+                    wbxml::encode_document(&b.finish()),
+                    "16.1",
+                )
+                .await;
+            assert!(eas::find_all_text_after(&doc, air::STATUS)
+                .iter()
+                .all(|s| s == "1"));
+            devices[0].1 = sync_key(&doc);
+            let native=live.call_using(serde_json::json!([["CalendarEvent/get",{
+                "accountId":live.account,"ids":[&id],"properties":["id","title","description","descriptionContentType"]
+            },"0"]]),&using).await;
+            assert_eq!(native[0][1]["list"][0]["title"], "Description fixture");
+            assert_eq!(native[0][1]["list"][0]["description"], expected_data);
+            assert_eq!(
+                native[0][1]["list"][0]["descriptionContentType"],
+                expected_type
+            );
+            let doc = live
+                .wbxml_version(
+                    "Sync",
+                    &devices[1].0,
+                    sync_body_preferences(&devices[1].1, &folder, None, true),
+                    "16.1",
+                )
+                .await;
+            assert_eq!(
+                eas::find_text_after(&doc, air::SERVER_ID),
+                Some(id.as_str())
+            );
+            assert!(eas::contains_token(&doc, base::BODY));
+            if !data.is_empty() {
+                assert_eq!(eas::find_text_after(&doc, base::DATA), Some(data));
+            }
+            assert_eq!(
+                eas::find_text_after(&doc, cal::SUBJECT),
+                Some("Description fixture")
+            );
+            devices[1].1 = sync_key(&doc);
+        }
+
+        let mut invalid = eas::DocumentBuilder::new();
+        invalid.start(air::SYNC);
+        invalid.start(air::COLLECTIONS);
+        invalid.start(air::COLLECTION);
+        invalid.leaf(air::SYNC_KEY, &devices[0].1);
+        invalid.leaf(air::COLLECTION_ID, &folder);
+        invalid.start(air::COMMANDS);
+        invalid.start(air::CHANGE);
+        invalid.leaf(air::SERVER_ID, &id);
+        invalid.start(air::APPLICATION_DATA);
+        invalid.leaf(cal::SUBJECT, "Must not apply");
+        invalid.start(base::BODY);
+        invalid.leaf(base::TYPE, "3");
+        invalid.leaf(base::DATA, "unsupported");
+        invalid.end();
+        for _ in 0..6 {
+            invalid.end();
+        }
+        let doc = live
+            .wbxml_version(
+                "Sync",
+                &devices[0].0,
+                wbxml::encode_document(&invalid.finish()),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&doc, air::STATUS).contains(&"6".to_owned()));
+        devices[0].1 = sync_key(&doc);
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{
+            "accountId":live.account,"ids":[&id],"properties":["id","title","description"]
+        },"0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(native[0][1]["list"][0]["title"], "Description fixture");
+        assert_eq!(native[0][1]["list"][0]["description"], "");
+        for value in [serde_json::json!("Native change"), serde_json::Value::Null] {
+            let result = live
+                .call_using(
+                    serde_json::json!([["CalendarEvent/set",{
+                "accountId":live.account,"update":{&id:{"description":value}}
+            },"0"]]),
+                    &using,
+                )
+                .await;
+            assert!(result[0][1]["updated"].get(&id).is_some());
+            let doc = live
+                .wbxml_version(
+                    "Sync",
+                    &devices[1].0,
+                    sync_body_preferences(&devices[1].1, &folder, None, true),
+                    "16.1",
+                )
+                .await;
+            assert_eq!(
+                eas::find_text_after(&doc, air::SERVER_ID),
+                Some(id.as_str())
+            );
+            assert!(eas::contains_token(&doc, base::BODY));
+            let body = eas::find_text_after(&doc, base::DATA).unwrap();
+            if value.is_null() {
+                assert!(!body.contains("Native change"));
+            } else {
+                assert!(body.contains("Native change"));
+            }
+            devices[1].1 = sync_key(&doc);
+        }
+        let result = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set",{
+            "accountId":live.account,"destroy":[id]
+        },"0"]]),
+                &using,
+            )
+            .await;
+        assert!(result[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_calendar_partial_times_preserve_timezone_and_other_endpoint() {
         use eas::calendar as cal;
         let live = Live::new("E2E_USER2").await;
