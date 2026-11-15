@@ -2719,6 +2719,90 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_sync_heartbeat_delivers_new_stalwart_mail() {
+        let live = Live::new("E2E_USER2").await;
+        let result = live.call(serde_json::json!([["Mailbox/set", {
+            "accountId": live.account, "create": {"m":{"name":format!("Sync wait {}",std::process::id())}}
+        }, "0"]])).await;
+        let folder = result[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let device = dev("sync-wait-native");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let synced = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.leaf(air::HEARTBEAT_INTERVAL, "60");
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&synced));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.empty_tag(air::GET_CHANGES);
+        b.end();
+        b.end();
+        b.end();
+        let request = live
+            .req_version("Sync", &device, "16.1")
+            .body(wbxml::encode_document(&b.finish()))
+            .send();
+        tokio::pin!(request);
+        tokio::select! {
+            response = &mut request => panic!("Sync returned before mail arrived: {:?}",response.unwrap().status()),
+            _ = tokio::time::sleep(Duration::from_millis(700)) => {}
+        }
+        let ids = live.seed(&folder, 1, "sync-wait", false).await;
+        let response = tokio::time::timeout(Duration::from_secs(10), &mut request)
+            .await
+            .unwrap()
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, air::SERVER_ID), ids);
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.leaf(air::HEARTBEAT_INTERVAL, "60");
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&doc));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.empty_tag(air::GET_CHANGES);
+        b.end();
+        b.end();
+        b.end();
+        let started = std::time::Instant::now();
+        let response = tokio::time::timeout(
+            Duration::from_secs(70),
+            live.req_version("Sync", &device, "16.1")
+                .body(wbxml::encode_document(&b.finish()))
+                .send(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let idle = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(59));
+        assert!(eas::find_all_text_after(&idle, air::SERVER_ID).is_empty());
+        let result = live
+            .call(serde_json::json!([
+                ["Email/set",{"accountId":live.account,"destroy":ids},"0"],
+                ["Mailbox/set",{"accountId":live.account,"destroy":[folder]},"1"]
+            ]))
+            .await;
+        assert!(result[0][1]["notDestroyed"].is_null());
+        assert!(result[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_find_16_1_reads_native_jmap_metadata_and_keywords() {
         use eas::{airsync_base as base, email2, find as f};
         let live = Live::new("E2E_USER2").await;
@@ -6857,4 +6941,92 @@ async fn omitted_sync_window_delivers_up_to_one_hundred_messages() {
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(eas::find_all_text_after(&doc, air::SERVER_ID).len(), 40);
     assert!(!eas::contains_token(&doc, air::MORE_AVAILABLE));
+}
+
+#[tokio::test]
+async fn sync_heartbeat_waits_for_new_mail_and_delivers_it() {
+    use eas::airsync as air;
+    let env = start_env(Opts::default()).await;
+    let response = env
+        .req("Sync", "sync-wait")
+        .body(sync_body("0", "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let prime = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    let response = env
+        .req("Sync", "sync-wait")
+        .body(sync_body(&sync_key(&prime), "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let synced = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.leaf(air::HEARTBEAT_INTERVAL, "60");
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, sync_key(&synced));
+    b.leaf(air::COLLECTION_ID, "inbox");
+    b.empty_tag(air::GET_CHANGES);
+    b.end();
+    b.end();
+    b.end();
+    let request = env
+        .req("Sync", "sync-wait")
+        .body(wbxml::encode_document(&b.finish()))
+        .send();
+    tokio::pin!(request);
+    tokio::select! {
+        response = &mut request => panic!("Sync returned before a change: {:?}", response.unwrap().status()),
+        _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+    }
+    env.mock.add_mail("other", "unrelated-new");
+    env.mock.emit_email_change();
+    tokio::select! {
+        response = &mut request => panic!("Unrelated mail ended Sync: {:?}", response.unwrap().status()),
+        _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+    }
+    env.mock.add_mail("inbox", "heartbeat-new");
+    env.mock.emit_email_change();
+    let response = tokio::time::timeout(Duration::from_secs(5), &mut request)
+        .await
+        .unwrap()
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert!(eas::find_all_text_after(&doc, air::SERVER_ID).contains(&"heartbeat-new".to_owned()));
+}
+
+#[tokio::test]
+async fn partial_sync_replaces_the_previous_wait_setting() {
+    use eas::airsync as air;
+    let env = start_env(Opts::default()).await;
+    let request = |partial: bool| {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        if partial {
+            b.empty_tag(air::PARTIAL);
+            b.leaf(air::HEARTBEAT_INTERVAL, "60");
+        } else {
+            b.leaf(air::WAIT, "1");
+        }
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, "0");
+        b.leaf(air::COLLECTION_ID, "inbox");
+        b.end();
+        b.end();
+        b.end();
+        wbxml::encode_document(&b.finish())
+    };
+    for partial in [false, true] {
+        let response = env
+            .req("Sync", "replace-wait")
+            .body(request(partial))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("1"));
+    }
 }

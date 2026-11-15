@@ -1821,6 +1821,63 @@ async fn load_replay(
     Some((request_key.to_owned(), new_key.to_owned(), doc.nodes))
 }
 
+async fn wait_for_sync_changes(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    query: &EasQuery,
+    collections: &[wbxml::eas::SyncCollectionRequest],
+    seconds: u64,
+) {
+    let user = query.user.as_deref().unwrap_or_else(|| auth.username());
+    let device = query.device_id.as_deref().unwrap_or("unknown");
+    for collection in collections {
+        if collection.sync_key == "0" || !collection.commands.is_empty() || !collection.get_changes
+        {
+            return;
+        }
+        if !matches!(state.state.get(user, device, &collection.collection_id).await,
+            Ok(Some(record)) if record.sync_key == collection.sync_key)
+        {
+            return;
+        }
+    }
+    let Some(_slot) = state.push.try_ping_slot() else {
+        return;
+    };
+    let push = state.push.ensure_subscriber(
+        &auth.username().to_ascii_lowercase(),
+        auth.session.event_source_url.as_deref(),
+        auth.username(),
+        auth.authorization.password(),
+    );
+    let _waiter = push.waiter();
+    let mut rx = push.subscribe();
+    let folders: Vec<_> = collections
+        .iter()
+        .map(|c| (c.collection_id.clone(), "Email".to_owned()))
+        .collect();
+    let mail = watched_mail_ids(&folders);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+    loop {
+        rx.borrow_and_update();
+        if !changed_mail_folders(state, auth, user, device, &mail)
+            .await
+            .is_empty()
+        {
+            return;
+        }
+        match changed_item_folders(state, auth, user, device, &folders).await {
+            Ok(items) if items.is_empty() => {}
+            _ => return,
+        }
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => return,
+            _ = tokio::time::sleep(Duration::from_secs(30)) => {},
+            result = rx.changed() => if result.is_err() { return; },
+        }
+    }
+}
+
 async fn sync_mail(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
@@ -1854,6 +1911,14 @@ async fn sync_mail(
             .with_label_values(&[command, "400"])
             .inc();
         return (StatusCode::BAD_REQUEST, "Sync missing Collections\n").into_response();
+    }
+
+    match sync_request::wait_seconds(document) {
+        Ok(Some(seconds)) => wait_for_sync_changes(state, auth, query, &collections, seconds).await,
+        Ok(None) => {}
+        Err((status, limit)) => {
+            return sync_request::error_with_limit(state, command, status, limit)
+        }
     }
 
     if let Some(device) = query.device_id.as_deref() {

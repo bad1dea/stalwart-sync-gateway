@@ -88,6 +88,37 @@ fn root_settings(document: &Document) -> Vec<Document> {
         .collect()
 }
 
+pub(super) fn wait_seconds(request: &Document) -> Result<Option<u64>, (&'static str, Option<u64>)> {
+    let values: Vec<_> = eas::child_elements(request)
+        .into_iter()
+        .filter(|child| is(child, air::WAIT) || is(child, air::HEARTBEAT_INTERVAL))
+        .collect();
+    if values.len() > 1 {
+        return Err(("4", None));
+    }
+    let Some(value) = values.first() else {
+        return Ok(None);
+    };
+    let minutes = is(value, air::WAIT);
+    let token = if minutes {
+        air::WAIT
+    } else {
+        air::HEARTBEAT_INTERVAL
+    };
+    let number = eas::find_text_after(value, token)
+        .and_then(|text| text.parse::<i64>().ok())
+        .ok_or(("4", None))?;
+    let (min, max) = if minutes { (1, 59) } else { (60, 3540) };
+    if number < min || number > max {
+        return Err(("14", Some(number.clamp(min, max) as u64)));
+    }
+    Ok(Some(if minutes {
+        number as u64 * 60
+    } else {
+        number as u64
+    }))
+}
+
 pub(super) async fn resolve(
     state: &AppState,
     user: &str,
@@ -143,6 +174,13 @@ pub(super) async fn resolve(
             }
         }
         for child in root_settings(&cached) {
+            if (is(&child, air::WAIT) || is(&child, air::HEARTBEAT_INTERVAL))
+                && root
+                    .iter()
+                    .any(|current| is(current, air::WAIT) || is(current, air::HEARTBEAT_INTERVAL))
+            {
+                continue;
+            }
             if !root.iter().any(|current| matches!((current.nodes.first(), child.nodes.first()),
                 (Some(Node::Start(a)), Some(Node::Start(b))) if a.token == b.token && a.code_page == b.code_page))
             { root.push(child); }
@@ -202,9 +240,21 @@ pub(super) async fn save(
 }
 
 pub(super) fn error(state: &AppState, command: &str, status: &str) -> Response {
+    error_with_limit(state, command, status, None)
+}
+
+pub(super) fn error_with_limit(
+    state: &AppState,
+    command: &str,
+    status: &str,
+    limit: Option<u64>,
+) -> Response {
     let mut b = DocumentBuilder::new();
     b.start(air::SYNC);
     b.leaf(air::STATUS, status);
+    if let Some(limit) = limit {
+        b.leaf(air::LIMIT, limit.to_string());
+    }
     b.end();
     state
         .metrics
@@ -217,4 +267,58 @@ pub(super) fn error(state: &AppState, command: &str, status: &str) -> Response {
         wbxml::encode_document(&b.finish()),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+    fn request(values: &[(Token, &str)]) -> Document {
+        let mut b = DocumentBuilder::new();
+        b.start(air::SYNC);
+        for (token, text) in values {
+            b.leaf(*token, *text);
+        }
+        b.end();
+        b.finish()
+    }
+    #[test]
+    fn validates_sync_wait_interval_and_limit() {
+        assert_eq!(wait_seconds(&request(&[])), Ok(None));
+        assert_eq!(wait_seconds(&request(&[(air::WAIT, "1")])), Ok(Some(60)));
+        assert_eq!(
+            wait_seconds(&request(&[(air::HEARTBEAT_INTERVAL, "3540")])),
+            Ok(Some(3540))
+        );
+        assert_eq!(
+            wait_seconds(&request(&[(air::WAIT, "0")])),
+            Err(("14", Some(1)))
+        );
+        assert_eq!(
+            wait_seconds(&request(&[(air::WAIT, "-1")])),
+            Err(("14", Some(1)))
+        );
+        assert_eq!(
+            wait_seconds(&request(&[(air::WAIT, "60")])),
+            Err(("14", Some(59)))
+        );
+        assert_eq!(
+            wait_seconds(&request(&[(air::HEARTBEAT_INTERVAL, "59")])),
+            Err(("14", Some(60)))
+        );
+        assert_eq!(
+            wait_seconds(&request(&[(air::HEARTBEAT_INTERVAL, "3541")])),
+            Err(("14", Some(3540)))
+        );
+        assert_eq!(
+            wait_seconds(&request(&[
+                (air::WAIT, "1"),
+                (air::HEARTBEAT_INTERVAL, "60")
+            ])),
+            Err(("4", None))
+        );
+        assert_eq!(
+            wait_seconds(&request(&[(air::WAIT, "bad")])),
+            Err(("4", None))
+        );
+    }
 }
