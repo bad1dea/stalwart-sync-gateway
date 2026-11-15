@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 struct Options {
     filter_type: Option<u8>,
     #[serde(default)]
+    mime_support: u8,
+    #[serde(default)]
     body_preferences: Vec<crate::wbxml::eas::RequestedBodyPreference>,
     #[serde(default, skip_serializing)]
     body_type: Option<u8>,
@@ -29,6 +31,7 @@ pub(super) async fn apply(
     let options = if collection.options_count > 0 {
         let options = Options {
             filter_type: collection.filter_type,
+            mime_support: collection.mime_support,
             body_preferences: collection.body_preferences.clone(),
             body_type: None,
             truncation_size: None,
@@ -58,6 +61,7 @@ pub(super) async fn apply(
     };
     if let Some(options) = options {
         collection.filter_type = Some(options.filter_type.unwrap_or(0));
+        collection.mime_support = options.mime_support;
         collection.body_preferences = options.body_preferences;
         if collection.body_preferences.is_empty() {
             if let Some(body_type) = options.body_type {

@@ -257,6 +257,7 @@ pub mod airsync {
     pub const FILTER_TYPE: Token = tag(0x18, false);
     pub const DELETES_AS_MOVES: Token = tag(0x1e, false);
     pub const SOFT_DELETE: Token = tag(0x21, false);
+    pub const MIME_SUPPORT: Token = tag(0x22, false);
     pub const WAIT: Token = tag(0x24, false);
     pub const PARTIAL: Token = tag(0x26, false);
     pub const HEARTBEAT_INTERVAL: Token = tag(0x29, false);
@@ -1066,6 +1067,45 @@ pub struct RequestedBodyPreference {
     pub preview: Option<usize>,
 }
 
+pub fn mime_support(document: &Document) -> Result<u8, &'static str> {
+    let mut value = None;
+    let options = if matches!(document.nodes.first(), Some(Node::Start(t))
+        if same_token(*t, airsync::OPTIONS))
+    {
+        vec![document.clone()]
+    } else {
+        child_elements(document)
+            .into_iter()
+            .filter(|child| {
+                matches!(child.nodes.first(), Some(Node::Start(t))
+                if same_token(*t, airsync::OPTIONS)
+                    || same_token(*t, item_operations::OPTIONS)
+                    || same_token(*t, search::OPTIONS))
+            })
+            .collect()
+    };
+    for options in options {
+        for child in child_elements(&options) {
+            if matches!(child.nodes.first(), Some(Node::Start(t))
+                if same_token(*t, airsync::MIME_SUPPORT))
+            {
+                let raw =
+                    find_text_after(&child, airsync::MIME_SUPPORT).ok_or("empty MIMESupport")?;
+                let parsed = match raw {
+                    "0" => 0,
+                    "1" => 1,
+                    "2" => 2,
+                    _ => return Err("invalid MIMESupport"),
+                };
+                if value.replace(parsed).is_some() {
+                    return Err("duplicate MIMESupport");
+                }
+            }
+        }
+    }
+    Ok(value.unwrap_or(0))
+}
+
 pub fn body_preferences(document: &Document) -> Result<Vec<RequestedBodyPreference>, &'static str> {
     let mut preferences = Vec::new();
     let mut start = None;
@@ -1159,6 +1199,7 @@ pub struct SyncCollectionRequest {
     pub options_count: usize,
     pub options_class: Option<String>,
     pub body_preferences: Vec<RequestedBodyPreference>,
+    pub mime_support: u8,
     pub body_preferences_valid: bool,
     /// Options > FilterType, if sent this request. Absent means "same as the
     /// previous Sync" ([MS-ASCMD] 2.2.3.125: Options persist).
@@ -1177,6 +1218,7 @@ impl Default for SyncCollectionRequest {
             options_count: 0,
             options_class: None,
             body_preferences: Vec::new(),
+            mime_support: 0,
             body_preferences_valid: true,
             filter_type: None,
         }
@@ -1311,6 +1353,7 @@ pub struct ItemOperationsFetchRequest {
     pub file_reference: Option<String>,
     pub range: Option<String>,
     pub body_preferences: Vec<RequestedBodyPreference>,
+    pub mime_support: u8,
 }
 
 /// Direct child elements, retaining their complete WBXML subtrees.
@@ -1367,6 +1410,7 @@ pub fn item_operations_fetch(document: &Document) -> Option<ItemOperationsFetchR
         file_reference,
         range: find_text_after(document, item_operations::RANGE).map(str::to_owned),
         body_preferences: body_preferences(document).ok()?,
+        mime_support: mime_support(document).ok()?,
     })
 }
 
@@ -1387,6 +1431,7 @@ pub struct SearchRequest {
     /// position/limit pair, since that conversion is the caller's job.
     pub range: Option<(i64, i64)>,
     pub body_preferences: Vec<RequestedBodyPreference>,
+    pub mime_support: u8,
 }
 
 /// Parses a `Search` request. Real devices send exactly one `Store` per
@@ -1404,12 +1449,16 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
         Some((start.parse().ok()?, end.parse().ok()?))
     });
     let body_preferences = body_preferences(document).ok()?;
+    let store = child_elements(document).into_iter().find(|child|
+        matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, search::STORE)))?;
+    let mime_support = mime_support(&store).ok()?;
     Some(SearchRequest {
         store_name,
         class,
         free_text,
         range,
         body_preferences,
+        mime_support,
     })
 }
 
@@ -1698,6 +1747,10 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                         };
                         for options in child_elements(&doc).into_iter().filter(|child|
                             matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, airsync::OPTIONS))) {
+                            match mime_support(&options) {
+                                Ok(value) => collection.mime_support = value,
+                                Err(_) => collection.body_preferences_valid = false,
+                            }
                             match body_preferences(&options) {
                                 Ok(preferences) => collection.body_preferences.extend(preferences),
                                 Err(_) => collection.body_preferences_valid = false,

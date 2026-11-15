@@ -187,6 +187,7 @@ async fn fetch_item(
                 auth,
                 &email,
                 &fetch.body_preferences,
+                fetch.mime_support,
             )
             .await
             {

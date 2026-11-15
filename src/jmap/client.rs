@@ -418,7 +418,7 @@ impl JmapClient {
                     },
                     "properties": [
                         "id", "blobId", "mailboxIds", "keywords", "receivedAt", "subject",
-                        "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments", "threadId"
+                        "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "bodyStructure", "attachments", "threadId"
                     ],
                     "fetchAllBodyValues": true,
                     "maxBodyValueBytes": 65536
@@ -562,7 +562,7 @@ impl JmapClient {
                         "ids": ids,
                         "properties": [
                             "id", "blobId", "mailboxIds", "keywords", "receivedAt", "subject",
-                            "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments", "threadId"
+                            "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "bodyStructure", "attachments", "threadId"
                         ],
                         "fetchAllBodyValues": true,
                         "maxBodyValueBytes": 65536
@@ -630,6 +630,7 @@ impl JmapClient {
                     "textBody",
                     "htmlBody",
                     "bodyValues",
+                    "bodyStructure",
                     "attachments",
                     "threadId",
                 ],
@@ -2045,7 +2046,7 @@ impl JmapClient {
                 "ids": [email_id],
                 "properties": [
                     "id", "blobId", "mailboxIds", "keywords", "receivedAt", "subject",
-                    "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "attachments", "threadId"
+                    "from", "to", "cc", "textBody", "htmlBody", "bodyValues", "bodyStructure", "attachments", "threadId"
                 ],
                 "fetchAllBodyValues": true,
                 "maxBodyValueBytes": 65536
@@ -2952,6 +2953,46 @@ struct EmailObject {
     body_values: BTreeMap<String, EmailBodyValue>,
     #[serde(default)]
     attachments: Vec<EmailAttachmentObject>,
+    #[serde(default)]
+    body_structure: Option<MimePart>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MimePart {
+    #[serde(default, rename = "type")]
+    content_type: String,
+    #[serde(default)]
+    sub_parts: Option<Vec<MimePart>>,
+}
+
+impl MimePart {
+    fn smime_kind(&self) -> Option<crate::model::SmimeKind> {
+        if ["application/pkcs7-mime", "application/x-pkcs7-mime"]
+            .iter()
+            .any(|kind| self.content_type.eq_ignore_ascii_case(kind))
+        {
+            Some(crate::model::SmimeKind::Opaque)
+        } else if self.content_type.eq_ignore_ascii_case("multipart/signed")
+            && self
+                .sub_parts
+                .as_deref()
+                .unwrap_or_default()
+                .get(1)
+                .is_some_and(|part| {
+                    [
+                        "application/pkcs7-signature",
+                        "application/x-pkcs7-signature",
+                    ]
+                    .iter()
+                    .any(|kind| part.content_type.eq_ignore_ascii_case(kind))
+                })
+        {
+            Some(crate::model::SmimeKind::MultipartSigned)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3023,6 +3064,7 @@ impl From<EmailObject> for Email {
             preview: value.preview,
             read: value.keywords.get("$seen").copied().unwrap_or(false),
             body,
+            smime: value.body_structure.as_ref().and_then(MimePart::smime_kind),
             attachments,
             blob_id: value.blob_id,
             thread_id: value.thread_id,
@@ -3709,5 +3751,50 @@ mod tests {
             local_to_utc_eas("not a date", Some("America/Toronto")),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod smime_tests {
+    use super::*;
+    #[test]
+    fn mime_structure_classifies_only_whole_smime_messages() {
+        use crate::model::SmimeKind::{MultipartSigned, Opaque};
+        for (structure, expected) in [
+            (
+                serde_json::json!({"type":"application/pkcs7-mime","subParts":null}),
+                Some(Opaque),
+            ),
+            (
+                serde_json::json!({"type":"Application/X-PKCS7-Mime"}),
+                Some(Opaque),
+            ),
+            (
+                serde_json::json!({"type":"multipart/signed","subParts":[
+                {"type":"text/plain"}, {"type":"application/pkcs7-signature"}]}),
+                Some(MultipartSigned),
+            ),
+            (
+                serde_json::json!({"type":"multipart/signed","subParts":[
+                {"type":"text/plain"}, {"type":"application/pgp-signature"}]}),
+                None,
+            ),
+            (
+                serde_json::json!({"type":"multipart/mixed","subParts":[
+                {"type":"text/plain"}, {"type":"application/pkcs7-mime"}]}),
+                None,
+            ),
+            (
+                serde_json::json!({"type":"text/plain","subParts":null}),
+                None,
+            ),
+        ] {
+            let email: Email = serde_json::from_value::<EmailObject>(
+                serde_json::json!({"id":"m", "bodyStructure":structure}),
+            )
+            .unwrap()
+            .into();
+            assert_eq!(email.smime, expected);
+        }
     }
 }

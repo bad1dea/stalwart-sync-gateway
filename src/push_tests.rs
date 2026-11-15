@@ -61,6 +61,7 @@ struct Mock {
     snapshot_changes: AtomicBool,
     identity_error: AtomicBool,
     download_error: AtomicBool,
+    mail_structures: Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
     mail_bodies: Mutex<std::collections::BTreeMap<String, (String, bool)>>,
     body_get_limits: Mutex<Vec<(String, usize)>>,
     body_get_error: AtomicBool,
@@ -450,6 +451,10 @@ async fn mock_api(
                                 keyword_map.get(&id).unwrap_or(&Default::default()),
                                 &m.date_of(&id),
                             );
+                            if let Some(structure) = m.mail_structures.lock().unwrap().get(&id) {
+                                email["bodyStructure"] = structure.clone();
+                            }
+
                             if let Some((value, html)) = m.mail_bodies.lock().unwrap().get(&id) {
                                 let requested =
                                     args["maxBodyValueBytes"].as_u64().unwrap_or(0) as usize;
@@ -562,6 +567,7 @@ async fn start_mock() -> Arc<Mock> {
         snapshot_changes: AtomicBool::new(false),
         identity_error: AtomicBool::new(false),
         download_error: AtomicBool::new(false),
+        mail_structures: Mutex::new(Default::default()),
         mail_bodies: Mutex::new(Default::default()),
         body_get_limits: Mutex::new(Vec::new()),
         body_get_error: AtomicBool::new(false),
@@ -784,7 +790,7 @@ fn requested_body_options(preferences: &[eas::RequestedBodyPreference]) -> wbxml
         .iter()
         .any(|preference| preference.body_type == 4)
     {
-        b.leaf(air::tag(0x22, false), "2");
+        b.leaf(air::MIME_SUPPORT, "2");
     }
     b.end();
     b.finish()
@@ -3244,6 +3250,77 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_mime_policy_uses_native_smime_structure_and_preserves_original_bytes() {
+        use eas::{airsync_base as base, email as mail};
+        let mut live = Live::new("E2E_USER2").await;
+        let r = live.call(serde_json::json!([["Mailbox/set", {
+            "accountId":live.account, "create":{"m":{"name":format!("MIME policy {}",std::process::id())}}
+        },"0"]])).await;
+        let folder = r[0][1]["created"]["m"]["id"].as_str().unwrap().to_owned();
+        let mut ids = Vec::new();
+        for (kind, body, class) in [
+            ("text/plain", "ordinary mail", "IPM.Note"),
+            ("application/pkcs7-mime; smime-type=enveloped-data", "AAECAwQF", "IPM.Note.SMIME"),
+            ("multipart/signed; protocol=\"application/pkcs7-signature\"; boundary=\"signed\"",
+                "--signed\r\nContent-Type: text/plain\r\n\r\nsigned text\r\n--signed\r\nContent-Type: application/pkcs7-signature\r\nContent-Transfer-Encoding: base64\r\n\r\nAAECAwQF\r\n--signed--\r\n",
+                "IPM.Note.SMIME.MultipartSigned"),
+        ] {
+            // Synthetic envelopes exercise MIME transport, not cryptographic validation.
+            let raw = format!("From: test@example.test\r\nTo: {}\r\nSubject: MIME policy\r\nMIME-Version: 1.0\r\nContent-Type: {kind}\r\n\r\n{body}", live.user);
+            let upload: serde_json::Value = live.http
+                .post(format!("{}/jmap/upload/{}/",live.jmap,live.account))
+                .basic_auth(&live.user, Some(&live.pass)).header("Content-Type","message/rfc822")
+                .body(raw.clone()).send().await.unwrap().json().await.unwrap();
+            let r = live.call(serde_json::json!([["Email/import",{
+                "accountId":live.account,
+                "emails":{"m":{"blobId":upload["blobId"],"mailboxIds":{&folder:true},"keywords":{}}}
+            },"0"]])).await;
+            let id = r[0][1]["created"]["m"]["id"].as_str().unwrap().to_owned();
+            ids.push(id.clone());
+            for mode in [None, Some("0"), Some("1"), Some("2")] {
+                let mime = mode == Some("2") || (mode == Some("1") && class != "IPM.Note");
+                let device = dev(&format!("mime-{class}-{mode:?}"));
+                let options = mime_options(mode, u32::MAX as usize);
+                let prime = live.wbxml_version("Sync", &device,
+                    sync_body_preferences("0",&folder,Some(&options),true),"16.1").await;
+                // Persisted MIME policy must survive a process restart.
+                if mode == Some("1") {
+                    let out = std::process::Command::new("sh").arg("-c")
+                        .arg(env("E2E_RESTART_CMD")).output().unwrap();
+                    assert!(out.status.success());
+                    live = Live::new("E2E_USER2").await;
+                }
+                let doc = live.wbxml_version("Sync", &device,
+                    sync_body_preferences(&sync_key(&prime),&folder,None,true),"16.1").await;
+                use eas::airsync as air;
+                let collection = eas::child_elements(&doc).into_iter().flat_map(|d|eas::child_elements(&d))
+                    .find(|d|matches!(d.nodes.first(),Some(wbxml::Node::Start(t)) if t.token == air::COLLECTION.token && t.code_page == air::PAGE)).unwrap();
+                let commands = eas::child_elements(&collection).into_iter().find(|d|
+                    matches!(d.nodes.first(),Some(wbxml::Node::Start(t)) if t.token == air::COMMANDS.token && t.code_page == air::PAGE)).unwrap();
+                let item = eas::child_elements(&commands).into_iter()
+                    .find(|d|eas::find_text_after(d,air::SERVER_ID)==Some(id.as_str())).unwrap();
+                assert_eq!(eas::find_text_after(&item,mail::MESSAGE_CLASS),Some(class));
+                if mime {
+                    assert_eq!(eas::find_text_after(&item,base::TYPE),Some("4"));
+                    assert_eq!(eas::find_opaque_after(&item,base::DATA),Some(raw.as_bytes()));
+                } else {
+                    assert_ne!(eas::find_text_after(&item,base::TYPE),Some("4"));
+                    assert!(eas::find_opaque_after(&item,base::DATA).is_none());
+                }
+            }
+        }
+        let r = live
+            .call(serde_json::json!([
+                ["Email/set",{"accountId":live.account,"destroy":ids},"0"],
+                ["Mailbox/set",{"accountId":live.account,"destroy":[folder]},"1"]
+            ]))
+            .await;
+        assert!(r[0][1]["notDestroyed"].is_null());
+        assert!(r[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_body_preferences_choose_native_fallback_and_persist_after_restart() {
         use eas::{airsync_base as base, RequestedBodyPreference as Pref};
         let live = Live::new("E2E_USER2").await;
@@ -4681,6 +4758,7 @@ async fn item_operations_mime_preserves_non_utf8_bytes() {
     b.leaf(air::COLLECTION_ID, "inbox");
     b.leaf(air::SERVER_ID, "m1");
     b.start(ops::OPTIONS);
+    b.leaf(air::MIME_SUPPORT, "2");
     b.start(base::BODY_PREFERENCE);
     b.leaf(base::TYPE, "4");
     b.end();
@@ -4828,6 +4906,7 @@ async fn item_operations_multipart_directory_and_binary_parts() {
     b.leaf(air::COLLECTION_ID, "inbox");
     b.leaf(air::SERVER_ID, "m1");
     b.start(ops::OPTIONS);
+    b.leaf(air::MIME_SUPPORT, "2");
     b.start(base::BODY_PREFERENCE);
     b.leaf(base::TYPE, "4");
     b.end();
@@ -6445,4 +6524,210 @@ async fn failed_or_incomplete_full_text_fetch_does_not_acknowledge_the_message()
     let response = env.req("Sync", "client").body(body).send().await.unwrap();
     assert_eq!(response.bytes().await.unwrap(), first);
     assert_eq!(env.mock.body_get_limits.lock().unwrap().len(), calls);
+}
+
+fn mime_options(mode: Option<&str>, limit: usize) -> wbxml::Document {
+    use eas::{airsync as air, airsync_base as base};
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::OPTIONS);
+    if let Some(mode) = mode {
+        b.leaf(air::MIME_SUPPORT, mode);
+    }
+    b.start(base::BODY_PREFERENCE);
+    b.leaf(base::TYPE, "4");
+    b.leaf(base::TRUNCATION_SIZE, limit.to_string());
+    b.end();
+    b.end();
+    b.finish()
+}
+
+#[tokio::test]
+async fn mime_policy_controls_sync_fetch_and_search_without_cross_request_leaks() {
+    use eas::{
+        airsync as air, airsync_base as base, email as mail, item_operations as ops, search as srch,
+    };
+    let env = start_env(Opts::default()).await;
+    env.mock
+        .boxes
+        .lock()
+        .unwrap()
+        .insert("inbox".to_owned(), vec!["m1".to_owned()]);
+    for structure in [
+        serde_json::json!({"type":"text/plain","subParts":null}),
+        serde_json::json!({"type":"application/pkcs7-mime"}),
+        serde_json::json!({"type":"multipart/signed","subParts":[
+            {"type":"text/plain"}, {"type":"application/pkcs7-signature"}]}),
+    ] {
+        let smime = structure["type"] != "text/plain";
+        let class = match structure["type"].as_str().unwrap() {
+            "text/plain" => "IPM.Note",
+            "multipart/signed" => "IPM.Note.SMIME.MultipartSigned",
+            _ => "IPM.Note.SMIME",
+        };
+        env.mock
+            .mail_structures
+            .lock()
+            .unwrap()
+            .insert("m1".to_owned(), structure);
+        for version in ["14.0", "16.1"] {
+            for mode in [None, Some("0"), Some("1"), Some("2")] {
+                let mime = mode == Some("2") || (mode == Some("1") && smime);
+                let options = mime_options(mode, 2);
+                let device = format!("mime-{class}-{mode:?}-{version}");
+                let response = env
+                    .req("Sync", &device)
+                    .header("MS-ASProtocolVersion", version)
+                    .body(sync_body_preferences("0", "inbox", Some(&options), true))
+                    .send()
+                    .await
+                    .unwrap();
+                let prime = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+                let response = env
+                    .req("Sync", &device)
+                    .header("MS-ASProtocolVersion", version)
+                    .body(sync_body_preferences(
+                        &sync_key(&prime),
+                        "inbox",
+                        None,
+                        true,
+                    ))
+                    .send()
+                    .await
+                    .unwrap();
+                let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+                assert_eq!(
+                    eas::find_text_after(&doc, base::TYPE),
+                    Some(if mime { "4" } else { "1" })
+                );
+                assert_eq!(eas::find_text_after(&doc, mail::MESSAGE_CLASS), Some(class));
+                if mime {
+                    assert_eq!(
+                        eas::find_opaque_after(&doc, base::DATA),
+                        Some(&MIME_BYTES[..2])
+                    );
+                } else {
+                    assert_eq!(eas::find_text_after(&doc, base::DATA), Some("bo"));
+                }
+                for command in ["ItemOperations", "Search"] {
+                    let mut b = eas::DocumentBuilder::new();
+                    if command == "ItemOperations" {
+                        b.start(ops::ITEM_OPERATIONS);
+                        b.start(ops::FETCH);
+                        b.leaf(ops::STORE, "Mailbox");
+                        b.leaf(air::COLLECTION_ID, "inbox");
+                        b.leaf(air::SERVER_ID, "m1");
+                        b.start(ops::OPTIONS);
+                    } else {
+                        b.start(srch::SEARCH);
+                        b.start(srch::STORE);
+                        b.leaf(srch::NAME, "Mailbox");
+                        b.start(srch::QUERY);
+                        b.leaf(srch::FREE_TEXT, "subject");
+                        // MIMESupport outside Options must not affect policy.
+                        b.leaf(air::MIME_SUPPORT, "2");
+                        b.end();
+                        b.start(srch::OPTIONS);
+                    }
+                    for child in eas::child_elements(&options) {
+                        b.extend(child.nodes);
+                    }
+                    b.end();
+                    b.end();
+                    b.end();
+                    let response = env
+                        .req(command, "mime-policy")
+                        .header("MS-ASProtocolVersion", version)
+                        .body(wbxml::encode_document(&b.finish()))
+                        .send()
+                        .await
+                        .unwrap();
+                    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+                    assert_eq!(
+                        eas::find_text_after(&doc, base::TYPE),
+                        Some(if mime { "4" } else { "1" })
+                    );
+                    assert_eq!(eas::find_text_after(&doc, mail::MESSAGE_CLASS), Some(class));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn mime_policy_rejects_empty_duplicate_and_out_of_range_options() {
+    use eas::airsync as air;
+    for values in [vec![""], vec!["3"], vec!["-1"], vec!["2", "1"]] {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::OPTIONS);
+        for value in values {
+            b.leaf(air::MIME_SUPPORT, value);
+        }
+        b.end();
+        assert!(eas::mime_support(&b.finish()).is_err());
+    }
+}
+
+#[tokio::test]
+async fn invalid_mime_options_preserve_saved_policy_and_replacement_resets_it() {
+    use eas::{airsync as air, airsync_base as base};
+    let env = start_env(Opts::default()).await;
+    let options = mime_options(Some("2"), 5);
+    let response = env
+        .req("Sync", "policy-replacement")
+        .body(sync_body_preferences("0", "inbox", Some(&options), true))
+        .send()
+        .await
+        .unwrap();
+    let prime = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    let mut key = sync_key(&prime);
+    let env = env.restarted().await;
+    let fetch = |key: &str, options: Option<wbxml::Document>| {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, key);
+        b.leaf(air::COLLECTION_ID, "inbox");
+        b.leaf(air::GET_CHANGES, "0");
+        if let Some(options) = options {
+            b.extend(options.nodes);
+        }
+        b.start(air::COMMANDS);
+        b.start(air::FETCH);
+        b.leaf(air::SERVER_ID, "m1");
+        for _ in 0..5 {
+            b.end();
+        }
+        wbxml::encode_document(&b.finish())
+    };
+    for (options, status, mime) in [
+        (Some(mime_options(Some("3"), 5)), "4", false),
+        (None, "1", true),
+        (Some(mime_options(None, 2)), "1", false),
+        (None, "1", false),
+    ] {
+        let response = env
+            .req("Sync", "policy-replacement")
+            .body(fetch(&key, options))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, air::STATUS), Some(status));
+        key = sync_key(&doc);
+        if status == "1" {
+            assert_eq!(
+                eas::find_text_after(&doc, base::TYPE),
+                Some(if mime { "4" } else { "1" })
+            );
+            if mime {
+                assert_eq!(
+                    eas::find_opaque_after(&doc, base::DATA),
+                    Some(&MIME_BYTES[..5])
+                );
+            } else {
+                assert_eq!(eas::find_text_after(&doc, base::DATA), Some("bo"));
+            }
+        }
+    }
 }

@@ -57,6 +57,7 @@ pub struct Email {
     pub preview: Option<String>,
     pub read: bool,
     pub body: Option<EmailBody>,
+    pub smime: Option<SmimeKind>,
     pub attachments: Vec<EmailAttachment>,
     /// The blobId of the message's own raw RFC822 source (JMAP Email
     /// objects expose this directly, distinct from any attachment's own
@@ -72,6 +73,12 @@ pub struct Email {
     /// attempt tried that -- commit `d199d37` -- and caused a real,
     /// device-visible sync error).
     pub thread_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmimeKind {
+    Opaque,
+    MultipartSigned,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

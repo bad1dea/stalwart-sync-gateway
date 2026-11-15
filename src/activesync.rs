@@ -898,9 +898,14 @@ async fn search(
                     .jmap
                     .search_emails(auth, &text, position, limit)
                     .await?;
-                let emails =
-                    prepare_mail_bodies(state, auth, emails, &body_pref.as_ref().unwrap().requests)
-                        .await?;
+                let emails = prepare_mail_bodies(
+                    state,
+                    auth,
+                    emails,
+                    &body_pref.as_ref().unwrap().requests,
+                    request.mime_support,
+                )
+                .await?;
                 Ok::<_, anyhow::Error>((emails, total))
             }
             .await;
@@ -2094,6 +2099,7 @@ async fn sync_mail(
                 auth,
                 &collection.commands,
                 &collection.body_preferences,
+                collection.mime_support,
             )
             .await
         } else {
@@ -2543,6 +2549,7 @@ async fn sync_mail(
                 auth,
                 emails_to_send,
                 &collection.body_preferences,
+                collection.mime_support,
             )
             .await
             {
@@ -2968,6 +2975,7 @@ async fn resolve_fetch_commands(
     auth: &crate::jmap::client::AuthenticatedSession,
     commands: &[wbxml::eas::SyncClientCommand],
     body_preferences: &[RequestedBodyPreference],
+    mime_support: u8,
 ) -> Vec<(
     String,
     anyhow::Result<Option<(crate::model::Email, BodyPreference)>>,
@@ -2978,7 +2986,7 @@ async fn resolve_fetch_commands(
             let result = state.jmap.get_email_by_id(auth, &command.server_id).await;
             let result = match result {
                 Ok(Some(email)) => {
-                    body_preferences_for_email(state, auth, &email, body_preferences)
+                    body_preferences_for_email(state, auth, &email, body_preferences, mime_support)
                         .await
                         .map(|preference| Some((email, preference)))
                 }
@@ -3115,7 +3123,28 @@ async fn body_preferences_for_email(
     auth: &AuthenticatedSession,
     email: &crate::model::Email,
     requests: &[RequestedBodyPreference],
+    mime_support: u8,
 ) -> anyhow::Result<BodyPreference> {
+    let allow_mime = mime_support == 2 || (mime_support == 1 && email.smime.is_some());
+    let mut effective = requests.to_vec();
+    if !allow_mime {
+        effective.retain(|pref| pref.body_type != 4);
+        if effective.is_empty() {
+            if let Some(pref) = requests.iter().find(|pref| pref.body_type == 4) {
+                effective.push(RequestedBodyPreference {
+                    body_type: match email.body.as_ref().map(|body| body.body_type) {
+                        Some(EmailBodyType::Html) => 2,
+                        _ => 1,
+                    },
+                    ..*pref
+                });
+            }
+        }
+    }
+    if allow_mime && email.smime.is_some() && effective.iter().any(|pref| pref.body_type == 4) {
+        effective.retain(|pref| pref.body_type == 4);
+    }
+    let requests = effective.as_slice();
     let complete_body = if email.body.as_ref().is_some_and(|body| body.is_truncated)
         && (requests.is_empty() || requests.iter().any(|pref| matches!(pref.body_type, 1 | 2)))
     {
@@ -3180,10 +3209,12 @@ async fn prepare_mail_bodies(
     auth: &AuthenticatedSession,
     emails: Vec<crate::model::Email>,
     requests: &[RequestedBodyPreference],
+    mime_support: u8,
 ) -> anyhow::Result<Vec<(crate::model::Email, BodyPreference)>> {
     let mut prepared = Vec::with_capacity(emails.len());
     for email in emails {
-        let preference = body_preferences_for_email(state, auth, &email, requests).await?;
+        let preference =
+            body_preferences_for_email(state, auth, &email, requests, mime_support).await?;
         prepared.push((email, preference));
     }
     Ok(prepared)
@@ -3278,7 +3309,14 @@ fn write_email_fields(
     }
     builder.leaf(mail::IMPORTANCE, "1");
     builder.leaf(mail::READ, if email.read { "1" } else { "0" });
-    builder.leaf(mail::MESSAGE_CLASS, "IPM.Note");
+    builder.leaf(
+        mail::MESSAGE_CLASS,
+        match email.smime {
+            Some(crate::model::SmimeKind::Opaque) => "IPM.Note.SMIME",
+            Some(crate::model::SmimeKind::MultipartSigned) => "IPM.Note.SMIME.MultipartSigned",
+            None => "IPM.Note",
+        },
+    );
     // Metadata only (no content -- see the project's logging constraint on
     // mail bodies): lets a body-not-rendering report be diagnosed without
     // needing to inspect an account's real mail.
@@ -6142,6 +6180,7 @@ mod tests {
                 body_type: EmailBodyType::Plain,
                 value: "Hello".to_owned(),
             }),
+            smime: None,
             attachments: vec![EmailAttachment {
                 blob_id: "blob-1".to_owned(),
                 name: "file.txt".to_owned(),
@@ -6227,6 +6266,7 @@ mod tests {
                 body_type: EmailBodyType::Plain,
                 value: "Hello".to_owned(),
             }),
+            smime: None,
             attachments: vec![],
             blob_id: None,
             thread_id: Some("thread-abc".to_owned()),
@@ -6273,6 +6313,7 @@ mod tests {
             preview: None,
             read: false,
             body: None,
+            smime: None,
             attachments: vec![],
             blob_id: None,
             thread_id: None,
@@ -6321,6 +6362,7 @@ mod tests {
                 body_type: EmailBodyType::Plain,
                 value: "Hello world".to_owned(),
             }),
+            smime: None,
             attachments: vec![],
             blob_id: None,
             thread_id: None,
@@ -6397,6 +6439,7 @@ mod tests {
             preview: None,
             read: false,
             body: None,
+            smime: None,
             attachments: vec![EmailAttachment {
                 blob_id: "blob-1".to_owned(),
                 name: "invoice.pdf".to_owned(),
