@@ -2119,7 +2119,7 @@ async fn sync_mail(
         if is_mail_collection {
             collection.commands.retain(|command| {
                 if matches!(command.kind, wbxml::eas::SyncClientCommandKind::Change)
-                    && !command.flag_valid
+                    && (!command.flag_valid || command.unsupported_mail_change)
                 {
                     failed_changes.push(command.server_id.clone());
                     false

@@ -4189,6 +4189,54 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_unsupported_draft_change_returns_item_error() {
+        let live = Live::new("E2E_USER2").await;
+        let r = live.call(serde_json::json!([["Mailbox/set", {
+            "accountId":live.account, "create":{"m":{"name":format!("Draft guard {}",std::process::id())}}
+        },"0"]])).await;
+        let folder = r[0][1]["created"]["m"]["id"].as_str().unwrap().to_owned();
+        let ids = live.seed(&folder, 1, "draft-guard", false).await;
+        let device = dev("draft-guard");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let sync = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let result = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                unsupported_mail_change_body(&sync_key(&sync), &folder, &ids[0]),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&result, air::STATUS).contains(&"6".to_owned()));
+        let native = live
+            .call(serde_json::json!([["Email/get",{
+            "accountId":live.account,"ids":ids,"properties":["id","subject","keywords"]
+        },"0"]]))
+            .await;
+        let item = &native[0][1]["list"][0];
+        assert_ne!(item["subject"], "Edited draft");
+        assert!(item["keywords"]["$seen"] != true);
+        let cleanup = live
+            .call(serde_json::json!([
+                ["Email/set",{"accountId":live.account,"destroy":ids},"0"],
+                ["Mailbox/set",{"accountId":live.account,"destroy":[folder]},"1"]
+            ]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_flag_validation_keeps_failed_items_unchanged_and_replays_mixed_results() {
         let live = Live::new("E2E_USER2").await;
         let r = live.call(serde_json::json!([["Mailbox/set", {
@@ -6296,6 +6344,80 @@ async fn partial_flag_metadata_preserves_other_fields() {
         eas::find_text_after(&doc, tasks::REMINDER_TIME),
         Some("2026-11-15T10:00:00.000Z")
     );
+}
+
+fn unsupported_mail_change_body(key: &str, folder: &str, id: &str) -> Vec<u8> {
+    use eas::{airsync as air, email as mail};
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, key);
+    b.leaf(air::COLLECTION_ID, folder);
+    b.leaf(air::GET_CHANGES, "0");
+    b.start(air::COMMANDS);
+    b.start(air::CHANGE);
+    b.leaf(air::SERVER_ID, id);
+    b.start(air::APPLICATION_DATA);
+    b.leaf(mail::SUBJECT, "Edited draft");
+    b.leaf(mail::READ, "1");
+    for _ in 0..6 {
+        b.end();
+    }
+    wbxml::encode_document(&b.finish())
+}
+
+#[tokio::test]
+async fn unsupported_mail_content_change_does_not_acknowledge_or_apply_read_state() {
+    use eas::airsync as air;
+    let env = start_env(Opts::default()).await;
+    let (prime, _, _) = env.sync_detail("client", "0").await;
+    let (key, _, _) = env.sync_detail("client", &prime).await;
+    let response = env
+        .req("Sync", "client")
+        .body(unsupported_mail_change_body(&key, "inbox", "m1"))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert!(eas::find_all_text_after(&doc, air::STATUS).contains(&"6".to_owned()));
+    assert!(env
+        .mock
+        .keywords
+        .lock()
+        .unwrap()
+        .get("m1")
+        .is_none_or(|keywords| !keywords.contains("$seen")));
+}
+
+#[tokio::test]
+async fn unsupported_sync_send_is_rejected() {
+    use eas::{airsync as air, email2};
+    let env = start_env(Opts::default()).await;
+    let (prime, _, _) = env.sync_detail("client", "0").await;
+    let (key, _, _) = env.sync_detail("client", &prime).await;
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, &key);
+    b.leaf(air::COLLECTION_ID, "inbox");
+    b.leaf(air::GET_CHANGES, "0");
+    b.start(air::COMMANDS);
+    b.start(air::CHANGE);
+    b.leaf(air::SERVER_ID, "m1");
+    b.empty_tag(email2::SEND);
+    for _ in 0..5 {
+        b.end();
+    }
+    let response = env
+        .req("Sync", "client")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert!(eas::find_all_text_after(&doc, air::STATUS).contains(&"6".to_owned()));
 }
 
 #[tokio::test]

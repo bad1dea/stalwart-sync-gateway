@@ -1238,6 +1238,7 @@ pub struct SyncClientCommand {
     pub flag_status: Option<u8>,
     pub flag_fields: Vec<(u8, u8, String)>,
     pub flag_valid: bool,
+    pub unsupported_mail_change: bool,
     pub note: NoteFields,
     pub contact: ContactFields,
     pub calendar: CalendarFields,
@@ -1647,6 +1648,7 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             flag_status: None,
                             flag_fields: Vec::new(),
                             flag_valid: true,
+                            unsupported_mail_change: false,
                             note: NoteFields::default(),
                             contact: ContactFields::default(),
                             calendar: CalendarFields::default(),
@@ -1739,6 +1741,12 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                         }
                         command.flag_valid = valid_mail_flag(&command_doc, command.flag_status);
                         command.flag_fields = mail_flag_fields(&command_doc);
+                        command.unsupported_mail_change = child_elements(&command_doc).iter().any(
+                            |child| matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, email2::SEND))
+                        ) || child_elements(&command_doc).iter()
+                            .filter(|child| matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, airsync::APPLICATION_DATA)))
+                            .flat_map(child_elements)
+                            .any(|child| !matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, email::READ) || same_token(*t, email::FLAG)));
                         command.note = extract_note_fields(&document.nodes[start + 1..idx]);
                         command.contact = extract_contact_fields(&document.nodes[start + 1..idx]);
                         command.calendar = extract_calendar_fields(&document.nodes[start + 1..idx]);
