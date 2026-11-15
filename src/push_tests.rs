@@ -2940,6 +2940,152 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_calendar_partial_times_preserve_timezone_and_other_endpoint() {
+        use eas::calendar as cal;
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let result = live
+            .call_using(
+                serde_json::json!([["Calendar/get", {
+            "accountId": live.account
+        }, "0"]]),
+                &using,
+            )
+            .await;
+        let calendar = result[0][1]["list"][0]["id"].as_str().unwrap().to_owned();
+        let folder = format!("cal_{calendar}");
+        let result = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set", {
+            "accountId":live.account, "create":{"e":{
+                "@type":"Event","calendarIds":{&calendar:true},"title":"Partial times",
+                "start":"2026-11-15T10:00:00","timeZone":"America/Toronto","duration":"PT1H"
+            }}
+        },"0"]]),
+                &using,
+            )
+            .await;
+        let id = result[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let device = dev("calendar-times");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let synced = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let mut key = sync_key(&synced);
+        for (field, value, expected_start, expected_end) in [
+            (
+                cal::END_TIME,
+                "20261115T170000Z",
+                "20261115T150000Z",
+                "20261115T170000Z",
+            ),
+            (
+                cal::START_TIME,
+                "20261115T140000Z",
+                "20261115T140000Z",
+                "20261115T170000Z",
+            ),
+        ] {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(air::SYNC);
+            b.start(air::COLLECTIONS);
+            b.start(air::COLLECTION);
+            b.leaf(air::SYNC_KEY, &key);
+            b.leaf(air::COLLECTION_ID, &folder);
+            b.start(air::COMMANDS);
+            b.start(air::CHANGE);
+            b.leaf(air::SERVER_ID, &id);
+            b.start(air::APPLICATION_DATA);
+            b.leaf(field, value);
+            for _ in 0..6 {
+                b.end();
+            }
+            let doc = live
+                .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+                .await;
+            assert!(eas::find_all_text_after(&doc, air::STATUS)
+                .iter()
+                .all(|status| status == "1"));
+            key = sync_key(&doc);
+            let inspect = live
+                .wbxml_version(
+                    "Sync",
+                    &dev("calendar-inspect"),
+                    sync_body("0", &folder),
+                    "16.1",
+                )
+                .await;
+            let inspect = live
+                .wbxml_version(
+                    "Sync",
+                    &dev("calendar-inspect"),
+                    sync_body(&sync_key(&inspect), &folder),
+                    "16.1",
+                )
+                .await;
+            let collection = eas::child_elements(&inspect)
+                .into_iter()
+                .flat_map(|node| eas::child_elements(&node))
+                .find(|node| {
+                    matches!(node.nodes.first(), Some(wbxml::Node::Start(t))
+                    if t.code_page == air::PAGE && t.token == air::COLLECTION.token)
+                })
+                .unwrap();
+            let commands = eas::child_elements(&collection)
+                .into_iter()
+                .find(|node| {
+                    matches!(node.nodes.first(), Some(wbxml::Node::Start(t))
+                    if t.code_page == air::PAGE && t.token == air::COMMANDS.token)
+                })
+                .unwrap();
+            let inspect = eas::child_elements(&commands)
+                .into_iter()
+                .find(|node| eas::find_text_after(node, air::SERVER_ID) == Some(id.as_str()))
+                .unwrap();
+            assert_eq!(
+                eas::find_text_after(&inspect, cal::START_TIME),
+                Some(expected_start)
+            );
+            assert_eq!(
+                eas::find_text_after(&inspect, cal::END_TIME),
+                Some(expected_end)
+            );
+            let result = live
+                .call_using(
+                    serde_json::json!([["CalendarEvent/get",{
+                "accountId":live.account,"ids":[&id],"properties":["id","timeZone"]
+            },"0"]]),
+                    &using,
+                )
+                .await;
+            assert_eq!(result[0][1]["list"][0]["timeZone"], "America/Toronto");
+        }
+        let result = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set",{
+            "accountId":live.account,"destroy":[id]
+        },"0"]]),
+                &using,
+            )
+            .await;
+        assert!(result[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_calendar_16_1_location_edits_preserve_jmap_data_and_clear() {
         use eas::{airsync_base as base, calendar as cal};
         let live = Live::new("E2E_USER2").await;

@@ -1671,17 +1671,81 @@ impl JmapClient {
                 );
             }
         }
-        if let Some(start) = fields
-            .start_time
-            .as_deref()
-            .and_then(eas_compact_to_local_iso)
-        {
-            event.insert("start".to_owned(), serde_json::Value::String(start));
-        }
-        if let (Some(start), Some(end)) = (&fields.start_time, &fields.end_time) {
-            if let Some(duration) = eas_compact_duration(start, end) {
-                event.insert("duration".to_owned(), serde_json::Value::String(duration));
+        if id.is_none() && fields.start_time.is_some() && fields.end_time.is_none() {
+            let start = fields
+                .start_time
+                .as_deref()
+                .and_then(eas_compact_to_local_iso)
+                .ok_or_else(|| anyhow::anyhow!("invalid calendar start"))?;
+            event.insert("start".to_owned(), serde_json::json!(start));
+        } else if fields.start_time.is_some() || fields.end_time.is_some() {
+            let existing = if let Some(id) = id {
+                let response: JmapResponse<serde_json::Value> = self.api_call(
+                    auth,
+                    &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
+                    vec![MethodCall::new("CalendarEvent/get", serde_json::json!({
+                        "accountId": account_id, "ids": [id], "properties": ["id", "start", "timeZone", "duration"]
+                    }), "0")],
+                ).await?;
+                let object = response
+                    .method_responses
+                    .iter()
+                    .find(|method| method.0 == "CalendarEvent/get")
+                    .and_then(|method| method.1["list"].as_array())
+                    .and_then(|list| list.iter().find(|object| object["id"] == id))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("CalendarEvent/get omitted the event being edited")
+                    })?;
+                Some(serde_json::from_value::<CalendarEventObject>(
+                    object.clone(),
+                )?)
+            } else {
+                None
+            };
+            let timezone = existing
+                .as_ref()
+                .and_then(|event| event.time_zone.as_deref());
+            let previous = existing.as_ref().map(|event| {
+                let mut value = CalendarEventObject::default();
+                value.start.clone_from(&event.start);
+                value.time_zone.clone_from(&event.time_zone);
+                value.duration.clone_from(&event.duration);
+                CalendarEvent::from(value)
+            });
+            let start = fields
+                .start_time
+                .as_deref()
+                .or_else(|| {
+                    previous
+                        .as_ref()
+                        .and_then(|event| event.start_utc.as_deref())
+                })
+                .ok_or_else(|| anyhow::anyhow!("calendar event has no start"))?;
+            let end = fields
+                .end_time
+                .as_deref()
+                .or_else(|| previous.as_ref().and_then(|event| event.end_utc.as_deref()))
+                .ok_or_else(|| anyhow::anyhow!("calendar event has no end"))?;
+            let start_local = eas_to_calendar_local(start, timezone).ok_or_else(|| {
+                anyhow::anyhow!("calendar start cannot be represented in its time zone")
+            })?;
+            let end_local = eas_to_calendar_local(end, timezone).ok_or_else(|| {
+                anyhow::anyhow!("calendar end cannot be represented in its time zone")
+            })?;
+            let duration = end_local.signed_duration_since(start_local).num_seconds();
+            if duration < 0 {
+                anyhow::bail!("calendar end precedes start in its time zone");
             }
+            if fields.start_time.is_some() {
+                event.insert(
+                    "start".to_owned(),
+                    serde_json::json!(start_local.format("%Y-%m-%dT%H:%M:%S").to_string()),
+                );
+            }
+            event.insert(
+                "duration".to_owned(),
+                serde_json::json!(format!("PT{duration}S")),
+            );
         }
         if let Some(all_day) = fields.all_day_event {
             event.insert(
@@ -3500,29 +3564,25 @@ fn local_to_utc_eas(local_iso: &str, timezone: Option<&str>) -> Option<String> {
     Some(utc.format("%Y%m%dT%H%M%SZ").to_string())
 }
 
-/// Write-side mirror of `local_to_utc_eas`'s "absent timeZone == already
-/// UTC" convention: parses EAS's compact UTC DateTime
-/// (`YYYYMMDDTHHMMSSZ`) and reformats it as the naive (no offset, no
-/// trailing `Z`) ISO 8601 shape JSCalendar's `start` wants when no
-/// `timeZone` property is sent alongside it.
+/// Convert an EAS instant to the event's local time only when it round-trips.
+fn eas_to_calendar_local(compact: &str, timezone: Option<&str>) -> Option<chrono::NaiveDateTime> {
+    let utc = chrono::NaiveDateTime::parse_from_str(compact, "%Y%m%dT%H%M%SZ")
+        .ok()?
+        .and_utc();
+    let local = match timezone {
+        Some(timezone) => utc
+            .with_timezone(&timezone.parse::<chrono_tz::Tz>().ok()?)
+            .naive_local(),
+        None => utc.naive_utc(),
+    };
+    (local_to_utc_eas(&local.format("%Y-%m-%dT%H:%M:%S").to_string(), timezone).as_deref()
+        == Some(compact))
+    .then_some(local)
+}
+
 fn eas_compact_to_local_iso(compact: &str) -> Option<String> {
     let parsed = chrono::NaiveDateTime::parse_from_str(compact, "%Y%m%dT%H%M%SZ").ok()?;
     Some(parsed.format("%Y-%m-%dT%H:%M:%S").to_string())
-}
-
-/// `end - start`, both in EAS's compact UTC DateTime form, as an ISO 8601
-/// duration for JSCalendar's `duration` property. Deliberately the
-/// simplest valid encoding (`PT<seconds>S`) rather than breaking into
-/// days/hours/minutes -- `PT5400S` is exactly as spec-valid as `PT1H30M`
-/// and has no ambiguity to get wrong.
-fn eas_compact_duration(start: &str, end: &str) -> Option<String> {
-    let start = chrono::NaiveDateTime::parse_from_str(start, "%Y%m%dT%H%M%SZ").ok()?;
-    let end = chrono::NaiveDateTime::parse_from_str(end, "%Y%m%dT%H%M%SZ").ok()?;
-    let seconds = (end - start).num_seconds();
-    if seconds < 0 {
-        return None;
-    }
-    Some(format!("PT{seconds}S"))
 }
 
 /// Minimal ISO 8601 duration parser covering the shapes JSCalendar event
@@ -3641,7 +3701,7 @@ impl From<CalendarObject> for Collection {
 #[cfg(test)]
 mod tests {
     use super::{
-        eas_compact_duration, eas_compact_to_local_iso, local_to_utc_eas,
+        eas_compact_to_local_iso, eas_to_calendar_local, local_to_utc_eas,
         parse_iso8601_duration_seconds,
     };
 
@@ -3675,19 +3735,16 @@ mod tests {
     }
 
     #[test]
-    fn eas_compact_duration_computes_seconds_between() {
+    fn calendar_utc_conversion_preserves_zone_and_rejects_ambiguous_time() {
         assert_eq!(
-            eas_compact_duration("20260901T140000Z", "20260901T153000Z"),
-            Some("PT5400S".to_owned())
+            eas_to_calendar_local("20261115T150000Z", Some("America/Toronto"))
+                .unwrap()
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string(),
+            "2026-11-15T10:00:00"
         );
-    }
-
-    #[test]
-    fn eas_compact_duration_rejects_end_before_start() {
-        assert_eq!(
-            eas_compact_duration("20260901T153000Z", "20260901T140000Z"),
-            None
-        );
+        assert!(eas_to_calendar_local("20261101T063000Z", Some("America/Toronto")).is_none());
+        assert!(eas_to_calendar_local("20261115T150000Z", Some("Invalid/Zone")).is_none());
     }
 
     #[test]
