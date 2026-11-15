@@ -1211,7 +1211,7 @@ impl Default for SyncCollectionRequest {
         Self {
             sync_key: "0".to_owned(),
             collection_id: String::new(),
-            window_size: 25,
+            window_size: 100,
             get_changes: true,
             deletes_as_moves: true,
             commands: Vec::new(),
@@ -1681,7 +1681,7 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                         } else if token.code_page == airsync::PAGE
                             && token.token == airsync::WINDOW_SIZE.token
                         {
-                            let size = text.parse::<usize>().unwrap_or(25);
+                            let size = text.parse::<usize>().unwrap_or(100);
                             collection.window_size = if size == 0 { 512 } else { size.min(512) };
                         } else if token.code_page == airsync::PAGE
                             && token.token == airsync::GET_CHANGES.token
@@ -2721,6 +2721,17 @@ mod tests {
     }
     #[test]
     fn sync_window_and_delete_defaults_follow_the_protocol() {
+        let mut b = DocumentBuilder::new();
+        b.start(airsync::SYNC);
+        b.start(airsync::COLLECTIONS);
+        b.start(airsync::COLLECTION);
+        b.leaf(airsync::SYNC_KEY, "1");
+        b.leaf(airsync::COLLECTION_ID, "folder");
+        b.end();
+        b.end();
+        b.end();
+        assert_eq!(sync_collections(&b.finish())[0].window_size, 100);
+
         for (window, expected) in [("0", 512), ("513", 512), ("19", 19)] {
             for mode in [None, Some(""), Some("0"), Some("1")] {
                 let mut b = DocumentBuilder::new();

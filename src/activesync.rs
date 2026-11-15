@@ -845,8 +845,7 @@ async fn search(
             .into_response();
     };
 
-    // (position, limit): default to the first 25 results (matching this
-    // gateway's own Sync WindowSize default) when the device omits Range
+    // (position, limit): default to the first 25 results when the device omits Range
     // entirely -- the schema marks it optional inside Options.
     let (position, limit) = match request.range {
         Some((start, end)) if end >= start => (start, (end - start + 1).clamp(1, 100) as usize),
@@ -5591,7 +5590,7 @@ fn mail_record_options(jmap_state: &str) -> MailRecordOptions {
         .next()
         .and_then(|w| w.parse::<usize>().ok())
         .filter(|w| *w > 0)
-        .unwrap_or(25);
+        .unwrap_or(100);
     let filter = parts.next().and_then(|f| f.parse().ok()).unwrap_or(0);
     let email_state = parts.next().unwrap_or_default().to_owned();
     MailRecordOptions {

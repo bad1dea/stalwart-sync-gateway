@@ -6731,3 +6731,41 @@ async fn invalid_mime_options_preserve_saved_policy_and_replacement_resets_it() 
         }
     }
 }
+
+#[tokio::test]
+async fn omitted_sync_window_delivers_up_to_one_hundred_messages() {
+    use eas::airsync as air;
+    let env = start_env(Opts::default()).await;
+    for i in 0..38 {
+        env.mock.add_mail("inbox", &format!("default-window-{i}"));
+    }
+    let body = |key: &str| {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, key);
+        b.leaf(air::COLLECTION_ID, "inbox");
+        b.empty_tag(air::GET_CHANGES);
+        b.end();
+        b.end();
+        b.end();
+        wbxml::encode_document(&b.finish())
+    };
+    let response = env
+        .req("Sync", "default-window")
+        .body(body("0"))
+        .send()
+        .await
+        .unwrap();
+    let prime = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    let response = env
+        .req("Sync", "default-window")
+        .body(body(&sync_key(&prime)))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, air::SERVER_ID).len(), 40);
+    assert!(!eas::contains_token(&doc, air::MORE_AVAILABLE));
+}
