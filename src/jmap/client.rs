@@ -1688,6 +1688,7 @@ impl JmapClient {
                     "duration",
                     "locations",
                     "showWithoutTime",
+                    "freeBusyStatus",
                     "participants",
                 ]),
                 limit,
@@ -1739,6 +1740,16 @@ impl JmapClient {
             "@type".to_owned(),
             serde_json::Value::String("Event".to_owned()),
         );
+        if let Some(busy) = fields.busy_status {
+            let value = match busy {
+                0 => "free",
+                1 => "x-eas-tentative",
+                2 => "busy",
+                3 => "x-eas-out-of-office",
+                _ => anyhow::bail!("unsupported calendar availability"),
+            };
+            event.insert("freeBusyStatus".to_owned(), serde_json::json!(value));
+        }
         if let Some(subject) = &fields.subject {
             event.insert(
                 "title".to_owned(),
@@ -4097,6 +4108,8 @@ struct CalendarEventObject {
     locations: Option<BTreeMap<String, CalendarEventLocation>>,
     #[serde(default)]
     show_without_time: bool,
+    #[serde(default)]
+    free_busy_status: Option<String>,
     /// Participant map keyed by an arbitrary JMAP-assigned id (NOT the
     /// email) -- confirmed live 2026-08-25 alongside `reply_to`: Stalwart
     /// silently drops a `participants`-only create with no top-level
@@ -4206,6 +4219,13 @@ impl From<CalendarEventObject> for CalendarEvent {
             start_utc,
             end_utc,
             all_day: value.show_without_time,
+            busy_status: Some(match value.free_busy_status.as_deref() {
+                Some("free") => 0,
+                Some("x-eas-tentative") => 1,
+                Some("x-eas-out-of-office") => 3,
+                Some("x-eas-working-elsewhere") => 4,
+                _ => 2,
+            }),
             organizer_email,
             organizer_name,
             attendees,

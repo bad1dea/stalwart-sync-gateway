@@ -3421,6 +3421,202 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_calendar_busy_status_round_trips_between_devices() {
+        use eas::calendar as cal;
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let result = live
+            .call_using(
+                serde_json::json!([["Calendar/get",{"accountId":live.account},"0"]]),
+                &using,
+            )
+            .await;
+        let calendar = result[0][1]["list"][0]["id"].as_str().unwrap().to_owned();
+        let folder = format!("cal_{calendar}");
+        let result = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set",{"accountId":live.account,
+            "create":{"e":{"@type":"Event","calendarIds":{&calendar:true},"title":"Busy fixture",
+                "start":"2042-05-05T10:00:00","timeZone":"Etc/UTC","duration":"PT1H",
+                "freeBusyStatus":"busy"}}},"0"]]),
+                &using,
+            )
+            .await;
+        let id = result[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut devices = Vec::new();
+        for prefix in ["calendar-busy-a", "calendar-busy-b"] {
+            let device = dev(prefix);
+            let prime = live
+                .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+                .await;
+            let sync = live
+                .wbxml_version(
+                    "Sync",
+                    &device,
+                    sync_body(&sync_key(&prime), &folder),
+                    "16.1",
+                )
+                .await;
+            assert!(eas::find_all_text_after(&sync, air::SERVER_ID).contains(&id));
+            devices.push((device, sync_key(&sync)));
+        }
+        for (status, native_value) in [
+            ("0", "free"),
+            ("1", "x-eas-tentative"),
+            ("2", "busy"),
+            ("3", "x-eas-out-of-office"),
+        ] {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(air::SYNC);
+            b.start(air::COLLECTIONS);
+            b.start(air::COLLECTION);
+            b.leaf(air::SYNC_KEY, &devices[0].1);
+            b.leaf(air::COLLECTION_ID, &folder);
+            b.start(air::COMMANDS);
+            b.start(air::CHANGE);
+            b.leaf(air::SERVER_ID, &id);
+            b.start(air::APPLICATION_DATA);
+            b.leaf(cal::BUSY_STATUS, status);
+            for _ in 0..6 {
+                b.end();
+            }
+            let response = live
+                .wbxml_version(
+                    "Sync",
+                    &devices[0].0,
+                    wbxml::encode_document(&b.finish()),
+                    "16.1",
+                )
+                .await;
+            assert!(eas::find_all_text_after(&response, air::STATUS)
+                .iter()
+                .all(|v| v == "1"));
+            devices[0].1 = sync_key(&response);
+            let native = live
+                .call_using(
+                    serde_json::json!([["CalendarEvent/get",{"accountId":live.account,
+                "ids":[&id],"properties":["title","freeBusyStatus"]},"0"]]),
+                    &using,
+                )
+                .await;
+            assert_eq!(native[0][1]["list"][0]["title"], "Busy fixture");
+            assert_eq!(native[0][1]["list"][0]["freeBusyStatus"], native_value);
+            let availability = live.call_using(serde_json::json!([["Principal/getAvailability",{
+                "accountId":live.account,"id":live.account,"utcStart":"2042-05-05T10:00:00Z","utcEnd":"2042-05-05T11:00:00Z"
+            },"0"]]), &["urn:ietf:params:jmap:core","urn:ietf:params:jmap:calendars","urn:ietf:params:jmap:principals"]).await;
+            assert_eq!(
+                availability[0][1]["list"].as_array().unwrap().is_empty(),
+                status == "0"
+            );
+            let other = live
+                .wbxml_version(
+                    "Sync",
+                    &devices[1].0,
+                    sync_body(&devices[1].1, &folder),
+                    "16.1",
+                )
+                .await;
+            assert_eq!(
+                eas::find_text_after(&other, air::SERVER_ID),
+                Some(id.as_str())
+            );
+            assert_eq!(eas::find_text_after(&other, cal::BUSY_STATUS), Some(status));
+            devices[1].1 = sync_key(&other);
+        }
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, &devices[0].1);
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, &id);
+        b.start(air::APPLICATION_DATA);
+        b.leaf(cal::BUSY_STATUS, "4");
+        b.leaf(cal::SUBJECT, "must not apply");
+        for _ in 0..6 {
+            b.end();
+        }
+        let response = live
+            .wbxml_version(
+                "Sync",
+                &devices[0].0,
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&response, air::STATUS).contains(&"6".to_owned()));
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{"accountId":live.account,
+            "ids":[&id],"properties":["title","freeBusyStatus"]},"0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(native[0][1]["list"][0]["title"], "Busy fixture");
+        assert_eq!(
+            native[0][1]["list"][0]["freeBusyStatus"],
+            "x-eas-out-of-office"
+        );
+        devices[0].1 = sync_key(&response);
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, &devices[0].1);
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::ADD);
+        b.leaf(air::CLIENT_ID, "busy-add");
+        b.start(air::APPLICATION_DATA);
+        b.leaf(cal::SUBJECT, "Free fixture");
+        b.leaf(cal::START_TIME, "20420506T100000Z");
+        b.leaf(cal::END_TIME, "20420506T110000Z");
+        b.leaf(cal::BUSY_STATUS, "0");
+        for _ in 0..6 {
+            b.end();
+        }
+        let added = live
+            .wbxml_version(
+                "Sync",
+                &devices[0].0,
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&added, air::STATUS)
+            .iter()
+            .all(|status| status == "1"));
+        let added_id = eas::find_text_after(&added, air::SERVER_ID)
+            .unwrap()
+            .to_owned();
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{"accountId":live.account,
+            "ids":[&added_id],"properties":["freeBusyStatus"]},"0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(native[0][1]["list"][0]["freeBusyStatus"], "free");
+        let cleanup = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set",{"accountId":live.account,
+            "destroy":[id,added_id]},"0"]]),
+                &using,
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_calendar_descriptions_round_trip_between_devices() {
         use eas::{airsync_base as base, calendar as cal, RequestedBodyPreference as Pref};
         let live = Live::new("E2E_USER2").await;

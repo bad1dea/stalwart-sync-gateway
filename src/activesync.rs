@@ -4526,7 +4526,8 @@ async fn sync_calendar_collection(
     let mut change_responses: Vec<(String, &'static str)> = Vec::new();
 
     for command in &collection.commands {
-        if command.calendar.unsupported_location
+        if command.calendar.unsupported_busy_status
+            || command.calendar.unsupported_location
             || command.calendar.unsupported_body
             || command.calendar.unsupported_attendees
         {
@@ -4772,6 +4773,7 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     event.start_utc.hash(&mut hasher);
     event.end_utc.hash(&mut hasher);
     event.all_day.hash(&mut hasher);
+    event.busy_status.hash(&mut hasher);
     event.organizer_email.hash(&mut hasher);
     event.organizer_name.hash(&mut hasher);
     event.is_organizer.hash(&mut hasher);
@@ -4853,6 +4855,13 @@ fn write_calendar_command(
         builder.leaf(cal::END_TIME, end.clone());
     }
     builder.leaf(cal::ALL_DAY_EVENT, if event.all_day { "1" } else { "0" });
+    let busy = event.busy_status.unwrap_or(2);
+    let busy = if busy == 4 && !matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
+        2
+    } else {
+        busy
+    };
+    builder.leaf(cal::BUSY_STATUS, busy.to_string());
     if !event.attendees.is_empty() {
         // [MS-ASCAL] MeetingStatus: 1 = meeting, organizer's own copy;
         // 3 = meeting, received as an attendee. The organizer is NEVER
@@ -6120,6 +6129,23 @@ mod tests {
     use crate::wbxml::eas::RequestedBodyPreference as BodyPreference;
     use crate::wbxml::eas::{airsync_base as base, DocumentBuilder};
     use crate::wbxml::Node;
+
+    #[test]
+    fn calendar_working_elsewhere_is_only_sent_to_newer_protocols() {
+        use crate::wbxml::eas::{self, airsync as air, calendar as cal};
+        let event = crate::model::CalendarEvent {
+            busy_status: Some(4),
+            ..Default::default()
+        };
+        for (version, expected) in [(ProtocolVersion::V14_0, "2"), (ProtocolVersion::V16_1, "4")] {
+            let mut b = eas::DocumentBuilder::new();
+            super::write_calendar_command(&mut b, air::CHANGE, &event, version, &[]);
+            assert_eq!(
+                eas::find_text_after(&b.finish(), cal::BUSY_STATUS),
+                Some(expected)
+            );
+        }
+    }
 
     #[test]
     fn calendar_location_wire_format_and_clear_follow_the_protocol_version() {

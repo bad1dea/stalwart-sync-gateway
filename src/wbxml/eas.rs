@@ -1275,6 +1275,8 @@ pub struct CalendarFields {
     pub start_time: Option<String>,
     pub end_time: Option<String>,
     pub all_day_event: Option<bool>,
+    pub busy_status: Option<u8>,
+    pub unsupported_busy_status: bool,
     pub attendees: Vec<AttendeeField>,
     pub attendees_present: bool,
     pub unsupported_attendees: bool,
@@ -2050,10 +2052,21 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     let mut type_count = 0;
     let mut data_count = 0;
     let mut attendees_count = 0;
+    let mut busy_count = 0;
 
     for node in nodes {
         match node {
             Node::Start(token) => {
+                if same_token(*token, calendar::BUSY_STATUS)
+                    && path
+                        .last()
+                        .is_some_and(|parent| same_token(*parent, airsync::APPLICATION_DATA))
+                {
+                    busy_count += 1;
+                    if !token.has_content {
+                        fields.unsupported_busy_status = true;
+                    }
+                }
                 if same_token(*token, calendar::SUBJECT) {
                     fields.subject = Some(String::new());
                 }
@@ -2160,6 +2173,14 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                     fields.start_time = Some(text.clone());
                 } else if same_token(top, calendar::END_TIME) {
                     fields.end_time = Some(text.clone());
+                } else if same_token(top, calendar::BUSY_STATUS)
+                    && path.len() >= 2
+                    && same_token(path[path.len() - 2], airsync::APPLICATION_DATA)
+                {
+                    fields.busy_status = text.parse::<u8>().ok();
+                    if !matches!(fields.busy_status, Some(0..=3)) {
+                        fields.unsupported_busy_status = true;
+                    }
                 } else if same_token(top, calendar::ALL_DAY_EVENT) {
                     fields.all_day_event = Some(text != "0");
                 }
@@ -2187,6 +2208,8 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
         }
     }
 
+    fields.unsupported_busy_status |=
+        busy_count > 1 || (busy_count == 1 && fields.busy_status.is_none());
     let mut attendee_emails = std::collections::HashSet::new();
     fields.unsupported_attendees |= attendees_count > 1
         || fields
@@ -2576,6 +2599,28 @@ mod tests {
         assert_eq!(command.task.subject.as_deref(), Some("Renew passport"));
         assert_eq!(command.task.complete, Some(false));
         assert_eq!(command.task.due_date.as_deref(), Some("20260905T090000Z"));
+    }
+
+    #[test]
+    fn calendar_busy_status_accepts_wire_values_and_rejects_invalid_updates() {
+        let parse = |values: &[&str]| {
+            let mut b = DocumentBuilder::new();
+            b.start(airsync::APPLICATION_DATA);
+            for value in values {
+                b.leaf(calendar::BUSY_STATUS, *value);
+            }
+            b.end();
+            super::extract_calendar_fields(&b.finish().nodes)
+        };
+        for value in 0..=3 {
+            let result = parse(&[&value.to_string()]);
+            assert_eq!(result.busy_status, Some(value));
+            assert!(!result.unsupported_busy_status);
+        }
+        assert!(parse(&["4"]).unsupported_busy_status);
+        assert!(parse(&["bad"]).unsupported_busy_status);
+        assert!(parse(&["1", "2"]).unsupported_busy_status);
+        assert_eq!(parse(&[]).busy_status, None);
     }
 
     #[test]

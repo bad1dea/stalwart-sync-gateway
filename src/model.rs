@@ -277,6 +277,7 @@ pub struct CalendarEvent {
     pub start_utc: Option<String>,
     pub end_utc: Option<String>,
     pub all_day: bool,
+    pub busy_status: Option<u8>,
     pub organizer_email: Option<String>,
     pub organizer_name: Option<String>,
     pub attendees: Vec<Attendee>,
