@@ -1744,6 +1744,7 @@ impl JmapClient {
                     "locations",
                     "showWithoutTime",
                     "freeBusyStatus",
+                    "privacy",
                     "keywords",
                     "alerts",
                     "useDefaultAlerts",
@@ -1865,6 +1866,53 @@ impl JmapClient {
         {
             anyhow::bail!("JMAP did not retain the requested calendar reminder");
         }
+        Ok(())
+    }
+
+    pub async fn verify_calendar_privacy(
+        &self,
+        auth: &AuthenticatedSession,
+        id: &str,
+        sensitivity: u8,
+    ) -> anyhow::Result<()> {
+        let expected = match sensitivity {
+            0 => "public",
+            2 => "private",
+            _ => anyhow::bail!("unsupported calendar sensitivity"),
+        };
+        let account = auth
+            .session
+            .primary_account_for(capabilities::CALENDARS)
+            .context("JMAP Calendars capability is not available")?;
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CALENDARS.to_owned(),
+                ],
+                vec![MethodCall::new(
+                    "CalendarEvent/get",
+                    serde_json::json!({
+                        "accountId":account, "ids":[id], "properties":["id","privacy"]
+                    }),
+                    "verify",
+                )],
+            )
+            .await?;
+        let item = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/get")
+            .and_then(|method| method.1["list"].as_array())
+            .and_then(|items| items.iter().find(|item| item["id"] == id))
+            .context("calendar privacy verification failed")?;
+        let privacy = match item.get("privacy") {
+            None | Some(serde_json::Value::Null) => "public",
+            Some(serde_json::Value::String(value)) => value,
+            _ => anyhow::bail!("invalid calendar privacy"),
+        };
+        anyhow::ensure!(privacy == expected, "JMAP did not retain calendar privacy");
         Ok(())
     }
 
@@ -2028,6 +2076,14 @@ impl JmapClient {
                 crate::jmap::calendar_reminder::write_reminder(&mut event, alerts, reminder)?;
                 reminder_changed = true;
             }
+        }
+        if let Some(sensitivity) = fields.sensitivity {
+            let privacy = match sensitivity {
+                0 => "public",
+                2 => "private",
+                _ => anyhow::bail!("unsupported calendar sensitivity"),
+            };
+            event.insert("privacy".to_owned(), serde_json::json!(privacy));
         }
         if let Some(categories) = &fields.categories {
             let keywords: BTreeMap<_, _> = categories.iter().map(|name| (name, true)).collect();
@@ -2484,6 +2540,10 @@ impl JmapClient {
                                 );
                             }
                         }
+                        if let Some(sensitivity) = fields.sensitivity {
+                            self.verify_calendar_privacy(auth, existing_id, sensitivity)
+                                .await?;
+                        }
                         if let Some(categories) = &fields.categories {
                             self.verify_calendar_categories(auth, existing_id, categories)
                                 .await?;
@@ -2504,6 +2564,10 @@ impl JmapClient {
                 {
                     if let Some(reminder) = fields.reminder {
                         self.verify_calendar_reminder(auth, new_id, reminder)
+                            .await?;
+                    }
+                    if let Some(sensitivity) = fields.sensitivity {
+                        self.verify_calendar_privacy(auth, new_id, sensitivity)
                             .await?;
                     }
                     if let Some(categories) = &fields.categories {
@@ -4505,6 +4569,8 @@ struct CalendarEventObject {
     #[serde(default)]
     free_busy_status: Option<String>,
     #[serde(default)]
+    privacy: Option<String>,
+    #[serde(default)]
     keywords: Option<BTreeMap<String, bool>>,
     #[serde(default)]
     alerts: Option<serde_json::Value>,
@@ -4627,6 +4693,11 @@ impl From<CalendarEventObject> for CalendarEvent {
                 Some("x-eas-working-elsewhere") => 4,
                 _ => 2,
             }),
+            sensitivity: match value.privacy.as_deref() {
+                None | Some("public") => 0,
+                Some("private") => 2,
+                _ => 3,
+            },
             categories: value
                 .keywords
                 .unwrap_or_default()
@@ -4845,6 +4916,24 @@ mod tests {
         eas_compact_to_local_iso, eas_to_calendar_local, local_to_utc_eas,
         parse_iso8601_duration_seconds,
     };
+
+    #[test]
+    fn calendar_privacy_maps_unknown_values_conservatively() {
+        for (privacy, expected) in [
+            (None, 0),
+            (Some("public"), 0),
+            (Some("private"), 2),
+            (Some("secret"), 3),
+            (Some("x-other"), 3),
+        ] {
+            let event = super::CalendarEventObject {
+                privacy: privacy.map(str::to_owned),
+                ..Default::default()
+            };
+            let event: crate::model::CalendarEvent = event.into();
+            assert_eq!(event.sensitivity, expected);
+        }
+    }
 
     #[test]
     fn jmap_body_truncation_is_preserved_even_for_an_empty_prefix() {

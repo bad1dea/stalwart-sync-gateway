@@ -1277,6 +1277,8 @@ pub struct CalendarFields {
     pub all_day_event: Option<bool>,
     pub busy_status: Option<u8>,
     pub unsupported_busy_status: bool,
+    pub sensitivity: Option<u8>,
+    pub unsupported_sensitivity: bool,
     pub reminder: Option<Option<u32>>,
     pub unsupported_reminder: bool,
     pub categories: Option<Vec<String>>,
@@ -2299,6 +2301,8 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     let mut attendees_count = 0;
     let mut busy_count = 0;
     let mut busy_text = String::new();
+    let mut sensitivity_count = 0;
+    let mut sensitivity_text = String::new();
     let mut reminder_count = 0;
     let mut reminder_text = String::new();
 
@@ -2338,6 +2342,23 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                     if !token.has_content {
                         fields.unsupported_busy_status = true;
                     }
+                }
+                if same_token(*token, calendar::SENSITIVITY)
+                    && path
+                        .last()
+                        .is_some_and(|parent| same_token(*parent, airsync::APPLICATION_DATA))
+                {
+                    sensitivity_count += 1;
+                    sensitivity_text.clear();
+                    if !token.has_content {
+                        fields.unsupported_sensitivity = true;
+                    }
+                }
+                if path
+                    .last()
+                    .is_some_and(|parent| same_token(*parent, calendar::SENSITIVITY))
+                {
+                    fields.unsupported_sensitivity = true;
                 }
                 if same_token(*token, calendar::SUBJECT) {
                     fields.subject = Some(String::new());
@@ -2455,6 +2476,11 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                     && same_token(path[path.len() - 2], airsync::APPLICATION_DATA)
                 {
                     busy_text.push_str(text);
+                } else if same_token(top, calendar::SENSITIVITY)
+                    && path.len() >= 2
+                    && same_token(path[path.len() - 2], airsync::APPLICATION_DATA)
+                {
+                    sensitivity_text.push_str(text);
                 } else if same_token(top, calendar::ALL_DAY_EVENT) {
                     fields.all_day_event = Some(text != "0");
                 }
@@ -2467,6 +2493,15 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                     fields.busy_status = busy_text.parse::<u8>().ok();
                     if !matches!(fields.busy_status, Some(0..=3)) {
                         fields.unsupported_busy_status = true;
+                    }
+                }
+                if path.len() >= 2
+                    && same_token(path[path.len() - 1], calendar::SENSITIVITY)
+                    && same_token(path[path.len() - 2], airsync::APPLICATION_DATA)
+                {
+                    fields.sensitivity = sensitivity_text.parse::<u8>().ok();
+                    if !matches!(fields.sensitivity, Some(0 | 2)) {
+                        fields.unsupported_sensitivity = true;
                     }
                 }
                 if path.len() >= 2
@@ -2496,6 +2531,12 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
             Node::Opaque(_) => {
                 if path
                     .last()
+                    .is_some_and(|token| same_token(*token, calendar::SENSITIVITY))
+                {
+                    fields.unsupported_sensitivity = true;
+                }
+                if path
+                    .last()
                     .is_some_and(|token| same_token(*token, calendar::REMINDER))
                 {
                     fields.unsupported_reminder = true;
@@ -2507,6 +2548,8 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
         }
     }
 
+    fields.unsupported_sensitivity |=
+        sensitivity_count > 1 || (sensitivity_count == 1 && fields.sensitivity.is_none());
     fields.unsupported_reminder |= reminder_count > 1;
     fields.unsupported_busy_status |=
         busy_count > 1 || (busy_count == 1 && fields.busy_status.is_none());
@@ -2939,6 +2982,35 @@ mod tests {
         assert!(parse(&[Some("4294967296")]).unsupported_reminder);
         assert!(parse(&[Some("-1")]).unsupported_reminder);
         assert!(parse(&[Some("1"), Some("2")]).unsupported_reminder);
+    }
+
+    #[test]
+    fn calendar_sensitivity_only_accepts_supported_values() {
+        fn parse(values: &[&str]) -> super::CalendarFields {
+            let mut b = super::DocumentBuilder::new();
+            b.start(super::airsync::APPLICATION_DATA);
+            for value in values {
+                b.leaf(super::calendar::SENSITIVITY, *value);
+            }
+            b.end();
+            super::extract_calendar_fields(&b.finish().nodes)
+        }
+        for (text, expected) in [("0", 0), ("2", 2)] {
+            let fields = parse(&[text]);
+            assert_eq!(fields.sensitivity, Some(expected));
+            assert!(!fields.unsupported_sensitivity);
+        }
+        assert!(!parse(&[]).unsupported_sensitivity);
+        for values in [
+            &["1"][..],
+            &["3"][..],
+            &["4"][..],
+            &["bad"][..],
+            &["0", "2"][..],
+            &[""][..],
+        ] {
+            assert!(parse(values).unsupported_sensitivity);
+        }
     }
 
     #[test]

@@ -3479,6 +3479,174 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_calendar_privacy_round_trips_and_unsupported_values_are_rejected() {
+        use eas::calendar as cal;
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let calendars = live
+            .call_using(
+                serde_json::json!([
+            ["Calendar/get",{"accountId":live.account},"0"]]),
+                &using,
+            )
+            .await;
+        let calendar = calendars[0][1]["list"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let folder = format!("cal_{calendar}");
+        let created = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set",{
+            "accountId":live.account,"create":{"e":{"@type":"Event",
+            "calendarIds":{&calendar:true},"title":"Privacy fixture",
+            "start":"2042-05-05T10:00:00","duration":"PT1H","privacy":"private"}}},"0"]]),
+                &using,
+            )
+            .await;
+        let id = created[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut devices = Vec::new();
+        for prefix in ["calendar-privacy-a", "calendar-privacy-b"] {
+            let device = dev(prefix);
+            let prime = live
+                .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+                .await;
+            let synced = live
+                .wbxml_version(
+                    "Sync",
+                    &device,
+                    sync_body(&sync_key(&prime), &folder),
+                    "16.1",
+                )
+                .await;
+            assert!(eas::find_all_text_after(&synced, cal::SENSITIVITY).contains(&"2".to_owned()));
+            devices.push((device, sync_key(&synced)));
+        }
+        for (value, privacy) in [
+            ("0", "public"),
+            ("2", "private"),
+            ("1", "private"),
+            ("3", "private"),
+        ] {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(air::SYNC);
+            b.start(air::COLLECTIONS);
+            b.start(air::COLLECTION);
+            b.leaf(air::SYNC_KEY, &devices[0].1);
+            b.leaf(air::COLLECTION_ID, &folder);
+            b.start(air::COMMANDS);
+            b.start(air::CHANGE);
+            b.leaf(air::SERVER_ID, &id);
+            b.start(air::APPLICATION_DATA);
+            b.leaf(cal::SENSITIVITY, value);
+            if value == "1" || value == "3" {
+                b.leaf(cal::SUBJECT, "must not change");
+            }
+            for _ in 0..6 {
+                b.end();
+            }
+            let response = live
+                .wbxml_version(
+                    "Sync",
+                    &devices[0].0,
+                    wbxml::encode_document(&b.finish()),
+                    "16.1",
+                )
+                .await;
+            if value == "1" || value == "3" {
+                assert!(eas::find_all_text_after(&response, air::STATUS).contains(&"6".to_owned()));
+            } else {
+                assert!(eas::find_all_text_after(&response, air::STATUS)
+                    .iter()
+                    .all(|status| status == "1"));
+            }
+            devices[0].1 = sync_key(&response);
+            let native = live
+                .call_using(
+                    serde_json::json!([["CalendarEvent/get",{
+                "accountId":live.account,"ids":[&id],"properties":["title","privacy"]},"0"]]),
+                    &using,
+                )
+                .await;
+            assert_eq!(native[0][1]["list"][0]["title"], "Privacy fixture");
+            assert_eq!(native[0][1]["list"][0]["privacy"], privacy);
+            if value == "0" || value == "2" {
+                let other = live
+                    .wbxml_version(
+                        "Sync",
+                        &devices[1].0,
+                        sync_body(&devices[1].1, &folder),
+                        "16.1",
+                    )
+                    .await;
+                assert_eq!(
+                    eas::find_text_after(&other, air::SERVER_ID),
+                    Some(id.as_str())
+                );
+                assert_eq!(eas::find_text_after(&other, cal::SENSITIVITY), Some(value));
+                devices[1].1 = sync_key(&other);
+            }
+        }
+        let mut add = eas::DocumentBuilder::new();
+        add.start(air::SYNC);
+        add.start(air::COLLECTIONS);
+        add.start(air::COLLECTION);
+        add.leaf(air::SYNC_KEY, &devices[0].1);
+        add.leaf(air::COLLECTION_ID, &folder);
+        add.start(air::COMMANDS);
+        add.start(air::ADD);
+        add.leaf(air::CLIENT_ID, "privacy-add");
+        add.start(air::APPLICATION_DATA);
+        add.leaf(cal::SUBJECT, "Private created fixture");
+        add.leaf(cal::START_TIME, "20420506T100000Z");
+        add.leaf(cal::END_TIME, "20420506T110000Z");
+        add.leaf(cal::SENSITIVITY, "2");
+        for _ in 0..6 {
+            add.end();
+        }
+        let request = wbxml::encode_document(&add.finish());
+        let added = live
+            .wbxml_version("Sync", &devices[0].0, request.clone(), "16.1")
+            .await;
+        assert!(eas::find_all_text_after(&added, air::STATUS)
+            .iter()
+            .all(|status| status == "1"));
+        let added_id = eas::find_text_after(&added, air::SERVER_ID)
+            .unwrap()
+            .to_owned();
+        let replay = live
+            .wbxml_version("Sync", &devices[0].0, request, "16.1")
+            .await;
+        assert_eq!(
+            eas::find_text_after(&replay, air::SERVER_ID),
+            Some(added_id.as_str())
+        );
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{
+            "accountId":live.account,"ids":[&added_id],"properties":["privacy"]},"0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(native[0][1]["list"][0]["privacy"], "private");
+        let cleanup = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set",{
+            "accountId":live.account,"destroy":[id,added_id]},"0"]]),
+                &using,
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_unsupported_recurrence_does_not_save_other_fields() {
         use eas::calendar as cal;
         let live = Live::new("E2E_USER2").await;

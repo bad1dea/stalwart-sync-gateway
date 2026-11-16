@@ -4768,6 +4768,7 @@ async fn sync_calendar_collection(
             || command.calendar.unsupported_attendees
             || command.calendar.unsupported_categories
             || command.calendar.unsupported_recurrence
+            || command.calendar.unsupported_sensitivity
         {
             match command.kind {
                 wbxml::eas::SyncClientCommandKind::Add => {
@@ -4785,6 +4786,7 @@ async fn sync_calendar_collection(
             wbxml::eas::SyncClientCommandKind::Add => {
                 let reservation = if command.calendar.reminder.is_some()
                     || command.calendar.categories.is_some()
+                    || command.calendar.sensitivity.is_some()
                 {
                     if command.client_id.is_empty()
                         || client_ids.get(&command.client_id) != Some(&1)
@@ -4857,6 +4859,14 @@ async fn sync_calendar_collection(
                                     .jmap
                                     .verify_calendar_reminder(auth, &id, reminder)
                                     .await;
+                            }
+                            if verified.is_ok() {
+                                if let Some(sensitivity) = command.calendar.sensitivity {
+                                    verified = state
+                                        .jmap
+                                        .verify_calendar_privacy(auth, &id, sensitivity)
+                                        .await;
+                                }
                             }
                             if verified.is_ok() {
                                 if let Some(categories) = &command.calendar.categories {
@@ -5132,6 +5142,7 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     event.end_utc.hash(&mut hasher);
     event.all_day.hash(&mut hasher);
     event.busy_status.hash(&mut hasher);
+    event.sensitivity.hash(&mut hasher);
     event.reminder_minutes.hash(&mut hasher);
     event.categories.hash(&mut hasher);
     event.organizer_email.hash(&mut hasher);
@@ -5225,6 +5236,7 @@ fn write_calendar_command(
         busy
     };
     builder.leaf(cal::BUSY_STATUS, busy.to_string());
+    builder.leaf(cal::SENSITIVITY, event.sensitivity.to_string());
     if !event.categories.is_empty() {
         builder.start(cal::CATEGORIES);
         for category in &event.categories {

@@ -292,6 +292,7 @@ pub struct CalendarEvent {
     pub end_utc: Option<String>,
     pub all_day: bool,
     pub busy_status: Option<u8>,
+    pub sensitivity: u8,
     pub reminder_minutes: Option<u32>,
     pub categories: Vec<String>,
     pub organizer_email: Option<String>,
