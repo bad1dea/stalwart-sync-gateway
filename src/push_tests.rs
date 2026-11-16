@@ -5269,6 +5269,103 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_draft_retry_does_not_duplicate_when_keywords_are_hidden() {
+        let live = Live::new("E2E_USER2").await;
+        let boxes = live
+            .call(serde_json::json!([["Mailbox/get",{"accountId":live.account},"0"]]))
+            .await;
+        let folder = boxes[0][1]["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["role"] == "drafts")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let pressure = live.seed(&folder, 1, "draft-keyword-pressure", false).await;
+        let mut patch = serde_json::Map::new();
+        for n in 0..110 {
+            patch.insert(
+                format!("keywords/draft-pressure-{}-{n}", std::process::id()),
+                serde_json::json!(true),
+            );
+        }
+        let updated = live
+            .call(serde_json::json!([["Email/set",{"accountId":live.account,
+            "update":{&pressure[0]:patch}},"0"]]))
+            .await;
+        assert!(updated[0][1]["updated"].get(&pressure[0]).is_some());
+        let query = || {
+            serde_json::json!([["Email/query",{"accountId":live.account,
+            "filter":{"inMailbox":&folder},"limit":1000},"0"]])
+        };
+        let before = live.call(query()).await;
+        let before_ids = before[0][1]["ids"].as_array().unwrap().clone();
+        let device = dev("draft-pressure");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let sync = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let first = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                draft_add_body(&sync_key(&sync), &folder, "capacity-client-id", false),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&first, air::STATUS)
+            .iter()
+            .any(|status| status == "5"));
+        let after = live.call(query()).await;
+        let added: Vec<_> = after[0][1]["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|id| !before_ids.contains(id))
+            .cloned()
+            .collect();
+        assert_eq!(added.len(), 1);
+        let retry = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                draft_add_body(&sync_key(&first), &folder, "capacity-client-id", false),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&retry, air::STATUS)
+            .iter()
+            .any(|status| status == "5"));
+        let final_state = live.call(query()).await;
+        let final_added: Vec<_> = final_state[0][1]["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|id| !before_ids.contains(id))
+            .cloned()
+            .collect();
+        assert_eq!(final_added, added);
+        let mut cleanup = pressure;
+        cleanup.extend(added.iter().map(|id| id.as_str().unwrap().to_owned()));
+        let result = live
+            .call(
+                serde_json::json!([["Email/set",{"accountId":live.account,"destroy":cleanup},"0"]]),
+            )
+            .await;
+        assert!(result[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_draft_add_recovers_after_server_write_before_sync_checkpoint() {
         let live = Live::new("E2E_USER2").await;
         let boxes = live
@@ -5299,13 +5396,9 @@ mod e2e {
         let request = draft_add_body(&key, &folder, "recovery-id", false);
         let doc = wbxml::decode_document(&request).unwrap();
         let collection = eas::sync_collections(&doc).remove(0);
-        let identity = serde_json::to_vec(&(
-            device.as_str(),
-            &folder,
-            &key,
-            &collection.commands[0].client_id,
-        ))
-        .unwrap();
+        let identity =
+            serde_json::to_vec(&(device.as_str(), &folder, &collection.commands[0].client_id))
+                .unwrap();
         let marker = format!(
             "eas-draft-add-{}",
             uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &identity).simple()

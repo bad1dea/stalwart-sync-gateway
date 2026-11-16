@@ -2647,7 +2647,7 @@ impl JmapClient {
         &self,
         auth: &AuthenticatedSession,
         folder: &str,
-        markers: (&str, &str),
+        replay: (&str, &str, &str),
         properties: serde_json::Value,
         mime: Option<Vec<u8>>,
         attachments: &[crate::model::DraftAttachment],
@@ -2659,7 +2659,6 @@ impl JmapClient {
         if self.find_mailbox_by_role(auth, "drafts").await?.as_deref() != Some(folder) {
             return Ok(None);
         }
-        let state = self.email_state(auth).await?;
         let response: JmapResponse<serde_json::Value> = self
             .api_call(
                 auth,
@@ -2667,7 +2666,7 @@ impl JmapClient {
                 vec![MethodCall::new(
                     "Email/query",
                     serde_json::json!({
-                        "accountId":account_id, "filter":{"hasKeyword":markers.0}, "limit":2
+                        "accountId":account_id, "filter":{"hasKeyword":replay.0}, "limit":2
                     }),
                     "q",
                 )],
@@ -2704,7 +2703,7 @@ impl JmapClient {
                     .and_then(|method| method.1["list"].as_array())
                     .and_then(|items| items.iter().find(|item| item["id"] == id))
                     .context("draft replay item disappeared")?;
-                if object["keywords"][markers.1] != true {
+                if object["keywords"][replay.1] != true {
                     anyhow::bail!("draft replay content differs");
                 }
                 return Ok(Some(self.finish_draft(auth, id, attachments).await?));
@@ -2738,7 +2737,7 @@ impl JmapClient {
             (
                 "Email/import",
                 serde_json::json!({
-                    "accountId":account_id, "ifInState":state,
+                    "accountId":account_id, "ifInState":replay.2,
                     "emails":{"draft":{"blobId":blob,"mailboxIds":properties["mailboxIds"],"keywords":properties["keywords"]}}
                 }),
             )
@@ -2746,7 +2745,7 @@ impl JmapClient {
             (
                 "Email/set",
                 serde_json::json!({
-                    "accountId":account_id, "ifInState":state, "create":{"draft":properties}
+                    "accountId":account_id, "ifInState":replay.2, "create":{"draft":properties}
                 }),
             )
         };
@@ -2765,6 +2764,29 @@ impl JmapClient {
         let id = result.1["created"]["draft"]["id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("JMAP did not create draft"))?;
+        let verify: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Email/get",
+                    serde_json::json!({
+                        "accountId":account_id, "ids":[id], "properties":["id","keywords"]
+                    }),
+                    "verify",
+                )],
+            )
+            .await?;
+        let object = verify
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "Email/get")
+            .and_then(|method| method.1["list"].as_array())
+            .and_then(|items| items.iter().find(|item| item["id"] == id))
+            .context("created draft is unavailable")?;
+        if object["keywords"][replay.0] != true || object["keywords"][replay.1] != true {
+            anyhow::bail!("JMAP did not retain draft replay markers");
+        }
         Ok(Some(self.finish_draft(auth, id, attachments).await?))
     }
 

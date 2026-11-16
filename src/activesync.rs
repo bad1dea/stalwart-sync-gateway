@@ -2217,13 +2217,9 @@ async fn sync_mail(
                     add_responses.push((command.client_id, None, "6"));
                     continue;
                 }
-                let identity = serde_json::to_vec(&(
-                    device_id,
-                    &collection.collection_id,
-                    &collection.sync_key,
-                    &command.client_id,
-                ))
-                .expect("serializing draft identity");
+                let identity =
+                    serde_json::to_vec(&(device_id, &collection.collection_id, &command.client_id))
+                        .expect("serializing draft identity");
                 let marker = format!(
                     "eas-draft-add-{}",
                     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &identity).simple()
@@ -2255,12 +2251,56 @@ async fn sync_mail(
                         continue;
                     }
                 };
+                let baseline = match state.jmap.email_state(auth).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to read draft baseline");
+                        add_responses.push((command.client_id, None, "5"));
+                        continue;
+                    }
+                };
+                let reservation = ItemState {
+                    item_id: marker.clone(),
+                    hash: serde_json::to_string(&(&baseline, &content_marker))
+                        .expect("serializing draft reservation"),
+                };
+                let journal = format!("__draft_add__:{}", collection.collection_id);
+                let reservation = match state
+                    .state
+                    .reserve_item(
+                        user,
+                        device_id,
+                        &collection.collection_id,
+                        &collection.sync_key,
+                        &journal,
+                        reservation,
+                    )
+                    .await
+                {
+                    Ok(Some(value)) => value,
+                    Ok(None) | Err(_) => {
+                        add_responses.push((command.client_id, None, "5"));
+                        continue;
+                    }
+                };
+                let (baseline, reserved_content): (String, String) =
+                    match serde_json::from_str(&reservation.hash) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            add_responses.push((command.client_id, None, "5"));
+                            continue;
+                        }
+                    };
+                if reserved_content != content_marker {
+                    add_responses.push((command.client_id, None, "6"));
+                    continue;
+                }
                 match state
                     .jmap
                     .create_email_draft(
                         auth,
                         &collection.collection_id,
-                        (&marker, &content_marker),
+                        (&marker, &content_marker, &baseline),
                         draft.properties,
                         draft.mime,
                         &draft.attachments,

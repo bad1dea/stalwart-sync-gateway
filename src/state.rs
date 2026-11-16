@@ -49,6 +49,16 @@ pub trait StateStore: Send + Sync {
         items: Option<Vec<ItemState>>,
     ) -> anyhow::Result<()>;
 
+    async fn reserve_item(
+        &self,
+        user: &str,
+        device_id: &str,
+        collection_id: &str,
+        sync_key: &str,
+        journal_id: &str,
+        item: ItemState,
+    ) -> anyhow::Result<Option<ItemState>>;
+
     /// Last-known per-item state for a collection, previous call to
     /// `put_item_states` (empty if never synced before).
     async fn item_states(
@@ -137,6 +147,34 @@ impl StateStore for MemoryStateStore {
             item_states.insert(key, items);
         }
         Ok(())
+    }
+
+    async fn reserve_item(
+        &self,
+        user: &str,
+        device_id: &str,
+        collection_id: &str,
+        sync_key: &str,
+        journal_id: &str,
+        item: ItemState,
+    ) -> anyhow::Result<Option<ItemState>> {
+        let records = self.records.read().await;
+        if !records
+            .get(&key(user, device_id, collection_id))
+            .is_some_and(|record| record.sync_key == sync_key)
+        {
+            return Ok(None);
+        }
+        let mut states = self.item_states.write().await;
+        let entries = states.entry(key(user, device_id, journal_id)).or_default();
+        if let Some(existing) = entries
+            .iter()
+            .find(|existing| existing.item_id == item.item_id)
+        {
+            return Ok(Some(existing.clone()));
+        }
+        entries.push(item.clone());
+        Ok(Some(item))
     }
 
     async fn item_states(
@@ -319,6 +357,46 @@ impl StateStore for SqliteStateStore {
         Ok(())
     }
 
+    async fn reserve_item(
+        &self,
+        user: &str,
+        device_id: &str,
+        collection_id: &str,
+        sync_key: &str,
+        journal_id: &str,
+        item: ItemState,
+    ) -> anyhow::Result<Option<ItemState>> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SQLite state lock poisoned"))?;
+        let tx = connection
+            .transaction()
+            .context("failed to start operation reservation")?;
+        let current: Option<String> = tx.query_row(
+            "SELECT sync_key FROM sync_records WHERE user = ?1 AND device_id = ?2 AND collection_id = ?3",
+            params![user, device_id, collection_id], |row| row.get(0)
+        ).optional().context("failed to read operation Sync key")?;
+        if current.as_deref() != Some(sync_key) {
+            return Ok(None);
+        }
+        tx.execute(
+            "INSERT INTO item_states (user, device_id, collection_id, item_id, item_hash, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, unixepoch()) ON CONFLICT DO NOTHING",
+            params![user, device_id, journal_id, item.item_id, item.hash]
+        ).context("failed to reserve operation")?;
+        let hash: String = tx.query_row(
+            "SELECT item_hash FROM item_states WHERE user = ?1 AND device_id = ?2 AND collection_id = ?3 AND item_id = ?4",
+            params![user, device_id, journal_id, item.item_id], |row| row.get(0)
+        ).context("failed to read reserved operation")?;
+        tx.commit()
+            .context("failed to commit operation reservation")?;
+        Ok(Some(ItemState {
+            item_id: item.item_id,
+            hash,
+        }))
+    }
+
     async fn item_states(
         &self,
         user: &str,
@@ -467,6 +545,63 @@ mod tests {
             Some(updated)
         );
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    async fn exercise_operation_reservation(store: std::sync::Arc<dyn StateStore>) {
+        store.put(record("1")).await.unwrap();
+        let mut jobs = Vec::new();
+        for number in 0..16 {
+            let store = store.clone();
+            jobs.push(tokio::spawn(async move {
+                store
+                    .reserve_item(
+                        "user@example.com",
+                        "device",
+                        "inbox",
+                        "1",
+                        "__journal__",
+                        ItemState {
+                            item_id: "op".to_owned(),
+                            hash: number.to_string(),
+                        },
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }));
+        }
+        let mut values = Vec::new();
+        for job in jobs {
+            values.push(job.await.unwrap().hash);
+        }
+        assert!(values.iter().all(|value| value == &values[0]));
+        store.put(record("2")).await.unwrap();
+        assert!(store
+            .reserve_item(
+                "user@example.com",
+                "device",
+                "inbox",
+                "1",
+                "__journal__",
+                ItemState {
+                    item_id: "new".to_owned(),
+                    hash: "bad".to_owned()
+                }
+            )
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn operation_reservation_is_atomic_in_memory_and_sqlite() {
+        exercise_operation_reservation(std::sync::Arc::new(MemoryStateStore::default())).await;
+        let path =
+            std::env::temp_dir().join(format!("stalwart-reservation-{}.db", uuid::Uuid::new_v4()));
+        let store = std::sync::Arc::new(SqliteStateStore::open(path.to_str().unwrap()).unwrap());
+        exercise_operation_reservation(store.clone()).await;
+        drop(store);
         let _ = std::fs::remove_file(path);
     }
 
