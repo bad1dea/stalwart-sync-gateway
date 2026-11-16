@@ -1453,6 +1453,8 @@ pub struct SearchRequest {
     pub collection_id: Option<String>,
     pub deep_traversal: bool,
     pub unsupported_query: bool,
+    pub conversation_id: Option<uuid::Uuid>,
+    pub invalid_conversation: bool,
     pub received_after: Option<String>,
     pub received_before: Option<String>,
     pub or_terms: Option<SearchOrTerms>,
@@ -1518,6 +1520,7 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
         search_date_comparison(&store, search::GREATER_THAN, search::AND);
     let (received_before, before_invalid) =
         search_date_comparison(&store, search::LESS_THAN, search::AND);
+    let (conversation_id, invalid_conversation) = search_conversation(&store);
     let (or_doc, or_invalid) = search_or_element(&store);
     let (or_after, or_after_invalid) =
         search_date_comparison(&store, search::GREATER_THAN, search::OR);
@@ -1545,9 +1548,9 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
                     && terms.received_after.is_none()
                     && terms.received_before.is_none()
             })
-            || [search::EQUAL_TO, search::CONVERSATION_ID]
-                .iter()
-                .any(|token| contains_token(document, *token)),
+            || contains_token(document, search::EQUAL_TO),
+        conversation_id,
+        invalid_conversation,
         received_after,
         received_before,
         or_terms,
@@ -1556,6 +1559,44 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
         body_preferences,
         mime_support,
     })
+}
+
+fn search_conversation(store: &Document) -> (Option<uuid::Uuid>, bool) {
+    fn visit(
+        document: &Document,
+        parent: Option<Token>,
+        found: &mut Vec<Document>,
+        invalid: &mut bool,
+    ) {
+        if let Some(Node::Start(token)) = document.nodes.first() {
+            if same_token(*token, search::CONVERSATION_ID) {
+                if !parent.is_some_and(|parent| same_token(parent, search::AND)) {
+                    *invalid = true;
+                }
+                found.push(document.clone());
+            }
+            for child in child_elements(document) {
+                visit(&child, Some(*token), found, invalid);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    let mut invalid = false;
+    visit(store, None, &mut found, &mut invalid);
+    if found.len() > 1 {
+        return (None, true);
+    }
+    let Some(node) = found.first() else {
+        return (None, invalid);
+    };
+    let id = match node.nodes.as_slice() {
+        [Node::Start(_), Node::Text(value), Node::End] => uuid::Uuid::parse_str(value).ok(),
+        [Node::Start(_), Node::Opaque(value), Node::End] => <[u8; 16]>::try_from(value.as_ref())
+            .ok()
+            .map(uuid::Uuid::from_bytes),
+        _ => None,
+    };
+    (id, invalid || id.is_none())
 }
 
 fn search_texts(document: &Document, include_or: bool) -> Vec<String> {
@@ -2982,6 +3023,49 @@ mod tests {
         assert!(parse(&[Some("4294967296")]).unsupported_reminder);
         assert!(parse(&[Some("-1")]).unsupported_reminder);
         assert!(parse(&[Some("1"), Some("2")]).unsupported_reminder);
+    }
+
+    #[test]
+    fn search_conversation_requires_one_guid_inside_and() {
+        fn request(parent: super::Token, values: &[&str]) -> super::Document {
+            let mut b = super::DocumentBuilder::new();
+            b.start(super::search::SEARCH);
+            b.start(super::search::STORE);
+            b.leaf(super::search::NAME, "Mailbox");
+            b.start(super::search::QUERY);
+            b.start(parent);
+            for value in values {
+                b.leaf(super::search::CONVERSATION_ID, *value);
+            }
+            b.end();
+            b.end();
+            b.end();
+            b.end();
+            b.finish()
+        }
+        let guid = "00112233-4455-6677-8899-aabbccddeeff";
+        let parsed = super::search_request(&request(super::search::AND, &[guid])).unwrap();
+        assert!(!parsed.invalid_conversation);
+        assert!(!parsed.unsupported_query);
+        assert_eq!(
+            parsed.conversation_id,
+            Some(uuid::Uuid::parse_str(guid).unwrap())
+        );
+        assert!(
+            super::search_request(&request(super::search::OR, &[guid]))
+                .unwrap()
+                .invalid_conversation
+        );
+        assert!(
+            super::search_request(&request(super::search::AND, &[guid, guid]))
+                .unwrap()
+                .invalid_conversation
+        );
+        assert!(
+            super::search_request(&request(super::search::AND, &["not-a-guid"]))
+                .unwrap()
+                .invalid_conversation
+        );
     }
 
     #[test]

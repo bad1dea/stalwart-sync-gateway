@@ -5,6 +5,7 @@ mod sync_options;
 mod sync_request;
 
 use crate::wbxml::eas::RequestedBodyPreference;
+use anyhow::Context;
 use axum::{
     body::Bytes,
     extract::{Query, State},
@@ -808,6 +809,98 @@ async fn ping_inner(
     }
 }
 
+async fn search_conversation_emails(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    conditions: Vec<serde_json::Value>,
+    position: i64,
+    limit: usize,
+    conversation: uuid::Uuid,
+) -> anyhow::Result<(Vec<crate::model::Email>, u64)> {
+    let filter = if conditions.is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::json!({"operator":"AND","conditions":conditions})
+    };
+    let mut offset = 0i64;
+    let mut matched = 0u64;
+    let mut selected = Vec::new();
+    let mut state_token: Option<String> = None;
+    let mut matched_thread: Option<String> = None;
+    let expected = *conversation.as_bytes();
+    let expected_le = conversation.to_bytes_le();
+    loop {
+        let page = state
+            .jmap
+            .query_emails(auth, filter.clone(), offset, 100, &["id", "threadId"])
+            .await?;
+        let query_state = page
+            .query_state
+            .context("conversation search state missing")?;
+        if let Some(previous) = &state_token {
+            anyhow::ensure!(
+                previous == &query_state,
+                "mail changed during conversation search"
+            );
+        } else {
+            state_token = Some(query_state);
+        }
+        let count = page.emails.len();
+        for email in page.emails {
+            if let Some(thread) = email.thread_id.as_deref() {
+                let id = eas_conversation_id(thread);
+                if id == expected || id == expected_le {
+                    if let Some(previous) = &matched_thread {
+                        anyhow::ensure!(previous == thread, "ambiguous conversation ID");
+                    } else {
+                        matched_thread = Some(thread.to_owned());
+                    }
+                    if matched >= position as u64 && selected.len() < limit {
+                        selected.push(email.id);
+                    }
+                    matched += 1;
+                }
+            }
+        }
+        offset += count as i64;
+        if offset as u64 == page.total {
+            break;
+        }
+        anyhow::ensure!(
+            count > 0 && (offset as u64) < page.total,
+            "incomplete conversation search"
+        );
+    }
+    let maximum = auth
+        .session
+        .capabilities
+        .get(crate::jmap::capabilities::CORE)
+        .and_then(|cap| cap.get("maxObjectsInGet"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(100)
+        .clamp(1, 1000) as usize;
+    let mut emails = Vec::new();
+    for chunk in selected.chunks(maximum) {
+        emails.extend(state.jmap.emails_by_ids(auth, chunk).await?);
+    }
+    anyhow::ensure!(
+        emails.len() == selected.len()
+            && emails
+                .iter()
+                .all(|email| email.thread_id.as_ref() == matched_thread.as_ref()),
+        "conversation changed during search"
+    );
+    let check = state
+        .jmap
+        .query_emails(auth, filter, 0, 1, &["id", "threadId"])
+        .await?;
+    anyhow::ensure!(
+        check.query_state == state_token && check.total == offset as u64,
+        "mail changed during conversation search"
+    );
+    Ok((emails, matched))
+}
+
 /// Handles `Search` (MS-ASCMD 2.2.1.16) -- was advertised in
 /// `SUPPORTED_COMMANDS` with no handler at all, falling through to the
 /// generic 501. Backs both `Store>Name == "Mailbox"` (full-text mail
@@ -886,7 +979,9 @@ async fn search(
     if let Some(status) = request.range_error {
         builder.leaf(srch::STATUS, status);
     } else if request.store_name.eq_ignore_ascii_case("Mailbox") {
-        if request.unsupported_query {
+        if request.invalid_conversation {
+            builder.leaf(srch::STATUS, "8");
+        } else if request.unsupported_query {
             builder.leaf(srch::STATUS, "2");
         } else if request
             .class
@@ -975,7 +1070,11 @@ async fn search(
                     }
                     conditions.push(serde_json::json!({"operator":"OR","conditions":alternatives}));
                 }
-                let (emails, total) = state.jmap.search_emails(auth,conditions,position,limit).await?;
+                let (emails, total) = if let Some(conversation) = request.conversation_id {
+                    search_conversation_emails(state, auth, conditions, position, limit, conversation).await?
+                } else {
+                    state.jmap.search_emails(auth,conditions,position,limit).await?
+                };
                 let emails = prepare_mail_bodies(
                     state,
                     auth,

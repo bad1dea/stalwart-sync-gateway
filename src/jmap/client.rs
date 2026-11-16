@@ -789,7 +789,7 @@ impl JmapClient {
 
         let mut total: u64 = 0;
         let mut query_state = None;
-        let mut query_count = 0;
+        let mut query_ids = Vec::new();
         for method in response.method_responses {
             match method.0.as_str() {
                 "Email/query" => {
@@ -797,19 +797,24 @@ impl JmapClient {
                         serde_json::from_value(method.1).context("invalid Email/query response")?;
                     total = query.total.context("Email/query omitted total")?;
                     query_state = query.query_state;
-                    query_count = query.ids.len();
+                    query_ids = query.ids;
                 }
                 "Email/get" => {
                     let get: GetResponse<EmailObject> =
                         serde_json::from_value(method.1).context("invalid Email/get response")?;
-                    let emails: Vec<Email> = get
+                    let mut by_id: BTreeMap<_, _> = get
                         .list
                         .into_iter()
                         .map(Email::from)
                         .map(|email| identities.email(email))
+                        .map(|email| (email.id.clone(), email))
+                        .collect();
+                    let emails: Vec<Email> = query_ids
+                        .iter()
+                        .filter_map(|id| by_id.remove(identities.stable(id)))
                         .collect();
                     anyhow::ensure!(
-                        emails.len() == query_count,
+                        emails.len() == query_ids.len() && by_id.is_empty(),
                         "Email search changed during fetch"
                     );
                     return Ok(EmailSearchPage {

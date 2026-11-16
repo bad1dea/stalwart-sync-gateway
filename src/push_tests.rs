@@ -4188,6 +4188,175 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_search_finds_conversation_through_multiple_pages() {
+        use eas::{email2, search as srch};
+        let live = Live::new("E2E_USER2").await;
+        let created = live.call(serde_json::json!([["Mailbox/set",{
+            "accountId":live.account,"create":{"m":{"name":format!("Conversation search {}",std::process::id())}}
+        },"0"]])).await;
+        let folder = created[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let target = live
+            .seed(&folder, 1, "conversation-target", false)
+            .await
+            .remove(0);
+        let device = dev("conversation-search");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "14.0")
+            .await;
+        let sync = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "14.0",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&sync, air::SERVER_ID),
+            Some(target.as_str())
+        );
+        let bytes: [u8; 16] = eas::find_opaque_after(&sync, email2::CONVERSATION_ID)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let conversation = uuid::Uuid::from_bytes(bytes).to_string();
+        let first_mail = live
+            .call(serde_json::json!([["Email/get",{
+            "accountId":live.account,"ids":[&target],"properties":["messageId","threadId"]},"0"]]))
+            .await;
+        let message_id = first_mail[0][1]["list"][0]["messageId"].clone();
+        let reply = serde_json::json!({"mailboxIds":{&folder:true},
+            "from":[{"email":live.user}],"subject":"Re: conversation-target 0",
+            "messageId":[format!("{}@e2e.test", uuid::Uuid::new_v4())],
+            "inReplyTo":message_id,"references":message_id});
+        let reply_result = live
+            .call(serde_json::json!([["Email/set",{
+            "accountId":live.account,"create":{"reply":reply}},"0"]]))
+            .await;
+        let reply_id = reply_result[0][1]["created"]["reply"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let reply_item = live
+            .call(serde_json::json!([["Email/get",{
+            "accountId":live.account,"ids":[&reply_id],"properties":["threadId"]},"0"]]))
+            .await;
+        assert_eq!(
+            reply_item[0][1]["list"][0]["threadId"],
+            first_mail[0][1]["list"][0]["threadId"]
+        );
+        let mut ids = live.seed(&folder, 105, "conversation-filler", false).await;
+        ids.extend([target.clone(), reply_id.clone()]);
+        let request = |guid: &str, range: &str, parent: wbxml::token::Token, text: Option<&str>| {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(srch::SEARCH);
+            b.start(srch::STORE);
+            b.leaf(srch::NAME, "Mailbox");
+            b.start(srch::QUERY);
+            b.start(parent);
+            b.leaf(air::CLASS, "Email");
+            b.leaf(air::COLLECTION_ID, &folder);
+            b.leaf(srch::CONVERSATION_ID, guid);
+            if let Some(text) = text {
+                b.leaf(srch::FREE_TEXT, text);
+            }
+            b.end();
+            b.end();
+            b.start(srch::OPTIONS);
+            b.leaf(srch::RANGE, range);
+            b.end();
+            b.end();
+            b.end();
+            wbxml::encode_document(&b.finish())
+        };
+        let first = live
+            .wbxml_version(
+                "Search",
+                &device,
+                request(&conversation, "0-0", srch::AND, None),
+                "14.0",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&first, srch::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(eas::find_text_after(&first, srch::TOTAL), Some("2"));
+        let first_id = eas::find_text_after(&first, srch::LONG_ID)
+            .unwrap()
+            .to_owned();
+        let next = live
+            .wbxml_version(
+                "Search",
+                &device,
+                request(&conversation, "1-1", srch::AND, None),
+                "14.0",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&next, srch::TOTAL), Some("2"));
+        let next_id = eas::find_text_after(&next, srch::LONG_ID)
+            .unwrap()
+            .to_owned();
+        let mut actual = vec![first_id, next_id];
+        actual.sort();
+        let mut expected = vec![target, reply_id];
+        expected.sort();
+        assert_eq!(actual, expected);
+        let beyond = live
+            .wbxml_version(
+                "Search",
+                &device,
+                request(&conversation, "2-2", srch::AND, None),
+                "14.0",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&beyond, srch::TOTAL), Some("2"));
+        assert!(eas::find_all_text_after(&beyond, srch::LONG_ID).is_empty());
+        let filtered = live
+            .wbxml_version(
+                "Search",
+                &device,
+                request(&conversation, "0-9", srch::AND, Some("conversation-filler")),
+                "14.0",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&filtered, srch::TOTAL), Some("0"));
+        let absent = live
+            .wbxml_version(
+                "Search",
+                &device,
+                request(&uuid::Uuid::new_v4().to_string(), "0-0", srch::AND, None),
+                "14.0",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&absent, srch::TOTAL), Some("0"));
+        let invalid = live
+            .wbxml_version(
+                "Search",
+                &device,
+                request(&conversation, "0-0", srch::OR, None),
+                "14.0",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&invalid, srch::STATUS),
+            vec!["1", "8"]
+        );
+        let cleanup = live
+            .call(serde_json::json!([
+                ["Email/set",{"accountId":live.account,"destroy":ids},"0"],
+                ["Mailbox/set",{"accountId":live.account,"destroy":[folder]},"1"]
+            ]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_mailbox_search_combines_or_text_and_date() {
         use eas::{email as mail, search as srch};
         let live = Live::new("E2E_USER2").await;
