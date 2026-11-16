@@ -4762,6 +4762,7 @@ async fn sync_calendar_collection(
             || command.calendar.unsupported_location
             || command.calendar.unsupported_body
             || command.calendar.unsupported_attendees
+            || command.calendar.unsupported_categories
         {
             match command.kind {
                 wbxml::eas::SyncClientCommandKind::Add => {
@@ -4777,7 +4778,9 @@ async fn sync_calendar_collection(
         }
         match command.kind {
             wbxml::eas::SyncClientCommandKind::Add => {
-                let reservation = if command.calendar.reminder.is_some() {
+                let reservation = if command.calendar.reminder.is_some()
+                    || command.calendar.categories.is_some()
+                {
                     if command.client_id.is_empty()
                         || client_ids.get(&command.client_id) != Some(&1)
                     {
@@ -4842,11 +4845,24 @@ async fn sync_calendar_collection(
                         .calendar_event_by_uid(auth, &calendar_id, uid)
                         .await
                     {
-                        Ok(Some(id)) => state
-                            .jmap
-                            .verify_calendar_reminder(auth, &id, command.calendar.reminder.unwrap())
-                            .await
-                            .map(|_| id),
+                        Ok(Some(id)) => {
+                            let mut verified = Ok(());
+                            if let Some(reminder) = command.calendar.reminder {
+                                verified = state
+                                    .jmap
+                                    .verify_calendar_reminder(auth, &id, reminder)
+                                    .await;
+                            }
+                            if verified.is_ok() {
+                                if let Some(categories) = &command.calendar.categories {
+                                    verified = state
+                                        .jmap
+                                        .verify_calendar_categories(auth, &id, categories)
+                                        .await;
+                                }
+                            }
+                            verified.map(|_| id)
+                        }
                         Ok(None) => {
                             state
                                 .jmap
@@ -5112,6 +5128,7 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     event.all_day.hash(&mut hasher);
     event.busy_status.hash(&mut hasher);
     event.reminder_minutes.hash(&mut hasher);
+    event.categories.hash(&mut hasher);
     event.organizer_email.hash(&mut hasher);
     event.organizer_name.hash(&mut hasher);
     event.is_organizer.hash(&mut hasher);
@@ -5203,6 +5220,15 @@ fn write_calendar_command(
         busy
     };
     builder.leaf(cal::BUSY_STATUS, busy.to_string());
+    if !event.categories.is_empty() {
+        builder.start(cal::CATEGORIES);
+        for category in &event.categories {
+            builder.leaf(cal::CATEGORY, category);
+        }
+        builder.end();
+    } else if tag.code_page == air::PAGE && tag.token == air::CHANGE.token {
+        builder.empty_tag(cal::CATEGORIES);
+    }
     if let Some(minutes) = event.reminder_minutes {
         builder.leaf(cal::REMINDER, minutes.to_string());
     } else if tag.code_page == air::PAGE

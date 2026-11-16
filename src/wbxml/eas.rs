@@ -1279,6 +1279,8 @@ pub struct CalendarFields {
     pub unsupported_busy_status: bool,
     pub reminder: Option<Option<u32>>,
     pub unsupported_reminder: bool,
+    pub categories: Option<Vec<String>>,
+    pub unsupported_categories: bool,
     pub attendees: Vec<AttendeeField>,
     pub attendees_present: bool,
     pub unsupported_attendees: bool,
@@ -1951,6 +1953,10 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                         command.note = extract_note_fields(&document.nodes[start + 1..idx]);
                         command.contact = extract_contact_fields(&document.nodes[start + 1..idx]);
                         command.calendar = extract_calendar_fields(&document.nodes[start + 1..idx]);
+                        match calendar_categories(&command.document) {
+                            Ok(categories) => command.calendar.categories = categories,
+                            Err(()) => command.calendar.unsupported_categories = true,
+                        }
                         command.task = extract_task_fields(&document.nodes[start + 1..idx]);
                         let has_identity =
                             !command.server_id.is_empty() || !command.client_id.is_empty();
@@ -2227,6 +2233,54 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
     }
 
     fields
+}
+
+fn calendar_categories(command: &Document) -> Result<Option<Vec<String>>, ()> {
+    let applications: Vec<_> = child_elements(command).into_iter()
+        .filter(|child| matches!(child.nodes.first(), Some(Node::Start(token)) if same_token(*token, airsync::APPLICATION_DATA)))
+        .collect();
+    let categories: Vec<_> = applications.iter().flat_map(child_elements)
+        .filter(|child| matches!(child.nodes.first(), Some(Node::Start(token)) if same_token(*token, calendar::CATEGORIES)))
+        .collect();
+    if categories.len() > 1 {
+        return Err(());
+    }
+    let Some(container) = categories.first() else {
+        return Ok(None);
+    };
+    let mut depth = 0usize;
+    for node in &container.nodes {
+        match node {
+            Node::Start(token) if token.has_content => depth += 1,
+            Node::End => depth = depth.checked_sub(1).ok_or(())?,
+            Node::Text(_) | Node::Opaque(_) if depth == 1 => return Err(()),
+            _ => {}
+        }
+    }
+    let mut values = std::collections::BTreeSet::new();
+    for child in child_elements(container) {
+        if !matches!(child.nodes.first(), Some(Node::Start(token)) if same_token(*token, calendar::CATEGORY) && token.has_content)
+        {
+            return Err(());
+        }
+        let mut value = String::new();
+        for node in child
+            .nodes
+            .iter()
+            .skip(1)
+            .take(child.nodes.len().saturating_sub(2))
+        {
+            if let Node::Text(text) = node {
+                value.push_str(text);
+            } else {
+                return Err(());
+            }
+        }
+        if value.is_empty() || !values.insert(value) {
+            return Err(());
+        }
+    }
+    Ok(Some(values.into_iter().collect()))
 }
 
 /// Mostly flat leaves like `extract_contact_fields`, except Attendees --
@@ -2876,6 +2930,52 @@ mod tests {
         assert!(parse(&[Some("4294967296")]).unsupported_reminder);
         assert!(parse(&[Some("-1")]).unsupported_reminder);
         assert!(parse(&[Some("1"), Some("2")]).unsupported_reminder);
+    }
+
+    #[test]
+    fn calendar_categories_validate_and_clear() {
+        fn command(children: impl FnOnce(&mut super::DocumentBuilder)) -> super::Document {
+            let mut b = super::DocumentBuilder::new();
+            b.start(super::airsync::CHANGE);
+            b.start(super::airsync::APPLICATION_DATA);
+            children(&mut b);
+            b.end();
+            b.end();
+            b.finish()
+        }
+        let absent = command(|_| {});
+        assert_eq!(super::calendar_categories(&absent), Ok(None));
+        let clear = command(|b| b.empty_tag(super::calendar::CATEGORIES));
+        assert_eq!(super::calendar_categories(&clear), Ok(Some(vec![])));
+        let valid = command(|b| {
+            b.start(super::calendar::CATEGORIES);
+            b.leaf(super::calendar::CATEGORY, "Work");
+            b.leaf(super::calendar::CATEGORY, "Personal space");
+            b.end();
+        });
+        assert_eq!(
+            super::calendar_categories(&valid),
+            Ok(Some(vec!["Personal space".into(), "Work".into()]))
+        );
+        let duplicate = command(|b| {
+            b.start(super::calendar::CATEGORIES);
+            b.leaf(super::calendar::CATEGORY, "Work");
+            b.leaf(super::calendar::CATEGORY, "Work");
+            b.end();
+        });
+        assert_eq!(super::calendar_categories(&duplicate), Err(()));
+        let invalid = command(|b| {
+            b.start(super::calendar::CATEGORIES);
+            b.empty_tag(super::calendar::CATEGORY);
+            b.end();
+        });
+        assert_eq!(super::calendar_categories(&invalid), Err(()));
+        let unknown = command(|b| {
+            b.start(super::calendar::CATEGORIES);
+            b.leaf(super::calendar::SUBJECT, "not a category");
+            b.end();
+        });
+        assert_eq!(super::calendar_categories(&unknown), Err(()));
     }
 
     #[test]

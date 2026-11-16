@@ -1744,6 +1744,7 @@ impl JmapClient {
                     "locations",
                     "showWithoutTime",
                     "freeBusyStatus",
+                    "keywords",
                     "alerts",
                     "useDefaultAlerts",
                     "participants",
@@ -1867,6 +1868,51 @@ impl JmapClient {
         Ok(())
     }
 
+    pub async fn verify_calendar_categories(
+        &self,
+        auth: &AuthenticatedSession,
+        id: &str,
+        categories: &[String],
+    ) -> anyhow::Result<()> {
+        let account = auth
+            .session
+            .primary_account_for(capabilities::CALENDARS)
+            .context("JMAP Calendars capability is not available")?;
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CALENDARS.to_owned(),
+                ],
+                vec![MethodCall::new(
+                    "CalendarEvent/get",
+                    serde_json::json!({
+                        "accountId":account, "ids":[id], "properties":["id","keywords"]
+                    }),
+                    "verify",
+                )],
+            )
+            .await?;
+        let item = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/get")
+            .and_then(|method| method.1["list"].as_array())
+            .and_then(|items| items.iter().find(|item| item["id"] == id))
+            .context("calendar categories verification failed")?;
+        let expected: BTreeMap<_, _> = categories.iter().map(|name| (name.clone(), true)).collect();
+        let observed: BTreeMap<String, bool> = match &item["keywords"] {
+            serde_json::Value::Null => BTreeMap::new(),
+            value => serde_json::from_value(value.clone())?,
+        };
+        anyhow::ensure!(
+            observed == expected,
+            "JMAP did not retain calendar categories"
+        );
+        Ok(())
+    }
+
     /// Creates (`id: None`) or updates (`id: Some`) a non-recurring
     /// calendar event from ActiveSync `CalendarFields`. Recurrence,
     /// attendees, and reminders are explicitly out of scope, matching
@@ -1982,6 +2028,17 @@ impl JmapClient {
                 crate::jmap::calendar_reminder::write_reminder(&mut event, alerts, reminder)?;
                 reminder_changed = true;
             }
+        }
+        if let Some(categories) = &fields.categories {
+            let keywords: BTreeMap<_, _> = categories.iter().map(|name| (name, true)).collect();
+            event.insert(
+                "keywords".to_owned(),
+                if keywords.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(keywords)
+                },
+            );
         }
         if let Some(busy) = fields.busy_status {
             let value = match busy {
@@ -2427,6 +2484,10 @@ impl JmapClient {
                                 );
                             }
                         }
+                        if let Some(categories) = &fields.categories {
+                            self.verify_calendar_categories(auth, existing_id, categories)
+                                .await?;
+                        }
                         return Ok(existing_id.to_owned());
                     }
                     anyhow::bail!(
@@ -2443,6 +2504,10 @@ impl JmapClient {
                 {
                     if let Some(reminder) = fields.reminder {
                         self.verify_calendar_reminder(auth, new_id, reminder)
+                            .await?;
+                    }
+                    if let Some(categories) = &fields.categories {
+                        self.verify_calendar_categories(auth, new_id, categories)
                             .await?;
                     }
                     return Ok(new_id.to_owned());
@@ -4440,6 +4505,8 @@ struct CalendarEventObject {
     #[serde(default)]
     free_busy_status: Option<String>,
     #[serde(default)]
+    keywords: Option<BTreeMap<String, bool>>,
+    #[serde(default)]
     alerts: Option<serde_json::Value>,
     #[serde(default)]
     use_default_alerts: bool,
@@ -4560,6 +4627,12 @@ impl From<CalendarEventObject> for CalendarEvent {
                 Some("x-eas-working-elsewhere") => 4,
                 _ => 2,
             }),
+            categories: value
+                .keywords
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(name, present)| present.then_some(name))
+                .collect(),
             reminder_minutes: value
                 .alerts
                 .as_ref()
