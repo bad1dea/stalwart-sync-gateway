@@ -3617,6 +3617,434 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_calendar_reminder_rejects_unsupported_default_flag() {
+        use eas::calendar as cal;
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let calendars = live
+            .call_using(
+                serde_json::json!([["Calendar/get",{"accountId":live.account},"0"]]),
+                &using,
+            )
+            .await;
+        let calendar = calendars[0][1]["list"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let folder = format!("cal_{calendar}");
+        let created=live.call_using(serde_json::json!([["CalendarEvent/set",{"accountId":live.account,
+            "create":{"e":{"@type":"Event","calendarIds":{&calendar:true},"title":"Unsupported default fixture",
+                "start":"2042-08-05T10:00:00","duration":"PT1H","useDefaultAlerts":false,
+                "alerts":{"a":{"@type":"Alert","action":"display","trigger":{"@type":"OffsetTrigger","offset":"-PT15M"}}}}}},"0"]]),&using).await;
+        let id = created[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let initial = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{"accountId":live.account,
+            "ids":[&id],"properties":["useDefaultAlerts"]},"0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(initial[0][1]["list"][0]["useDefaultAlerts"], true);
+        let device = dev("old-reminder");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let sync = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&sync));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, &id);
+        b.start(air::APPLICATION_DATA);
+        b.leaf(cal::REMINDER, "30");
+        for _ in 0..6 {
+            b.end();
+        }
+        let changed = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert!(eas::find_all_text_after(&changed, air::STATUS).contains(&"5".to_owned()));
+        let cleanup = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set",{"accountId":live.account,
+            "destroy":[id]},"0"]]),
+                &using,
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_calendar_default_reminders_are_not_overwritten() {
+        use eas::calendar as cal;
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let created=live.call_using(serde_json::json!([["Calendar/set",{"accountId":live.account,
+            "create":{"c":{"name":format!("Default reminder {}",std::process::id()),
+                "defaultAlertsWithTime":{"a":{"@type":"Alert","action":"display",
+                    "trigger":{"@type":"OffsetTrigger","offset":"-PT20M","relativeTo":"start"}}}}}},"0"]]),&using).await;
+        let calendar = created[0][1]["created"]["c"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let folder = format!("cal_{calendar}");
+        let created=live.call_using(serde_json::json!([["CalendarEvent/set",{"accountId":live.account,
+            "create":{"e":{"@type":"Event","calendarIds":{&calendar:true},"title":"Default alert fixture",
+                "start":"2042-07-05T10:00:00","duration":"PT1H","useDefaultAlerts":true,
+                "alerts":{"email":{"@type":"Alert","action":"email","trigger":{"@type":"OffsetTrigger","offset":"-PT1H"}}}}}},"0"]]),&using).await;
+        let id = created[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let device = dev("default-reminder");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let sync = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&sync, air::SERVER_ID),
+            Some(id.as_str())
+        );
+        assert_eq!(eas::find_text_after(&sync, cal::REMINDER), Some("20"));
+        let mut unchanged = eas::DocumentBuilder::new();
+        unchanged.start(air::SYNC);
+        unchanged.start(air::COLLECTIONS);
+        unchanged.start(air::COLLECTION);
+        unchanged.leaf(air::SYNC_KEY, sync_key(&sync));
+        unchanged.leaf(air::COLLECTION_ID, &folder);
+        unchanged.start(air::COMMANDS);
+        unchanged.start(air::CHANGE);
+        unchanged.leaf(air::SERVER_ID, &id);
+        unchanged.start(air::APPLICATION_DATA);
+        unchanged.leaf(cal::REMINDER, "20");
+        unchanged.leaf(cal::SUBJECT, "Preserved default");
+        for _ in 0..6 {
+            unchanged.end();
+        }
+        let same = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                wbxml::encode_document(&unchanged.finish()),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&same, air::STATUS)
+            .iter()
+            .all(|value| value == "1"));
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{"accountId":live.account,
+            "ids":[&id],"properties":["title","useDefaultAlerts"]},"0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(native[0][1]["list"][0]["title"], "Preserved default");
+        assert_eq!(native[0][1]["list"][0]["useDefaultAlerts"], true);
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&same));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, &id);
+        b.start(air::APPLICATION_DATA);
+        b.leaf(cal::REMINDER, "30");
+        b.leaf(cal::SUBJECT, "must not apply");
+        for _ in 0..6 {
+            b.end();
+        }
+        let changed = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert!(eas::find_all_text_after(&changed, air::STATUS).contains(&"5".to_owned()));
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{"accountId":live.account,
+            "ids":[&id],"properties":["title","useDefaultAlerts"]},"0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(native[0][1]["list"][0]["title"], "Preserved default");
+        assert_eq!(native[0][1]["list"][0]["useDefaultAlerts"], true);
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&changed));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::ADD);
+        b.leaf(air::CLIENT_ID, "reminder-add");
+        b.start(air::APPLICATION_DATA);
+        b.leaf(cal::SUBJECT, "must not be created");
+        b.leaf(cal::START_TIME, "20420706T100000Z");
+        b.leaf(cal::END_TIME, "20420706T110000Z");
+        b.leaf(cal::REMINDER, "15");
+        for _ in 0..6 {
+            b.end();
+        }
+        let added = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert!(eas::find_all_text_after(&added, air::STATUS).contains(&"6".to_owned()));
+        let query = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/query",{"accountId":live.account,
+            "filter":{"inCalendar":calendar}},"0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(query[0][1]["ids"].as_array().unwrap().len(), 1);
+        let second=live.call_using(serde_json::json!([["CalendarEvent/set",{"accountId":live.account,
+            "create":{"e":{"@type":"Event","calendarIds":{&calendar:true},"title":"Default only fixture",
+                "start":"2042-07-06T10:00:00","duration":"PT1H","useDefaultAlerts":true}}},"0"]]),&using).await;
+        let second_id = second[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let sync_second = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&added), &folder),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&sync_second, air::SERVER_ID).contains(&second_id));
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&sync_second));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, &second_id);
+        b.start(air::APPLICATION_DATA);
+        b.leaf(cal::REMINDER, "30");
+        for _ in 0..6 {
+            b.end();
+        }
+        let changed = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert!(eas::find_all_text_after(&changed, air::STATUS)
+            .iter()
+            .all(|value| value == "1"));
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{"accountId":live.account,
+            "ids":[&second_id],"properties":["alerts","useDefaultAlerts"]},"0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(native[0][1]["list"][0]["useDefaultAlerts"], false);
+        assert_eq!(
+            crate::jmap::calendar_reminder::read_reminder(&native[0][1]["list"][0]["alerts"]),
+            Some(30)
+        );
+        let cleanup = live
+            .call_using(
+                serde_json::json!([
+            ["CalendarEvent/set",{"accountId":live.account,"destroy":[id,second_id]},"0"],
+            ["Calendar/set",{"accountId":live.account,"destroy":[calendar]},"1"]]),
+                &using,
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_calendar_reminders_preserve_other_alerts() {
+        use eas::calendar as cal;
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let calendars = live
+            .call_using(
+                serde_json::json!([["Calendar/get",{"accountId":live.account},"0"]]),
+                &using,
+            )
+            .await;
+        let calendar = calendars[0][1]["list"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let folder = format!("cal_{calendar}");
+        let created=live.call_using(serde_json::json!([["CalendarEvent/set",{"accountId":live.account,
+            "create":{"e":{"@type":"Event","calendarIds":{&calendar:true},"title":"Reminder fixture",
+                "start":"2042-06-05T10:00:00","timeZone":"Etc/UTC","duration":"PT1H","useDefaultAlerts":false,
+                "alerts":{"display":{"@type":"Alert","action":"display","trigger":{"@type":"OffsetTrigger","offset":"-PT15M"}},
+                    "email":{"@type":"Alert","action":"email","trigger":{"@type":"OffsetTrigger","offset":"-PT1H"}}}}}},"0"]]),&using).await;
+        let id = created[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut devices = Vec::new();
+        for prefix in ["calendar-reminder-a", "calendar-reminder-b"] {
+            let device = dev(prefix);
+            let prime = live
+                .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+                .await;
+            let sync = live
+                .wbxml_version(
+                    "Sync",
+                    &device,
+                    sync_body(&sync_key(&prime), &folder),
+                    "16.1",
+                )
+                .await;
+            let commands=eas::child_elements(&sync).into_iter().flat_map(|node|eas::child_elements(&node))
+                .flat_map(|node|eas::child_elements(&node))
+                .find(|node|matches!(node.nodes.first(),Some(wbxml::Node::Start(t)) if t.code_page==air::PAGE && t.token==air::COMMANDS.token)).unwrap();
+            let item = eas::child_elements(&commands)
+                .into_iter()
+                .find(|item| eas::find_text_after(item, air::SERVER_ID) == Some(id.as_str()))
+                .unwrap();
+            assert_eq!(eas::find_text_after(&item, cal::REMINDER), Some("15"));
+            devices.push((device, sync_key(&sync)));
+        }
+        for value in [Some("30"), None, Some("0")] {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(air::SYNC);
+            b.start(air::COLLECTIONS);
+            b.start(air::COLLECTION);
+            b.leaf(air::SYNC_KEY, &devices[0].1);
+            b.leaf(air::COLLECTION_ID, &folder);
+            b.start(air::COMMANDS);
+            b.start(air::CHANGE);
+            b.leaf(air::SERVER_ID, &id);
+            b.start(air::APPLICATION_DATA);
+            if let Some(value) = value {
+                b.leaf(cal::REMINDER, value);
+            } else {
+                b.empty_tag(cal::REMINDER);
+            }
+            for _ in 0..6 {
+                b.end();
+            }
+            let response = live
+                .wbxml_version(
+                    "Sync",
+                    &devices[0].0,
+                    wbxml::encode_document(&b.finish()),
+                    "16.1",
+                )
+                .await;
+            assert!(eas::find_all_text_after(&response, air::STATUS)
+                .iter()
+                .all(|v| v == "1"));
+            devices[0].1 = sync_key(&response);
+            let native = live
+                .call_using(
+                    serde_json::json!([["CalendarEvent/get",{"accountId":live.account,
+                "ids":[&id],"properties":["title","alerts","useDefaultAlerts"]},"0"]]),
+                    &using,
+                )
+                .await;
+            let event = &native[0][1]["list"][0];
+            assert_eq!(event["title"], "Reminder fixture");
+            assert_eq!(event["useDefaultAlerts"], false);
+            assert_eq!(event["alerts"]["email"]["action"], "email");
+            assert_eq!(event["alerts"]["email"]["trigger"]["offset"], "-PT1H");
+            assert_eq!(
+                crate::jmap::calendar_reminder::read_reminder(&event["alerts"]),
+                value.map(|v| v.parse().unwrap())
+            );
+            let peer = live
+                .wbxml_version(
+                    "Sync",
+                    &devices[1].0,
+                    sync_body(&devices[1].1, &folder),
+                    "16.1",
+                )
+                .await;
+            assert_eq!(
+                eas::find_text_after(&peer, air::SERVER_ID),
+                Some(id.as_str())
+            );
+            assert_eq!(eas::find_text_after(&peer, cal::REMINDER), value);
+            assert!(eas::contains_token(&peer, cal::REMINDER));
+            devices[1].1 = sync_key(&peer);
+        }
+        let extra = live.call_using(serde_json::json!([["CalendarEvent/set",{
+            "accountId":live.account,"update":{&id:{"alerts/other":{"@type":"Alert","action":"display",
+                "trigger":{"@type":"OffsetTrigger","offset":"-PT5M"}}}}},"0"]]),&using).await;
+        assert!(extra[0][1]["updated"].get(&id).is_some());
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, &devices[0].1);
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, &id);
+        b.start(air::APPLICATION_DATA);
+        b.leaf(cal::REMINDER, "20");
+        b.leaf(cal::SUBJECT, "must not apply");
+        for _ in 0..6 {
+            b.end();
+        }
+        let rejected = live
+            .wbxml_version(
+                "Sync",
+                &devices[0].0,
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&rejected, air::STATUS).contains(&"5".to_owned()));
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{"accountId":live.account,
+            "ids":[&id],"properties":["title","alerts"]},"0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(native[0][1]["list"][0]["title"], "Reminder fixture");
+        assert!(native[0][1]["list"][0]["alerts"].get("other").is_some());
+        let cleanup=live.call_using(serde_json::json!([["CalendarEvent/set",{"accountId":live.account,"destroy":[id]},"0"]]),&using).await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_calendar_descriptions_round_trip_between_devices() {
         use eas::{airsync_base as base, calendar as cal, RequestedBodyPreference as Pref};
         let live = Live::new("E2E_USER2").await;

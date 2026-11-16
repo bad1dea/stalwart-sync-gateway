@@ -4526,7 +4526,12 @@ async fn sync_calendar_collection(
     let mut change_responses: Vec<(String, &'static str)> = Vec::new();
 
     for command in &collection.commands {
-        if command.calendar.unsupported_busy_status
+        if (matches!(command.kind, wbxml::eas::SyncClientCommandKind::Add)
+            && command.calendar.reminder.is_some())
+            || command.calendar.unsupported_reminder
+            || (command.calendar.reminder == Some(None)
+                && !matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1))
+            || command.calendar.unsupported_busy_status
             || command.calendar.unsupported_location
             || command.calendar.unsupported_body
             || command.calendar.unsupported_attendees
@@ -4672,30 +4677,32 @@ async fn sync_calendar_collection(
             collection.sync_key.clone()
         };
 
-    if let Err(error) = state
-        .state
-        .put(SyncRecord {
-            user: user.to_owned(),
-            device_id: device_id.to_owned(),
-            collection_id: collection.collection_id.clone(),
-            sync_key: new_sync_key.clone(),
-            jmap_state: String::new(),
-            seen_ids: Vec::new(),
-        })
-        .await
-    {
-        tracing::warn!(%error, user, device_id, collection = collection.collection_id, "failed to persist Calendar SyncRecord");
-    }
     let item_states: Vec<ItemState> = previous_by_id
         .into_iter()
         .map(|(item_id, hash)| ItemState { item_id, hash })
         .collect();
     if let Err(error) = state
         .state
-        .put_item_states(user, device_id, &collection.collection_id, item_states)
+        .put_with_items(
+            SyncRecord {
+                user: user.to_owned(),
+                device_id: device_id.to_owned(),
+                collection_id: collection.collection_id.clone(),
+                sync_key: new_sync_key.clone(),
+                jmap_state: String::new(),
+                seen_ids: Vec::new(),
+            },
+            Some(item_states),
+        )
         .await
     {
-        tracing::warn!(%error, user, device_id, collection = collection.collection_id, "failed to persist Calendar item state");
+        tracing::warn!(%error, user, device_id, collection = collection.collection_id, "failed to persist Calendar Sync state");
+        builder.start(air::COLLECTION);
+        builder.leaf(air::SYNC_KEY, collection.sync_key.clone());
+        builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+        builder.leaf(air::STATUS, "5");
+        builder.end();
+        return;
     }
 
     builder.start(air::COLLECTION);
@@ -4774,6 +4781,7 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     event.end_utc.hash(&mut hasher);
     event.all_day.hash(&mut hasher);
     event.busy_status.hash(&mut hasher);
+    event.reminder_minutes.hash(&mut hasher);
     event.organizer_email.hash(&mut hasher);
     event.organizer_name.hash(&mut hasher);
     event.is_organizer.hash(&mut hasher);
@@ -4862,6 +4870,14 @@ fn write_calendar_command(
         busy
     };
     builder.leaf(cal::BUSY_STATUS, busy.to_string());
+    if let Some(minutes) = event.reminder_minutes {
+        builder.leaf(cal::REMINDER, minutes.to_string());
+    } else if tag.code_page == air::PAGE
+        && tag.token == air::CHANGE.token
+        && matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1)
+    {
+        builder.empty_tag(cal::REMINDER);
+    }
     if !event.attendees.is_empty() {
         // [MS-ASCAL] MeetingStatus: 1 = meeting, organizer's own copy;
         // 3 = meeting, received as an attendee. The organizer is NEVER
@@ -6129,6 +6145,32 @@ mod tests {
     use crate::wbxml::eas::RequestedBodyPreference as BodyPreference;
     use crate::wbxml::eas::{airsync_base as base, DocumentBuilder};
     use crate::wbxml::Node;
+
+    #[test]
+    fn calendar_reminder_clear_uses_the_modern_empty_tag() {
+        use crate::wbxml::eas::{self, airsync as air, calendar as cal};
+        let mut event = crate::model::CalendarEvent::default();
+        let before = super::calendar_event_hash(&event);
+        event.reminder_minutes = Some(0);
+        assert_ne!(super::calendar_event_hash(&event), before);
+        let mut b = eas::DocumentBuilder::new();
+        super::write_calendar_command(&mut b, air::CHANGE, &event, ProtocolVersion::V16_1, &[]);
+        assert_eq!(eas::find_text_after(&b.finish(), cal::REMINDER), Some("0"));
+        event.reminder_minutes = None;
+        for (version, present) in [
+            (ProtocolVersion::V14_0, false),
+            (ProtocolVersion::V16_1, true),
+        ] {
+            let mut b = eas::DocumentBuilder::new();
+            super::write_calendar_command(&mut b, air::CHANGE, &event, version, &[]);
+            let doc = b.finish();
+            assert_eq!(eas::contains_token(&doc, cal::REMINDER), present);
+            if present {
+                assert!(doc.nodes.iter().any(|node| matches!(node,crate::wbxml::Node::Start(token)
+                    if token.code_page==cal::PAGE && token.token==cal::REMINDER.token && !token.has_content)));
+            }
+        }
+    }
 
     #[test]
     fn calendar_working_elsewhere_is_only_sent_to_newer_protocols() {

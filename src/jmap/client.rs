@@ -1689,15 +1689,70 @@ impl JmapClient {
                     "locations",
                     "showWithoutTime",
                     "freeBusyStatus",
+                    "alerts",
+                    "useDefaultAlerts",
                     "participants",
                 ]),
                 limit,
             )
             .await?;
+        let defaults =
+            if items.iter().any(|item| item.use_default_alerts) {
+                let account_id = auth
+                    .session
+                    .primary_account_for(capabilities::CALENDARS)
+                    .context("JMAP Calendars capability is not available")?;
+                let response: JmapResponse<serde_json::Value> = self.api_call(auth,
+                &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
+                vec![MethodCall::new("Calendar/get", serde_json::json!({
+                    "accountId":account_id, "ids":[calendar_id],
+                    "properties":["id","defaultAlertsWithTime","defaultAlertsWithoutTime"]
+                }), "defaults")]).await?;
+                let result = response
+                    .method_responses
+                    .iter()
+                    .find(|method| method.0 == "Calendar/get")
+                    .context("calendar default alerts lookup failed")?;
+                let item = result.1["list"]
+                    .as_array()
+                    .and_then(|items| items.iter().find(|item| item["id"] == calendar_id))
+                    .context("calendar default alerts unavailable")?;
+                for property in ["defaultAlertsWithTime", "defaultAlertsWithoutTime"] {
+                    let value = item
+                        .get(property)
+                        .context("calendar default alerts missing")?;
+                    if !value.is_null() && !value.is_object() {
+                        anyhow::bail!("invalid calendar default alerts");
+                    }
+                }
+                Some((
+                    item["defaultAlertsWithTime"].clone(),
+                    item["defaultAlertsWithoutTime"].clone(),
+                ))
+            } else {
+                None
+            };
         Ok(items
             .into_iter()
             .filter(|item| item.kind != "Task")
-            .map(CalendarEvent::from)
+            .map(|mut item| {
+                if item.use_default_alerts {
+                    if let Some((with_time, without_time)) = &defaults {
+                        let selected = if item.show_without_time {
+                            without_time
+                        } else {
+                            with_time
+                        };
+                        if selected
+                            .as_object()
+                            .is_some_and(|alerts| !alerts.is_empty())
+                        {
+                            item.alerts = Some(selected.clone());
+                        }
+                    }
+                }
+                CalendarEvent::from(item)
+            })
             .map(|mut event| {
                 event.is_organizer = event
                     .organizer_email
@@ -1731,6 +1786,9 @@ impl JmapClient {
         id: Option<&str>,
         fields: &crate::wbxml::eas::CalendarFields,
     ) -> anyhow::Result<String> {
+        if id.is_none() && fields.reminder.is_some() {
+            anyhow::bail!("calendar reminder creation is not yet supported");
+        }
         let Some(account_id) = auth.session.primary_account_for(capabilities::CALENDARS) else {
             anyhow::bail!("JMAP Calendars capability is not available");
         };
@@ -1740,6 +1798,83 @@ impl JmapClient {
             "@type".to_owned(),
             serde_json::Value::String("Event".to_owned()),
         );
+        let mut reminder_state = None;
+        let mut reminder_changed = false;
+        if let Some(reminder) = fields.reminder {
+            let id = id.context("calendar reminder creation is not yet supported")?;
+            let response: JmapResponse<serde_json::Value> = self.api_call(auth,
+                &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
+                vec![MethodCall::new("CalendarEvent/get", serde_json::json!({
+                    "accountId":account_id, "ids":[id], "properties":["id","alerts","useDefaultAlerts","showWithoutTime"]
+                }), "reminder")]).await?;
+            let result = response
+                .method_responses
+                .iter()
+                .find(|method| method.0 == "CalendarEvent/get")
+                .context("calendar reminder lookup failed")?;
+            reminder_state = Some(
+                result.1["state"]
+                    .as_str()
+                    .context("calendar state missing")?
+                    .to_owned(),
+            );
+            let item = result.1["list"]
+                .as_array()
+                .and_then(|list| list.iter().find(|item| item["id"] == id))
+                .context("calendar event not found")?;
+            let alerts = item.get("alerts").context("calendar alerts missing")?;
+            let mut effective = alerts;
+            let mut defaults_value = None;
+            let use_defaults = item["useDefaultAlerts"]
+                .as_bool()
+                .context("calendar default-alert setting missing")?;
+            if use_defaults {
+                let defaults: JmapResponse<serde_json::Value> = self.api_call(auth,
+                    &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
+                    vec![MethodCall::new("Calendar/get", serde_json::json!({
+                        "accountId":account_id, "ids":[calendar_id],
+                        "properties":["id","defaultAlertsWithTime","defaultAlertsWithoutTime"]
+                    }), "defaults")]).await?;
+                let result = defaults
+                    .method_responses
+                    .iter()
+                    .find(|method| method.0 == "Calendar/get")
+                    .context("calendar default alerts lookup failed")?;
+                let calendar = result.1["list"]
+                    .as_array()
+                    .and_then(|list| list.iter().find(|calendar| calendar["id"] == calendar_id))
+                    .context("calendar default alerts unavailable")?;
+                let property = if item["showWithoutTime"] == true {
+                    "defaultAlertsWithoutTime"
+                } else {
+                    "defaultAlertsWithTime"
+                };
+                let defaults = calendar
+                    .get(property)
+                    .context("calendar default alerts missing")?;
+                if !defaults.is_null() && !defaults.is_object() {
+                    anyhow::bail!("invalid calendar default alerts");
+                }
+                if calendar[property]
+                    .as_object()
+                    .is_some_and(|values| !values.is_empty())
+                {
+                    defaults_value = Some(calendar[property].clone());
+                }
+            }
+            if let Some(defaults) = &defaults_value {
+                effective = defaults;
+            }
+            if !crate::jmap::calendar_reminder::unchanged(effective, reminder)? {
+                if defaults_value.as_ref().is_some_and(|defaults| {
+                    !crate::jmap::calendar_reminder::defaults_match(alerts, defaults)
+                }) {
+                    anyhow::bail!("calendar has dormant alerts that cannot be changed safely");
+                }
+                crate::jmap::calendar_reminder::write_reminder(&mut event, alerts, reminder)?;
+                reminder_changed = true;
+            }
+        }
         if let Some(busy) = fields.busy_status {
             let value = match busy {
                 0 => "free",
@@ -2096,14 +2231,15 @@ impl JmapClient {
         }
 
         let call = match id {
-            Some(existing_id) => MethodCall::new(
-                "CalendarEvent/set",
-                serde_json::json!({
-                    "accountId": account_id,
-                    "update": { existing_id: event }
-                }),
-                "0",
-            ),
+            Some(existing_id) => {
+                let mut arguments = serde_json::json!({
+                    "accountId":account_id, "update":{existing_id:event}
+                });
+                if let Some(state) = reminder_state {
+                    arguments["ifInState"] = serde_json::json!(state);
+                }
+                MethodCall::new("CalendarEvent/set", arguments, "0")
+            }
             None => {
                 event.insert(
                     "calendarIds".to_owned(),
@@ -2142,6 +2278,44 @@ impl JmapClient {
                         .get("updated")
                         .and_then(|value| value.get(existing_id));
                     if updated.is_some() {
+                        if let Some(reminder) = fields.reminder.filter(|_| reminder_changed) {
+                            let verify: JmapResponse<serde_json::Value> = self
+                                .api_call(
+                                    auth,
+                                    &[
+                                        capabilities::CORE.to_owned(),
+                                        capabilities::CALENDARS.to_owned(),
+                                    ],
+                                    vec![MethodCall::new(
+                                        "CalendarEvent/get",
+                                        serde_json::json!({
+                                            "accountId":account_id, "ids":[existing_id],
+                                            "properties":["id","alerts","useDefaultAlerts"]
+                                        }),
+                                        "verify",
+                                    )],
+                                )
+                                .await?;
+                            let result = verify
+                                .method_responses
+                                .iter()
+                                .find(|method| method.0 == "CalendarEvent/get")
+                                .context("calendar reminder verification failed")?;
+                            let item = result.1["list"]
+                                .as_array()
+                                .and_then(|items| {
+                                    items.iter().find(|item| item["id"] == existing_id)
+                                })
+                                .context("updated calendar event disappeared")?;
+                            if item["useDefaultAlerts"] != false
+                                || crate::jmap::calendar_reminder::read_reminder(&item["alerts"])
+                                    != reminder
+                            {
+                                anyhow::bail!(
+                                    "JMAP did not retain the requested calendar reminder"
+                                );
+                            }
+                        }
                         return Ok(existing_id.to_owned());
                     }
                     anyhow::bail!(
@@ -4110,6 +4284,10 @@ struct CalendarEventObject {
     show_without_time: bool,
     #[serde(default)]
     free_busy_status: Option<String>,
+    #[serde(default)]
+    alerts: Option<serde_json::Value>,
+    #[serde(default)]
+    use_default_alerts: bool,
     /// Participant map keyed by an arbitrary JMAP-assigned id (NOT the
     /// email) -- confirmed live 2026-08-25 alongside `reply_to`: Stalwart
     /// silently drops a `participants`-only create with no top-level
@@ -4226,6 +4404,10 @@ impl From<CalendarEventObject> for CalendarEvent {
                 Some("x-eas-working-elsewhere") => 4,
                 _ => 2,
             }),
+            reminder_minutes: value
+                .alerts
+                .as_ref()
+                .and_then(crate::jmap::calendar_reminder::read_reminder),
             organizer_email,
             organizer_name,
             attendees,

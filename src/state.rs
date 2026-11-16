@@ -43,6 +43,11 @@ pub trait StateStore: Send + Sync {
         collection_id: &str,
     ) -> anyhow::Result<Option<SyncRecord>>;
     async fn put(&self, record: SyncRecord) -> anyhow::Result<()>;
+    async fn put_with_items(
+        &self,
+        record: SyncRecord,
+        items: Option<Vec<ItemState>>,
+    ) -> anyhow::Result<()>;
 
     /// Last-known per-item state for a collection, previous call to
     /// `put_item_states` (empty if never synced before).
@@ -116,6 +121,21 @@ impl StateStore for MemoryStateStore {
             key(&record.user, &record.device_id, &record.collection_id),
             record,
         );
+        Ok(())
+    }
+
+    async fn put_with_items(
+        &self,
+        record: SyncRecord,
+        items: Option<Vec<ItemState>>,
+    ) -> anyhow::Result<()> {
+        let key = key(&record.user, &record.device_id, &record.collection_id);
+        let mut records = self.records.write().await;
+        let mut item_states = self.item_states.write().await;
+        records.insert(key.clone(), record);
+        if let Some(items) = items {
+            item_states.insert(key, items);
+        }
         Ok(())
     }
 
@@ -244,6 +264,58 @@ impl StateStore for SqliteStateStore {
                 ],
             )
             .context("failed to write Sync state")?;
+        Ok(())
+    }
+
+    async fn put_with_items(
+        &self,
+        record: SyncRecord,
+        items: Option<Vec<ItemState>>,
+    ) -> anyhow::Result<()> {
+        let seen_ids =
+            serde_json::to_string(&record.seen_ids).context("failed to encode seen IDs")?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SQLite state lock poisoned"))?;
+        let tx = connection
+            .transaction()
+            .context("failed to start Sync state transaction")?;
+        tx.execute(
+            "INSERT INTO sync_records
+                (user, device_id, collection_id, sync_key, jmap_state, seen_ids_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch())
+             ON CONFLICT(user, device_id, collection_id) DO UPDATE SET
+                sync_key = excluded.sync_key,
+                jmap_state = excluded.jmap_state,
+                seen_ids_json = excluded.seen_ids_json,
+                updated_at = excluded.updated_at",
+            params![
+                record.user,
+                record.device_id,
+                record.collection_id,
+                record.sync_key,
+                record.jmap_state,
+                seen_ids
+            ],
+        )
+        .context("failed to write Sync state")?;
+        if let Some(items) = items {
+            tx.execute(
+                "DELETE FROM item_states WHERE user = ?1 AND device_id = ?2 AND collection_id = ?3",
+                params![record.user, record.device_id, record.collection_id],
+            )
+            .context("failed to clear previous item state")?;
+            for item in &items {
+                tx.execute(
+                    "INSERT INTO item_states (user, device_id, collection_id, item_id, item_hash, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())",
+                    params![record.user, record.device_id, record.collection_id, item.item_id, item.hash],
+                ).context("failed to write item state")?;
+            }
+        }
+        tx.commit()
+            .context("failed to commit Sync state transaction")?;
         Ok(())
     }
 
@@ -395,6 +467,45 @@ mod tests {
             Some(updated)
         );
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_sync_and_item_state_commit_together() {
+        let path =
+            std::env::temp_dir().join(format!("stalwart-atomic-state-{}.db", uuid::Uuid::new_v4()));
+        let store = SqliteStateStore::open(path.to_str().unwrap()).unwrap();
+        let item = ItemState {
+            item_id: "a".to_owned(),
+            hash: "old".to_owned(),
+        };
+        store
+            .put_with_items(record("1"), Some(vec![item.clone()]))
+            .await
+            .unwrap();
+        let duplicate = ItemState {
+            item_id: "a".to_owned(),
+            hash: "new".to_owned(),
+        };
+        assert!(store
+            .put_with_items(record("2"), Some(vec![duplicate.clone(), duplicate]))
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .get("user@example.com", "device", "inbox")
+                .await
+                .unwrap(),
+            Some(record("1"))
+        );
+        assert_eq!(
+            store
+                .item_states("user@example.com", "device", "inbox")
+                .await
+                .unwrap(),
+            vec![item]
+        );
+        drop(store);
         let _ = std::fs::remove_file(path);
     }
 }

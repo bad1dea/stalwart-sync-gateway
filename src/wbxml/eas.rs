@@ -1277,6 +1277,8 @@ pub struct CalendarFields {
     pub all_day_event: Option<bool>,
     pub busy_status: Option<u8>,
     pub unsupported_busy_status: bool,
+    pub reminder: Option<Option<u32>>,
+    pub unsupported_reminder: bool,
     pub attendees: Vec<AttendeeField>,
     pub attendees_present: bool,
     pub unsupported_attendees: bool,
@@ -2053,16 +2055,35 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     let mut data_count = 0;
     let mut attendees_count = 0;
     let mut busy_count = 0;
+    let mut busy_text = String::new();
+    let mut reminder_count = 0;
+    let mut reminder_text = String::new();
 
     for node in nodes {
         match node {
             Node::Start(token) => {
+                if same_token(*token, calendar::REMINDER)
+                    && path
+                        .last()
+                        .is_some_and(|parent| same_token(*parent, airsync::APPLICATION_DATA))
+                {
+                    reminder_count += 1;
+                    reminder_text.clear();
+                    fields.reminder = Some(None);
+                }
+                if path
+                    .last()
+                    .is_some_and(|parent| same_token(*parent, calendar::REMINDER))
+                {
+                    fields.unsupported_reminder = true;
+                }
                 if same_token(*token, calendar::BUSY_STATUS)
                     && path
                         .last()
                         .is_some_and(|parent| same_token(*parent, airsync::APPLICATION_DATA))
                 {
                     busy_count += 1;
+                    busy_text.clear();
                     if !token.has_content {
                         fields.unsupported_busy_status = true;
                     }
@@ -2173,19 +2194,40 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                     fields.start_time = Some(text.clone());
                 } else if same_token(top, calendar::END_TIME) {
                     fields.end_time = Some(text.clone());
+                } else if same_token(top, calendar::REMINDER)
+                    && path.len() >= 2
+                    && same_token(path[path.len() - 2], airsync::APPLICATION_DATA)
+                {
+                    reminder_text.push_str(text);
                 } else if same_token(top, calendar::BUSY_STATUS)
                     && path.len() >= 2
                     && same_token(path[path.len() - 2], airsync::APPLICATION_DATA)
                 {
-                    fields.busy_status = text.parse::<u8>().ok();
-                    if !matches!(fields.busy_status, Some(0..=3)) {
-                        fields.unsupported_busy_status = true;
-                    }
+                    busy_text.push_str(text);
                 } else if same_token(top, calendar::ALL_DAY_EVENT) {
                     fields.all_day_event = Some(text != "0");
                 }
             }
             Node::End => {
+                if path.len() >= 2
+                    && same_token(path[path.len() - 1], calendar::BUSY_STATUS)
+                    && same_token(path[path.len() - 2], airsync::APPLICATION_DATA)
+                {
+                    fields.busy_status = busy_text.parse::<u8>().ok();
+                    if !matches!(fields.busy_status, Some(0..=3)) {
+                        fields.unsupported_busy_status = true;
+                    }
+                }
+                if path.len() >= 2
+                    && same_token(path[path.len() - 1], calendar::REMINDER)
+                    && same_token(path[path.len() - 2], airsync::APPLICATION_DATA)
+                    && !reminder_text.is_empty()
+                {
+                    match reminder_text.parse::<u32>() {
+                        Ok(minutes) => fields.reminder = Some(Some(minutes)),
+                        Err(_) => fields.unsupported_reminder = true,
+                    }
+                }
                 if path
                     .last()
                     .is_some_and(|&t| same_token(t, calendar::ATTENDEE))
@@ -2201,6 +2243,12 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                 path.pop();
             }
             Node::Opaque(_) => {
+                if path
+                    .last()
+                    .is_some_and(|token| same_token(*token, calendar::REMINDER))
+                {
+                    fields.unsupported_reminder = true;
+                }
                 if path.iter().any(|t| same_token(*t, airsync_base::BODY)) {
                     fields.unsupported_body = true;
                 }
@@ -2208,6 +2256,7 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
         }
     }
 
+    fields.unsupported_reminder |= reminder_count > 1;
     fields.unsupported_busy_status |=
         busy_count > 1 || (busy_count == 1 && fields.busy_status.is_none());
     let mut attendee_emails = std::collections::HashSet::new();
@@ -2599,6 +2648,46 @@ mod tests {
         assert_eq!(command.task.subject.as_deref(), Some("Renew passport"));
         assert_eq!(command.task.complete, Some(false));
         assert_eq!(command.task.due_date.as_deref(), Some("20260905T090000Z"));
+    }
+
+    #[test]
+    fn calendar_numeric_fields_join_fragmented_text() {
+        let mut b = DocumentBuilder::new();
+        b.start(airsync::APPLICATION_DATA);
+        b.start(calendar::REMINDER);
+        b.extend(vec![Node::Text("1".to_owned()), Node::Text("5".to_owned())]);
+        b.end();
+        b.start(calendar::BUSY_STATUS);
+        b.extend(vec![Node::Text("1".to_owned()), Node::Text("2".to_owned())]);
+        b.end();
+        b.end();
+        let fields = super::extract_calendar_fields(&b.finish().nodes);
+        assert_eq!(fields.reminder, Some(Some(15)));
+        assert!(fields.unsupported_busy_status);
+    }
+
+    #[test]
+    fn calendar_reminder_distinguishes_absent_clear_zero_and_invalid() {
+        let parse = |values: &[Option<&str>]| {
+            let mut b = DocumentBuilder::new();
+            b.start(airsync::APPLICATION_DATA);
+            for value in values {
+                if let Some(value) = value {
+                    b.leaf(calendar::REMINDER, *value);
+                } else {
+                    b.empty_tag(calendar::REMINDER);
+                }
+            }
+            b.end();
+            super::extract_calendar_fields(&b.finish().nodes)
+        };
+        assert_eq!(parse(&[]).reminder, None);
+        assert_eq!(parse(&[None]).reminder, Some(None));
+        assert_eq!(parse(&[Some("0")]).reminder, Some(Some(0)));
+        assert_eq!(parse(&[Some("4294967295")]).reminder, Some(Some(u32::MAX)));
+        assert!(parse(&[Some("4294967296")]).unsupported_reminder);
+        assert!(parse(&[Some("-1")]).unsupported_reminder);
+        assert!(parse(&[Some("1"), Some("2")]).unsupported_reminder);
     }
 
     #[test]
