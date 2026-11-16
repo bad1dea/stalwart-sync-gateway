@@ -1448,6 +1448,7 @@ pub struct SearchRequest {
     /// which are overwhelmingly mail search from the device's own Mail
     /// app.
     pub class: Option<String>,
+    pub unsupported_class_query: bool,
     pub free_text: Option<String>,
     pub free_texts: Vec<String>,
     pub collection_id: Option<String>,
@@ -1483,7 +1484,7 @@ pub struct SearchOrTerms {
 /// naturally picks up the first (only) occurrence of each element.
 pub fn search_request(document: &Document) -> Option<SearchRequest> {
     let store_name = find_text_after(document, search::NAME)?.to_owned();
-    let class = find_text_after(document, airsync::CLASS).map(str::to_owned);
+    let (class, unsupported_class_query) = search_classes(document);
     let free_texts = search_texts(document, false);
     let free_text = free_texts
         .first()
@@ -1534,6 +1535,7 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
     Some(SearchRequest {
         store_name,
         class,
+        unsupported_class_query,
         free_text,
         free_texts,
         collection_id: find_text_after(document, airsync::COLLECTION_ID).map(str::to_owned),
@@ -1559,6 +1561,42 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
         body_preferences,
         mime_support,
     })
+}
+
+fn search_classes(document: &Document) -> (Option<String>, bool) {
+    fn visit(
+        document: &Document,
+        parent: Option<Token>,
+        values: &mut Vec<String>,
+        invalid: &mut bool,
+    ) {
+        if let Some(Node::Start(token)) = document.nodes.first() {
+            if same_token(*token, airsync::CLASS) {
+                if !parent.is_some_and(|parent| same_token(parent, search::AND)) {
+                    *invalid = true;
+                }
+                match document.nodes.as_slice() {
+                    [Node::Start(_), Node::Text(value), Node::End] if !value.is_empty() => {
+                        values.push(value.clone())
+                    }
+                    _ => *invalid = true,
+                }
+            }
+            for child in child_elements(document) {
+                visit(&child, Some(*token), values, invalid);
+            }
+        }
+    }
+    let mut values = Vec::new();
+    let mut invalid = false;
+    visit(document, None, &mut values, &mut invalid);
+    if values
+        .iter()
+        .any(|class| !class.eq_ignore_ascii_case("Email"))
+    {
+        invalid = true;
+    }
+    (values.into_iter().next(), invalid)
 }
 
 fn search_conversation(store: &Document) -> (Option<uuid::Uuid>, bool) {

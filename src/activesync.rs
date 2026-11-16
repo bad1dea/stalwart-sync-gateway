@@ -911,12 +911,8 @@ async fn search_conversation_emails(
 /// real principals on this instance). `Range`'s "m-n" is zero-based
 /// inclusive on both ends per the real schema; converted to JMAP's
 /// `position`/`limit` here since that's the one place this command
-/// needs the conversion. A Mailbox search restricted to any
-/// `airsync:Class` other than "Email" (Calendar/Contacts/Tasks/Notes/
-/// SMS) returns a clean empty-but-successful result for that store
-/// rather than erroring the whole command -- those classes have no
-/// search backing today, but a device asking for them shouldn't see a
-/// broken response, just zero matches.
+/// needs the conversion. Mailbox searches for unsupported item classes
+/// return SearchTooComplex instead of an incomplete result.
 async fn search(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
@@ -979,17 +975,10 @@ async fn search(
     if let Some(status) = request.range_error {
         builder.leaf(srch::STATUS, status);
     } else if request.store_name.eq_ignore_ascii_case("Mailbox") {
-        if request.invalid_conversation {
+        if request.invalid_conversation || request.unsupported_class_query {
             builder.leaf(srch::STATUS, "8");
         } else if request.unsupported_query {
             builder.leaf(srch::STATUS, "2");
-        } else if request
-            .class
-            .as_deref()
-            .is_some_and(|class| !class.eq_ignore_ascii_case("Email"))
-        {
-            builder.leaf(srch::STATUS, "1");
-            builder.leaf(srch::TOTAL, "0");
         } else {
             let texts = &request.free_texts;
             let results = async {

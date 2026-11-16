@@ -4665,7 +4665,7 @@ mod e2e {
             .await;
         assert_eq!(
             eas::find_all_text_after(&invalid, srch::STATUS),
-            vec!["1", "2"]
+            vec!["1", "8"]
         );
         let ids = [root_ids, child_ids, outside_ids].concat();
         let cleanup = live
@@ -10887,6 +10887,51 @@ async fn failed_sync_mime_preparation_keeps_the_previous_key_and_pending_message
     assert_eq!(eas::find_opaque_after(&doc, base::DATA), Some(MIME_BYTES));
     let response = env.req("Sync", "client").body(body).send().await.unwrap();
     assert_eq!(response.bytes().await.unwrap(), first);
+}
+
+#[tokio::test]
+async fn search_rejects_unsupported_or_misplaced_classes() {
+    use eas::{airsync as air, search as srch};
+    let env = start_env(Opts::default()).await;
+    for (classes, nested, expected) in [
+        (vec!["Email"], true, "1"),
+        (vec!["Calendar"], true, "8"),
+        (vec!["Email", "Contacts"], true, "8"),
+        (vec!["Email"], false, "8"),
+    ] {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(srch::SEARCH);
+        b.start(srch::STORE);
+        b.leaf(srch::NAME, "Mailbox");
+        b.start(srch::QUERY);
+        if nested {
+            b.start(srch::AND);
+        }
+        for class in classes {
+            b.leaf(air::CLASS, class);
+        }
+        b.leaf(srch::FREE_TEXT, "subject");
+        if nested {
+            b.end();
+        }
+        b.end();
+        b.end();
+        b.end();
+        let response = env
+            .req("Search", "client")
+            .body(wbxml::encode_document(&b.finish()))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(
+            eas::find_all_text_after(&doc, srch::STATUS),
+            vec!["1", expected]
+        );
+        if expected == "8" {
+            assert!(!eas::contains_token(&doc, srch::TOTAL));
+        }
+    }
 }
 
 #[tokio::test]
