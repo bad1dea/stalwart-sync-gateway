@@ -3693,6 +3693,88 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_mailbox_search_date_bounds_are_exclusive() {
+        use eas::{email as mail, search as srch};
+        let live = Live::new("E2E_USER2").await;
+        let word = format!("datefixture{}", std::process::id());
+        let ids = live
+            .seed_dated(&[
+                (&word, "2020-01-01T00:00:00Z".to_owned()),
+                (&word, "2020-01-01T00:00:01Z".to_owned()),
+                (&word, "2020-01-01T00:00:02Z".to_owned()),
+            ])
+            .await;
+        let search = |after: &str, before: &str, text: bool| {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(srch::SEARCH);
+            b.start(srch::STORE);
+            b.leaf(srch::NAME, "Mailbox");
+            b.start(srch::QUERY);
+            b.start(srch::AND);
+            b.leaf(air::CLASS, "Email");
+            if text {
+                b.leaf(srch::FREE_TEXT, &word);
+            }
+            b.start(srch::GREATER_THAN);
+            b.empty_tag(mail::DATE_RECEIVED);
+            b.leaf(srch::VALUE, after);
+            b.end();
+            b.start(srch::LESS_THAN);
+            b.empty_tag(mail::DATE_RECEIVED);
+            b.leaf(srch::VALUE, before);
+            b.end();
+            b.end();
+            b.end();
+            b.start(srch::OPTIONS);
+            b.leaf(srch::RANGE, "0-9");
+            b.end();
+            b.end();
+            b.end();
+            wbxml::encode_document(&b.finish())
+        };
+        let result = live
+            .wbxml_version(
+                "Search",
+                &dev("date-search"),
+                search("2020-01-01T00:00:00Z", "2020-01-01T00:00:02Z", true),
+                "14.0",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&result, srch::LONG_ID),
+            vec![ids[1].clone()]
+        );
+        let fraction = live
+            .wbxml_version(
+                "Search",
+                &dev("date-search-fraction"),
+                search("2020-01-01T00:00:00.500Z", "2020-01-01T00:00:01.500Z", true),
+                "14.0",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&fraction, srch::LONG_ID),
+            vec![ids[1].clone()]
+        );
+        let only_dates = live
+            .wbxml_version(
+                "Search",
+                &dev("date-only"),
+                search("2020-01-01T00:00:00Z", "2020-01-01T00:00:02Z", false),
+                "14.0",
+            )
+            .await;
+        let returned = eas::find_all_text_after(&only_dates, srch::LONG_ID);
+        assert!(returned.contains(&ids[1]));
+        assert!(!returned.contains(&ids[0]) && !returned.contains(&ids[2]));
+        let cleanup = live
+            .call(serde_json::json!([["Email/set",{"accountId":live.account,"destroy":ids},"0"]]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_mailbox_search_respects_folder_and_deep_traversal() {
         use eas::search as srch;
         let live = Live::new("E2E_USER2").await;

@@ -614,17 +614,27 @@ impl JmapClient {
         auth: &AuthenticatedSession,
         text: &str,
         folders: Option<&[String]>,
+        received: (Option<&str>, Option<&str>),
         position: i64,
         limit: usize,
     ) -> anyhow::Result<(Vec<Email>, u64)> {
-        let filter = match folders {
-            Some(folders) => serde_json::json!({
-                "operator":"AND", "conditions":[
-                    {"text":text},
-                    {"operator":"OR","conditions":folders.iter().map(|id| serde_json::json!({"inMailbox":id})).collect::<Vec<_>>()}
-                ]
-            }),
-            None => serde_json::json!({"text": text}),
+        let mut conditions = Vec::new();
+        if !text.is_empty() {
+            conditions.push(serde_json::json!({"text":text}));
+        }
+        if let Some(folders) = folders {
+            conditions.push(serde_json::json!({"operator":"OR","conditions":folders.iter().map(|id| serde_json::json!({"inMailbox":id})).collect::<Vec<_>>() }));
+        }
+        if let Some(after) = received.0 {
+            conditions.push(serde_json::json!({"operator":"NOT","conditions":[{"before":after}]}));
+        }
+        if let Some(before) = received.1 {
+            conditions.push(serde_json::json!({"before":before}));
+        }
+        let filter = if conditions.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({"operator":"AND","conditions":conditions})
         };
         let page = self
             .query_emails(

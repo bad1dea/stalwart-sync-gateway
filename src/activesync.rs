@@ -927,9 +927,35 @@ async fn search(
                 } else {
                     None
                 };
+                // Stalwart indexes receivedAt at whole-second precision.
+                let boundary = |value: &str, upper: bool| -> anyhow::Result<String> {
+                    let time = chrono::DateTime::parse_from_rfc3339(value)?;
+                    let seconds =
+                        time.timestamp() + i64::from(!upper || time.timestamp_subsec_nanos() != 0);
+                    let time = chrono::DateTime::from_timestamp(seconds, 0)
+                        .ok_or_else(|| anyhow::anyhow!("search date out of range"))?;
+                    Ok(time.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                };
+                let after = request
+                    .received_after
+                    .as_deref()
+                    .map(|value| boundary(value, false))
+                    .transpose()?;
+                let before = request
+                    .received_before
+                    .as_deref()
+                    .map(|value| boundary(value, true))
+                    .transpose()?;
                 let (emails, total) = state
                     .jmap
-                    .search_emails(auth, &text, folders.as_deref(), position, limit)
+                    .search_emails(
+                        auth,
+                        &text,
+                        folders.as_deref(),
+                        (after.as_deref(), before.as_deref()),
+                        position,
+                        limit,
+                    )
                     .await?;
                 let emails = prepare_mail_bodies(
                     state,

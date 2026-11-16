@@ -1447,6 +1447,8 @@ pub struct SearchRequest {
     pub collection_id: Option<String>,
     pub deep_traversal: bool,
     pub unsupported_query: bool,
+    pub received_after: Option<String>,
+    pub received_before: Option<String>,
     /// The EAS `Range` element's two numbers, parsed as-is (zero-based,
     /// inclusive on both ends per the real schema's own prose, e.g.
     /// "0-9" = the first 10 results) -- NOT yet converted to a
@@ -1474,24 +1476,72 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
     let store = child_elements(document).into_iter().find(|child|
         matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, search::STORE)))?;
     let mime_support = mime_support(&store).ok()?;
+    let (received_after, after_invalid) = search_date_comparison(&store, search::GREATER_THAN);
+    let (received_before, before_invalid) = search_date_comparison(&store, search::LESS_THAN);
     Some(SearchRequest {
         store_name,
         class,
         free_text,
         collection_id: find_text_after(document, airsync::COLLECTION_ID).map(str::to_owned),
         deep_traversal: contains_token(document, search::DEEP_TRAVERSAL),
-        unsupported_query: [
-            search::OR,
-            search::EQUAL_TO,
-            search::LESS_THAN,
-            search::GREATER_THAN,
-        ]
-        .iter()
-        .any(|token| contains_token(document, *token)),
+        unsupported_query: after_invalid
+            || before_invalid
+            || [search::OR, search::EQUAL_TO]
+                .iter()
+                .any(|token| contains_token(document, *token)),
+        received_after,
+        received_before,
         range,
         body_preferences,
         mime_support,
     })
+}
+
+fn search_date_comparison(store: &Document, comparison: Token) -> (Option<String>, bool) {
+    fn visit(
+        document: &Document,
+        token: Token,
+        parent: Option<Token>,
+        found: &mut Vec<Document>,
+        invalid: &mut bool,
+    ) {
+        if let Some(Node::Start(current)) = document.nodes.first() {
+            if same_token(*current, token) {
+                if !parent.is_some_and(|p| same_token(p, search::AND)) {
+                    *invalid = true;
+                }
+                found.push(document.clone());
+            }
+            for child in child_elements(document) {
+                visit(&child, token, Some(*current), found, invalid);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    let mut invalid = false;
+    visit(store, comparison, None, &mut found, &mut invalid);
+    if found.len() > 1 {
+        return (None, true);
+    }
+    let Some(condition) = found.first() else {
+        return (None, invalid);
+    };
+    let children = child_elements(condition);
+    if children.len() != 2
+        || !matches!(children[0].nodes.first(), Some(Node::Start(t)) if same_token(*t, email::DATE_RECEIVED))
+        || !matches!(children[1].nodes.first(), Some(Node::Start(t)) if same_token(*t, search::VALUE))
+    {
+        return (None, true);
+    }
+    let value = find_text_after(&children[1], search::VALUE).map(str::to_owned);
+    if value
+        .as_deref()
+        .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+        .is_none()
+    {
+        return (None, true);
+    }
+    (value, invalid)
 }
 
 /// Finds the raw bytes of an opaque (binary) node immediately following a
@@ -3015,6 +3065,47 @@ mod tests {
         assert_eq!(request.class.as_deref(), Some("Email"));
         assert_eq!(request.free_text.as_deref(), Some("invite"));
         assert_eq!(request.range, Some((0, 9)));
+    }
+
+    #[test]
+    fn validates_mailbox_search_date_comparisons() {
+        let document = |duplicate: bool, wrong_order: bool, value: &str| {
+            let mut b = DocumentBuilder::new();
+            b.start(search::SEARCH);
+            b.start(search::STORE);
+            b.leaf(search::NAME, "Mailbox");
+            b.start(search::QUERY);
+            b.start(search::AND);
+            for _ in 0..if duplicate { 2 } else { 1 } {
+                b.start(search::GREATER_THAN);
+                if wrong_order {
+                    b.leaf(search::VALUE, value);
+                    b.empty_tag(email::DATE_RECEIVED);
+                } else {
+                    b.empty_tag(email::DATE_RECEIVED);
+                    b.leaf(search::VALUE, value);
+                }
+                b.end();
+            }
+            b.end();
+            b.end();
+            b.end();
+            b.end();
+            b.finish()
+        };
+        let valid = search_request(&document(false, false, "2020-01-01T00:00:00Z")).unwrap();
+        assert!(!valid.unsupported_query);
+        assert_eq!(
+            valid.received_after.as_deref(),
+            Some("2020-01-01T00:00:00Z")
+        );
+        for invalid in [
+            document(true, false, "2020-01-01T00:00:00Z"),
+            document(false, true, "2020-01-01T00:00:00Z"),
+            document(false, false, "not a date"),
+        ] {
+            assert!(search_request(&invalid).unwrap().unsupported_query);
+        }
     }
 
     #[test]
