@@ -3693,6 +3693,89 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_mailbox_search_respects_folder_and_deep_traversal() {
+        use eas::search as srch;
+        let live = Live::new("E2E_USER2").await;
+        let created = live.call(serde_json::json!([["Mailbox/set",{"accountId":live.account,
+            "create":{"parent":{"name":format!("Search root {}",std::process::id())},
+                      "child":{"name":format!("Search child {}",std::process::id()),"parentId":"#parent"},
+                      "outside":{"name":format!("Search outside {}",std::process::id())}}},"0"]])).await;
+        let created = &created[0][1]["created"];
+        let parent = created["parent"]["id"].as_str().unwrap().to_owned();
+        let child = created["child"]["id"].as_str().unwrap().to_owned();
+        let outside = created["outside"]["id"].as_str().unwrap().to_owned();
+        let word = format!("scopefixture{}", std::process::id());
+        let root_ids = live.seed(&parent, 1, &word, false).await;
+        let child_ids = live.seed(&child, 1, &word, false).await;
+        let outside_ids = live.seed(&outside, 1, &word, false).await;
+        let update = live
+            .call(serde_json::json!([["Email/set",{"accountId":live.account,
+            "update":{&root_ids[0]:{format!("mailboxIds/{outside}"):true}}},"0"]]))
+            .await;
+        assert!(update[0][1]["updated"].get(&root_ids[0]).is_some());
+        let search = |deep, unsupported| {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(srch::SEARCH);
+            b.start(srch::STORE);
+            b.leaf(srch::NAME, "Mailbox");
+            b.start(srch::QUERY);
+            b.start(if unsupported { srch::OR } else { srch::AND });
+            b.leaf(air::CLASS, "Email");
+            b.leaf(air::COLLECTION_ID, &parent);
+            b.leaf(srch::FREE_TEXT, &word);
+            b.end();
+            b.end();
+            b.start(srch::OPTIONS);
+            b.leaf(srch::RANGE, "0-9");
+            if deep {
+                b.empty_tag(srch::DEEP_TRAVERSAL);
+            }
+            b.end();
+            b.end();
+            b.end();
+            wbxml::encode_document(&b.finish())
+        };
+        let root = live
+            .wbxml_version("Search", &dev("search-scope"), search(false, false), "14.0")
+            .await;
+        assert_eq!(eas::find_all_text_after(&root, srch::LONG_ID), root_ids);
+        assert_eq!(
+            eas::find_text_after(&root, air::COLLECTION_ID),
+            Some(parent.as_str())
+        );
+        let deep = live
+            .wbxml_version("Search", &dev("search-deep"), search(true, false), "14.0")
+            .await;
+        let mut actual = eas::find_all_text_after(&deep, srch::LONG_ID);
+        actual.sort();
+        let mut expected = [root_ids.clone(), child_ids.clone()].concat();
+        expected.sort();
+        assert_eq!(actual, expected);
+        let invalid = live
+            .wbxml_version(
+                "Search",
+                &dev("search-invalid"),
+                search(false, true),
+                "14.0",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&invalid, srch::STATUS),
+            vec!["1", "2"]
+        );
+        let ids = [root_ids, child_ids, outside_ids].concat();
+        let cleanup = live
+            .call(
+                serde_json::json!([["Email/set",{"accountId":live.account,"destroy":ids},"0"],
+            ["Mailbox/set",{"accountId":live.account,"destroy":[child,parent,outside]},"1"]]),
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_calendar_uid_matches_stalwart_and_other_device() {
         use eas::calendar as cal;
         let live = Live::new("E2E_USER2").await;

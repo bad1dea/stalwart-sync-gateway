@@ -884,7 +884,9 @@ async fn search(
     builder.start(srch::STORE);
 
     if request.store_name.eq_ignore_ascii_case("Mailbox") {
-        if request
+        if request.unsupported_query {
+            builder.leaf(srch::STATUS, "2");
+        } else if request
             .class
             .as_deref()
             .is_some_and(|class| !class.eq_ignore_ascii_case("Email"))
@@ -894,9 +896,40 @@ async fn search(
         } else {
             let text = request.free_text.unwrap_or_default();
             let results = async {
+                let folders = if let Some(folder) = &request.collection_id {
+                    let collections = state.jmap.collections(auth).await?;
+                    let mailboxes: Vec<_> = collections
+                        .iter()
+                        .filter(|item| item.kind == crate::model::CollectionKind::Mail)
+                        .collect();
+                    if !mailboxes.iter().any(|item| &item.id == folder) {
+                        anyhow::bail!("unknown search folder");
+                    }
+                    let mut scope = BTreeSet::from([folder.clone()]);
+                    if request.deep_traversal {
+                        loop {
+                            let before = scope.len();
+                            for item in &mailboxes {
+                                if item
+                                    .parent_id
+                                    .as_ref()
+                                    .is_some_and(|parent| scope.contains(parent))
+                                {
+                                    scope.insert(item.id.clone());
+                                }
+                            }
+                            if before == scope.len() {
+                                break;
+                            }
+                        }
+                    }
+                    Some(scope.into_iter().collect::<Vec<_>>())
+                } else {
+                    None
+                };
                 let (emails, total) = state
                     .jmap
-                    .search_emails(auth, &text, position, limit)
+                    .search_emails(auth, &text, folders.as_deref(), position, limit)
                     .await?;
                 let emails = prepare_mail_bodies(
                     state,
@@ -906,18 +939,22 @@ async fn search(
                     request.mime_support,
                 )
                 .await?;
-                Ok::<_, anyhow::Error>((emails, total))
+                Ok::<_, anyhow::Error>((emails, total, folders))
             }
             .await;
             match results {
-                Ok((emails, total)) => {
+                Ok((emails, total, folders)) => {
                     builder.leaf(srch::STATUS, "1");
                     for (email, preference) in emails {
                         let email_id = email.id.clone();
                         builder.start(srch::RESULT);
                         builder.leaf(air::CLASS, "Email");
                         builder.leaf(srch::LONG_ID, email_id.clone());
-                        if let Some(mailbox_id) = email.mailbox_ids.first() {
+                        if let Some(mailbox_id) = email
+                            .mailbox_ids
+                            .iter()
+                            .find(|id| folders.as_ref().is_none_or(|scope| scope.contains(id)))
+                        {
                             builder.leaf(air::COLLECTION_ID, mailbox_id.clone());
                         }
                         builder.start(srch::PROPERTIES);

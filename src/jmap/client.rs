@@ -613,13 +613,23 @@ impl JmapClient {
         &self,
         auth: &AuthenticatedSession,
         text: &str,
+        folders: Option<&[String]>,
         position: i64,
         limit: usize,
     ) -> anyhow::Result<(Vec<Email>, u64)> {
+        let filter = match folders {
+            Some(folders) => serde_json::json!({
+                "operator":"AND", "conditions":[
+                    {"text":text},
+                    {"operator":"OR","conditions":folders.iter().map(|id| serde_json::json!({"inMailbox":id})).collect::<Vec<_>>()}
+                ]
+            }),
+            None => serde_json::json!({"text": text}),
+        };
         let page = self
             .query_emails(
                 auth,
-                serde_json::json!({"text": text}),
+                filter,
                 position,
                 limit.min(100),
                 &[

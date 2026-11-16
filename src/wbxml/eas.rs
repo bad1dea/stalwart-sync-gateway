@@ -1444,6 +1444,9 @@ pub struct SearchRequest {
     /// app.
     pub class: Option<String>,
     pub free_text: Option<String>,
+    pub collection_id: Option<String>,
+    pub deep_traversal: bool,
+    pub unsupported_query: bool,
     /// The EAS `Range` element's two numbers, parsed as-is (zero-based,
     /// inclusive on both ends per the real schema's own prose, e.g.
     /// "0-9" = the first 10 results) -- NOT yet converted to a
@@ -1475,6 +1478,16 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
         store_name,
         class,
         free_text,
+        collection_id: find_text_after(document, airsync::COLLECTION_ID).map(str::to_owned),
+        deep_traversal: contains_token(document, search::DEEP_TRAVERSAL),
+        unsupported_query: [
+            search::OR,
+            search::EQUAL_TO,
+            search::LESS_THAN,
+            search::GREATER_THAN,
+        ]
+        .iter()
+        .any(|token| contains_token(document, *token)),
         range,
         body_preferences,
         mime_support,
