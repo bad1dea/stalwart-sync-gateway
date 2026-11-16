@@ -849,8 +849,8 @@ async fn search(
     // (position, limit): default to the first 25 results when the device omits Range
     // entirely -- the schema marks it optional inside Options.
     let (position, limit) = match request.range {
-        Some((start, end)) if end >= start => (start, (end - start + 1).clamp(1, 100) as usize),
-        _ => (0, 25),
+        Some((start, end)) => (start, (end - start + 1) as usize),
+        None => (0, 100),
     };
 
     // Search results need a lightweight preview, NOT the full body/
@@ -883,7 +883,9 @@ async fn search(
     builder.start(srch::RESPONSE);
     builder.start(srch::STORE);
 
-    if request.store_name.eq_ignore_ascii_case("Mailbox") {
+    if let Some(status) = request.range_error {
+        builder.leaf(srch::STATUS, status);
+    } else if request.store_name.eq_ignore_ascii_case("Mailbox") {
         if request.unsupported_query {
             builder.leaf(srch::STATUS, "2");
         } else if request
@@ -971,6 +973,7 @@ async fn search(
             match results {
                 Ok((emails, total, folders)) => {
                     builder.leaf(srch::STATUS, "1");
+                    let count = emails.len();
                     for (email, preference) in emails {
                         let email_id = email.id.clone();
                         builder.start(srch::RESULT);
@@ -994,8 +997,11 @@ async fn search(
                         builder.end();
                         builder.end();
                     }
-                    if let Some((start, end)) = request.range {
-                        builder.leaf(srch::RANGE, format!("{start}-{end}"));
+                    if count > 0 {
+                        builder.leaf(
+                            srch::RANGE,
+                            format!("{position}-{}", position + count as i64 - 1),
+                        );
                     }
                     builder.leaf(srch::TOTAL, total.to_string());
                 }
@@ -1007,11 +1013,18 @@ async fn search(
         }
     } else if request.store_name.eq_ignore_ascii_case("GAL") {
         let text = request.free_text.unwrap_or_default();
-        match state.jmap.search_principals(auth, &text, limit).await {
+        match state.jmap.all_principals(auth).await {
             Ok(principals) => {
-                builder.leaf(srch::STATUS, "1");
+                let principals = find::matching_principals(principals, &text);
                 let total = principals.len();
-                for principal in principals {
+                let page: Vec<_> = principals
+                    .into_iter()
+                    .skip(position as usize)
+                    .take(limit)
+                    .collect();
+                let count = page.len();
+                builder.leaf(srch::STATUS, "1");
+                for principal in page {
                     builder.start(srch::RESULT);
                     builder.start(srch::PROPERTIES);
                     builder.leaf(gal::DISPLAY_NAME, principal.display_name);
@@ -1020,6 +1033,12 @@ async fn search(
                     }
                     builder.end();
                     builder.end();
+                }
+                if count > 0 {
+                    builder.leaf(
+                        srch::RANGE,
+                        format!("{position}-{}", position + count as i64 - 1),
+                    );
                 }
                 builder.leaf(srch::TOTAL, total.to_string());
             }

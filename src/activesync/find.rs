@@ -317,14 +317,11 @@ async fn execute(
     Ok(b.finish())
 }
 
-async fn execute_gal(
-    state: &AppState,
-    auth: &AuthenticatedSession,
-    device: &EasQuery,
-    request: Request,
-) -> anyhow::Result<wbxml::Document> {
-    let term = request.text.to_lowercase();
-    let mut principals = state.jmap.all_principals(auth).await?;
+pub(super) fn matching_principals(
+    mut principals: Vec<crate::jmap::client::PrincipalResult>,
+    term: &str,
+) -> Vec<crate::jmap::client::PrincipalResult> {
+    let term = term.to_lowercase();
     principals.retain(|principal| {
         let display = principal.display_name.to_lowercase();
         display.starts_with(&term)
@@ -344,6 +341,17 @@ async fn execute_gal(
             principal.id.clone(),
         )
     });
+    principals
+}
+
+async fn execute_gal(
+    state: &AppState,
+    auth: &AuthenticatedSession,
+    device: &EasQuery,
+    request: Request,
+) -> anyhow::Result<wbxml::Document> {
+    let term = request.text.to_lowercase();
+    let principals = matching_principals(state.jmap.all_principals(auth).await?, &term);
     let query_state = uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_OID,
         &serde_json::to_vec(&principals)?,

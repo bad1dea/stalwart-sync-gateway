@@ -772,68 +772,6 @@ impl JmapClient {
     /// the closest thing to a human display name (e.g. "khuong", "System
     /// administrator") and is used for `gal:DisplayName` when present,
     /// falling back to the account name (its email) otherwise.
-    pub async fn search_principals(
-        &self,
-        auth: &AuthenticatedSession,
-        text: &str,
-        limit: usize,
-    ) -> anyhow::Result<Vec<PrincipalResult>> {
-        let Some(account_id) = auth.session.primary_account_for(capabilities::PRINCIPALS) else {
-            return Ok(Vec::new());
-        };
-        let limit = limit.clamp(1, 100);
-
-        let calls = vec![
-            MethodCall::new(
-                "Principal/query",
-                serde_json::json!({
-                    "accountId": account_id,
-                    "filter": { "text": text },
-                    "limit": limit
-                }),
-                "q",
-            ),
-            MethodCall::new(
-                "Principal/get",
-                serde_json::json!({
-                    "accountId": account_id,
-                    "#ids": {
-                        "resultOf": "q",
-                        "name": "Principal/query",
-                        "path": "/ids"
-                    },
-                    "properties": ["id", "name", "email", "description"]
-                }),
-                "g",
-            ),
-        ];
-
-        let response: JmapResponse<serde_json::Value> = self
-            .api_call(
-                auth,
-                &[
-                    capabilities::CORE.to_owned(),
-                    capabilities::PRINCIPALS.to_owned(),
-                ],
-                calls,
-            )
-            .await?;
-
-        for method in response.method_responses {
-            match method.0.as_str() {
-                "Principal/get" => {
-                    let get: GetResponse<PrincipalObject> = serde_json::from_value(method.1)
-                        .context("invalid Principal/get response")?;
-                    return Ok(get.list.into_iter().map(PrincipalResult::from).collect());
-                }
-                "error" => anyhow::bail!("JMAP method error in principal search"),
-                _ => {}
-            }
-        }
-
-        Ok(Vec::new())
-    }
-
     pub async fn all_principals(
         &self,
         auth: &AuthenticatedSession,

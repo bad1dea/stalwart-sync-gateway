@@ -1455,6 +1455,7 @@ pub struct SearchRequest {
     /// "0-9" = the first 10 results) -- NOT yet converted to a
     /// position/limit pair, since that conversion is the caller's job.
     pub range: Option<(i64, i64)>,
+    pub range_error: Option<&'static str>,
     pub body_preferences: Vec<RequestedBodyPreference>,
     pub mime_support: u8,
 }
@@ -1469,11 +1470,33 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
     let store_name = find_text_after(document, search::NAME)?.to_owned();
     let class = find_text_after(document, airsync::CLASS).map(str::to_owned);
     let free_texts = find_all_text_after(document, search::FREE_TEXT);
-    let free_text = free_texts.first().cloned();
-    let range = find_text_after(document, search::RANGE).and_then(|raw| {
-        let (start, end) = raw.split_once('-')?;
-        Some((start.parse().ok()?, end.parse().ok()?))
-    });
+    let free_text = free_texts
+        .first()
+        .cloned()
+        .or_else(|| find_text_after(document, search::QUERY).map(str::to_owned));
+    let (range, range_error) = match find_text_after(document, search::RANGE) {
+        Some(raw) => {
+            let parsed = raw.split_once('-').and_then(|(start, end)| {
+                if start.is_empty()
+                    || end.is_empty()
+                    || !start.bytes().all(|b| b.is_ascii_digit())
+                    || !end.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return None;
+                }
+                let start: i64 = start.parse().ok()?;
+                let end: i64 = end.parse().ok()?;
+                (end >= start).then_some((start, end))
+            });
+            match parsed {
+                Some((start, end)) if end - start < 100 => (Some((start, end)), None),
+                Some(_) => (None, Some("12")),
+                None => (None, Some("2")),
+            }
+        }
+        None if contains_token(document, search::RANGE) => (None, Some("2")),
+        None => (None, None),
+    };
     let body_preferences = body_preferences(document).ok()?;
     let store = child_elements(document).into_iter().find(|child|
         matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, search::STORE)))?;
@@ -1495,6 +1518,7 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
         received_after,
         received_before,
         range,
+        range_error,
         body_preferences,
         mime_support,
     })
@@ -3068,6 +3092,28 @@ mod tests {
         assert_eq!(request.class.as_deref(), Some("Email"));
         assert_eq!(request.free_text.as_deref(), Some("invite"));
         assert_eq!(request.range, Some((0, 9)));
+    }
+
+    #[test]
+    fn validates_search_result_ranges() {
+        let request = |range: &str| {
+            let mut b = DocumentBuilder::new();
+            b.start(search::SEARCH);
+            b.start(search::STORE);
+            b.leaf(search::NAME, "Mailbox");
+            b.start(search::OPTIONS);
+            b.leaf(search::RANGE, range);
+            b.end();
+            b.end();
+            b.end();
+            search_request(&b.finish()).unwrap()
+        };
+        assert_eq!(request("10-19").range, Some((10, 19)));
+        assert_eq!(request("0-100").range_error, Some("12"));
+        assert_eq!(request("7-6").range_error, Some("2"));
+        assert_eq!(request("-1-0").range_error, Some("2"));
+        assert_eq!(request("0-9223372036854775807").range_error, Some("12"));
+        assert_eq!(request("0-9223372036854775808").range_error, Some("2"));
     }
 
     #[test]

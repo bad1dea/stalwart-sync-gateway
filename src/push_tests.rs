@@ -3693,6 +3693,51 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_gal_search_paginates_plain_query_and_reports_total() {
+        use eas::{gal, search as srch};
+        let live = Live::new("E2E_USER2").await;
+        let search = |range: &str| {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(srch::SEARCH);
+            b.start(srch::STORE);
+            b.leaf(srch::NAME, "GAL");
+            b.leaf(srch::QUERY, "a");
+            b.start(srch::OPTIONS);
+            b.leaf(srch::RANGE, range);
+            b.end();
+            b.end();
+            b.end();
+            wbxml::encode_document(&b.finish())
+        };
+        let first = live
+            .wbxml_version("Search", &dev("gal-first"), search("0-0"), "14.0")
+            .await;
+        let second = live
+            .wbxml_version("Search", &dev("gal-second"), search("1-1"), "14.0")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&first, srch::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(eas::find_text_after(&first, srch::TOTAL), Some("2"));
+        assert_eq!(eas::find_text_after(&second, srch::TOTAL), Some("2"));
+        assert_eq!(eas::find_text_after(&first, srch::RANGE), Some("0-0"));
+        assert_eq!(eas::find_text_after(&second, srch::RANGE), Some("1-1"));
+        assert_ne!(
+            eas::find_text_after(&first, gal::DISPLAY_NAME),
+            eas::find_text_after(&second, gal::DISPLAY_NAME)
+        );
+        let invalid = live
+            .wbxml_version("Search", &dev("gal-invalid"), search("0-100"), "14.0")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&invalid, srch::STATUS),
+            vec!["1", "12"]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_mailbox_search_requires_each_free_text_term() {
         use eas::search as srch;
         let live = Live::new("E2E_USER2").await;
@@ -3736,6 +3781,7 @@ mod e2e {
             )
             .await;
         assert_eq!(eas::find_all_text_after(&result, srch::LONG_ID), both);
+        assert_eq!(eas::find_text_after(&result, srch::RANGE), Some("0-0"));
         let cleanup = live
             .call(serde_json::json!([
             ["Email/set",{"accountId":live.account,"destroy":[&both[0],&one[0]]},"0"],
