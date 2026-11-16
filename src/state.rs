@@ -47,6 +47,15 @@ pub trait StateStore: Send + Sync {
         &self,
         record: SyncRecord,
         items: Option<Vec<ItemState>>,
+    ) -> anyhow::Result<()> {
+        self.put_with_items_and_clear(record, items, None).await
+    }
+
+    async fn put_with_items_and_clear(
+        &self,
+        record: SyncRecord,
+        items: Option<Vec<ItemState>>,
+        completed: Option<(String, Vec<ItemState>)>,
     ) -> anyhow::Result<()>;
 
     async fn reserve_item(
@@ -134,17 +143,26 @@ impl StateStore for MemoryStateStore {
         Ok(())
     }
 
-    async fn put_with_items(
+    async fn put_with_items_and_clear(
         &self,
         record: SyncRecord,
         items: Option<Vec<ItemState>>,
+        completed: Option<(String, Vec<ItemState>)>,
     ) -> anyhow::Result<()> {
-        let key = key(&record.user, &record.device_id, &record.collection_id);
+        let record_key = key(&record.user, &record.device_id, &record.collection_id);
+        let journal_key = completed
+            .as_ref()
+            .map(|(journal, _)| key(&record.user, &record.device_id, journal));
         let mut records = self.records.write().await;
         let mut item_states = self.item_states.write().await;
-        records.insert(key.clone(), record);
+        records.insert(record_key.clone(), record);
         if let Some(items) = items {
-            item_states.insert(key, items);
+            item_states.insert(record_key, items);
+        }
+        if let (Some(journal_key), Some((_, completed))) = (journal_key, completed) {
+            if let Some(entries) = item_states.get_mut(&journal_key) {
+                entries.retain(|entry| !completed.contains(entry));
+            }
         }
         Ok(())
     }
@@ -305,10 +323,11 @@ impl StateStore for SqliteStateStore {
         Ok(())
     }
 
-    async fn put_with_items(
+    async fn put_with_items_and_clear(
         &self,
         record: SyncRecord,
         items: Option<Vec<ItemState>>,
+        completed: Option<(String, Vec<ItemState>)>,
     ) -> anyhow::Result<()> {
         let seen_ids =
             serde_json::to_string(&record.seen_ids).context("failed to encode seen IDs")?;
@@ -350,6 +369,14 @@ impl StateStore for SqliteStateStore {
                      VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())",
                     params![record.user, record.device_id, record.collection_id, item.item_id, item.hash],
                 ).context("failed to write item state")?;
+            }
+        }
+        if let Some((journal, completed)) = completed {
+            for item in completed {
+                tx.execute(
+                    "DELETE FROM item_states WHERE user = ?1 AND device_id = ?2 AND collection_id = ?3 AND item_id = ?4 AND item_hash = ?5",
+                    params![record.user, record.device_id, journal, item.item_id, item.hash],
+                ).context("failed to clear completed operation")?;
             }
         }
         tx.commit()
@@ -576,7 +603,39 @@ mod tests {
             values.push(job.await.unwrap().hash);
         }
         assert!(values.iter().all(|value| value == &values[0]));
-        store.put(record("2")).await.unwrap();
+        let saved = ItemState {
+            item_id: "op".to_owned(),
+            hash: values[0].clone(),
+        };
+        store
+            .put_with_items_and_clear(
+                record("2"),
+                None,
+                Some(("__journal__".to_owned(), vec![saved])),
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .item_states("user@example.com", "device", "__journal__")
+            .await
+            .unwrap()
+            .is_empty());
+        let fresh = store
+            .reserve_item(
+                "user@example.com",
+                "device",
+                "inbox",
+                "2",
+                "__journal__",
+                ItemState {
+                    item_id: "op".to_owned(),
+                    hash: "fresh".to_owned(),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh.hash, "fresh");
         assert!(store
             .reserve_item(
                 "user@example.com",
@@ -618,14 +677,40 @@ mod tests {
             .put_with_items(record("1"), Some(vec![item.clone()]))
             .await
             .unwrap();
+        let reserved = store
+            .reserve_item(
+                "user@example.com",
+                "device",
+                "inbox",
+                "1",
+                "__journal__",
+                ItemState {
+                    item_id: "operation".to_owned(),
+                    hash: "pending".to_owned(),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
         let duplicate = ItemState {
             item_id: "a".to_owned(),
             hash: "new".to_owned(),
         };
         assert!(store
-            .put_with_items(record("2"), Some(vec![duplicate.clone(), duplicate]))
+            .put_with_items_and_clear(
+                record("2"),
+                Some(vec![duplicate.clone(), duplicate]),
+                Some(("__journal__".to_owned(), vec![reserved.clone()]))
+            )
             .await
             .is_err());
+        assert_eq!(
+            store
+                .item_states("user@example.com", "device", "__journal__")
+                .await
+                .unwrap(),
+            vec![reserved]
+        );
         assert_eq!(
             store
                 .get("user@example.com", "device", "inbox")

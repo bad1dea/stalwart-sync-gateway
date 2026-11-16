@@ -4627,11 +4627,17 @@ async fn sync_calendar_collection(
     let mut deleted = false;
     let mut add_responses: Vec<(String, Option<String>, &'static str)> = Vec::new();
     let mut change_responses: Vec<(String, &'static str)> = Vec::new();
+    let journal = format!("__calendar_add__:{}", collection.collection_id);
+    let mut completed = Vec::new();
+    let mut client_ids = BTreeMap::new();
+    for command in &collection.commands {
+        if matches!(command.kind, wbxml::eas::SyncClientCommandKind::Add) {
+            *client_ids.entry(&command.client_id).or_insert(0usize) += 1;
+        }
+    }
 
     for command in &collection.commands {
-        if (matches!(command.kind, wbxml::eas::SyncClientCommandKind::Add)
-            && command.calendar.reminder.is_some())
-            || command.calendar.unsupported_reminder
+        if command.calendar.unsupported_reminder
             || (command.calendar.reminder == Some(None)
                 && !matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1))
             || command.calendar.unsupported_busy_status
@@ -4653,12 +4659,101 @@ async fn sync_calendar_collection(
         }
         match command.kind {
             wbxml::eas::SyncClientCommandKind::Add => {
-                match state
-                    .jmap
-                    .save_calendar_event(auth, &calendar_id, None, &command.calendar)
-                    .await
-                {
+                let reservation = if command.calendar.reminder.is_some() {
+                    if command.client_id.is_empty()
+                        || client_ids.get(&command.client_id) != Some(&1)
+                    {
+                        add_responses.push((command.client_id.clone(), None, "6"));
+                        continue;
+                    }
+                    let identity = serde_json::to_vec(&(
+                        device_id,
+                        &collection.collection_id,
+                        &command.client_id,
+                    ))
+                    .expect("serializing calendar add identity");
+                    let item_id =
+                        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &identity).to_string();
+                    let content = uuid::Uuid::new_v5(
+                        &uuid::Uuid::NAMESPACE_OID,
+                        &wbxml::encode_document(&command.document),
+                    )
+                    .to_string();
+                    let uid = format!(
+                        "eas-{}@stalwart-sync-gateway",
+                        uuid::Uuid::new_v4().simple()
+                    );
+                    let item = ItemState {
+                        item_id,
+                        hash: serde_json::to_string(&(&uid, &content))
+                            .expect("serializing calendar reservation"),
+                    };
+                    let reserved = state
+                        .state
+                        .reserve_item(
+                            user,
+                            device_id,
+                            &collection.collection_id,
+                            &collection.sync_key,
+                            &journal,
+                            item,
+                        )
+                        .await;
+                    match reserved {
+                        Ok(Some(item)) => {
+                            match serde_json::from_str::<(String, String)>(&item.hash) {
+                                Ok((uid, saved)) if saved == content => Some((uid, item)),
+                                _ => {
+                                    add_responses.push((command.client_id.clone(), None, "6"));
+                                    continue;
+                                }
+                            }
+                        }
+                        _ => {
+                            add_responses.push((command.client_id.clone(), None, "5"));
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let uid = reservation.as_ref().map(|(uid, _)| uid);
+                let result = if let Some(uid) = uid {
+                    match state
+                        .jmap
+                        .calendar_event_by_uid(auth, &calendar_id, uid)
+                        .await
+                    {
+                        Ok(Some(id)) => state
+                            .jmap
+                            .verify_calendar_reminder(auth, &id, command.calendar.reminder.unwrap())
+                            .await
+                            .map(|_| id),
+                        Ok(None) => {
+                            state
+                                .jmap
+                                .save_calendar_event(
+                                    auth,
+                                    &calendar_id,
+                                    None,
+                                    Some(uid),
+                                    &command.calendar,
+                                )
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    state
+                        .jmap
+                        .save_calendar_event(auth, &calendar_id, None, None, &command.calendar)
+                        .await
+                };
+                match result {
                     Ok(new_id) => {
+                        if let Some((_, item)) = reservation {
+                            completed.push(item);
+                        }
                         add_responses.push((command.client_id.clone(), Some(new_id), "1"))
                     }
                     Err(error) => {
@@ -4678,6 +4773,7 @@ async fn sync_calendar_collection(
                         auth,
                         &calendar_id,
                         Some(&command.server_id),
+                        None,
                         &command.calendar,
                     )
                     .await
@@ -4786,7 +4882,7 @@ async fn sync_calendar_collection(
         .collect();
     if let Err(error) = state
         .state
-        .put_with_items(
+        .put_with_items_and_clear(
             SyncRecord {
                 user: user.to_owned(),
                 device_id: device_id.to_owned(),
@@ -4796,6 +4892,7 @@ async fn sync_calendar_collection(
                 seen_ids: Vec::new(),
             },
             Some(item_states),
+            Some((journal, completed)),
         )
         .await
     {

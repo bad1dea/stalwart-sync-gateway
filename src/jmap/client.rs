@@ -1785,6 +1785,54 @@ impl JmapClient {
             .collect())
     }
 
+    pub async fn calendar_event_by_uid(
+        &self,
+        auth: &AuthenticatedSession,
+        calendar_id: &str,
+        uid: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let items: Vec<CalendarEventObject> = self.query_objects(
+            auth, capabilities::CALENDARS, "CalendarEvent",
+            serde_json::json!({"operator":"AND","conditions":[{"inCalendar":calendar_id},{"uid":uid}]}),
+            Some(&["id","uid"]), 2,
+        ).await?;
+        match items.as_slice() {
+            [] => Ok(None),
+            [item] if item.uid.as_deref() == Some(uid) => Ok(Some(item.id.clone())),
+            _ => anyhow::bail!("ambiguous calendar UID"),
+        }
+    }
+
+    pub async fn verify_calendar_reminder(
+        &self,
+        auth: &AuthenticatedSession,
+        id: &str,
+        reminder: Option<u32>,
+    ) -> anyhow::Result<()> {
+        let account = auth
+            .session
+            .primary_account_for(capabilities::CALENDARS)
+            .context("JMAP Calendars capability is not available")?;
+        let response: JmapResponse<serde_json::Value> = self.api_call(auth,
+            &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
+            vec![MethodCall::new("CalendarEvent/get",serde_json::json!({
+                "accountId":account,"ids":[id],"properties":["id","alerts","useDefaultAlerts"]
+            }),"verify")]).await?;
+        let item = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/get")
+            .and_then(|method| method.1["list"].as_array())
+            .and_then(|items| items.iter().find(|item| item["id"] == id))
+            .context("calendar reminder verification failed")?;
+        if item["useDefaultAlerts"] != false
+            || !crate::jmap::calendar_reminder::unchanged(&item["alerts"], reminder)?
+        {
+            anyhow::bail!("JMAP did not retain the requested calendar reminder");
+        }
+        Ok(())
+    }
+
     /// Creates (`id: None`) or updates (`id: Some`) a non-recurring
     /// calendar event from ActiveSync `CalendarFields`. Recurrence,
     /// attendees, and reminders are explicitly out of scope, matching
@@ -1805,11 +1853,9 @@ impl JmapClient {
         auth: &AuthenticatedSession,
         calendar_id: &str,
         id: Option<&str>,
+        uid: Option<&str>,
         fields: &crate::wbxml::eas::CalendarFields,
     ) -> anyhow::Result<String> {
-        if id.is_none() && fields.reminder.is_some() {
-            anyhow::bail!("calendar reminder creation is not yet supported");
-        }
         let Some(account_id) = auth.session.primary_account_for(capabilities::CALENDARS) else {
             anyhow::bail!("JMAP Calendars capability is not available");
         };
@@ -1821,8 +1867,15 @@ impl JmapClient {
         );
         let mut reminder_state = None;
         let mut reminder_changed = false;
-        if let Some(reminder) = fields.reminder {
-            let id = id.context("calendar reminder creation is not yet supported")?;
+        if let (Some(reminder), None) = (fields.reminder, id) {
+            crate::jmap::calendar_reminder::write_reminder(
+                &mut event,
+                &serde_json::Value::Null,
+                reminder,
+            )?;
+            reminder_changed = true;
+        }
+        if let (Some(reminder), Some(id)) = (fields.reminder, id) {
             let response: JmapResponse<serde_json::Value> = self.api_call(auth,
                 &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
                 vec![MethodCall::new("CalendarEvent/get", serde_json::json!({
@@ -2262,6 +2315,9 @@ impl JmapClient {
                 MethodCall::new("CalendarEvent/set", arguments, "0")
             }
             None => {
+                if let Some(uid) = uid {
+                    event.insert("uid".to_owned(), serde_json::json!(uid));
+                }
                 event.insert(
                     "calendarIds".to_owned(),
                     serde_json::json!({ calendar_id: true }),
@@ -2351,6 +2407,10 @@ impl JmapClient {
                     .and_then(|event| event.get("id"))
                     .and_then(|value| value.as_str())
                 {
+                    if let Some(reminder) = fields.reminder {
+                        self.verify_calendar_reminder(auth, new_id, reminder)
+                            .await?;
+                    }
                     return Ok(new_id.to_owned());
                 }
                 anyhow::bail!(

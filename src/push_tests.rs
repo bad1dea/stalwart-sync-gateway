@@ -3962,6 +3962,88 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_calendar_add_retries_without_duplicate_on_unsupported_server() {
+        use eas::calendar as cal;
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let created = live
+            .call_using(
+                serde_json::json!([["Calendar/set",{"accountId":live.account,
+            "create":{"c":{"name":format!("Reminder retry {}",std::process::id())}}},"0"]]),
+                &using,
+            )
+            .await;
+        let calendar = created[0][1]["created"]["c"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let folder = format!("cal_{calendar}");
+        let device = dev("reminder-add-retry");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let sync = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let request = |key: &str| {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(air::SYNC);
+            b.start(air::COLLECTIONS);
+            b.start(air::COLLECTION);
+            b.leaf(air::SYNC_KEY, key);
+            b.leaf(air::COLLECTION_ID, &folder);
+            b.start(air::COMMANDS);
+            b.start(air::ADD);
+            b.leaf(air::CLIENT_ID, "retry");
+            b.start(air::APPLICATION_DATA);
+            b.leaf(cal::SUBJECT, "Reminder retry");
+            b.leaf(cal::START_TIME, "20420706T100000Z");
+            b.leaf(cal::END_TIME, "20420706T110000Z");
+            b.leaf(cal::REMINDER, "15");
+            for _ in 0..6 {
+                b.end();
+            }
+            wbxml::encode_document(&b.finish())
+        };
+        let first = live
+            .wbxml_version("Sync", &device, request(&sync_key(&sync)), "16.1")
+            .await;
+        assert!(eas::find_all_text_after(&first, air::STATUS).contains(&"5".to_owned()));
+        let query = || {
+            serde_json::json!([["CalendarEvent/query",{"accountId":live.account,
+            "filter":{"inCalendar":&calendar}},"0"]])
+        };
+        let before = live.call_using(query(), &using).await;
+        let ids = before[0][1]["ids"].as_array().unwrap().clone();
+        assert_eq!(ids.len(), 1);
+        let retry = live
+            .wbxml_version("Sync", &device, request(&sync_key(&first)), "16.1")
+            .await;
+        assert!(eas::find_all_text_after(&retry, air::STATUS).contains(&"5".to_owned()));
+        let after = live.call_using(query(), &using).await;
+        assert_eq!(after[0][1]["ids"].as_array().unwrap(), &ids);
+        let cleanup = live
+            .call_using(
+                serde_json::json!([
+            ["CalendarEvent/set",{"accountId":live.account,"destroy":ids},"0"],
+            ["Calendar/set",{"accountId":live.account,"destroy":[calendar]},"1"]]),
+                &using,
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_calendar_default_reminders_are_not_overwritten() {
         use eas::calendar as cal;
         let live = Live::new("E2E_USER2").await;
@@ -4076,17 +4158,60 @@ mod e2e {
         b.start(air::ADD);
         b.leaf(air::CLIENT_ID, "reminder-add");
         b.start(air::APPLICATION_DATA);
-        b.leaf(cal::SUBJECT, "must not be created");
+        b.leaf(cal::SUBJECT, "Created with reminder");
         b.leaf(cal::START_TIME, "20420706T100000Z");
         b.leaf(cal::END_TIME, "20420706T110000Z");
         b.leaf(cal::REMINDER, "15");
         for _ in 0..6 {
             b.end();
         }
+        let request = wbxml::encode_document(&b.finish());
         let added = live
-            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .wbxml_version("Sync", &device, request.clone(), "16.1")
             .await;
-        assert!(eas::find_all_text_after(&added, air::STATUS).contains(&"6".to_owned()));
+        assert_eq!(
+            eas::find_all_text_after(&added, air::STATUS),
+            vec!["1", "1"]
+        );
+        let added_id = eas::find_text_after(&added, air::SERVER_ID)
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            live.wbxml_version("Sync", &device, request.clone(), "16.1")
+                .await,
+            added
+        );
+        let mut retry = wbxml::decode_document(&request).unwrap();
+        for index in 0..retry.nodes.len().saturating_sub(1) {
+            if matches!(&retry.nodes[index], wbxml::Node::Start(token) if token.code_page == air::PAGE && token.token == air::SYNC_KEY.token)
+            {
+                retry.nodes[index + 1] = wbxml::Node::Text(sync_key(&added));
+                break;
+            }
+        }
+        let retried = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&retry), "16.1")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&retried, air::STATUS),
+            vec!["1", "1"]
+        );
+        let reused_id = eas::find_text_after(&retried, air::SERVER_ID)
+            .unwrap()
+            .to_owned();
+        assert_ne!(reused_id, added_id);
+        let created = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{"accountId":live.account,
+            "ids":[&added_id],"properties":["alerts","useDefaultAlerts"]},"0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(created[0][1]["list"][0]["useDefaultAlerts"], false);
+        assert_eq!(
+            crate::jmap::calendar_reminder::read_reminder(&created[0][1]["list"][0]["alerts"]),
+            Some(15)
+        );
         let query = live
             .call_using(
                 serde_json::json!([["CalendarEvent/query",{"accountId":live.account,
@@ -4094,7 +4219,7 @@ mod e2e {
                 &using,
             )
             .await;
-        assert_eq!(query[0][1]["ids"].as_array().unwrap().len(), 1);
+        assert_eq!(query[0][1]["ids"].as_array().unwrap().len(), 3);
         let second=live.call_using(serde_json::json!([["CalendarEvent/set",{"accountId":live.account,
             "create":{"e":{"@type":"Event","calendarIds":{&calendar:true},"title":"Default only fixture",
                 "start":"2042-07-06T10:00:00","duration":"PT1H","useDefaultAlerts":true}}},"0"]]),&using).await;
@@ -4106,7 +4231,7 @@ mod e2e {
             .wbxml_version(
                 "Sync",
                 &device,
-                sync_body(&sync_key(&added), &folder),
+                sync_body(&sync_key(&retried), &folder),
                 "16.1",
             )
             .await;
@@ -4146,7 +4271,7 @@ mod e2e {
         let cleanup = live
             .call_using(
                 serde_json::json!([
-            ["CalendarEvent/set",{"accountId":live.account,"destroy":[id,second_id]},"0"],
+            ["CalendarEvent/set",{"accountId":live.account,"destroy":[id,second_id,added_id,reused_id]},"0"],
             ["Calendar/set",{"accountId":live.account,"destroy":[calendar]},"1"]]),
                 &using,
             )
