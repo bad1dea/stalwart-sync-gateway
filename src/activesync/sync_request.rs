@@ -116,6 +116,34 @@ pub(super) fn response_changes(nodes: Vec<Node>) -> usize {
         .sum()
 }
 
+pub(super) fn empty_timeout_response(request: &Document, response: &Document) -> bool {
+    let requested = eas::sync_collections(request);
+    let replies = collections(response);
+    if requested.is_empty() || requested.len() != replies.len() {
+        return false;
+    }
+    requested.iter().all(|collection| {
+        if !collection.commands.is_empty() || collection.sync_key == "0" {
+            return false;
+        }
+        let Some(reply) = replies.iter().find(|reply| {
+            eas::find_text_after(reply, air::COLLECTION_ID)
+                == Some(collection.collection_id.as_str())
+        }) else {
+            return false;
+        };
+        let children = eas::child_elements(reply);
+        children.len() == 3
+            && eas::find_text_after(reply, air::SYNC_KEY) == Some(collection.sync_key.as_str())
+            && eas::find_text_after(reply, air::STATUS) == Some("1")
+            && children.iter().all(|child| {
+                [air::COLLECTION_ID, air::SYNC_KEY, air::STATUS]
+                    .iter()
+                    .any(|token| is(child, *token))
+            })
+    })
+}
+
 pub(super) fn wait_seconds(request: &Document) -> Result<Option<u64>, (&'static str, Option<u64>)> {
     let values: Vec<_> = eas::child_elements(request)
         .into_iter()
@@ -329,6 +357,53 @@ mod wait_tests {
             ])),
             Err("4")
         );
+    }
+
+    #[test]
+    fn only_unchanged_successful_collections_can_have_an_empty_timeout_response() {
+        fn collection(key: &str, response: bool, changed: bool) -> Document {
+            let mut b = DocumentBuilder::new();
+            b.start(air::SYNC);
+            b.start(air::COLLECTIONS);
+            b.start(air::COLLECTION);
+            b.leaf(air::SYNC_KEY, key);
+            b.leaf(air::COLLECTION_ID, "inbox");
+            if response {
+                b.leaf(air::STATUS, "1");
+            }
+            if changed {
+                b.start(air::COMMANDS);
+                b.start(air::ADD);
+                b.leaf(air::SERVER_ID, "mail");
+                b.end();
+                b.end();
+            }
+            b.end();
+            b.end();
+            b.end();
+            b.finish()
+        }
+        let request = collection("2", false, false);
+        assert!(empty_timeout_response(
+            &request,
+            &collection("2", true, false)
+        ));
+        assert!(!empty_timeout_response(
+            &request,
+            &collection("3", true, false)
+        ));
+        assert!(!empty_timeout_response(
+            &request,
+            &collection("2", true, true)
+        ));
+        assert!(!empty_timeout_response(
+            &collection("2", false, true),
+            &collection("2", true, false)
+        ));
+        assert!(!empty_timeout_response(
+            &collection("0", false, false),
+            &collection("0", true, false)
+        ));
     }
 
     #[test]

@@ -2897,9 +2897,8 @@ mod e2e {
         .await
         .unwrap()
         .unwrap();
-        let idle = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
         assert!(started.elapsed() >= Duration::from_secs(59));
-        assert!(eas::find_all_text_after(&idle, air::SERVER_ID).is_empty());
+        assert!(response.bytes().await.unwrap().is_empty());
         let result = live
             .call(serde_json::json!([
                 ["Email/set",{"accountId":live.account,"destroy":ids},"0"],
@@ -11046,6 +11045,62 @@ async fn omitted_sync_window_delivers_up_to_one_hundred_messages() {
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(eas::find_all_text_after(&doc, air::SERVER_ID).len(), 40);
     assert!(!eas::contains_token(&doc, air::MORE_AVAILABLE));
+}
+
+#[tokio::test]
+#[ignore]
+async fn sync_heartbeat_timeout_is_empty_and_cached_request_receives_later_change() {
+    use eas::airsync as air;
+    let env = start_env(Opts::default()).await;
+    let response = env
+        .req("Sync", "heartbeat-timeout")
+        .body(sync_body("0", "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let prime = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    let response = env
+        .req("Sync", "heartbeat-timeout")
+        .body(sync_body(&sync_key(&prime), "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let synced = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.leaf(air::HEARTBEAT_INTERVAL, "60");
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, sync_key(&synced));
+    b.leaf(air::COLLECTION_ID, "inbox");
+    b.empty_tag(air::GET_CHANGES);
+    b.end();
+    b.end();
+    b.end();
+    let start = tokio::time::Instant::now();
+    let response = tokio::time::timeout(
+        Duration::from_secs(75),
+        env.req("Sync", "heartbeat-timeout")
+            .body(wbxml::encode_document(&b.finish()))
+            .send(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(response.status(), 200);
+    assert!(start.elapsed() >= Duration::from_secs(59));
+    assert!(response.bytes().await.unwrap().is_empty());
+    env.mock.add_mail("inbox", "after-heartbeat-timeout");
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        env.req("Sync", "heartbeat-timeout").send(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let reply = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert!(eas::find_all_text_after(&reply, air::SERVER_ID)
+        .contains(&"after-heartbeat-timeout".to_owned()));
 }
 
 #[tokio::test]

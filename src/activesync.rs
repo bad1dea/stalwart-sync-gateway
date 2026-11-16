@@ -1937,22 +1937,22 @@ async fn wait_for_sync_changes(
     query: &EasQuery,
     collections: &[wbxml::eas::SyncCollectionRequest],
     seconds: u64,
-) {
+) -> bool {
     let user = query.user.as_deref().unwrap_or_else(|| auth.username());
     let device = query.device_id.as_deref().unwrap_or("unknown");
     for collection in collections {
         if collection.sync_key == "0" || !collection.commands.is_empty() || !collection.get_changes
         {
-            return;
+            return false;
         }
         if !matches!(state.state.get(user, device, &collection.collection_id).await,
             Ok(Some(record)) if record.sync_key == collection.sync_key)
         {
-            return;
+            return false;
         }
     }
     let Some(_slot) = state.push.try_ping_slot() else {
-        return;
+        return false;
     };
     let push = state.push.ensure_subscriber(
         &auth.username().to_ascii_lowercase(),
@@ -1974,16 +1974,16 @@ async fn wait_for_sync_changes(
             .await
             .is_empty()
         {
-            return;
+            return false;
         }
         match changed_item_folders(state, auth, user, device, &folders).await {
             Ok(items) if items.is_empty() => {}
-            _ => return,
+            _ => return false,
         }
         tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => return,
+            _ = tokio::time::sleep_until(deadline) => return true,
             _ = tokio::time::sleep(Duration::from_secs(30)) => {},
-            result = rx.changed() => if result.is_err() { return; },
+            result = rx.changed() => if result.is_err() { return false; },
         }
     }
 }
@@ -2028,13 +2028,13 @@ async fn sync_mail(
         Err(status) => return sync_request::error(state, command, status),
     };
 
-    match sync_request::wait_seconds(document) {
+    let wait_expired = match sync_request::wait_seconds(document) {
         Ok(Some(seconds)) => wait_for_sync_changes(state, auth, query, &collections, seconds).await,
-        Ok(None) => {}
+        Ok(None) => false,
         Err((status, limit)) => {
             return sync_request::error_with_limit(state, command, status, limit)
         }
-    }
+    };
 
     if let Some(device) = query.device_id.as_deref() {
         let push = state.push.user(&auth.username().to_ascii_lowercase());
@@ -3374,7 +3374,11 @@ async fn sync_mail(
             "trace: Sync"
         );
     }
-    let body = wbxml::encode_document(&reply);
+    let body = if wait_expired && sync_request::empty_timeout_response(document, &reply) {
+        Vec::new()
+    } else {
+        wbxml::encode_document(&reply)
+    };
     state
         .metrics
         .eas_requests_total
