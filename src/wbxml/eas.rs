@@ -1450,6 +1450,7 @@ pub struct SearchRequest {
     pub unsupported_query: bool,
     pub received_after: Option<String>,
     pub received_before: Option<String>,
+    pub or_terms: Option<SearchOrTerms>,
     /// The EAS `Range` element's two numbers, parsed as-is (zero-based,
     /// inclusive on both ends per the real schema's own prose, e.g.
     /// "0-9" = the first 10 results) -- NOT yet converted to a
@@ -1458,6 +1459,13 @@ pub struct SearchRequest {
     pub range_error: Option<&'static str>,
     pub body_preferences: Vec<RequestedBodyPreference>,
     pub mime_support: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchOrTerms {
+    pub texts: Vec<String>,
+    pub received_after: Option<String>,
+    pub received_before: Option<String>,
 }
 
 /// Parses a `Search` request. Real devices send exactly one `Store` per
@@ -1469,7 +1477,7 @@ pub struct SearchRequest {
 pub fn search_request(document: &Document) -> Option<SearchRequest> {
     let store_name = find_text_after(document, search::NAME)?.to_owned();
     let class = find_text_after(document, airsync::CLASS).map(str::to_owned);
-    let free_texts = find_all_text_after(document, search::FREE_TEXT);
+    let free_texts = search_texts(document, false);
     let free_text = free_texts
         .first()
         .cloned()
@@ -1501,8 +1509,20 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
     let store = child_elements(document).into_iter().find(|child|
         matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, search::STORE)))?;
     let mime_support = mime_support(&store).ok()?;
-    let (received_after, after_invalid) = search_date_comparison(&store, search::GREATER_THAN);
-    let (received_before, before_invalid) = search_date_comparison(&store, search::LESS_THAN);
+    let (received_after, after_invalid) =
+        search_date_comparison(&store, search::GREATER_THAN, search::AND);
+    let (received_before, before_invalid) =
+        search_date_comparison(&store, search::LESS_THAN, search::AND);
+    let (or_doc, or_invalid) = search_or_element(&store);
+    let (or_after, or_after_invalid) =
+        search_date_comparison(&store, search::GREATER_THAN, search::OR);
+    let (or_before, or_before_invalid) =
+        search_date_comparison(&store, search::LESS_THAN, search::OR);
+    let or_terms = or_doc.as_ref().map(|or| SearchOrTerms {
+        texts: search_texts(or, true),
+        received_after: or_after,
+        received_before: or_before,
+    });
     Some(SearchRequest {
         store_name,
         class,
@@ -1512,11 +1532,20 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
         deep_traversal: contains_token(document, search::DEEP_TRAVERSAL),
         unsupported_query: after_invalid
             || before_invalid
-            || [search::OR, search::EQUAL_TO]
+            || or_invalid
+            || or_after_invalid
+            || or_before_invalid
+            || or_terms.as_ref().is_some_and(|terms| {
+                terms.texts.iter().all(String::is_empty)
+                    && terms.received_after.is_none()
+                    && terms.received_before.is_none()
+            })
+            || [search::EQUAL_TO, search::CONVERSATION_ID]
                 .iter()
                 .any(|token| contains_token(document, *token)),
         received_after,
         received_before,
+        or_terms,
         range,
         range_error,
         body_preferences,
@@ -1524,29 +1553,98 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
     })
 }
 
-fn search_date_comparison(store: &Document, comparison: Token) -> (Option<String>, bool) {
+fn search_texts(document: &Document, include_or: bool) -> Vec<String> {
+    fn visit(document: &Document, include_or: bool, output: &mut Vec<String>) {
+        if let Some(Node::Start(token)) = document.nodes.first() {
+            if same_token(*token, search::OR) && !include_or {
+                return;
+            }
+            if same_token(*token, search::FREE_TEXT) {
+                if let Some(value) = find_text_after(document, search::FREE_TEXT) {
+                    output.push(value.to_owned());
+                }
+                return;
+            }
+            for child in child_elements(document) {
+                visit(&child, include_or, output);
+            }
+        }
+    }
+    let mut output = Vec::new();
+    visit(document, include_or, &mut output);
+    output
+}
+
+fn search_or_element(store: &Document) -> (Option<Document>, bool) {
+    fn visit(
+        document: &Document,
+        parent: Option<Token>,
+        found: &mut Vec<Document>,
+        invalid: &mut bool,
+    ) {
+        if let Some(Node::Start(token)) = document.nodes.first() {
+            if same_token(*token, search::OR) {
+                if !parent.is_some_and(|p| same_token(p, search::AND)) {
+                    *invalid = true;
+                }
+                let children = child_elements(document);
+                if children.is_empty() || children.iter().any(|child| !matches!(child.nodes.first(),
+                    Some(Node::Start(t)) if [search::FREE_TEXT,search::GREATER_THAN,search::LESS_THAN]
+                        .iter().any(|allowed| same_token(*t,*allowed)))) { *invalid = true; }
+                found.push(document.clone());
+            }
+            for child in child_elements(document) {
+                visit(&child, Some(*token), found, invalid);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    let mut invalid = false;
+    visit(store, None, &mut found, &mut invalid);
+    if found.len() > 1 {
+        invalid = true;
+    }
+    (found.into_iter().next(), invalid)
+}
+
+fn search_date_comparison(
+    store: &Document,
+    comparison: Token,
+    target_parent: Token,
+) -> (Option<String>, bool) {
     fn visit(
         document: &Document,
         token: Token,
+        target_parent: Token,
         parent: Option<Token>,
         found: &mut Vec<Document>,
         invalid: &mut bool,
     ) {
         if let Some(Node::Start(current)) = document.nodes.first() {
             if same_token(*current, token) {
-                if !parent.is_some_and(|p| same_token(p, search::AND)) {
+                if parent.is_some_and(|p| same_token(p, target_parent)) {
+                    found.push(document.clone());
+                } else if !parent
+                    .is_some_and(|p| same_token(p, search::AND) || same_token(p, search::OR))
+                {
                     *invalid = true;
                 }
-                found.push(document.clone());
             }
             for child in child_elements(document) {
-                visit(&child, token, Some(*current), found, invalid);
+                visit(&child, token, target_parent, Some(*current), found, invalid);
             }
         }
     }
     let mut found = Vec::new();
     let mut invalid = false;
-    visit(store, comparison, None, &mut found, &mut invalid);
+    visit(
+        store,
+        comparison,
+        target_parent,
+        None,
+        &mut found,
+        &mut invalid,
+    );
     if found.len() > 1 {
         return (None, true);
     }
@@ -3092,6 +3190,47 @@ mod tests {
         assert_eq!(request.class.as_deref(), Some("Email"));
         assert_eq!(request.free_text.as_deref(), Some("invite"));
         assert_eq!(request.range, Some((0, 9)));
+    }
+
+    #[test]
+    fn parses_search_or_under_and_and_rejects_invalid_groups() {
+        let document = |valid_parent: bool, include_term: bool| {
+            let mut b = DocumentBuilder::new();
+            b.start(search::SEARCH);
+            b.start(search::STORE);
+            b.leaf(search::NAME, "Mailbox");
+            b.start(search::QUERY);
+            if valid_parent {
+                b.start(search::AND);
+            }
+            b.leaf(search::FREE_TEXT, "outer");
+            b.start(search::OR);
+            if include_term {
+                b.leaf(search::FREE_TEXT, "inner");
+            }
+            b.end();
+            if valid_parent {
+                b.end();
+            }
+            b.end();
+            b.end();
+            b.end();
+            b.finish()
+        };
+        let valid = search_request(&document(true, true)).unwrap();
+        assert!(!valid.unsupported_query);
+        assert_eq!(valid.free_texts, vec!["outer"]);
+        assert_eq!(valid.or_terms.unwrap().texts, vec!["inner"]);
+        assert!(
+            search_request(&document(false, true))
+                .unwrap()
+                .unsupported_query
+        );
+        assert!(
+            search_request(&document(true, false))
+                .unwrap()
+                .unsupported_query
+        );
     }
 
     #[test]

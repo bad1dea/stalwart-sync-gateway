@@ -3693,6 +3693,64 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_mailbox_search_combines_or_text_and_date() {
+        use eas::{email as mail, search as srch};
+        let live = Live::new("E2E_USER2").await;
+        let word = format!("orgroup{}", std::process::id());
+        let alternate = format!("alternate{}", std::process::id());
+        let old = format!("{word} old");
+        let middle = format!("{word} {alternate}");
+        let recent = format!("{word} recent");
+        let ids = live
+            .seed_dated(&[
+                (&old, "2020-01-01T00:00:00Z".to_owned()),
+                (&middle, "2020-01-02T00:00:00Z".to_owned()),
+                (&recent, "2020-01-03T00:00:00Z".to_owned()),
+            ])
+            .await;
+        let mut b = eas::DocumentBuilder::new();
+        b.start(srch::SEARCH);
+        b.start(srch::STORE);
+        b.leaf(srch::NAME, "Mailbox");
+        b.start(srch::QUERY);
+        b.start(srch::AND);
+        b.leaf(air::CLASS, "Email");
+        b.leaf(srch::FREE_TEXT, &word);
+        b.start(srch::OR);
+        b.leaf(srch::FREE_TEXT, &alternate);
+        b.start(srch::GREATER_THAN);
+        b.empty_tag(mail::DATE_RECEIVED);
+        b.leaf(srch::VALUE, "2020-01-02T00:00:00Z");
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        b.start(srch::OPTIONS);
+        b.leaf(srch::RANGE, "0-9");
+        b.end();
+        b.end();
+        b.end();
+        let result = live
+            .wbxml_version(
+                "Search",
+                &dev("search-or"),
+                wbxml::encode_document(&b.finish()),
+                "14.0",
+            )
+            .await;
+        let mut actual = eas::find_all_text_after(&result, srch::LONG_ID);
+        actual.sort();
+        let mut expected = vec![ids[1].clone(), ids[2].clone()];
+        expected.sort();
+        assert_eq!(actual, expected);
+        let cleanup = live
+            .call(serde_json::json!([["Email/set",{"accountId":live.account,"destroy":ids},"0"]]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_gal_search_paginates_plain_query_and_reports_total() {
         use eas::{gal, search as srch};
         let live = Live::new("E2E_USER2").await;

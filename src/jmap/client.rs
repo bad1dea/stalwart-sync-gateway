@@ -612,26 +612,10 @@ impl JmapClient {
     pub async fn search_emails(
         &self,
         auth: &AuthenticatedSession,
-        texts: &[String],
-        folders: Option<&[String]>,
-        received: (Option<&str>, Option<&str>),
+        conditions: Vec<serde_json::Value>,
         position: i64,
         limit: usize,
     ) -> anyhow::Result<(Vec<Email>, u64)> {
-        let mut conditions: Vec<_> = texts
-            .iter()
-            .filter(|text| !text.is_empty())
-            .map(|text| serde_json::json!({"text":text}))
-            .collect();
-        if let Some(folders) = folders {
-            conditions.push(serde_json::json!({"operator":"OR","conditions":folders.iter().map(|id| serde_json::json!({"inMailbox":id})).collect::<Vec<_>>() }));
-        }
-        if let Some(after) = received.0 {
-            conditions.push(serde_json::json!({"operator":"NOT","conditions":[{"before":after}]}));
-        }
-        if let Some(before) = received.1 {
-            conditions.push(serde_json::json!({"before":before}));
-        }
         let filter = if conditions.is_empty() {
             serde_json::json!({})
         } else {

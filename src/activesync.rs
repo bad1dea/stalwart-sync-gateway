@@ -948,17 +948,34 @@ async fn search(
                     .as_deref()
                     .map(|value| boundary(value, true))
                     .transpose()?;
-                let (emails, total) = state
-                    .jmap
-                    .search_emails(
-                        auth,
-                        texts,
-                        folders.as_deref(),
-                        (after.as_deref(), before.as_deref()),
-                        position,
-                        limit,
-                    )
-                    .await?;
+                let mut conditions: Vec<_> = texts.iter().filter(|text| !text.is_empty())
+                    .map(|text| serde_json::json!({"text":text})).collect();
+                if let Some(folders) = &folders {
+                    conditions.push(serde_json::json!({"operator":"OR","conditions":
+                        folders.iter().map(|id| serde_json::json!({"inMailbox":id})).collect::<Vec<_>>() }));
+                }
+                if let Some(after) = after {
+                    conditions.push(serde_json::json!({"operator":"NOT","conditions":[{"before":after}]}));
+                }
+                if let Some(before) = before {
+                    conditions.push(serde_json::json!({"before":before}));
+                }
+                if let Some(or) = &request.or_terms {
+                    let mut alternatives: Vec<_> = or.texts.iter().filter(|text| !text.is_empty())
+                        .map(|text| serde_json::json!({"text":text})).collect();
+                    if let Some(after) = or.received_after.as_deref() {
+                        let after = boundary(after,false)?;
+                        alternatives.push(serde_json::json!({"operator":"NOT","conditions":[{"before":after}]}));
+                    }
+                    if let Some(before) = or.received_before.as_deref() {
+                        alternatives.push(serde_json::json!({"before":boundary(before,true)?}));
+                    }
+                    if alternatives.is_empty() {
+                        anyhow::bail!("empty Search OR");
+                    }
+                    conditions.push(serde_json::json!({"operator":"OR","conditions":alternatives}));
+                }
+                let (emails, total) = state.jmap.search_emails(auth,conditions,position,limit).await?;
                 let emails = prepare_mail_bodies(
                     state,
                     auth,
