@@ -1281,6 +1281,7 @@ pub struct CalendarFields {
     pub unsupported_reminder: bool,
     pub categories: Option<Vec<String>>,
     pub unsupported_categories: bool,
+    pub unsupported_recurrence: bool,
     pub attendees: Vec<AttendeeField>,
     pub attendees_present: bool,
     pub unsupported_attendees: bool,
@@ -2304,6 +2305,14 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     for node in nodes {
         match node {
             Node::Start(token) => {
+                if (same_token(*token, calendar::RECURRENCE)
+                    || same_token(*token, calendar::EXCEPTIONS))
+                    && path
+                        .last()
+                        .is_some_and(|parent| same_token(*parent, airsync::APPLICATION_DATA))
+                {
+                    fields.unsupported_recurrence = true;
+                }
                 if same_token(*token, calendar::REMINDER)
                     && path
                         .last()
@@ -2930,6 +2939,17 @@ mod tests {
         assert!(parse(&[Some("4294967296")]).unsupported_reminder);
         assert!(parse(&[Some("-1")]).unsupported_reminder);
         assert!(parse(&[Some("1"), Some("2")]).unsupported_reminder);
+    }
+
+    #[test]
+    fn calendar_recurrence_and_exceptions_are_not_silently_accepted() {
+        for token in [super::calendar::RECURRENCE, super::calendar::EXCEPTIONS] {
+            let mut b = super::DocumentBuilder::new();
+            b.start(super::airsync::APPLICATION_DATA);
+            b.empty_tag(token);
+            b.end();
+            assert!(super::extract_calendar_fields(&b.finish().nodes).unsupported_recurrence);
+        }
     }
 
     #[test]

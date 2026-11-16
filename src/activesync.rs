@@ -4767,6 +4767,7 @@ async fn sync_calendar_collection(
             || command.calendar.unsupported_body
             || command.calendar.unsupported_attendees
             || command.calendar.unsupported_categories
+            || command.calendar.unsupported_recurrence
         {
             match command.kind {
                 wbxml::eas::SyncClientCommandKind::Add => {

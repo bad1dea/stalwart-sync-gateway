@@ -3479,6 +3479,95 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_unsupported_recurrence_does_not_save_other_fields() {
+        use eas::calendar as cal;
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let calendars = live
+            .call_using(
+                serde_json::json!([
+            ["Calendar/get",{"accountId":live.account},"0"]]),
+                &using,
+            )
+            .await;
+        let calendar = calendars[0][1]["list"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let folder = format!("cal_{calendar}");
+        let created = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set",{
+            "accountId":live.account,"create":{"e":{"@type":"Event",
+            "calendarIds":{&calendar:true},"title":"Recurrence safety fixture",
+            "start":"2042-05-05T10:00:00","duration":"PT1H"}}},"0"]]),
+                &using,
+            )
+            .await;
+        let id = created[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let device = dev("unsupported-recurrence");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let synced = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&synced));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, &id);
+        b.start(air::APPLICATION_DATA);
+        b.leaf(cal::SUBJECT, "must not change");
+        b.start(cal::RECURRENCE);
+        b.leaf(cal::RECURRENCE_TYPE, "0");
+        b.end();
+        for _ in 0..6 {
+            b.end();
+        }
+        let response = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert!(eas::find_all_text_after(&response, air::STATUS).contains(&"6".to_owned()));
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{
+            "accountId":live.account,"ids":[&id],"properties":["title","recurrenceRules"]},"0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(
+            native[0][1]["list"][0]["title"],
+            "Recurrence safety fixture"
+        );
+        assert!(native[0][1]["list"][0]["recurrenceRules"].is_null());
+        let cleanup = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set",{
+            "accountId":live.account,"destroy":[id]},"0"]]),
+                &using,
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_calendar_categories_round_trip_between_devices() {
         use eas::calendar as cal;
         let live = Live::new("E2E_USER2").await;
