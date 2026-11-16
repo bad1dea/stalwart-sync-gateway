@@ -2253,6 +2253,8 @@ async fn sync_mail(
             &'static str,
         )> = Vec::new();
         let mut added_ids = BTreeSet::new();
+        let draft_journal = format!("__draft_add__:{}", collection.collection_id);
+        let mut draft_completed = Vec::new();
         if is_mail_collection {
             let mut adds = Vec::new();
             collection.commands.retain(|command| {
@@ -2283,9 +2285,20 @@ async fn sync_mail(
                 let identity =
                     serde_json::to_vec(&(device_id, &collection.collection_id, &command.client_id))
                         .expect("serializing draft identity");
-                let marker = format!(
+                let reservation_id = format!(
                     "eas-draft-add-{}",
                     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &identity).simple()
+                );
+                let attempt = serde_json::to_vec(&(
+                    device_id,
+                    &collection.collection_id,
+                    &collection.sync_key,
+                    &command.client_id,
+                ))
+                .expect("serializing draft attempt");
+                let marker = format!(
+                    "eas-draft-add-{}",
+                    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &attempt).simple()
                 );
                 let content_marker = format!(
                     "eas-draft-data-{}",
@@ -2299,7 +2312,7 @@ async fn sync_mail(
                     status,
                     fields: command.flag_fields.clone(),
                 });
-                let draft = match draft::create_properties(
+                let mut draft = match draft::create_properties(
                     &command.document,
                     &collection.collection_id,
                     auth.username(),
@@ -2323,11 +2336,10 @@ async fn sync_mail(
                     }
                 };
                 let reservation = ItemState {
-                    item_id: marker.clone(),
-                    hash: serde_json::to_string(&(&baseline, &content_marker))
+                    item_id: reservation_id.clone(),
+                    hash: serde_json::to_string(&(&baseline, &content_marker, &marker))
                         .expect("serializing draft reservation"),
                 };
-                let journal = format!("__draft_add__:{}", collection.collection_id);
                 let reservation = match state
                     .state
                     .reserve_item(
@@ -2335,7 +2347,7 @@ async fn sync_mail(
                         device_id,
                         &collection.collection_id,
                         &collection.sync_key,
-                        &journal,
+                        &draft_journal,
                         reservation,
                     )
                     .await
@@ -2346,24 +2358,45 @@ async fn sync_mail(
                         continue;
                     }
                 };
-                let (baseline, reserved_content): (String, String) =
-                    match serde_json::from_str(&reservation.hash) {
-                        Ok(value) => value,
-                        Err(_) => {
-                            add_responses.push((command.client_id, None, "5"));
-                            continue;
-                        }
-                    };
+                let saved = serde_json::from_str::<(String, String, String)>(&reservation.hash)
+                    .or_else(|_| {
+                        serde_json::from_str::<(String, String)>(&reservation.hash)
+                            .map(|(baseline, content)| (baseline, content, reservation_id.clone()))
+                    });
+                let (baseline, reserved_content, saved_marker) = match saved {
+                    Ok(value) => value,
+                    Err(_) => {
+                        add_responses.push((command.client_id, None, "5"));
+                        continue;
+                    }
+                };
                 if reserved_content != content_marker {
                     add_responses.push((command.client_id, None, "6"));
                     continue;
+                }
+                if saved_marker != marker {
+                    draft = match draft::create_properties(
+                        &command.document,
+                        &collection.collection_id,
+                        auth.username(),
+                        &saved_marker,
+                        &content_marker,
+                        command.read,
+                        flag.as_ref(),
+                    ) {
+                        Ok(properties) => properties,
+                        Err(_) => {
+                            add_responses.push((command.client_id, None, "6"));
+                            continue;
+                        }
+                    };
                 }
                 match state
                     .jmap
                     .create_email_draft(
                         auth,
                         &collection.collection_id,
-                        (&marker, &content_marker, &baseline),
+                        (&saved_marker, &content_marker, &baseline),
                         draft.properties,
                         draft.mime,
                         &draft.attachments,
@@ -2371,10 +2404,14 @@ async fn sync_mail(
                     .await
                 {
                     Ok(Some(created)) => {
+                        draft_completed.push(reservation);
                         added_ids.insert(created.id.clone());
                         add_responses.push((command.client_id, Some(created), "1"));
                     }
-                    Ok(None) => add_responses.push((command.client_id, None, "6")),
+                    Ok(None) => {
+                        draft_completed.push(reservation);
+                        add_responses.push((command.client_id, None, "6"));
+                    }
                     Err(error) => {
                         tracing::warn!(%error, "failed to create draft");
                         add_responses.push((command.client_id, None, "5"));
@@ -2954,42 +2991,46 @@ async fn sync_mail(
 
             if let Err(error) = state
                 .state
-                .put(SyncRecord {
-                    user: user.to_owned(),
-                    device_id: device_id.to_owned(),
-                    collection_id: collection.collection_id.clone(),
-                    sync_key: new_sync_key.clone(),
-                    // Mail records keep the device's Sync window here so Ping
-                    // can judge "new" the same way Sync does.
-                    jmap_state: mail_record_state(requested_window, filter, &new_email_state),
-                    // SyncKey 0 means the device threw its copy of the folder
-                    // away: what it has now is exactly what this response
-                    // sends. Merging the old list kept messages it no longer
-                    // has (moved/deleted), so Ping kept reporting them gone.
-                    seen_ids: if collection.sync_key == "0" {
-                        Vec::new()
-                    } else {
-                        // Newest first, in listing order; ids the listing does
-                        // not show (yet) keep their place at the end.
-                        let keep = |id: &String| {
-                            (previous_seen.contains(id) || fetched_ids.contains(id))
-                                && !to_remove.contains(id)
-                                && !aged_set.contains(id)
-                        };
-                        let mut order: Vec<String> =
-                            scan.iter().filter(|id| keep(id)).cloned().collect();
-                        order.extend(
-                            previous_order
-                                .iter()
-                                .chain(fetched_ids.iter())
-                                .filter(|id| !scan_set.contains(*id) && keep(id))
-                                .cloned(),
-                        );
-                        let mut dedup = BTreeSet::new();
-                        order.retain(|id| dedup.insert(id.clone()));
-                        order
+                .put_with_items_and_clear(
+                    SyncRecord {
+                        user: user.to_owned(),
+                        device_id: device_id.to_owned(),
+                        collection_id: collection.collection_id.clone(),
+                        sync_key: new_sync_key.clone(),
+                        // Mail records keep the device's Sync window here so Ping
+                        // can judge "new" the same way Sync does.
+                        jmap_state: mail_record_state(requested_window, filter, &new_email_state),
+                        // SyncKey 0 means the device threw its copy of the folder
+                        // away: what it has now is exactly what this response
+                        // sends. Merging the old list kept messages it no longer
+                        // has (moved/deleted), so Ping kept reporting them gone.
+                        seen_ids: if collection.sync_key == "0" {
+                            Vec::new()
+                        } else {
+                            // Newest first, in listing order; ids the listing does
+                            // not show (yet) keep their place at the end.
+                            let keep = |id: &String| {
+                                (previous_seen.contains(id) || fetched_ids.contains(id))
+                                    && !to_remove.contains(id)
+                                    && !aged_set.contains(id)
+                            };
+                            let mut order: Vec<String> =
+                                scan.iter().filter(|id| keep(id)).cloned().collect();
+                            order.extend(
+                                previous_order
+                                    .iter()
+                                    .chain(fetched_ids.iter())
+                                    .filter(|id| !scan_set.contains(*id) && keep(id))
+                                    .cloned(),
+                            );
+                            let mut dedup = BTreeSet::new();
+                            order.retain(|id| dedup.insert(id.clone()));
+                            order
+                        },
                     },
-                })
+                    None,
+                    Some((draft_journal.clone(), draft_completed.clone())),
+                )
                 .await
             {
                 tracing::warn!(
@@ -3142,45 +3183,49 @@ async fn sync_mail(
             } else {
                 collection.sync_key.clone()
             };
-            if advance || collection.options_count > 0 {
+            if advance || collection.options_count > 0 || !draft_completed.is_empty() {
                 if let Err(error) = state
                     .state
-                    .put(SyncRecord {
-                        user: user.to_owned(),
-                        device_id: device_id.to_owned(),
-                        collection_id: collection.collection_id.clone(),
-                        sync_key: new_sync_key.clone(),
-                        jmap_state: if collection.options_count > 0 {
-                            let previous = mail_record_options(
+                    .put_with_items_and_clear(
+                        SyncRecord {
+                            user: user.to_owned(),
+                            device_id: device_id.to_owned(),
+                            collection_id: collection.collection_id.clone(),
+                            sync_key: new_sync_key.clone(),
+                            jmap_state: if collection.options_count > 0 {
+                                let previous = mail_record_options(
+                                    previous_record
+                                        .as_ref()
+                                        .map(|record| record.jmap_state.as_str())
+                                        .unwrap_or(""),
+                                );
+                                mail_record_state(
+                                    previous.window,
+                                    collection.filter_type.unwrap_or(0),
+                                    &previous.email_state,
+                                )
+                            } else {
                                 previous_record
                                     .as_ref()
-                                    .map(|record| record.jmap_state.as_str())
-                                    .unwrap_or(""),
-                            );
-                            mail_record_state(
-                                previous.window,
-                                collection.filter_type.unwrap_or(0),
-                                &previous.email_state,
-                            )
-                        } else {
-                            previous_record
-                                .as_ref()
-                                .map(|record| record.jmap_state.clone())
-                                .unwrap_or_default()
-                        },
-                        seen_ids: {
-                            let mut ids = previous_record
-                                .as_ref()
-                                .map(|record| record.seen_ids.clone())
-                                .unwrap_or_default();
-                            for id in &added_ids {
-                                if !ids.contains(id) {
-                                    ids.push(id.clone());
+                                    .map(|record| record.jmap_state.clone())
+                                    .unwrap_or_default()
+                            },
+                            seen_ids: {
+                                let mut ids = previous_record
+                                    .as_ref()
+                                    .map(|record| record.seen_ids.clone())
+                                    .unwrap_or_default();
+                                for id in &added_ids {
+                                    if !ids.contains(id) {
+                                        ids.push(id.clone());
+                                    }
                                 }
-                            }
-                            ids
+                                ids
+                            },
                         },
-                    })
+                        None,
+                        Some((draft_journal.clone(), draft_completed.clone())),
+                    )
                     .await
                 {
                     tracing::warn!(

@@ -5760,6 +5760,72 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_draft_client_id_can_be_reused_after_success() {
+        let live = Live::new("E2E_USER2").await;
+        let boxes = live
+            .call(serde_json::json!([["Mailbox/get",{"accountId":live.account},"0"]]))
+            .await;
+        let folder = boxes[0][1]["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["role"] == "drafts")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let device = dev("draft-reuse");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let sync = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let first = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                draft_add_body(&sync_key(&sync), &folder, "reused-id", false),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&first, air::STATUS),
+            vec!["1", "1"]
+        );
+        let first_id = eas::find_text_after(&first, air::SERVER_ID)
+            .unwrap()
+            .to_owned();
+        let second = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                draft_add_body(&sync_key(&first), &folder, "reused-id", false),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&second, air::STATUS),
+            vec!["1", "1"]
+        );
+        let second_id = eas::find_text_after(&second, air::SERVER_ID)
+            .unwrap()
+            .to_owned();
+        assert_ne!(first_id, second_id);
+        let cleanup = live
+            .call(serde_json::json!([["Email/set",{"accountId":live.account,
+            "destroy":[first_id,second_id]},"0"]]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_draft_add_recovers_after_server_write_before_sync_checkpoint() {
         let live = Live::new("E2E_USER2").await;
         let boxes = live
@@ -5790,9 +5856,13 @@ mod e2e {
         let request = draft_add_body(&key, &folder, "recovery-id", false);
         let doc = wbxml::decode_document(&request).unwrap();
         let collection = eas::sync_collections(&doc).remove(0);
-        let identity =
-            serde_json::to_vec(&(device.as_str(), &folder, &collection.commands[0].client_id))
-                .unwrap();
+        let identity = serde_json::to_vec(&(
+            device.as_str(),
+            &folder,
+            &key,
+            &collection.commands[0].client_id,
+        ))
+        .unwrap();
         let marker = format!(
             "eas-draft-add-{}",
             uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &identity).simple()
