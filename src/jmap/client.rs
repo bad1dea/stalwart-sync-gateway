@@ -1679,6 +1679,7 @@ impl JmapClient {
                 serde_json::json!({ "inCalendar": calendar_id }),
                 Some(&[
                     "id",
+                    "uid",
                     "@type",
                     "title",
                     "description",
@@ -4286,6 +4287,8 @@ impl From<ContactCardObject> for Contact {
 #[serde(rename_all = "camelCase")]
 struct CalendarEventObject {
     id: String,
+    #[serde(default)]
+    uid: Option<String>,
     #[serde(rename = "@type", default)]
     kind: String,
     #[serde(default)]
@@ -4393,6 +4396,7 @@ impl From<CalendarEventObject> for CalendarEvent {
 
         Self {
             id: value.id,
+            uid: value.uid,
             calendar_ids: Vec::new(),
             title: value.title,
             description: value.description.map(|description| {

@@ -267,6 +267,7 @@ pub struct Contact {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CalendarEvent {
     pub id: String,
+    pub uid: Option<String>,
     pub calendar_ids: Vec<String>,
     pub title: String,
     pub description: Option<EmailBody>,

@@ -3693,6 +3693,110 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_calendar_uid_matches_stalwart_and_other_device() {
+        use eas::calendar as cal;
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let created = live
+            .call_using(
+                serde_json::json!([["Calendar/set",{"accountId":live.account,
+            "create":{"c":{"name":format!("UID fixture {}",std::process::id())}}},"0"]]),
+                &using,
+            )
+            .await;
+        let calendar = created[0][1]["created"]["c"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let folder = format!("cal_{calendar}");
+        let device = dev("calendar-uid");
+        let peer = dev("calendar-uid-peer");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let initial = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let peer_prime = live
+            .wbxml_version("Sync", &peer, sync_body("0", &folder), "16.1")
+            .await;
+        let peer_initial = live
+            .wbxml_version(
+                "Sync",
+                &peer,
+                sync_body(&sync_key(&peer_prime), &folder),
+                "16.1",
+            )
+            .await;
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&initial));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::ADD);
+        b.leaf(air::CLIENT_ID, "uid-client");
+        b.start(air::APPLICATION_DATA);
+        b.leaf(cal::SUBJECT, "UID fixture");
+        b.leaf(cal::START_TIME, "20420706T100000Z");
+        b.leaf(cal::END_TIME, "20420706T110000Z");
+        for _ in 0..6 {
+            b.end();
+        }
+        let added = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&added, air::STATUS),
+            vec!["1", "1"]
+        );
+        let id = eas::find_text_after(&added, air::SERVER_ID)
+            .unwrap()
+            .to_owned();
+        let uid = eas::find_text_after(&added, cal::UID).unwrap().to_owned();
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{"accountId":live.account,
+            "ids":[&id],"properties":["uid"]},"0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(native[0][1]["list"][0]["uid"], uid);
+        let peer_sync = live
+            .wbxml_version(
+                "Sync",
+                &peer,
+                sync_body(&sync_key(&peer_initial), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&peer_sync, cal::UID),
+            Some(uid.as_str())
+        );
+        let cleanup = live
+            .call_using(
+                serde_json::json!([
+            ["CalendarEvent/set",{"accountId":live.account,"destroy":[id]},"0"],
+            ["Calendar/set",{"accountId":live.account,"destroy":[calendar]},"1"]]),
+                &using,
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_calendar_default_reminders_are_not_overwritten() {
         use eas::calendar as cal;
         let live = Live::new("E2E_USER2").await;

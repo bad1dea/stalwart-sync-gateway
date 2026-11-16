@@ -4759,6 +4759,17 @@ async fn sync_calendar_collection(
                 builder.leaf(air::SERVER_ID, server_id.clone());
             }
             builder.leaf(air::STATUS, *status);
+            if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
+                if let Some(uid) = server_id
+                    .as_ref()
+                    .and_then(|id| current_by_id.get(id))
+                    .and_then(|(_, event)| event.uid.as_ref())
+                {
+                    builder.start(air::APPLICATION_DATA);
+                    builder.leaf(wbxml::eas::calendar::UID, uid.clone());
+                    builder.end();
+                }
+            }
             builder.end();
         }
         for (server_id, status) in &change_responses {
@@ -4811,6 +4822,7 @@ async fn sync_calendar_collection(
 /// Same purpose as `contact_hash`/`jmap::notes::note_hash`.
 fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    event.uid.hash(&mut hasher);
     event.title.hash(&mut hasher);
     if let Some(body) = &event.description {
         body.body_type.eas_value().hash(&mut hasher);
@@ -4858,6 +4870,9 @@ fn write_calendar_command(
         builder.leaf(cal::START_TIME, start.clone());
     }
     builder.leaf(cal::SUBJECT, event.title.clone());
+    if let Some(uid) = &event.uid {
+        builder.leaf(cal::UID, uid.clone());
+    }
     let empty_body = crate::model::EmailBody {
         body_type: EmailBodyType::Plain,
         value: String::new(),
