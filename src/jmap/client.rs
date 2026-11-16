@@ -93,6 +93,34 @@ fn path_and_query_raw(url: &str) -> Option<&str> {
 pub struct JmapClient {
     http: reqwest::Client,
     config: Config,
+    state: crate::state::SharedStateStore,
+}
+
+#[derive(Default)]
+struct DraftIdentityMap {
+    by_backend: BTreeMap<String, String>,
+    by_stable: BTreeMap<String, String>,
+}
+impl DraftIdentityMap {
+    fn backend<'a>(&'a self, id: &'a str) -> &'a str {
+        self.by_stable.get(id).map(String::as_str).unwrap_or(id)
+    }
+    fn stable<'a>(&'a self, id: &'a str) -> &'a str {
+        self.by_backend.get(id).map(String::as_str).unwrap_or(id)
+    }
+    fn email(&self, mut email: Email) -> Email {
+        if let Some(stable) = self.by_backend.get(&email.id) {
+            email.draft_revision = Some(email.id.clone());
+            email.id = stable.clone();
+        }
+        email
+    }
+    fn state(&self, backend: &str, mut state: EmailState) -> EmailState {
+        if self.by_backend.contains_key(backend) {
+            state.draft_revision = Some(backend.to_owned());
+        }
+        state
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -175,7 +203,7 @@ pub enum DestroyMailboxOutcome {
 }
 
 impl JmapClient {
-    pub fn new(config: Config) -> anyhow::Result<Self> {
+    pub fn new(config: Config, state: crate::state::SharedStateStore) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent("stalwart-sync-gateway/0.1")
             .danger_accept_invalid_certs(!config.stalwart_tls_verify)
@@ -183,7 +211,34 @@ impl JmapClient {
             .http2_adaptive_window(true)
             .build()
             .context("failed to build JMAP HTTP client")?;
-        Ok(Self { http, config })
+        Ok(Self {
+            http,
+            config,
+            state,
+        })
+    }
+
+    async fn draft_identity_map(
+        &self,
+        auth: &AuthenticatedSession,
+    ) -> anyhow::Result<DraftIdentityMap> {
+        let account = auth
+            .session
+            .primary_account_for(capabilities::MAIL)
+            .context("JMAP Mail capability is unavailable")?;
+        let mut result = DraftIdentityMap::default();
+        for item in self.state.draft_mappings(account).await? {
+            if item.item_id == item.hash
+                || result
+                    .by_backend
+                    .insert(item.hash.clone(), item.item_id.clone())
+                    .is_some()
+                || result.by_stable.insert(item.item_id, item.hash).is_some()
+            {
+                anyhow::bail!("invalid draft identity mapping");
+            }
+        }
+        Ok(result)
     }
 
     pub async fn unauthenticated_probe(&self) -> anyhow::Result<()> {
@@ -398,6 +453,7 @@ impl JmapClient {
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
             return Ok((Vec::new(), false));
         };
+        let identities = self.draft_identity_map(auth).await?;
         let limit = limit.clamp(1, 100);
 
         let calls = vec![
@@ -452,7 +508,12 @@ impl JmapClient {
                 "Email/get" => {
                     let get: GetResponse<EmailObject> =
                         serde_json::from_value(method.1).context("invalid Email/get response")?;
-                    let emails: Vec<Email> = get.list.into_iter().map(Email::from).collect();
+                    let emails: Vec<Email> = get
+                        .list
+                        .into_iter()
+                        .map(Email::from)
+                        .map(|email| identities.email(email))
+                        .collect();
                     let has_more = total.is_some_and(|total| total as usize > limit);
                     return Ok((emails, has_more));
                 }
@@ -541,6 +602,15 @@ impl JmapClient {
                 break;
             }
         }
+        let identities = self.draft_identity_map(auth).await?;
+        for id in &mut ids {
+            *id = identities.stable(id).to_owned();
+        }
+        let mut unique = BTreeSet::new();
+        anyhow::ensure!(
+            ids.iter().all(|id| unique.insert(id.clone())),
+            "duplicate draft identity in mailbox"
+        );
         Ok(ids)
     }
 
@@ -557,6 +627,11 @@ impl JmapClient {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
+        let identities = self.draft_identity_map(auth).await?;
+        let backend_ids: Vec<_> = ids
+            .iter()
+            .map(|id| identities.backend(id).to_owned())
+            .collect();
         let response: JmapResponse<serde_json::Value> = self
             .api_call(
                 auth,
@@ -565,7 +640,7 @@ impl JmapClient {
                     "Email/get",
                     serde_json::json!({
                         "accountId": account_id,
-                        "ids": ids,
+                        "ids": backend_ids,
                         "properties": [
                             "id", "blobId", "mailboxIds", "keywords", "receivedAt", "subject",
                             "from", "to", "cc", "bcc", "replyTo", "header:To:asRaw", "header:Cc:asRaw",
@@ -587,6 +662,7 @@ impl JmapClient {
                         .list
                         .into_iter()
                         .map(Email::from)
+                        .map(|email| identities.email(email))
                         .map(|e| (e.id.clone(), e))
                         .collect();
                     return Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect());
@@ -672,6 +748,7 @@ impl JmapClient {
             .clamp(1, 1000) as usize;
         let limit = limit.clamp(1, maximum);
 
+        let identities = self.draft_identity_map(auth).await?;
         let calls = vec![
             MethodCall::new(
                 "Email/query",
@@ -725,7 +802,12 @@ impl JmapClient {
                 "Email/get" => {
                     let get: GetResponse<EmailObject> =
                         serde_json::from_value(method.1).context("invalid Email/get response")?;
-                    let emails: Vec<Email> = get.list.into_iter().map(Email::from).collect();
+                    let emails: Vec<Email> = get
+                        .list
+                        .into_iter()
+                        .map(Email::from)
+                        .map(|email| identities.email(email))
+                        .collect();
                     anyhow::ensure!(
                         emails.len() == query_count,
                         "Email search changed during fetch"
@@ -888,6 +970,11 @@ impl JmapClient {
             return Ok(BTreeSet::new());
         };
 
+        let identities = self.draft_identity_map(auth).await?;
+        let backend_ids: Vec<_> = candidate_ids
+            .iter()
+            .map(|id| identities.backend(id).to_owned())
+            .collect();
         let response: JmapResponse<serde_json::Value> = self
             .api_call(
                 auth,
@@ -896,7 +983,7 @@ impl JmapClient {
                     "Email/get",
                     serde_json::json!({
                         "accountId": account_id,
-                        "ids": candidate_ids,
+                        "ids": backend_ids,
                         "properties": ["id", "mailboxIds"]
                     }),
                     "0",
@@ -913,7 +1000,7 @@ impl JmapClient {
                     .list
                     .into_iter()
                     .filter(|email| email.mailbox_ids.get(mailbox_id).copied().unwrap_or(false))
-                    .map(|email| email.id)
+                    .map(|email| identities.stable(&email.id).to_owned())
                     .collect());
             } else if method.0 == "error" {
                 anyhow::bail!("JMAP method error while checking mail deletion candidates");
@@ -945,6 +1032,7 @@ impl JmapClient {
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
             return Ok(None);
         };
+        let identities = self.draft_identity_map(auth).await?;
         let mut calls = vec![
             MethodCall::new(
                 "Email/query",
@@ -973,7 +1061,11 @@ impl JmapClient {
         ];
         // `seen_ids` is stored newest first (see sync_mail); Sync confirms the
         // same leading slice, so anything reported here it can deliver.
-        let check: Vec<&String> = seen_ids.iter().take(SEEN_CHECK).collect();
+        let check: Vec<String> = seen_ids
+            .iter()
+            .take(SEEN_CHECK)
+            .map(|id| identities.backend(id).to_owned())
+            .collect();
         if !check.is_empty() {
             calls.push(MethodCall::new(
                 "Email/get",
@@ -1004,26 +1096,32 @@ impl JmapClient {
                 "Email/query" => {
                     let q: QueryResponse =
                         serde_json::from_value(method.1).context("invalid Email/query response")?;
-                    query_ids = q.ids;
+                    query_ids = q
+                        .ids
+                        .into_iter()
+                        .map(|id| identities.stable(&id).to_owned())
+                        .collect();
                 }
                 "Email/get" if call_id == "n" => {
                     let g: GetResponse<EmailMembership> =
                         serde_json::from_value(method.1).context("invalid Email/get response")?;
                     for e in g.list {
-                        newest_state.insert(e.id, EmailState::from_keywords(&e.keywords));
+                        let read = identities.state(&e.id, EmailState::from_keywords(&e.keywords));
+                        newest_state.insert(identities.stable(&e.id).to_owned(), read);
                     }
                 }
                 "Email/get" => {
                     let g: GetResponse<EmailMembership> =
                         serde_json::from_value(method.1).context("invalid Email/get response")?;
                     for e in &g.list {
-                        seen_state.insert(e.id.clone(), EmailState::from_keywords(&e.keywords));
+                        let read = identities.state(&e.id, EmailState::from_keywords(&e.keywords));
+                        seen_state.insert(identities.stable(&e.id).to_owned(), read);
                     }
                     still_here = Some(
                         g.list
                             .into_iter()
                             .filter(|e| e.mailbox_ids.get(mailbox_id).copied().unwrap_or(false))
-                            .map(|e| e.id)
+                            .map(|e| identities.stable(&e.id).to_owned())
                             .collect(),
                     );
                 }
@@ -1121,6 +1219,7 @@ impl JmapClient {
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
             return Ok(None);
         };
+        let identities = self.draft_identity_map(auth).await?;
         let mut out = EmailChangesSince {
             new_state: since_state.to_owned(),
             touched: BTreeMap::new(),
@@ -1167,17 +1266,23 @@ impl JmapClient {
                             .to_owned();
                         more = method.1["hasMoreChanges"].as_bool().unwrap_or(false);
                         if let Some(ids) = method.1["destroyed"].as_array() {
-                            out.destroyed
-                                .extend(ids.iter().filter_map(|v| v.as_str().map(str::to_owned)));
+                            out.destroyed.extend(
+                                ids.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .filter(|id| !identities.by_stable.contains_key(*id))
+                                    .map(|id| identities.stable(id).to_owned()),
+                            );
                         }
                     }
                     ("Email/get", _) => {
                         let get: GetResponse<EmailMembership> = serde_json::from_value(method.1)
                             .context("invalid Email/get response for changes")?;
                         for e in get.list {
-                            let read = EmailState::from_keywords(&e.keywords);
+                            let read =
+                                identities.state(&e.id, EmailState::from_keywords(&e.keywords));
                             let here = e.mailbox_ids.get(mailbox_id).copied().unwrap_or(false);
-                            out.touched.insert(e.id, (read, here));
+                            out.touched
+                                .insert(identities.stable(&e.id).to_owned(), (read, here));
                         }
                     }
                     ("error", "c") => {
@@ -1228,6 +1333,11 @@ impl JmapClient {
             }
             return Ok(out);
         }
+        let identities = self.draft_identity_map(auth).await?;
+        let backend_ids: Vec<_> = ids
+            .iter()
+            .map(|id| identities.backend(id).to_owned())
+            .collect();
         let response: JmapResponse<serde_json::Value> = self
             .api_call(
                 auth,
@@ -1236,7 +1346,7 @@ impl JmapClient {
                     "Email/get",
                     serde_json::json!({
                         "accountId": account_id,
-                        "ids": ids,
+                        "ids": backend_ids,
                         "properties": ["id", "keywords"]
                     }),
                     "0",
@@ -1249,8 +1359,9 @@ impl JmapClient {
                     let get: GetResponse<EmailMembership> = serde_json::from_value(method.1)
                         .context("invalid Email/get response for read states")?;
                     for email in get.list {
-                        let read = EmailState::from_keywords(&email.keywords);
-                        out.insert(email.id, read);
+                        let read =
+                            identities.state(&email.id, EmailState::from_keywords(&email.keywords));
+                        out.insert(identities.stable(&email.id).to_owned(), read);
                     }
                 }
                 "error" => anyhow::bail!("JMAP method error reading message read states"),
@@ -2564,11 +2675,13 @@ impl JmapClient {
             return Ok(None);
         };
 
+        let identities = self.draft_identity_map(auth).await?;
+        let backend_id = identities.backend(email_id);
         let calls = vec![MethodCall::new(
             "Email/get",
             serde_json::json!({
                 "accountId": account_id,
-                "ids": [email_id],
+                "ids": [backend_id],
                 "properties": [
                     "id", "blobId", "mailboxIds", "keywords", "receivedAt", "subject",
                     "from", "to", "cc", "bcc", "replyTo", "header:To:asRaw", "header:Cc:asRaw",
@@ -2593,7 +2706,12 @@ impl JmapClient {
                 "Email/get" => {
                     let get: GetResponse<EmailObject> =
                         serde_json::from_value(method.1).context("invalid Email/get response")?;
-                    return Ok(get.list.into_iter().next().map(Email::from));
+                    return Ok(get
+                        .list
+                        .into_iter()
+                        .next()
+                        .map(Email::from)
+                        .map(|email| identities.email(email)));
                 }
                 "error" => anyhow::bail!("JMAP method error in email fetch"),
                 _ => {}
@@ -2614,6 +2732,8 @@ impl JmapClient {
             .session
             .primary_account_for(capabilities::MAIL)
             .ok_or_else(|| anyhow::anyhow!("JMAP Mail capability is unavailable"))?;
+        let identities = self.draft_identity_map(auth).await?;
+        let backend_id = identities.backend(email_id);
         let response: JmapResponse<serde_json::Value> = self
             .api_call(
                 auth,
@@ -2621,7 +2741,7 @@ impl JmapClient {
                 vec![MethodCall::new(
                     "Email/get",
                     serde_json::json!({
-                        "accountId": account_id, "ids": [email_id],
+                        "accountId": account_id, "ids": [backend_id],
                         "properties": ["id", "textBody", "htmlBody", "bodyValues"],
                         "fetchAllBodyValues": true, "maxBodyValueBytes": max_bytes
                     }),
@@ -2637,7 +2757,7 @@ impl JmapClient {
                     return Ok(get
                         .list
                         .into_iter()
-                        .find(|email| email.id == email_id)
+                        .find(|email| email.id == backend_id)
                         .and_then(|mut email| select_body(&mut email)));
                 }
                 "error" => anyhow::bail!("JMAP method error fetching the message body"),
@@ -2884,6 +3004,8 @@ impl JmapClient {
             .session
             .primary_account_for(capabilities::MAIL)
             .context("JMAP Mail capability is not available")?;
+        let identities = self.draft_identity_map(auth).await?;
+        let email_id = identities.backend(email_id);
         let response: JmapResponse<serde_json::Value> = self
             .api_call(
                 auth,
@@ -3032,7 +3154,7 @@ impl JmapClient {
             anyhow::bail!("JMAP did not retain the requested email state");
         }
         let keywords = observed;
-        Ok(EmailState::from_keywords(&keywords))
+        Ok(identities.state(email_id, EmailState::from_keywords(&keywords)))
     }
 
     pub async fn delete_email(
@@ -3062,6 +3184,8 @@ impl JmapClient {
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
             anyhow::bail!("JMAP Mail capability is not available");
         };
+        let identities = self.draft_identity_map(auth).await?;
+        let email_id = identities.backend(email_id);
 
         self.email_set(
             auth,
@@ -3284,6 +3408,8 @@ impl JmapClient {
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
             anyhow::bail!("JMAP Mail capability is not available");
         };
+        let identities = self.draft_identity_map(auth).await?;
+        let email_id = identities.backend(email_id);
 
         let mut patch = serde_json::Map::new();
         patch.insert(
@@ -3999,6 +4125,7 @@ impl From<EmailObject> for Email {
             format_addresses(parsed.as_deref().unwrap_or_default())
         };
         Self {
+            draft_revision: None,
             id: value.id,
             mailbox_ids: value
                 .mailbox_ids

@@ -719,7 +719,7 @@ async fn spawn_gateway(
     let push = PushHub::new(&config).unwrap();
     let app_state = AppState {
         config: config.clone(),
-        jmap: crate::jmap::client::JmapClient::new(config.clone()).unwrap(),
+        jmap: crate::jmap::client::JmapClient::new(config.clone(), state.clone()).unwrap(),
         metrics: Metrics::new().unwrap(),
         state: state.clone(),
         push: push.clone(),
@@ -1880,6 +1880,65 @@ async fn folder_sync(
         eas::find_text_after(&doc, fh::COUNT).map(str::to_owned),
         eas::find_all_text_after(&doc, fh::SERVER_ID),
     )
+}
+
+#[tokio::test]
+async fn replacement_draft_keeps_identity_and_sends_content_changes() {
+    use eas::{airsync as air, email};
+    let env = start_env(Opts::default()).await;
+    env.mock.set_keyword("m1", "$draft", true);
+    for device in ["draft-a", "draft-b"] {
+        let ids = env.sync_all(device).await;
+        assert!(ids.contains(&"m1".to_owned()));
+    }
+    env.mock.add_mail("inbox", "replacement");
+    env.mock
+        .mail_bodies
+        .lock()
+        .unwrap()
+        .insert("replacement".to_owned(), ("x".repeat(70_000), false));
+    env.mock.set_keyword("replacement", "$draft", true);
+    env.mock.remove_mail("inbox", "m1");
+    assert!(env
+        .state
+        .swap_draft_mapping("a1", "m1", "m1", "replacement")
+        .await
+        .unwrap());
+    for device in ["draft-a", "draft-b"] {
+        let key = env.keys.lock().unwrap().get(device).unwrap().clone();
+        let response = env
+            .req("Sync", device)
+            .body(sync_body(&key, "inbox"))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        let commands = eas::child_elements(&doc)
+            .into_iter()
+            .flat_map(|child| eas::child_elements(&child))
+            .flat_map(|child| eas::child_elements(&child))
+            .find(|child| {
+                matches!(child.nodes.first(), Some(wbxml::Node::Start(token))
+                if token.code_page==air::PAGE && token.token==air::COMMANDS.token)
+            })
+            .unwrap();
+        let changes = eas::child_elements(&commands);
+        assert!(changes.iter().any(
+            |change| matches!(change.nodes.first(), Some(wbxml::Node::Start(token))
+            if token.code_page==air::PAGE && token.token==air::CHANGE.token)
+                && eas::find_text_after(change, air::SERVER_ID) == Some("m1")
+                && eas::find_text_after(change, email::SUBJECT) == Some("subject replacement")
+        ));
+        assert!(!changes.iter().any(|change| matches!(change.nodes.first(), Some(wbxml::Node::Start(token))
+            if token.code_page==air::PAGE && (token.token==air::ADD.token || token.token==air::DELETE.token))));
+    }
+    assert!(env
+        .mock
+        .body_get_limits
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(id, limit)| id == "replacement" && *limit == 0));
 }
 
 #[tokio::test]
@@ -5914,6 +5973,239 @@ mod e2e {
             )
             .await;
         assert!(result[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_replaced_draft_keeps_eas_identity_and_syncs_content() {
+        use eas::{email, item_operations as ops};
+        let live = Live::new("E2E_USER2").await;
+        let created = live.call(serde_json::json!([["Mailbox/set",{
+            "accountId":live.account, "create":{"m":{"name":format!("Draft identity {}",std::process::id())}}
+        },"0"]])).await;
+        let folder = created[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let old = live
+            .seed(&folder, 1, "draft-original", false)
+            .await
+            .remove(0);
+        let r = live
+            .call(serde_json::json!([["Email/set",{
+            "accountId":live.account,"update":{&old:{"keywords/$draft":true}}
+        },"0"]]))
+            .await;
+        assert!(r[0][1]["updated"].get(&old).is_some());
+        let device = dev("draft-identity");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let sync = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&sync, air::SERVER_ID),
+            Some(old.as_str())
+        );
+        let other = dev("draft-identity-other");
+        let other_prime = live
+            .wbxml_version("Sync", &other, sync_body("0", &folder), "16.1")
+            .await;
+        let other_sync = live
+            .wbxml_version(
+                "Sync",
+                &other,
+                sync_body(&sync_key(&other_prime), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&other_sync, air::SERVER_ID),
+            Some(old.as_str())
+        );
+        let keywords = serde_json::json!({"$draft":true});
+        let replacement = live
+            .call(serde_json::json!([["Email/set",{
+            "accountId":live.account,"create":{"e":{"mailboxIds":{&folder:true},"keywords":keywords,
+                "subject":"Changed draft subject","bodyValues":{"b":{"value":"Changed draft body"}},
+                "textBody":[{"partId":"b","type":"text/plain"}]}}
+        },"0"]]))
+            .await;
+        let new = replacement[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(new, old);
+        let result = live
+            .call(serde_json::json!([["Email/set",{
+            "accountId":live.account,"destroy":[&old]
+        },"0"]]))
+            .await;
+        assert!(result[0][1]["notDestroyed"].is_null());
+        let state = crate::state::SqliteStateStore::open(&env("E2E_STATE_SQLITE_PATH")).unwrap();
+        assert!(crate::state::StateStore::swap_draft_mapping(
+            &state,
+            &live.account,
+            &old,
+            &old,
+            &new
+        )
+        .await
+        .unwrap());
+        if let Ok(restart) = std::env::var("E2E_RESTART_CMD") {
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(restart)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let live = Live::new("E2E_USER2").await;
+        let changed = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&sync), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&changed, air::SERVER_ID),
+            vec![old.clone()]
+        );
+        assert_eq!(
+            eas::find_text_after(&changed, email::SUBJECT),
+            Some("Changed draft subject")
+        );
+        assert!(eas::contains_token(&changed, air::CHANGE));
+        assert!(!eas::contains_token(&changed, air::DELETE));
+        let other_changed = live
+            .wbxml_version(
+                "Sync",
+                &other,
+                sync_body(&sync_key(&other_sync), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&other_changed, air::SERVER_ID),
+            vec![old.clone()]
+        );
+        assert!(eas::contains_token(&other_changed, air::CHANGE));
+        assert_eq!(
+            eas::find_text_after(&other_changed, email::SUBJECT),
+            Some("Changed draft subject")
+        );
+        let mut b = eas::DocumentBuilder::new();
+        b.start(ops::ITEM_OPERATIONS);
+        b.start(ops::FETCH);
+        b.leaf(ops::STORE, "Mailbox");
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.leaf(air::SERVER_ID, &old);
+        b.end();
+        b.end();
+        let fetched = live
+            .wbxml_version(
+                "ItemOperations",
+                &device,
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&fetched, email::SUBJECT),
+            Some("Changed draft subject")
+        );
+        let update = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                flag_change_body(
+                    &sync_key(&changed),
+                    &folder,
+                    &old,
+                    Some("2"),
+                    Some(true),
+                    false,
+                ),
+                "16.1",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&update, air::STATUS), Some("1"));
+        let get = live
+            .call(serde_json::json!([["Email/get",{
+            "accountId":live.account, "ids":[&new], "properties":["id","keywords"]
+        },"0"]]))
+            .await;
+        assert_eq!(get[0][1]["list"][0]["keywords"]["$seen"], true);
+        assert_eq!(get[0][1]["list"][0]["keywords"]["$flagged"], true);
+        let other_flag = live
+            .wbxml_version(
+                "Sync",
+                &other,
+                sync_body(&sync_key(&other_changed), &folder),
+                "16.1",
+            )
+            .await;
+        assert!(eas::contains_token(&other_flag, air::CHANGE));
+        assert_eq!(
+            eas::find_text_after(&other_flag, air::SERVER_ID),
+            Some(old.as_str())
+        );
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&update));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.leaf(air::GET_CHANGES, "0");
+        b.leaf(air::DELETES_AS_MOVES, "0");
+        b.start(air::COMMANDS);
+        b.start(air::DELETE);
+        b.leaf(air::SERVER_ID, &old);
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        let deleted = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert_eq!(eas::find_text_after(&deleted, air::STATUS), Some("1"));
+        let other_delete = live
+            .wbxml_version(
+                "Sync",
+                &other,
+                sync_body(&sync_key(&other_flag), &folder),
+                "16.1",
+            )
+            .await;
+        assert!(eas::contains_token(&other_delete, air::DELETE));
+        assert_eq!(
+            eas::find_text_after(&other_delete, air::SERVER_ID),
+            Some(old.as_str())
+        );
+        assert!(crate::state::StateStore::swap_draft_mapping(
+            &state,
+            &live.account,
+            &old,
+            &new,
+            &old
+        )
+        .await
+        .unwrap());
+        let cleanup = live
+            .call(serde_json::json!([
+                ["Mailbox/set",{"accountId":live.account,"destroy":[folder]},"0"]
+            ]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
     }
 
     #[tokio::test]

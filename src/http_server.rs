@@ -27,8 +27,8 @@ pub struct AppState {
 
 pub async fn serve(config: Config) -> anyhow::Result<()> {
     let metrics = Metrics::new()?;
-    let jmap = JmapClient::new(config.clone())?;
     let state = state::new_store(&config).await?;
+    let jmap = JmapClient::new(config.clone(), state.clone())?;
     let push = PushHub::new(&config)?;
     let app_state = AppState {
         config: config.clone(),

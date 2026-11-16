@@ -58,6 +58,16 @@ pub trait StateStore: Send + Sync {
         completed: Option<(String, Vec<ItemState>)>,
     ) -> anyhow::Result<()>;
 
+    // EAS IDs stay stable when JMAP replaces an immutable draft.
+    async fn draft_mappings(&self, account: &str) -> anyhow::Result<Vec<ItemState>>;
+    async fn swap_draft_mapping(
+        &self,
+        account: &str,
+        stable_id: &str,
+        expected_backend: &str,
+        new_backend: &str,
+    ) -> anyhow::Result<bool>;
+
     async fn reserve_item(
         &self,
         user: &str,
@@ -117,6 +127,7 @@ pub async fn new_store(config: &Config) -> anyhow::Result<SharedStateStore> {
 pub struct MemoryStateStore {
     records: RwLock<BTreeMap<String, SyncRecord>>,
     item_states: RwLock<BTreeMap<String, Vec<ItemState>>>,
+    draft_mappings: RwLock<BTreeMap<(String, String), String>>,
 }
 
 #[async_trait]
@@ -165,6 +176,56 @@ impl StateStore for MemoryStateStore {
             }
         }
         Ok(())
+    }
+
+    async fn draft_mappings(&self, account: &str) -> anyhow::Result<Vec<ItemState>> {
+        let mappings = self.draft_mappings.read().await;
+        Ok(mappings
+            .iter()
+            .filter(|((owner, _), _)| owner == account)
+            .map(|((_, stable), backend)| ItemState {
+                item_id: stable.clone(),
+                hash: backend.clone(),
+            })
+            .collect())
+    }
+
+    async fn swap_draft_mapping(
+        &self,
+        account: &str,
+        stable_id: &str,
+        expected_backend: &str,
+        new_backend: &str,
+    ) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            !account.is_empty()
+                && !stable_id.is_empty()
+                && !expected_backend.is_empty()
+                && !new_backend.is_empty(),
+            "invalid draft identity"
+        );
+        let mut mappings = self.draft_mappings.write().await;
+        let entry = (account.to_owned(), stable_id.to_owned());
+        let current = mappings
+            .get(&entry)
+            .map(String::as_str)
+            .unwrap_or(stable_id);
+        if current != expected_backend {
+            return Ok(false);
+        }
+        if mappings.iter().any(|((owner, stable), backend)| {
+            owner == account
+                && stable != stable_id
+                && (backend == new_backend || stable == new_backend || backend == stable_id)
+        }) {
+            anyhow::bail!("conflicting draft identity");
+        }
+        if stable_id == new_backend {
+            mappings.remove(&entry);
+        } else {
+            mappings.insert(entry, new_backend.to_owned());
+        }
+        Ok(true)
     }
 
     async fn reserve_item(
@@ -384,6 +445,74 @@ impl StateStore for SqliteStateStore {
         Ok(())
     }
 
+    async fn draft_mappings(&self, account: &str) -> anyhow::Result<Vec<ItemState>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SQLite state lock poisoned"))?;
+        let mut query = connection
+            .prepare("SELECT stable_id, backend_id FROM draft_identities WHERE account_id = ?1")?;
+        let rows = query.query_map(params![account], |row| {
+            Ok(ItemState {
+                item_id: row.get(0)?,
+                hash: row.get(1)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to read draft identities")
+    }
+
+    async fn swap_draft_mapping(
+        &self,
+        account: &str,
+        stable_id: &str,
+        expected_backend: &str,
+        new_backend: &str,
+    ) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            !account.is_empty()
+                && !stable_id.is_empty()
+                && !expected_backend.is_empty()
+                && !new_backend.is_empty(),
+            "invalid draft identity"
+        );
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SQLite state lock poisoned"))?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT backend_id FROM draft_identities WHERE account_id = ?1 AND stable_id = ?2",
+                params![account, stable_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current.as_deref().unwrap_or(stable_id) != expected_backend {
+            return Ok(false);
+        }
+        let conflict: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM draft_identities WHERE account_id = ?1 AND stable_id != ?2 AND (backend_id = ?3 OR stable_id = ?3 OR backend_id = ?2))",
+            params![account,stable_id,new_backend], |row| row.get(0))?;
+        if conflict {
+            anyhow::bail!("conflicting draft identity");
+        }
+        if stable_id == new_backend {
+            tx.execute(
+                "DELETE FROM draft_identities WHERE account_id = ?1 AND stable_id = ?2",
+                params![account, stable_id],
+            )?;
+        } else {
+            tx.execute(
+                "INSERT INTO draft_identities (account_id,stable_id,backend_id) VALUES (?1,?2,?3)
+                ON CONFLICT(account_id,stable_id) DO UPDATE SET backend_id = excluded.backend_id",
+                params![account, stable_id, new_backend],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     async fn reserve_item(
         &self,
         user: &str,
@@ -516,6 +645,17 @@ fn migrate(connection: &Connection) -> anyhow::Result<()> {
 
         INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (2, unixepoch());
+
+        CREATE TABLE IF NOT EXISTS draft_identities (
+            account_id TEXT NOT NULL,
+            stable_id TEXT NOT NULL,
+            backend_id TEXT NOT NULL,
+            PRIMARY KEY (account_id, stable_id),
+            UNIQUE (account_id, backend_id)
+        );
+
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (3, unixepoch());
         ",
     )?;
     Ok(())
@@ -661,6 +801,65 @@ mod tests {
         let store = std::sync::Arc::new(SqliteStateStore::open(path.to_str().unwrap()).unwrap());
         exercise_operation_reservation(store.clone()).await;
         drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    async fn exercise_draft_mappings(store: std::sync::Arc<dyn StateStore>) {
+        assert!(store.draft_mappings("a").await.unwrap().is_empty());
+        assert!(store
+            .swap_draft_mapping("a", "stable", "stable", "one")
+            .await
+            .unwrap());
+        assert!(!store
+            .swap_draft_mapping("a", "stable", "stable", "stale")
+            .await
+            .unwrap());
+        assert!(store
+            .swap_draft_mapping("b", "stable", "stable", "one")
+            .await
+            .unwrap());
+        assert!(store
+            .swap_draft_mapping("a", "other", "other", "one")
+            .await
+            .is_err());
+        let mut jobs = Vec::new();
+        for next in ["two", "three"] {
+            let store = store.clone();
+            jobs.push(tokio::spawn(async move {
+                store
+                    .swap_draft_mapping("a", "stable", "one", next)
+                    .await
+                    .unwrap()
+            }));
+        }
+        let mut wins = 0;
+        for job in jobs {
+            wins += usize::from(job.await.unwrap());
+        }
+        assert_eq!(wins, 1);
+        let mappings = store.draft_mappings("a").await.unwrap();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].item_id, "stable");
+        assert!(["two", "three"].contains(&mappings[0].hash.as_str()));
+        assert!(store
+            .swap_draft_mapping("a", "stable", &mappings[0].hash, "stable")
+            .await
+            .unwrap());
+        assert!(store.draft_mappings("a").await.unwrap().is_empty());
+        assert_eq!(store.draft_mappings("b").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn draft_mappings_are_atomic_and_account_scoped() {
+        exercise_draft_mappings(std::sync::Arc::new(MemoryStateStore::default())).await;
+        let path =
+            std::env::temp_dir().join(format!("stalwart-draft-map-{}.db", uuid::Uuid::new_v4()));
+        let store = std::sync::Arc::new(SqliteStateStore::open(path.to_str().unwrap()).unwrap());
+        exercise_draft_mappings(store.clone()).await;
+        drop(store);
+        let reopened = SqliteStateStore::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(reopened.draft_mappings("b").await.unwrap()[0].hash, "one");
+        drop(reopened);
         let _ = std::fs::remove_file(path);
     }
 

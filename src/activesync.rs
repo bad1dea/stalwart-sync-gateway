@@ -2950,6 +2950,55 @@ async fn sync_mail(
                     "mail Sync: sending message-state changes"
                 );
             }
+            let draft_ids: Vec<String> = state_changes
+                .iter()
+                .filter(|(_, metadata)| metadata.draft_revision.is_some())
+                .map(|(id, _)| id.clone())
+                .collect();
+            let draft_emails = match state.jmap.emails_by_ids(auth, &draft_ids).await {
+                Ok(emails)
+                    if emails.len() == draft_ids.len()
+                        && emails.iter().all(|email| {
+                            state_changes.iter().any(|(id, metadata)| {
+                                id == &email.id && *metadata == email.message_state()
+                            })
+                        }) =>
+                {
+                    emails
+                }
+                _ => {
+                    builder.start(air::COLLECTION);
+                    builder.leaf(air::SYNC_KEY, &collection.sync_key);
+                    builder.leaf(air::COLLECTION_ID, &collection.collection_id);
+                    builder.leaf(air::STATUS, "5");
+                    builder.end();
+                    continue 'collections;
+                }
+            };
+            let mut draft_changes: BTreeMap<String, (crate::model::Email, BodyPreference)> =
+                match prepare_mail_bodies(
+                    state,
+                    auth,
+                    draft_emails,
+                    &collection.body_preferences,
+                    collection.mime_support,
+                )
+                .await
+                {
+                    Ok(items) => items
+                        .into_iter()
+                        .map(|(email, pref)| (email.id.clone(), (email, pref)))
+                        .collect(),
+                    Err(error) => {
+                        tracing::warn!(%error, "draft change preparation failed");
+                        builder.start(air::COLLECTION);
+                        builder.leaf(air::SYNC_KEY, &collection.sync_key);
+                        builder.leaf(air::COLLECTION_ID, &collection.collection_id);
+                        builder.leaf(air::STATUS, "5");
+                        builder.end();
+                        continue 'collections;
+                    }
+                };
             let mut new_states = previous_states;
             for (id, read) in &outside_updates {
                 new_states.insert(id.clone(), read.fingerprint().to_owned());
@@ -2964,23 +3013,6 @@ async fn sync_mail(
                 }
             }
             new_states.retain(|id, _| !to_remove.contains(id.as_str()) && !aged_set.contains(id));
-            if new_states != stored_states {
-                let items = new_states
-                    .iter()
-                    .map(|(id, hash)| crate::state::ItemState {
-                        item_id: id.clone(),
-                        hash: hash.clone(),
-                    })
-                    .collect();
-                if let Err(error) = state
-                    .state
-                    .put_item_states(user, device_id, &collection.collection_id, items)
-                    .await
-                {
-                    tracing::warn!(%error, "failed to persist mail read states");
-                }
-            }
-
             // [MS-ASCMD] initial Sync: the reply to SyncKey 0 carries only the
             // new SyncKey; items come on the next request. iOS 27 rejects a
             // <Commands> block here ("No parse rule ... codePage 0x0 token
@@ -3064,7 +3096,12 @@ async fn sync_mail(
                             order
                         },
                     },
-                    None,
+                    (new_states != stored_states).then(|| {
+                        new_states
+                            .into_iter()
+                            .map(|(item_id, hash)| ItemState { item_id, hash })
+                            .collect()
+                    }),
                     Some((draft_journal.clone(), draft_completed.clone())),
                 )
                 .await
@@ -3164,12 +3201,21 @@ async fn sync_mail(
                     builder.end();
                 }
                 for (id, read) in &state_changes {
-                    write_email_state_change(&mut builder, id, read.clone());
+                    if let Some((email, preference)) = draft_changes.remove(id) {
+                        builder.start(air::CHANGE);
+                        builder.leaf(air::SERVER_ID, id);
+                        builder.start(air::APPLICATION_DATA);
+                        write_email_fields(&mut builder, id, email, Some(preference), version);
+                        builder.end();
+                        builder.end();
+                    } else {
+                        write_email_state_change(&mut builder, id, read.clone());
+                    }
                 }
                 builder.end();
             }
         } else {
-            if !client_state_changes.is_empty() || !added_states.is_empty() {
+            let uploaded_items = if !client_state_changes.is_empty() || !added_states.is_empty() {
                 let items = match state
                     .state
                     .item_states(user, device_id, &collection.collection_id)
@@ -3194,24 +3240,15 @@ async fn sync_mail(
                 for (id, metadata) in &added_states {
                     items.insert(id.clone(), metadata.fingerprint());
                 }
-                let items = items
-                    .into_iter()
-                    .map(|(item_id, hash)| ItemState { item_id, hash })
-                    .collect();
-                if let Err(error) = state
-                    .state
-                    .put_item_states(user, device_id, &collection.collection_id, items)
-                    .await
-                {
-                    tracing::warn!(%error, "failed to acknowledge uploaded message state");
-                    builder.start(air::COLLECTION);
-                    builder.leaf(air::SYNC_KEY, &collection.sync_key);
-                    builder.leaf(air::COLLECTION_ID, &collection.collection_id);
-                    builder.leaf(air::STATUS, "5");
-                    builder.end();
-                    continue;
-                }
-            }
+                Some(
+                    items
+                        .into_iter()
+                        .map(|(item_id, hash)| ItemState { item_id, hash })
+                        .collect(),
+                )
+            } else {
+                None
+            };
             let is_first_sync = collection.sync_key == "0";
             let advance = is_first_sync || client_commands_applied;
             let new_sync_key = if advance {
@@ -3259,7 +3296,7 @@ async fn sync_mail(
                                 ids
                             },
                         },
-                        None,
+                        uploaded_items,
                         Some((draft_journal.clone(), draft_completed.clone())),
                     )
                     .await
@@ -6932,6 +6969,7 @@ mod tests {
         // hard-rejected (the same failure class already confirmed for
         // Attachment/Preview/Notes).
         let email = Email {
+            draft_revision: None,
             id: "email-1".to_owned(),
             mailbox_ids: vec![],
             subject: "Subject".to_owned(),
@@ -7023,6 +7061,7 @@ mod tests {
         use crate::wbxml::eas::email2;
 
         let email_with_thread = Email {
+            draft_revision: None,
             id: "email-1".to_owned(),
             mailbox_ids: vec![],
             subject: "Subject".to_owned(),
@@ -7076,6 +7115,7 @@ mod tests {
         }
 
         let email_without_thread = Email {
+            draft_revision: None,
             id: "email-2".to_owned(),
             mailbox_ids: vec![],
             subject: "Subject".to_owned(),
@@ -7123,6 +7163,7 @@ mod tests {
         // is why previews kept showing raw markup even after the
         // separate "strip HTML tags" fix landed.
         let email = Email {
+            draft_revision: None,
             id: "email-1".to_owned(),
             mailbox_ids: vec![],
             subject: "Subject".to_owned(),
@@ -7206,6 +7247,7 @@ mod tests {
         // sequence is just DisplayName, FileReference, Method,
         // EstimatedDataSize, IsInline.
         let email = Email {
+            draft_revision: None,
             id: "email-1".to_owned(),
             mailbox_ids: vec![],
             subject: "Has an attachment".to_owned(),

@@ -46,6 +46,7 @@ pub mod eas_folder_type {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Email {
     pub id: String,
+    pub draft_revision: Option<String>,
     pub mailbox_ids: Vec<String>,
     pub subject: String,
     pub received_at: Option<String>,
@@ -147,6 +148,7 @@ pub struct EmailState {
     pub read: bool,
     pub flagged: bool,
     pub flag: Option<MailFlag>,
+    pub draft_revision: Option<String>,
 }
 
 impl EmailState {
@@ -174,6 +176,7 @@ impl EmailState {
             read,
             flagged,
             flag,
+            draft_revision: None,
         }
     }
 
@@ -194,6 +197,10 @@ impl EmailState {
                 );
             }
         }
+        if let Some(revision) = &self.draft_revision {
+            value.push_str(";draft:");
+            value.push_str(revision);
+        }
         value
     }
 }
@@ -201,7 +208,13 @@ impl EmailState {
 impl Email {
     pub fn message_state(&self) -> EmailState {
         let flagged = self.keywords.iter().any(|k| k == "$flagged");
-        EmailState::from_keyword_iter(self.read, flagged, self.keywords.iter().map(String::as_str))
+        let mut state = EmailState::from_keyword_iter(
+            self.read,
+            flagged,
+            self.keywords.iter().map(String::as_str),
+        );
+        state.draft_revision.clone_from(&self.draft_revision);
+        state
     }
 }
 
