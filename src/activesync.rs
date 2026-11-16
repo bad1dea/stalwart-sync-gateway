@@ -894,7 +894,7 @@ async fn search(
             builder.leaf(srch::STATUS, "1");
             builder.leaf(srch::TOTAL, "0");
         } else {
-            let text = request.free_text.unwrap_or_default();
+            let texts = &request.free_texts;
             let results = async {
                 let folders = if let Some(folder) = &request.collection_id {
                     let collections = state.jmap.collections(auth).await?;
@@ -950,7 +950,7 @@ async fn search(
                     .jmap
                     .search_emails(
                         auth,
-                        &text,
+                        texts,
                         folders.as_deref(),
                         (after.as_deref(), before.as_deref()),
                         position,

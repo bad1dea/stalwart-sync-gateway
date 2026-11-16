@@ -3693,6 +3693,60 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_mailbox_search_requires_each_free_text_term() {
+        use eas::search as srch;
+        let live = Live::new("E2E_USER2").await;
+        let created = live
+            .call(serde_json::json!([["Mailbox/set",{"accountId":live.account,
+            "create":{"m":{"name":format!("Search terms {}",std::process::id())}}},"0"]]))
+            .await;
+        let folder = created[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let first = format!("alphaterm{}", std::process::id());
+        let second = format!("betaterm{}", std::process::id());
+        let both = live
+            .seed(&folder, 1, &format!("{first} {second}"), false)
+            .await;
+        let one = live.seed(&folder, 1, &first, false).await;
+        let mut b = eas::DocumentBuilder::new();
+        b.start(srch::SEARCH);
+        b.start(srch::STORE);
+        b.leaf(srch::NAME, "Mailbox");
+        b.start(srch::QUERY);
+        b.start(srch::AND);
+        b.leaf(air::CLASS, "Email");
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.leaf(srch::FREE_TEXT, &first);
+        b.leaf(srch::FREE_TEXT, &second);
+        b.end();
+        b.end();
+        b.start(srch::OPTIONS);
+        b.leaf(srch::RANGE, "0-9");
+        b.end();
+        b.end();
+        b.end();
+        let result = live
+            .wbxml_version(
+                "Search",
+                &dev("search-terms"),
+                wbxml::encode_document(&b.finish()),
+                "14.0",
+            )
+            .await;
+        assert_eq!(eas::find_all_text_after(&result, srch::LONG_ID), both);
+        let cleanup = live
+            .call(serde_json::json!([
+            ["Email/set",{"accountId":live.account,"destroy":[&both[0],&one[0]]},"0"],
+            ["Mailbox/set",{"accountId":live.account,"destroy":[folder]},"1"]]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_mailbox_search_date_bounds_are_exclusive() {
         use eas::{email as mail, search as srch};
         let live = Live::new("E2E_USER2").await;

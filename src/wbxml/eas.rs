@@ -1444,6 +1444,7 @@ pub struct SearchRequest {
     /// app.
     pub class: Option<String>,
     pub free_text: Option<String>,
+    pub free_texts: Vec<String>,
     pub collection_id: Option<String>,
     pub deep_traversal: bool,
     pub unsupported_query: bool,
@@ -1467,7 +1468,8 @@ pub struct SearchRequest {
 pub fn search_request(document: &Document) -> Option<SearchRequest> {
     let store_name = find_text_after(document, search::NAME)?.to_owned();
     let class = find_text_after(document, airsync::CLASS).map(str::to_owned);
-    let free_text = find_text_after(document, search::FREE_TEXT).map(str::to_owned);
+    let free_texts = find_all_text_after(document, search::FREE_TEXT);
+    let free_text = free_texts.first().cloned();
     let range = find_text_after(document, search::RANGE).and_then(|raw| {
         let (start, end) = raw.split_once('-')?;
         Some((start.parse().ok()?, end.parse().ok()?))
@@ -1482,6 +1484,7 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
         store_name,
         class,
         free_text,
+        free_texts,
         collection_id: find_text_after(document, airsync::COLLECTION_ID).map(str::to_owned),
         deep_traversal: contains_token(document, search::DEEP_TRAVERSAL),
         unsupported_query: after_invalid
