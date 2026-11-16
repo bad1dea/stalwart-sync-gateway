@@ -1998,7 +1998,46 @@ impl JmapClient {
             "@type".to_owned(),
             serde_json::Value::String("Event".to_owned()),
         );
-        let mut reminder_state = None;
+        let mut update_state = None;
+        if let Some(id) = id.filter(|_| {
+            fields.reminder.is_some()
+                || fields.location.is_some()
+                || fields.start_time.is_some()
+                || fields.end_time.is_some()
+                || fields.attendees_present
+        }) {
+            let response: JmapResponse<serde_json::Value> = self
+                .api_call(
+                    auth,
+                    &[
+                        capabilities::CORE.to_owned(),
+                        capabilities::CALENDARS.to_owned(),
+                    ],
+                    vec![MethodCall::new(
+                        "CalendarEvent/get",
+                        serde_json::json!({"accountId":account_id,"ids":[id],"properties":["id"]}),
+                        "state",
+                    )],
+                )
+                .await?;
+            let result = response
+                .method_responses
+                .iter()
+                .find(|method| method.0 == "CalendarEvent/get")
+                .context("calendar state lookup failed")?;
+            anyhow::ensure!(
+                result.1["list"]
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(|item| item["id"] == id)),
+                "calendar event not found"
+            );
+            update_state = Some(
+                result.1["state"]
+                    .as_str()
+                    .context("calendar state missing")?
+                    .to_owned(),
+            );
+        }
         let mut reminder_changed = false;
         if let (Some(reminder), None) = (fields.reminder, id) {
             crate::jmap::calendar_reminder::write_reminder(
@@ -2019,11 +2058,9 @@ impl JmapClient {
                 .iter()
                 .find(|method| method.0 == "CalendarEvent/get")
                 .context("calendar reminder lookup failed")?;
-            reminder_state = Some(
-                result.1["state"]
-                    .as_str()
-                    .context("calendar state missing")?
-                    .to_owned(),
+            anyhow::ensure!(
+                result.1["state"].as_str() == update_state.as_deref(),
+                "calendar changed during update"
             );
             let item = result.1["list"]
                 .as_array()
@@ -2461,7 +2498,7 @@ impl JmapClient {
                 let mut arguments = serde_json::json!({
                     "accountId":account_id, "update":{existing_id:event}
                 });
-                if let Some(state) = reminder_state {
+                if let Some(state) = update_state {
                     arguments["ifInState"] = serde_json::json!(state);
                 }
                 MethodCall::new("CalendarEvent/set", arguments, "0")
@@ -5088,5 +5125,81 @@ mod smime_tests {
             .into();
             assert_eq!(email.smime, expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod calendar_update_state_tests {
+    use super::*;
+    use axum::{routing::post, Json, Router};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[tokio::test]
+    async fn location_update_rejects_a_changed_calendar_state() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let captured = calls.clone();
+        let app = Router::new().route("/", post(move |Json(request): Json<serde_json::Value>| {
+            let calls = captured.clone();
+            async move {
+                let call = &request["methodCalls"][0];
+                let number = calls.fetch_add(1, Ordering::SeqCst);
+                let response = match number {
+                    0 => {
+                        assert_eq!(call[0], "CalendarEvent/get");
+                        serde_json::json!(["CalendarEvent/get", {"state":"before","list":[{"id":"e"}]}, "state"])
+                    }
+                    1 => {
+                        assert_eq!(call[0], "CalendarEvent/get");
+                        serde_json::json!(["CalendarEvent/get", {"state":"after","list":[{"id":"e","locations":{"room":{"name":"External change"}}}]}, "0"])
+                    }
+                    2 => {
+                        assert_eq!(call[0], "CalendarEvent/set");
+                        assert_eq!(call[1]["ifInState"], "before");
+                        serde_json::json!(["error", {"type":"stateMismatch"}, "0"])
+                    }
+                    _ => panic!("unexpected JMAP request"),
+                };
+                Json(serde_json::json!({"methodResponses":[response]}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{},
+            "primaryAccounts":{capabilities::CALENDARS:"a"},
+            "apiUrl":url,
+            "downloadUrl":url,
+            "uploadUrl":url,
+            "username":"user",
+            "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let fields = crate::wbxml::eas::CalendarFields {
+            location: Some("Client change".into()),
+            ..Default::default()
+        };
+        assert!(client
+            .save_calendar_event(&auth, "calendar", Some("e"), None, &fields)
+            .await
+            .is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        server.abort();
     }
 }
