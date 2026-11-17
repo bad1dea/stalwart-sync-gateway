@@ -3128,11 +3128,9 @@ impl JmapClient {
                     .as_array()
                     .and_then(|list| list.iter().find(|item| item["id"] == id))
                     .context("task not found")?;
-                let zone = item.get("timeZone").context("task time zone missing")?;
-                if zone.is_null() {
-                    None
-                } else {
-                    Some(zone.as_str().context("invalid task time zone")?.to_owned())
+                match item.get("timeZone") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(zone) => Some(zone.as_str().context("invalid task time zone")?.to_owned()),
                 }
             } else {
                 None
