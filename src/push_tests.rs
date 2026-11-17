@@ -6634,7 +6634,7 @@ mod e2e {
                 serde_json::json!([["CalendarEvent/set", {
             "accountId":live.account, "create":{"e":{
                 "@type":"Event","calendarIds":{&calendar:true},"title":"Partial times",
-                "start":"2026-11-15T10:00:00","timeZone":"America/Toronto","duration":"PT1H"
+                "start":"2026-03-08T01:30:00","timeZone":"America/Toronto","duration":"PT2H"
             }}
         },"0"]]),
                 &using,
@@ -6660,15 +6660,15 @@ mod e2e {
         for (field, value, expected_start, expected_end) in [
             (
                 cal::END_TIME,
-                "20261115T170000Z",
-                "20261115T150000Z",
-                "20261115T170000Z",
+                "20260308T093000Z",
+                "20260308T063000Z",
+                "20260308T093000Z",
             ),
             (
                 cal::START_TIME,
-                "20261115T140000Z",
-                "20261115T140000Z",
-                "20261115T170000Z",
+                "20260308T060000Z",
+                "20260308T060000Z",
+                "20260308T093000Z",
             ),
         ] {
             let mut b = eas::DocumentBuilder::new();

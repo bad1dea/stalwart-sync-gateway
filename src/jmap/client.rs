@@ -1959,7 +1959,7 @@ impl JmapClient {
     /// list-and-diff read pattern mail/contacts use. `start`/`timeZone`/
     /// `duration` are converted to UTC EAS DateTimes here (not left for
     /// the WBXML writer) so the conversion has one call site to get
-    /// right -- see `local_to_utc_eas`/`parse_iso8601_duration_seconds`.
+    /// right -- see `local_to_utc_eas`/`calendar_end_utc`.
     /// Filters out `@type: "Task"` items -- `CalendarEvent/query` has no
     /// server-side type filter (same as `tasks_in_calendar` already notes)
     /// so this and the Tasks read path both list everything in the
@@ -2553,12 +2553,14 @@ impl JmapClient {
             let start_local = eas_to_calendar_local(start, timezone).ok_or_else(|| {
                 anyhow::anyhow!("calendar start cannot be represented in its time zone")
             })?;
-            let end_local = eas_to_calendar_local(end, timezone).ok_or_else(|| {
+            eas_to_calendar_local(end, timezone).ok_or_else(|| {
                 anyhow::anyhow!("calendar end cannot be represented in its time zone")
             })?;
-            let duration = end_local.signed_duration_since(start_local).num_seconds();
+            let start_utc = chrono::NaiveDateTime::parse_from_str(start, "%Y%m%dT%H%M%SZ")?;
+            let end_utc = chrono::NaiveDateTime::parse_from_str(end, "%Y%m%dT%H%M%SZ")?;
+            let duration = end_utc.signed_duration_since(start_utc).num_seconds();
             if duration < 0 {
-                anyhow::bail!("calendar end precedes start in its time zone");
+                anyhow::bail!("calendar end precedes start");
             }
             if fields.start_time.is_some() {
                 event.insert(
@@ -5043,19 +5045,13 @@ impl From<CalendarEventObject> for CalendarEvent {
             .start
             .as_deref()
             .and_then(|start| local_to_utc_eas(start, value.time_zone.as_deref()));
-        let end_utc = match (&start_utc, value.start.as_deref(), &value.duration) {
-            (Some(_), Some(start), Some(duration)) => parse_iso8601_duration_seconds(duration)
-                .and_then(|seconds| {
-                    let naive = chrono::NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S")
-                        .ok()?
-                        + chrono::Duration::seconds(seconds);
-                    local_to_utc_eas(
-                        &naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
-                        value.time_zone.as_deref(),
-                    )
-                }),
-            _ => None,
-        };
+        let end_utc = value.start.as_deref().and_then(|start| {
+            calendar_end_utc(
+                start,
+                value.time_zone.as_deref(),
+                value.duration.as_deref().unwrap_or("PT0S"),
+            )
+        });
         let location = value
             .locations
             .into_iter()
@@ -5281,36 +5277,61 @@ fn eas_compact_to_local_iso(compact: &str) -> Option<String> {
     Some(parsed.format("%Y-%m-%dT%H:%M:%S").to_string())
 }
 
-/// Minimal ISO 8601 duration parser covering the shapes JSCalendar event
-/// durations actually use (`PT1H`, `PT30M`, `P1D`, `PT1H30M`) -- days plus
-/// hours/minutes/seconds. Deliberately doesn't handle weeks/months/years
-/// (ambiguous without an anchor date, and not something a calendar event
-/// duration would realistically use).
-fn parse_iso8601_duration_seconds(duration: &str) -> Option<i64> {
+// Days and weeks are calendar durations; hours, minutes and seconds are elapsed time.
+fn parse_calendar_duration(duration: &str) -> Option<(i64, i64)> {
     let rest = duration.strip_prefix('P')?;
-    let (date_part, time_part) = match rest.split_once('T') {
-        Some((date, time)) => (date, Some(time)),
-        None => (rest, None),
+    let (date, time) = rest
+        .split_once('T')
+        .map_or((rest, None), |(d, t)| (d, Some(t)));
+    let (weeks, day_part) = date.split_once('W').map_or((0, date), |(weeks, days)| {
+        (weeks.parse::<i64>().unwrap_or(-1), days)
+    });
+    let days = if day_part.is_empty() {
+        0
+    } else {
+        day_part.strip_suffix('D')?.parse::<i64>().ok()?
     };
+    if days < 0 {
+        return None;
+    }
+    let days = weeks.checked_mul(7)?.checked_add(days)?;
+    if weeks < 0 {
+        return None;
+    }
+    let mut seconds = 0_i64;
+    let mut remainder = time.unwrap_or("");
+    let mut has_time = false;
+    for (unit, scale) in [('H', 3600), ('M', 60), ('S', 1)] {
+        if let Some((number, rest)) = remainder.split_once(unit) {
+            let value = number.parse::<i64>().ok()?;
+            if value < 0 {
+                return None;
+            }
+            seconds = seconds.checked_add(value.checked_mul(scale)?)?;
+            remainder = rest;
+            has_time = true;
+        }
+    }
+    if days < 0
+        || !remainder.is_empty()
+        || (date.is_empty() && !has_time)
+        || (time.is_some() && !has_time)
+    {
+        return None;
+    }
+    Some((days, seconds))
+}
 
-    let mut seconds: i64 = 0;
-    if !date_part.is_empty() {
-        seconds += date_part.strip_suffix('D')?.parse::<i64>().ok()? * 86400;
-    }
-    if let Some(mut time_part) = time_part {
-        if let Some(idx) = time_part.find('H') {
-            seconds += time_part[..idx].parse::<i64>().ok()? * 3600;
-            time_part = &time_part[idx + 1..];
-        }
-        if let Some(idx) = time_part.find('M') {
-            seconds += time_part[..idx].parse::<i64>().ok()? * 60;
-            time_part = &time_part[idx + 1..];
-        }
-        if let Some(idx) = time_part.find('S') {
-            seconds += time_part[..idx].parse::<i64>().ok()?;
-        }
-    }
-    Some(seconds)
+fn calendar_end_utc(start: &str, timezone: Option<&str>, duration: &str) -> Option<String> {
+    let (days, seconds) = parse_calendar_duration(duration)?;
+    let local = chrono::NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S")
+        .ok()?
+        .checked_add_signed(chrono::Duration::try_days(days)?)?;
+    let day_end = local_to_utc_eas(&local.format("%Y-%m-%dT%H:%M:%S").to_string(), timezone)?;
+    let utc = chrono::NaiveDateTime::parse_from_str(&day_end, "%Y%m%dT%H%M%SZ")
+        .ok()?
+        .checked_add_signed(chrono::Duration::try_seconds(seconds)?)?;
+    Some(utc.format("%Y%m%dT%H%M%SZ").to_string())
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -5397,8 +5418,8 @@ impl From<CalendarObject> for Collection {
 #[cfg(test)]
 mod tests {
     use super::{
-        eas_compact_to_local_iso, eas_to_calendar_local, local_to_utc_eas,
-        parse_iso8601_duration_seconds,
+        calendar_end_utc, eas_compact_to_local_iso, eas_to_calendar_local, local_to_utc_eas,
+        parse_calendar_duration,
     };
 
     #[test]
@@ -5592,27 +5613,62 @@ mod tests {
 
     #[test]
     fn duration_parses_hours_only() {
-        assert_eq!(parse_iso8601_duration_seconds("PT1H"), Some(3600));
+        assert_eq!(parse_calendar_duration("PT1H"), Some((0, 3600)));
     }
 
     #[test]
     fn duration_parses_hours_and_minutes() {
-        assert_eq!(parse_iso8601_duration_seconds("PT1H30M"), Some(5400));
+        assert_eq!(parse_calendar_duration("PT1H30M"), Some((0, 5400)));
     }
 
     #[test]
     fn duration_parses_days_only() {
-        assert_eq!(parse_iso8601_duration_seconds("P1D"), Some(86400));
+        assert_eq!(parse_calendar_duration("P1D"), Some((1, 0)));
     }
 
     #[test]
     fn duration_parses_minutes_only() {
-        assert_eq!(parse_iso8601_duration_seconds("PT30M"), Some(1800));
+        assert_eq!(parse_calendar_duration("PT30M"), Some((0, 1800)));
     }
 
     #[test]
     fn duration_rejects_garbage() {
-        assert_eq!(parse_iso8601_duration_seconds("not a duration"), None);
+        assert_eq!(parse_calendar_duration("not a duration"), None);
+    }
+
+    #[test]
+    fn calendar_duration_respects_dst_and_calendar_days() {
+        let tz = Some("America/Toronto");
+        assert_eq!(
+            calendar_end_utc("2026-03-08T01:30:00", tz, "PT2H").as_deref(),
+            Some("20260308T083000Z")
+        );
+        assert_eq!(
+            calendar_end_utc("2026-11-01T00:30:00", tz, "PT2H").as_deref(),
+            Some("20261101T063000Z")
+        );
+        assert_eq!(
+            calendar_end_utc("2026-03-07T12:00:00", tz, "P1D").as_deref(),
+            Some("20260308T160000Z")
+        );
+        assert_eq!(
+            calendar_end_utc("2026-03-07T12:00:00", tz, "P1DT2H").as_deref(),
+            Some("20260308T180000Z")
+        );
+        assert_eq!(parse_calendar_duration("P1W"), Some((7, 0)));
+        assert_eq!(parse_calendar_duration("P1W2DT2H"), Some((9, 7200)));
+        for invalid in [
+            "P",
+            "PT",
+            "PT1Hgarbage",
+            "P-1D",
+            "PT-1H",
+            "P1DT",
+            "P-1W",
+            "P1W-1D",
+        ] {
+            assert_eq!(parse_calendar_duration(invalid), None, "{invalid}");
+        }
     }
 
     #[test]
