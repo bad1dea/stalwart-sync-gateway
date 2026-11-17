@@ -3652,6 +3652,14 @@ fn write_email_add(
     builder.end();
 }
 
+fn write_mime_data(builder: &mut wbxml::eas::DocumentBuilder, data: bytes::Bytes) {
+    let token = wbxml::eas::airsync_base::DATA;
+    match std::str::from_utf8(&data) {
+        Ok(text) if !text.contains('\0') => builder.leaf(token, text.to_owned()),
+        _ => builder.opaque_leaf(token, data),
+    }
+}
+
 /// Writes the Email-class field set (Subject, DateReceived, From/To/Cc,
 /// Importance, Read, Body/NativeBodyType) into whatever container the
 /// caller already opened -- ApplicationData for a Sync Add, Properties for
@@ -3765,7 +3773,7 @@ fn write_email_fields(
             builder.leaf(base::ESTIMATED_DATA_SIZE, mime.full_size.to_string());
             builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
             if !truncated || !pref.all_or_none {
-                builder.opaque_leaf(base::DATA, mime.data);
+                write_mime_data(builder, mime.data);
             }
             let preview_limit = pref.preview.unwrap_or(255);
             if preview_limit > 0 {
@@ -6237,6 +6245,29 @@ mod tests {
     use crate::wbxml::eas::RequestedBodyPreference as BodyPreference;
     use crate::wbxml::eas::{airsync_base as base, DocumentBuilder};
     use crate::wbxml::Node;
+
+    #[test]
+    fn mime_body_uses_inline_wbxml_string_when_possible() {
+        use crate::wbxml::{decode_document, eas, encode_document};
+        let raw = b"From: sender@example.test\r\nContent-Type: text/plain\r\n\r\nHello";
+        let mut builder = DocumentBuilder::new();
+        super::write_mime_data(&mut builder, bytes::Bytes::copy_from_slice(raw));
+        let doc = decode_document(&encode_document(&builder.finish())).unwrap();
+        assert_eq!(
+            eas::find_text_after(&doc, base::DATA).map(str::as_bytes),
+            Some(raw.as_slice())
+        );
+        assert!(eas::find_opaque_after(&doc, base::DATA).is_none());
+
+        let binary = b"binary\0\xff";
+        let mut builder = DocumentBuilder::new();
+        super::write_mime_data(&mut builder, bytes::Bytes::copy_from_slice(binary));
+        let doc = decode_document(&encode_document(&builder.finish())).unwrap();
+        assert_eq!(
+            eas::find_opaque_after(&doc, base::DATA),
+            Some(binary.as_slice())
+        );
+    }
 
     #[test]
     fn calendar_reminder_clear_uses_the_modern_empty_tag() {
