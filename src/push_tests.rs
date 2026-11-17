@@ -554,6 +554,11 @@ async fn mock_es(State(m): State<Arc<Mock>>) -> impl IntoResponse {
     )
 }
 
+fn body_data_bytes(document: &wbxml::Document) -> Option<&[u8]> {
+    eas::find_opaque_after(document, eas::airsync_base::DATA)
+        .or_else(|| eas::find_text_after(document, eas::airsync_base::DATA).map(str::as_bytes))
+}
+
 const BLOB_BYTES: &[u8] = b"\x00\xff\x01\x02\x80payload";
 const MIME_BYTES: &[u8] =
     b"From: a@example.test\r\nContent-Type: application/octet-stream\r\n\r\n\xff\x00\x80";
@@ -7241,6 +7246,73 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_ios_mime_fetch_is_a_wbxml_string() {
+        use eas::{airsync_base as base, email as mail};
+        let live = Live::new("E2E_USER2").await;
+        let created = live.call(serde_json::json!([["Mailbox/set",{
+            "accountId":live.account,"create":{"m":{"name":format!("MIME fetch fixture {}",std::process::id())}}
+        },"0"]])).await;
+        let folder = created[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let ids = live.seed(&folder, 1, "mime-fetch", false).await;
+        let device = dev("mime-fetch");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "14.0")
+            .await;
+        let synced = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "14.0",
+            )
+            .await;
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&synced));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.leaf(air::GET_CHANGES, "0");
+        b.start(air::OPTIONS);
+        b.leaf(air::MIME_SUPPORT, "2");
+        b.start(base::BODY_PREFERENCE);
+        b.leaf(base::TYPE, "4");
+        b.end();
+        b.end();
+        b.start(air::COMMANDS);
+        b.start(air::FETCH);
+        b.leaf(air::SERVER_ID, &ids[0]);
+        for _ in 0..5 {
+            b.end();
+        }
+        let response = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "14.0")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&response, air::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(eas::find_text_after(&response, base::TYPE), Some("4"));
+        assert!(eas::find_text_after(&response, mail::SUBJECT).is_some());
+        let body =
+            eas::find_text_after(&response, base::DATA).expect("MIME must be a WBXML string");
+        assert!(body.contains("body 0"));
+        assert!(eas::find_opaque_after(&response, base::DATA).is_none());
+        let cleanup = live
+            .call(serde_json::json!([
+                ["Email/set",{"accountId":live.account,"destroy":ids},"0"],
+                ["Mailbox/set",{"accountId":live.account,"destroy":[folder]},"1"]
+            ]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_mime_draft_import_preserves_original_bytes() {
         use eas::airsync_base as base;
         let live = Live::new("E2E_USER2").await;
@@ -7312,9 +7384,10 @@ mod e2e {
             .unwrap();
         assert_eq!(eas::find_text_after(&item, base::TYPE), Some("4"));
         assert_eq!(
-            eas::find_opaque_after(&item, base::DATA),
+            eas::find_text_after(&item, base::DATA).map(str::as_bytes),
             Some(raw.as_slice())
         );
+        assert!(eas::find_opaque_after(&item, base::DATA).is_none());
         let cleanup = live
             .call(serde_json::json!([["Email/set",{"accountId":live.account,"destroy":[id]},"0"]]))
             .await;
@@ -7606,10 +7679,10 @@ mod e2e {
                 assert_eq!(eas::find_text_after(&item,mail::MESSAGE_CLASS),Some(class));
                 if mime {
                     assert_eq!(eas::find_text_after(&item,base::TYPE),Some("4"));
-                    assert_eq!(eas::find_opaque_after(&item,base::DATA),Some(raw.as_bytes()));
+                    assert_eq!(body_data_bytes(&item),Some(raw.as_bytes()));
                 } else {
                     assert_ne!(eas::find_text_after(&item,base::TYPE),Some("4"));
-                    assert!(eas::find_opaque_after(&item,base::DATA).is_none());
+                    assert!(eas::find_opaque_after(&item, base::DATA).is_none());
                 }
             }
         }
@@ -7742,7 +7815,7 @@ mod e2e {
             )
             .await;
         assert_eq!(eas::find_text_after(&doc, base::TYPE), Some("4"));
-        assert_eq!(eas::find_opaque_after(&doc, base::DATA).unwrap().len(), 64);
+        assert_eq!(body_data_bytes(&doc).unwrap().len(), 64);
         assert!(
             eas::find_text_after(&doc, base::ESTIMATED_DATA_SIZE)
                 .unwrap()
@@ -9258,7 +9331,7 @@ async fn item_operations_mime_preserves_non_utf8_bytes() {
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(eas::find_all_text_after(&doc, ops::STATUS), vec!["1", "1"]);
     assert_eq!(eas::find_text_after(&doc, base::TYPE), Some("4"));
-    assert_eq!(eas::find_opaque_after(&doc, base::DATA), Some(MIME_BYTES));
+    assert_eq!(body_data_bytes(&doc), Some(MIME_BYTES));
 }
 
 /// Local mock-backed endpoint for independent EAS clients. EAS_INTEROP_FILE
@@ -10959,10 +11032,7 @@ async fn sync_and_item_operations_honor_mime_limits_and_all_or_none() {
         .unwrap();
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(eas::find_all_text_after(&doc, base::TYPE), vec!["4", "4"]);
-    assert_eq!(
-        eas::find_opaque_after(&doc, base::DATA),
-        Some(&MIME_BYTES[..5])
-    );
+    assert_eq!(body_data_bytes(&doc), Some(&MIME_BYTES[..5]));
 
     let mut b = eas::DocumentBuilder::new();
     b.start(ops::ITEM_OPERATIONS);
@@ -11001,7 +11071,7 @@ async fn sync_and_item_operations_honor_mime_limits_and_all_or_none() {
 
 #[tokio::test]
 async fn failed_sync_mime_preparation_keeps_the_previous_key_and_pending_messages() {
-    use eas::{airsync as air, airsync_base as base, RequestedBodyPreference as Pref};
+    use eas::{airsync as air, RequestedBodyPreference as Pref};
     let env = start_env(Opts::default()).await;
     let options = requested_body_options(&[Pref {
         body_type: 4,
@@ -11045,7 +11115,7 @@ async fn failed_sync_mime_preparation_keeps_the_previous_key_and_pending_message
     let doc = wbxml::decode_document(&first).unwrap();
     assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("1"));
     assert_eq!(eas::find_all_text_after(&doc, air::SERVER_ID).len(), 2);
-    assert_eq!(eas::find_opaque_after(&doc, base::DATA), Some(MIME_BYTES));
+    assert_eq!(body_data_bytes(&doc), Some(MIME_BYTES));
     let response = env.req("Sync", "client").body(body).send().await.unwrap();
     assert_eq!(response.bytes().await.unwrap(), first);
 }
@@ -11263,10 +11333,7 @@ async fn search_and_sync_fetch_use_the_requested_body_preferences() {
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(eas::find_all_text_after(&doc, air::STATUS), vec!["1", "1"]);
     assert_eq!(eas::find_text_after(&doc, base::TYPE), Some("4"));
-    assert_eq!(
-        eas::find_opaque_after(&doc, base::DATA),
-        Some(&MIME_BYTES[..5])
-    );
+    assert_eq!(body_data_bytes(&doc), Some(&MIME_BYTES[..5]));
     assert_eq!(eas::find_text_after(&doc, base::TRUNCATED), Some("1"));
 }
 
@@ -11591,10 +11658,7 @@ async fn mime_policy_controls_sync_fetch_and_search_without_cross_request_leaks(
                 );
                 assert_eq!(eas::find_text_after(&doc, mail::MESSAGE_CLASS), Some(class));
                 if mime {
-                    assert_eq!(
-                        eas::find_opaque_after(&doc, base::DATA),
-                        Some(&MIME_BYTES[..2])
-                    );
+                    assert_eq!(body_data_bytes(&doc), Some(&MIME_BYTES[..2]));
                 } else {
                     assert_eq!(eas::find_text_after(&doc, base::DATA), Some("bo"));
                 }
@@ -11711,10 +11775,7 @@ async fn invalid_mime_options_preserve_saved_policy_and_replacement_resets_it() 
                 Some(if mime { "4" } else { "1" })
             );
             if mime {
-                assert_eq!(
-                    eas::find_opaque_after(&doc, base::DATA),
-                    Some(&MIME_BYTES[..5])
-                );
+                assert_eq!(body_data_bytes(&doc), Some(&MIME_BYTES[..5]));
             } else {
                 assert_eq!(eas::find_text_after(&doc, base::DATA), Some("bo"));
             }
