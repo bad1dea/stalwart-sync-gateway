@@ -5245,11 +5245,24 @@ fn local_to_utc_eas(local_iso: &str, timezone: Option<&str>) -> Option<String> {
     let utc: chrono::DateTime<chrono::Utc> =
         match timezone.and_then(|tz| tz.parse::<chrono_tz::Tz>().ok()) {
             Some(tz) => {
-                let local = tz
-                    .from_local_datetime(&naive)
-                    .single()
-                    .or_else(|| tz.from_local_datetime(&naive).earliest())?;
-                local.with_timezone(&chrono::Utc)
+                let local = tz.from_local_datetime(&naive).earliest();
+                match local {
+                    Some(local) => local.with_timezone(&chrono::Utc),
+                    None => {
+                        use chrono::Offset;
+                        let offset = (1..=2880).find_map(|minutes| {
+                            let earlier =
+                                naive.checked_sub_signed(chrono::Duration::minutes(minutes))?;
+                            tz.from_local_datetime(&earlier)
+                                .earliest()
+                                .map(|time| time.offset().fix())
+                        })?;
+                        offset
+                            .from_local_datetime(&naive)
+                            .single()?
+                            .with_timezone(&chrono::Utc)
+                    }
+                }
             }
             None => chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc),
         };
@@ -5669,6 +5682,18 @@ mod tests {
         ] {
             assert_eq!(parse_calendar_duration(invalid), None, "{invalid}");
         }
+    }
+
+    #[test]
+    fn calendar_nonexistent_local_time_uses_pre_transition_offset() {
+        assert_eq!(
+            local_to_utc_eas("2026-03-08T02:30:00", Some("America/Toronto")).as_deref(),
+            Some("20260308T073000Z")
+        );
+        assert_eq!(
+            calendar_end_utc("2026-03-07T02:30:00", Some("America/Toronto"), "P1D").as_deref(),
+            Some("20260308T073000Z")
+        );
     }
 
     #[test]
