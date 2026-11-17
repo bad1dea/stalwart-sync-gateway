@@ -5,7 +5,9 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 
-use super::{body_preferences_for_email, write_email_fields, ProtocolVersion};
+use super::{
+    body_preferences_for_email, write_contact_fields, write_email_fields, ProtocolVersion,
+};
 use crate::{
     http_server::AppState,
     jmap::client::AuthenticatedSession,
@@ -180,6 +182,49 @@ async fn fetch_item(
         .as_deref()
         .or(fetch.server_id.as_deref())
         .unwrap();
+    let contact_id = fetch
+        .long_id
+        .as_deref()
+        .and_then(|id| id.strip_prefix("contact:"))
+        .or_else(|| {
+            (fetch.long_id.is_none()
+                && fetch
+                    .collection_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("ab_")))
+            .then_some(target)
+        });
+    if let Some(contact_id) = contact_id {
+        match state.jmap.get_contact_by_id(auth, contact_id).await {
+            Ok(Some(contact))
+                if fetch.collection_id.as_deref().is_none_or(|folder| {
+                    folder
+                        .strip_prefix("ab_")
+                        .is_some_and(|id| contact.address_book_ids.iter().any(|book| book == id))
+                }) =>
+            {
+                builder.leaf(ops::STATUS, "1");
+                if let Some(id) = fetch.collection_id.as_deref() {
+                    builder.leaf(air::COLLECTION_ID, id);
+                }
+                if let Some(id) = fetch.long_id.as_deref() {
+                    builder.leaf(eas::search::LONG_ID, id);
+                } else {
+                    builder.leaf(air::SERVER_ID, contact_id);
+                }
+                builder.leaf(air::CLASS, "Contacts");
+                builder.start(ops::PROPERTIES);
+                write_contact_fields(builder, &contact);
+                builder.end();
+            }
+            Ok(_) => builder.leaf(ops::STATUS, "6"),
+            Err(error) => {
+                tracing::warn!(%error, "ItemOperations contact fetch failed");
+                builder.leaf(ops::STATUS, "3");
+            }
+        }
+        return;
+    }
     match state.jmap.get_email_by_id(auth, target).await {
         Ok(Some(email)) => {
             let preference = match body_preferences_for_email(

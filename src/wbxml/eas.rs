@@ -1441,12 +1441,7 @@ pub fn item_operations_fetch(document: &Document) -> Option<ItemOperationsFetchR
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchRequest {
     pub store_name: String,
-    /// `airsync:Class` inside `Query` -- present when a device restricts
-    /// a Mailbox-store search to one item class (e.g. "Email",
-    /// "Calendar"). Absent is treated as "Email" (the only class this
-    /// gateway actually searches), matching real-world Mailbox searches
-    /// which are overwhelmingly mail search from the device's own Mail
-    /// app.
+    /// Optional item-class filter for a Mailbox search.
     pub class: Option<String>,
     pub unsupported_class_query: bool,
     pub free_text: Option<String>,
@@ -1590,11 +1585,16 @@ fn search_classes(document: &Document) -> (Option<String>, bool) {
     let mut values = Vec::new();
     let mut invalid = false;
     visit(document, None, &mut values, &mut invalid);
-    if values
-        .iter()
-        .any(|class| !class.eq_ignore_ascii_case("Email"))
-    {
-        invalid = true;
+    if let Some(first) = values.first() {
+        if !first.eq_ignore_ascii_case("Email") && !first.eq_ignore_ascii_case("Contacts") {
+            invalid = true;
+        }
+        if values
+            .iter()
+            .any(|class| !class.eq_ignore_ascii_case(first))
+        {
+            invalid = true;
+        }
     }
     (values.into_iter().next(), invalid)
 }

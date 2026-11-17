@@ -1453,6 +1453,214 @@ impl JmapClient {
         }
     }
 
+    pub async fn search_contacts(
+        &self,
+        auth: &AuthenticatedSession,
+        address_book: Option<&str>,
+        terms: &[String],
+        alternatives: Option<&[String]>,
+        position: usize,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<Contact>, u64)> {
+        let account = auth
+            .session
+            .primary_account_for(capabilities::CONTACTS)
+            .context("JMAP Contacts capability is unavailable")?;
+        let filter = match address_book {
+            Some(book) => serde_json::json!({"inAddressBook":book}),
+            None => serde_json::json!({}),
+        };
+        let maximum = auth
+            .session
+            .capabilities
+            .get(capabilities::CORE)
+            .and_then(|cap| cap.get("maxObjectsInGet"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(100)
+            .clamp(1, 200);
+        let using = [
+            capabilities::CORE.to_owned(),
+            capabilities::CONTACTS.to_owned(),
+        ];
+        let terms: Vec<_> = terms
+            .iter()
+            .filter(|text| !text.is_empty())
+            .map(|text| text.to_lowercase())
+            .collect();
+        let alternatives = alternatives.map(|values| {
+            values
+                .iter()
+                .filter(|text| !text.is_empty())
+                .map(|text| text.to_lowercase())
+                .collect::<Vec<_>>()
+        });
+
+        fn matches(value: &serde_json::Value, term: &str) -> bool {
+            match value {
+                serde_json::Value::String(value) => value.to_lowercase().contains(term),
+                serde_json::Value::Array(values) => values.iter().any(|value| matches(value, term)),
+                serde_json::Value::Object(values) => values
+                    .iter()
+                    .filter(|(key, _)| {
+                        !matches!(
+                            key.as_str(),
+                            "@type" | "kind" | "contexts" | "language" | "pref"
+                        )
+                    })
+                    .any(|(_, value)| matches(value, term)),
+                _ => false,
+            }
+        }
+
+        let fields = [
+            "name",
+            "emails",
+            "phones",
+            "organizations",
+            "titles",
+            "nicknames",
+            "addresses",
+            "notes",
+            "onlineServices",
+        ];
+        let mut offset = 0u64;
+        let mut query_state: Option<String> = None;
+        let mut all_count = None;
+        let mut total = 0u64;
+        let mut contacts = Vec::new();
+        let mut seen = BTreeSet::new();
+        loop {
+            let response: JmapResponse<serde_json::Value> = self.api_call(auth, &using, vec![
+                MethodCall::new("ContactCard/query", serde_json::json!({
+                    "accountId":account, "filter":filter, "position":offset,
+                    "limit":maximum, "calculateTotal":true
+                }), "q"),
+                MethodCall::new("ContactCard/get", serde_json::json!({
+                    "accountId":account, "#ids":{"resultOf":"q","name":"ContactCard/query","path":"/ids"},
+                    "properties":["id","addressBookIds","name","emails","phones","organizations",
+                        "titles","nicknames","addresses","notes","onlineServices"]
+                }), "g"),
+            ]).await?;
+            let query = response
+                .method_responses
+                .iter()
+                .find(|method| method.0 == "ContactCard/query")
+                .context("contact search query failed")?;
+            let query: QueryResponse = serde_json::from_value(query.1.clone())?;
+            let state = query.query_state.context("contact search state missing")?;
+            if let Some(previous) = &query_state {
+                anyhow::ensure!(previous == &state, "contacts changed during search");
+            } else {
+                query_state = Some(state);
+            }
+            let count = query.total.context("contact search total missing")?;
+            if let Some(previous) = all_count {
+                anyhow::ensure!(previous == count, "contact search total changed");
+            } else {
+                all_count = Some(count);
+            }
+            let get = response
+                .method_responses
+                .iter()
+                .find(|method| method.0 == "ContactCard/get")
+                .context("contact search lookup failed")?;
+            let get: GetResponse<serde_json::Value> = serde_json::from_value(get.1.clone())?;
+            let mut by_id = BTreeMap::new();
+            for item in get.list {
+                let id = item["id"]
+                    .as_str()
+                    .context("contact ID missing")?
+                    .to_owned();
+                anyhow::ensure!(by_id.insert(id, item).is_none(), "duplicate contact lookup");
+            }
+            anyhow::ensure!(
+                by_id.len() == query.ids.len(),
+                "contact search changed during lookup"
+            );
+            let page_len = query.ids.len() as u64;
+            for id in query.ids {
+                anyhow::ensure!(seen.insert(id.clone()), "duplicate contact search result");
+                let item = by_id
+                    .remove(&id)
+                    .context("contact search changed during lookup")?;
+                let has = |term: &str| fields.iter().any(|field| matches(&item[*field], term));
+                if terms.iter().all(|term| has(term))
+                    && alternatives
+                        .as_ref()
+                        .is_none_or(|values| values.iter().any(|term| has(term)))
+                {
+                    if total >= position as u64 && contacts.len() < limit {
+                        contacts.push(Contact::from(serde_json::from_value::<ContactCardObject>(
+                            item,
+                        )?));
+                    }
+                    total += 1;
+                }
+            }
+            offset += page_len;
+            anyhow::ensure!(offset <= count, "contact search exceeded total");
+            if offset == count {
+                break;
+            }
+            anyhow::ensure!(page_len > 0, "incomplete contact search");
+        }
+        let check: JmapResponse<serde_json::Value> = self.api_call(auth, &using, vec![
+            MethodCall::new("ContactCard/query", serde_json::json!({
+                "accountId":account, "filter":filter, "position":0, "limit":1, "calculateTotal":true
+            }), "check")
+        ]).await?;
+        let check = check
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "ContactCard/query")
+            .context("contact search verification failed")?;
+        let check: QueryResponse = serde_json::from_value(check.1.clone())?;
+        anyhow::ensure!(
+            check.query_state == query_state && check.total == all_count,
+            "contacts changed during search"
+        );
+        Ok((contacts, total))
+    }
+
+    pub async fn get_contact_by_id(
+        &self,
+        auth: &AuthenticatedSession,
+        id: &str,
+    ) -> anyhow::Result<Option<Contact>> {
+        let account = auth
+            .session
+            .primary_account_for(capabilities::CONTACTS)
+            .context("JMAP Contacts capability is unavailable")?;
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CONTACTS.to_owned(),
+                ],
+                vec![MethodCall::new(
+                    "ContactCard/get",
+                    serde_json::json!({
+                        "accountId":account, "ids":[id],
+                        "properties":["id","addressBookIds","name","emails","phones","organizations","titles"]
+                    }),
+                    "g",
+                )],
+            )
+            .await?;
+        let result = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "ContactCard/get")
+            .context("contact lookup failed")?;
+        let get: GetResponse<ContactCardObject> = serde_json::from_value(result.1.clone())?;
+        anyhow::ensure!(
+            get.list.len() <= 1 && get.list.iter().all(|item| item.id == id),
+            "contact lookup returned unexpected items"
+        );
+        Ok(get.list.into_iter().next().map(Contact::from))
+    }
+
     pub async fn contacts_in_address_book(
         &self,
         auth: &AuthenticatedSession,

@@ -4188,6 +4188,167 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_search_contacts_paginates_and_fetches_results() {
+        use eas::{contacts, item_operations as ops, search as srch};
+        let live = Live::new("E2E_USER2").await;
+        let using = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:contacts"];
+        let books = live
+            .call_using(
+                serde_json::json!([["AddressBook/get",{
+            "accountId":live.account
+        },"0"]]),
+                &using,
+            )
+            .await;
+        let book = books[0][1]["list"][0]["id"].as_str().unwrap().to_owned();
+        let marker = format!("contactfixture{}", std::process::id());
+        let created = live
+            .call_using(
+                serde_json::json!([["ContactCard/set",{
+            "accountId":live.account,
+            "create":{
+                "a":{"@type":"Card","version":"1.0","addressBookIds":{&book:true},
+                    "name":{"full":format!("{marker} Alpha")},
+                    "emails":{"e":{"address":"alpha@example.test"}}},
+                "b":{"@type":"Card","version":"1.0","addressBookIds":{&book:true},
+                    "name":{"full":format!("{marker} Beta")}},
+                "c":{"@type":"Card","version":"1.0","addressBookIds":{&book:true},
+                    "name":{"full":"unrelated fixture"}}
+            }
+        },"0"]]),
+                &using,
+            )
+            .await;
+        let cards = &created[0][1]["created"];
+        let ids: Vec<String> = ["a", "b", "c"]
+            .into_iter()
+            .map(|key| {
+                cards[key]["id"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("contact create failed: {created}"))
+                    .to_owned()
+            })
+            .collect();
+        let search = |range: &str| {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(srch::SEARCH);
+            b.start(srch::STORE);
+            b.leaf(srch::NAME, "Mailbox");
+            b.start(srch::QUERY);
+            b.start(srch::AND);
+            b.leaf(air::CLASS, "Contacts");
+            b.leaf(air::COLLECTION_ID, format!("ab_{book}"));
+            b.leaf(srch::FREE_TEXT, &marker);
+            b.end();
+            b.end();
+            b.start(srch::OPTIONS);
+            b.leaf(srch::RANGE, range);
+            b.end();
+            b.end();
+            b.end();
+            wbxml::encode_document(&b.finish())
+        };
+        let first = live
+            .wbxml_version("Search", &dev("contact-search"), search("0-0"), "16.1")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&first, srch::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(eas::find_text_after(&first, srch::TOTAL), Some("2"));
+        assert_eq!(eas::find_text_after(&first, srch::RANGE), Some("0-0"));
+        assert_eq!(eas::find_text_after(&first, air::CLASS), Some("Contacts"));
+        assert_eq!(
+            eas::find_text_after(&first, air::COLLECTION_ID),
+            Some(format!("ab_{book}").as_str())
+        );
+        let long_id = eas::find_text_after(&first, srch::LONG_ID)
+            .unwrap()
+            .to_owned();
+        let name = eas::find_text_after(&first, contacts::FILE_AS)
+            .unwrap()
+            .to_owned();
+        assert!(name.starts_with(&marker));
+        let second = live
+            .wbxml_version("Search", &dev("contact-search"), search("1-1"), "16.1")
+            .await;
+        assert_eq!(eas::find_text_after(&second, srch::TOTAL), Some("2"));
+        assert_eq!(eas::find_text_after(&second, srch::RANGE), Some("1-1"));
+        assert_ne!(
+            eas::find_text_after(&second, srch::LONG_ID),
+            Some(long_id.as_str())
+        );
+
+        let mut b = eas::DocumentBuilder::new();
+        b.start(ops::ITEM_OPERATIONS);
+        b.start(ops::FETCH);
+        b.leaf(ops::STORE, "Mailbox");
+        b.leaf(srch::LONG_ID, &long_id);
+        b.end();
+        b.end();
+        let fetch = live
+            .wbxml_version(
+                "ItemOperations",
+                &dev("contact-search"),
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&fetch, ops::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(eas::find_text_after(&fetch, air::CLASS), Some("Contacts"));
+        assert_eq!(
+            eas::find_text_after(&fetch, contacts::FILE_AS),
+            Some(name.as_str())
+        );
+        for (folder, expected) in [
+            (format!("ab_{book}"), "1"),
+            ("ab_nonexistent".to_owned(), "6"),
+        ] {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(ops::ITEM_OPERATIONS);
+            b.start(ops::FETCH);
+            b.leaf(ops::STORE, "Mailbox");
+            b.leaf(air::COLLECTION_ID, folder);
+            b.leaf(air::SERVER_ID, long_id.strip_prefix("contact:").unwrap());
+            b.end();
+            b.end();
+            let fetched = live
+                .wbxml_version(
+                    "ItemOperations",
+                    &dev("contact-search"),
+                    wbxml::encode_document(&b.finish()),
+                    "16.1",
+                )
+                .await;
+            assert_eq!(
+                eas::find_all_text_after(&fetched, ops::STATUS),
+                vec!["1", expected]
+            );
+            if expected == "1" {
+                assert_eq!(
+                    eas::find_text_after(&fetched, contacts::FILE_AS),
+                    Some(name.as_str())
+                );
+            } else {
+                assert!(!eas::contains_token(&fetched, contacts::FILE_AS));
+            }
+        }
+        let cleanup = live
+            .call_using(
+                serde_json::json!([["ContactCard/set",{
+            "accountId":live.account,"destroy":ids
+        },"0"]]),
+                &using,
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_search_finds_conversation_through_multiple_pages() {
         use eas::{email2, search as srch};
         let live = Live::new("E2E_USER2").await;
@@ -10932,6 +11093,87 @@ async fn search_rejects_unsupported_or_misplaced_classes() {
             assert!(!eas::contains_token(&doc, srch::TOTAL));
         }
     }
+}
+
+#[tokio::test]
+async fn contact_search_pages_and_rejects_changed_snapshots() {
+    use eas::{airsync as air, contacts, search as srch};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 215);
+    let mut b = eas::DocumentBuilder::new();
+    b.start(srch::SEARCH);
+    b.start(srch::STORE);
+    b.leaf(srch::NAME, "Mailbox");
+    b.start(srch::QUERY);
+    b.start(srch::AND);
+    b.leaf(air::CLASS, "Contacts");
+    b.leaf(srch::FREE_TEXT, "CONTACT");
+    b.end();
+    b.end();
+    b.start(srch::OPTIONS);
+    b.leaf(srch::RANGE, "5-7");
+    b.end();
+    b.end();
+    b.end();
+    let request = wbxml::encode_document(&b.finish());
+    let search = || env.req("Search", "client").body(request.clone()).send();
+    let response = search().await.unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, srch::STATUS), vec!["1", "1"]);
+    assert_eq!(eas::find_text_after(&doc, srch::TOTAL), Some("215"));
+    assert_eq!(eas::find_text_after(&doc, srch::RANGE), Some("5-7"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, contacts::FILE_AS),
+        vec!["Contact 5", "Contact 6", "Contact 7"]
+    );
+    env.mock.snapshot_changes.store(true, Ordering::SeqCst);
+    let response = search().await.unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, srch::STATUS), vec!["1", "3"]);
+    assert!(!eas::contains_token(&doc, srch::TOTAL));
+}
+
+#[tokio::test]
+async fn contact_search_combines_and_or_terms() {
+    use eas::{airsync as air, contacts, search as srch};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 3);
+    {
+        let mut all = env.mock.groupware.lock().unwrap();
+        let items = all.get_mut("contacts").unwrap();
+        items[0]["name"]["full"] = serde_json::json!("Ada Blue");
+        items[1]["name"]["full"] = serde_json::json!("Ada Green");
+        items[2]["name"]["full"] = serde_json::json!("Bob Blue");
+    }
+    let mut b = eas::DocumentBuilder::new();
+    b.start(srch::SEARCH);
+    b.start(srch::STORE);
+    b.leaf(srch::NAME, "Mailbox");
+    b.start(srch::QUERY);
+    b.start(srch::AND);
+    b.leaf(air::CLASS, "Contacts");
+    b.leaf(srch::FREE_TEXT, "ada");
+    b.start(srch::OR);
+    b.leaf(srch::FREE_TEXT, "BLUE");
+    b.leaf(srch::FREE_TEXT, "green");
+    b.end();
+    b.end();
+    b.end();
+    b.end();
+    b.end();
+    let response = env
+        .req("Search", "client")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, srch::STATUS), vec!["1", "1"]);
+    assert_eq!(eas::find_text_after(&doc, srch::TOTAL), Some("2"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, contacts::FILE_AS),
+        vec!["Ada Blue", "Ada Green"]
+    );
 }
 
 #[tokio::test]

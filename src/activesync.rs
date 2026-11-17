@@ -979,6 +979,95 @@ async fn search(
             builder.leaf(srch::STATUS, "8");
         } else if request.unsupported_query {
             builder.leaf(srch::STATUS, "2");
+        } else if request
+            .class
+            .as_deref()
+            .is_some_and(|class| class.eq_ignore_ascii_case("Contacts"))
+        {
+            if request.received_after.is_some()
+                || request.received_before.is_some()
+                || request.conversation_id.is_some()
+                || request.or_terms.as_ref().is_some_and(|terms| {
+                    terms.received_after.is_some() || terms.received_before.is_some()
+                })
+            {
+                builder.leaf(srch::STATUS, "8");
+            } else {
+                let result = async {
+                    let folder = if let Some(folder) = &request.collection_id {
+                        let collections = state.jmap.collections(auth).await?;
+                        let exists = collections.iter().any(|item| {
+                            item.id == *folder
+                                && item.kind == crate::model::CollectionKind::Contacts
+                        });
+                        anyhow::ensure!(exists, "unknown contact search folder");
+                        Some(
+                            folder
+                                .strip_prefix("ab_")
+                                .context("invalid contact folder")?
+                                .to_owned(),
+                        )
+                    } else {
+                        None
+                    };
+                    let (contacts, total) = state
+                        .jmap
+                        .search_contacts(
+                            auth,
+                            folder.as_deref(),
+                            &request.free_texts,
+                            request.or_terms.as_ref().map(|or| or.texts.as_slice()),
+                            position as usize,
+                            limit,
+                        )
+                        .await?;
+                    let contacts = contacts
+                        .into_iter()
+                        .map(|contact| {
+                            anyhow::ensure!(
+                                contact.id.len() <= 248,
+                                "contact ID is too long for search"
+                            );
+                            let address_book = contact
+                                .address_book_ids
+                                .iter()
+                                .find(|id| folder.as_ref().is_none_or(|folder| folder == *id))
+                                .context("contact has no matching address book")?
+                                .clone();
+                            Ok((contact, address_book))
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    Ok::<_, anyhow::Error>((contacts, total))
+                }
+                .await;
+                match result {
+                    Ok((contacts, total)) => {
+                        builder.leaf(srch::STATUS, "1");
+                        let count = contacts.len();
+                        for (contact, address_book) in contacts {
+                            builder.start(srch::RESULT);
+                            builder.leaf(air::CLASS, "Contacts");
+                            builder.leaf(srch::LONG_ID, format!("contact:{}", contact.id));
+                            builder.leaf(air::COLLECTION_ID, format!("ab_{address_book}"));
+                            builder.start(srch::PROPERTIES);
+                            write_contact_fields(&mut builder, &contact);
+                            builder.end();
+                            builder.end();
+                        }
+                        if count > 0 {
+                            builder.leaf(
+                                srch::RANGE,
+                                format!("{position}-{}", position + count as i64 - 1),
+                            );
+                        }
+                        builder.leaf(srch::TOTAL, total.to_string());
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Search contacts query failed");
+                        builder.leaf(srch::STATUS, "3");
+                    }
+                }
+            }
         } else {
             let texts = &request.free_texts;
             let results = async {
@@ -4747,7 +4836,20 @@ fn write_contact_command(
     tag: wbxml::token::Token,
     contact: &crate::model::Contact,
 ) {
-    use wbxml::eas::{airsync as air, contacts as c};
+    use wbxml::eas::airsync as air;
+    builder.start(tag);
+    builder.leaf(air::SERVER_ID, contact.id.clone());
+    builder.start(air::APPLICATION_DATA);
+    write_contact_fields(builder, contact);
+    builder.end();
+    builder.end();
+}
+
+fn write_contact_fields(
+    builder: &mut wbxml::eas::DocumentBuilder,
+    contact: &crate::model::Contact,
+) {
+    use wbxml::eas::contacts as c;
 
     // Field order matches the real z-push-stalwart-jmap source (PR #187,
     // pinned in config/z-push/Dockerfile: src/lib/syncobjects/
@@ -4758,9 +4860,6 @@ fn write_contact_command(
     // first and Business/Company/JobTitle last -- completely reversed
     // from the real schema, the same failure class already confirmed
     // for Email/Attachment/Preview/Notes.
-    builder.start(tag);
-    builder.leaf(air::SERVER_ID, contact.id.clone());
-    builder.start(air::APPLICATION_DATA);
     if let Some(business) = &contact.business_phone {
         builder.leaf(c::BUSINESS_PHONE_NUMBER, business.clone());
     }
@@ -4795,8 +4894,6 @@ fn write_contact_command(
     if let Some(mobile) = &contact.mobile_phone {
         builder.leaf(c::MOBILE_PHONE_NUMBER, mobile.clone());
     }
-    builder.end();
-    builder.end();
 }
 
 /// Handles one Calendar collection's Sync round-trip end to end, same
