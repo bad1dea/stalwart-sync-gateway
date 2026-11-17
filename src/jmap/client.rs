@@ -2031,6 +2031,7 @@ impl JmapClient {
                     "start",
                     "timeZone",
                     "duration",
+                    "status",
                     "locations",
                     "showWithoutTime",
                     "freeBusyStatus",
@@ -4959,6 +4960,8 @@ struct CalendarEventObject {
     #[serde(default)]
     duration: Option<String>,
     #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
     locations: Option<BTreeMap<String, CalendarEventLocation>>,
     #[serde(default)]
     show_without_time: bool,
@@ -5178,6 +5181,7 @@ impl From<CalendarEventObject> for CalendarEvent {
             organizer_name,
             attendees,
             is_organizer: false,
+            cancelled: value.status.as_deref() == Some("cancelled"),
             response_type: None,
         }
     }

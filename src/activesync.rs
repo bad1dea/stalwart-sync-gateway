@@ -5814,6 +5814,7 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     event.organizer_email.hash(&mut hasher);
     event.organizer_name.hash(&mut hasher);
     event.is_organizer.hash(&mut hasher);
+    event.cancelled.hash(&mut hasher);
     event.response_type.hash(&mut hasher);
     event.attendees.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
@@ -5948,7 +5949,12 @@ fn write_calendar_fields(
         if event.organizer_email.is_some() {
             builder.leaf(
                 cal::MEETING_STATUS,
-                if event.is_organizer { "1" } else { "3" },
+                match (event.is_organizer, event.cancelled) {
+                    (true, false) => "1",
+                    (false, false) => "3",
+                    (true, true) => "5",
+                    (false, true) => "7",
+                },
             );
         }
         builder.start(cal::ATTENDEES);
@@ -7391,6 +7397,42 @@ mod tests {
     #[test]
     fn eas_datetime_strips_dashes_and_colons() {
         assert_eq!(eas_datetime("2026-08-24T02:05:00Z"), "20260824T020500Z");
+    }
+
+    #[test]
+    fn calendar_meeting_status_reflects_cancellation() {
+        use crate::wbxml::eas::{airsync as air, calendar as cal, DocumentBuilder};
+        let mut event = crate::model::CalendarEvent {
+            organizer_email: Some("owner@example.test".into()),
+            attendees: vec![crate::model::Attendee {
+                email: "attendee@example.test".into(),
+                name: None,
+                participation_status: None,
+                optional: false,
+            }],
+            ..Default::default()
+        };
+        for (organizer, cancelled, expected) in [
+            (true, false, "1"),
+            (false, false, "3"),
+            (true, true, "5"),
+            (false, true, "7"),
+        ] {
+            event.is_organizer = organizer;
+            event.cancelled = cancelled;
+            let mut builder = DocumentBuilder::new();
+            super::write_calendar_command(
+                &mut builder,
+                air::CHANGE,
+                &event,
+                super::ProtocolVersion::V16_1,
+                &[],
+            );
+            assert_eq!(
+                crate::wbxml::eas::find_text_after(&builder.finish(), cal::MEETING_STATUS),
+                Some(expected)
+            );
+        }
     }
 
     #[test]

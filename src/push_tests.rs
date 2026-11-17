@@ -5723,6 +5723,26 @@ mod e2e {
             eas::find_text_after(&changed, cal::RESPONSE_TYPE),
             Some("3")
         );
+        let cancelled = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set", {"accountId":live.account,
+            "update":{&id:{"status":"cancelled"}}}, "0"]]),
+                &using,
+            )
+            .await;
+        assert!(cancelled[0][1]["notUpdated"].is_null());
+        let cancelled_sync = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&changed), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&cancelled_sync, cal::MEETING_STATUS),
+            Some("7")
+        );
         let native = live
             .call_using(
                 serde_json::json!([["CalendarEvent/get", {"accountId":live.account,
@@ -5737,7 +5757,7 @@ mod e2e {
             .values()
             .filter(|item| item["roles"]["owner"] == true)
             .count();
-        let mut key = sync_key(&changed);
+        let mut key = sync_key(&cancelled_sync);
         if owners > 1 {
             let mut b = eas::DocumentBuilder::new();
             b.start(air::SYNC);

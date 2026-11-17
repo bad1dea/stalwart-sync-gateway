@@ -304,6 +304,7 @@ pub struct CalendarEvent {
     /// sets this explicitly after mapping. Drives MeetingStatus (1 vs 3) in
     /// `write_calendar_command`.
     pub is_organizer: bool,
+    pub cancelled: bool,
     pub response_type: Option<u8>,
 }
 
