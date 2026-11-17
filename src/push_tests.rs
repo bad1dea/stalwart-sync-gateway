@@ -5073,6 +5073,58 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_sendmail_confirms_real_submission() {
+        let live = Live::new("E2E_USER2").await;
+        let marker = format!("sendfixture{}", std::process::id());
+        let mime = format!("From: {}\r\nTo: {}\r\nSubject: {}\r\nMessage-ID: <{}@e2e.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nfixture", live.user, live.user, marker, marker);
+        let response = live
+            .req("SendMail", &dev("send-confirm"))
+            .header("Content-Type", "message/rfc822")
+            .body(mime)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let mut ids = Vec::new();
+        for _ in 0..50 {
+            let found = live
+                .call(
+                    serde_json::json!([["Email/query", {"accountId":live.account,
+                "filter":{"subject":&marker}, "calculateTotal":true}, "0"]]),
+                )
+                .await;
+            ids = found[0][1]["ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|id| id.as_str().map(str::to_owned))
+                .collect();
+            if ids.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(ids.len() >= 2, "sandbox message was not delivered locally");
+        let caps = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:mail",
+            "urn:ietf:params:jmap:submission",
+        ];
+        let submissions = live.call_using(serde_json::json!([["EmailSubmission/query", {"accountId":live.account, "filter":{"emailIds":&ids}}, "0"]]), &caps).await;
+        let submission_ids = submissions[0][1]["ids"].as_array().unwrap().clone();
+        assert_eq!(submission_ids.len(), 1);
+        let submission_cleanup = live.call_using(serde_json::json!([["EmailSubmission/set", {"accountId":live.account,"destroy":submission_ids}, "0"]]), &caps).await;
+        assert!(submission_cleanup[0][1]["notDestroyed"].is_null());
+        let cleanup = live
+            .call(
+                serde_json::json!([["Email/set", {"accountId":live.account, "destroy":ids}, "0"]]),
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_sync_heartbeat_delivers_new_stalwart_calendar_event() {
         use eas::calendar as cal;
         let live = Live::new("E2E_USER2").await;

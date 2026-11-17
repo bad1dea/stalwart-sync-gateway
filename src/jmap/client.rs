@@ -4145,17 +4145,7 @@ impl JmapClient {
             )
             .await?;
 
-        for method in submit_response.method_responses {
-            if method.0 == "EmailSubmission/set" {
-                if let Some(not_created) = method.1.get("notCreated").and_then(|v| v.as_object()) {
-                    if !not_created.is_empty() {
-                        anyhow::bail!("EmailSubmission/set failed: {not_created:?}");
-                    }
-                }
-            }
-        }
-
-        Ok(())
+        confirm_submission(&submit_response)
     }
 
     pub async fn mail_identities(
@@ -4380,6 +4370,28 @@ pub(crate) struct JmapResponse<T> {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct MethodResponse<T>(pub(crate) String, pub(crate) T, pub(crate) String);
+fn confirm_submission(response: &JmapResponse<serde_json::Value>) -> anyhow::Result<()> {
+    let method = response
+        .method_responses
+        .iter()
+        .find(|method| method.2 == "sub")
+        .context("EmailSubmission/set response was missing")?;
+    anyhow::ensure!(
+        method.0 == "EmailSubmission/set",
+        "EmailSubmission/set returned a method error"
+    );
+    anyhow::ensure!(
+        method.1["notCreated"]["s1"].is_null(),
+        "EmailSubmission/set rejected the message"
+    );
+    anyhow::ensure!(
+        method.1["created"]["s1"]["id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "EmailSubmission/set did not confirm the message"
+    );
+    Ok(())
+}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct GetResponse<T> {
@@ -5301,6 +5313,41 @@ mod tests {
         eas_compact_to_local_iso, eas_to_calendar_local, local_to_utc_eas,
         parse_iso8601_duration_seconds,
     };
+
+    #[test]
+    fn submission_requires_a_confirmed_created_id() {
+        for (response, expected) in [
+            (
+                serde_json::json!({"methodResponses":[["EmailSubmission/set",{"created":{"s1":{"id":"ok"}}},"sub"]]}),
+                true,
+            ),
+            (
+                serde_json::json!({"methodResponses":[["error",{"type":"serverFail"},"sub"]]}),
+                false,
+            ),
+            (
+                serde_json::json!({"methodResponses":[["EmailSubmission/set",{"notCreated":{"s1":{"type":"forbidden"}}},"sub"]]}),
+                false,
+            ),
+            (
+                serde_json::json!({"methodResponses":[["EmailSubmission/set",{"created":{}},"sub"]]}),
+                false,
+            ),
+            (
+                serde_json::json!({"methodResponses":[["EmailSubmission/set",{"created":{"s1":{"id":""}}},"sub"]]}),
+                false,
+            ),
+            (
+                serde_json::json!({"methodResponses":[["EmailSubmission/set",{"created":{"s1":{"id":"ok"}}},"wrong"]]}),
+                false,
+            ),
+            (serde_json::json!({"methodResponses":[]}), false),
+        ] {
+            let parsed: super::JmapResponse<serde_json::Value> =
+                serde_json::from_value(response).unwrap();
+            assert_eq!(super::confirm_submission(&parsed).is_ok(), expected);
+        }
+    }
 
     #[test]
     fn calendar_privacy_maps_unknown_values_conservatively() {
