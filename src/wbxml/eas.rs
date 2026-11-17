@@ -1284,6 +1284,7 @@ pub struct CalendarFields {
     pub categories: Option<Vec<String>>,
     pub unsupported_categories: bool,
     pub unsupported_recurrence: bool,
+    pub unsupported_response_type: bool,
     pub attendees: Vec<AttendeeField>,
     pub attendees_present: bool,
     pub unsupported_attendees: bool,
@@ -2400,6 +2401,13 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     for node in nodes {
         match node {
             Node::Start(token) => {
+                if same_token(*token, calendar::RESPONSE_TYPE)
+                    && path
+                        .last()
+                        .is_some_and(|parent| same_token(*parent, airsync::APPLICATION_DATA))
+                {
+                    fields.unsupported_response_type = true;
+                }
                 if (same_token(*token, calendar::RECURRENCE)
                     || same_token(*token, calendar::EXCEPTIONS))
                     && path
@@ -3151,6 +3159,15 @@ mod tests {
         ] {
             assert!(parse(values).unsupported_sensitivity);
         }
+    }
+
+    #[test]
+    fn calendar_response_type_is_rejected_in_client_changes() {
+        let mut b = super::DocumentBuilder::new();
+        b.start(super::airsync::APPLICATION_DATA);
+        b.leaf(super::calendar::RESPONSE_TYPE, "3");
+        b.end();
+        assert!(super::extract_calendar_fields(&b.finish().nodes).unsupported_response_type);
     }
 
     #[test]

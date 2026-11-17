@@ -5657,6 +5657,159 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_calendar_response_type_tracks_the_current_user() {
+        use eas::calendar as cal;
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let created = live
+            .call_using(
+                serde_json::json!([["Calendar/set", {"accountId":live.account,
+            "create":{"c":{"name":format!("Response fixture {}", std::process::id())}}}, "0"]]),
+                &using,
+            )
+            .await;
+        let calendar = created[0][1]["created"]["c"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let event = live.call_using(serde_json::json!([["CalendarEvent/set", {"accountId":live.account,
+            "create":{"e":{"@type":"Event", "calendarIds":{&calendar:true}, "title":"Response fixture",
+                "start":"2042-07-06T10:00:00", "duration":"PT1H", "replyTo":{"imip":"mailto:owner@example.test"},
+                "participants":{
+                    "owner":{"@type":"Participant", "email":"owner@example.test", "calendarAddress":"mailto:owner@example.test", "roles":{"owner":true}, "sendTo":{"imip":"mailto:owner@example.test"}, "scheduleAgent":"client"},
+                    "self":{"@type":"Participant", "email":live.user, "calendarAddress":format!("mailto:{}",live.user), "roles":{"attendee":true}, "participationStatus":"tentative", "sendTo":{"imip":format!("mailto:{}",live.user)}, "scheduleAgent":"client"}
+                }}}}, "0"]]), &using).await;
+        let id = event[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("event creation failed: {event}"))
+            .to_owned();
+        let folder = format!("cal_{calendar}");
+        let device = dev("response-type");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let initial = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&initial, cal::RESPONSE_TYPE),
+            Some("2")
+        );
+        let updated = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set", {"accountId":live.account,
+            "update":{&id:{"participants/self/participationStatus":"accepted"}}}, "0"]]),
+                &using,
+            )
+            .await;
+        assert!(updated[0][1]["notUpdated"].is_null());
+        let changed = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&initial), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&changed, cal::RESPONSE_TYPE),
+            Some("3")
+        );
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get", {"accountId":live.account,
+            "ids":[&id],"properties":["participants"]}, "0"]]),
+                &using,
+            )
+            .await;
+        let participants = native[0][1]["list"][0]["participants"].clone();
+        let owners = participants
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|item| item["roles"]["owner"] == true)
+            .count();
+        let mut key = sync_key(&changed);
+        if owners > 1 {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(air::SYNC);
+            b.start(air::COLLECTIONS);
+            b.start(air::COLLECTION);
+            b.leaf(air::SYNC_KEY, &key);
+            b.leaf(air::COLLECTION_ID, &folder);
+            b.start(air::COMMANDS);
+            b.start(air::CHANGE);
+            b.leaf(air::SERVER_ID, &id);
+            b.start(air::APPLICATION_DATA);
+            b.start(cal::ATTENDEES);
+            b.start(cal::ATTENDEE);
+            b.leaf(cal::ATTENDEE_EMAIL, &live.user);
+            for _ in 0..8 {
+                b.end();
+            }
+            let rejected = live
+                .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+                .await;
+            assert!(eas::find_all_text_after(&rejected, air::STATUS).contains(&"5".to_owned()));
+            key = sync_key(&rejected);
+            let after = live
+                .call_using(
+                    serde_json::json!([["CalendarEvent/get", {"accountId":live.account,
+                "ids":[&id],"properties":["participants"]}, "0"]]),
+                    &using,
+                )
+                .await;
+            assert_eq!(after[0][1]["list"][0]["participants"], participants);
+        }
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, &key);
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, &id);
+        b.start(air::APPLICATION_DATA);
+        b.leaf(cal::SUBJECT, "must not apply");
+        b.leaf(cal::RESPONSE_TYPE, "4");
+        for _ in 0..6 {
+            b.end();
+        }
+        let rejected = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert!(eas::find_all_text_after(&rejected, air::STATUS).contains(&"6".to_owned()));
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get", {"accountId":live.account,
+            "ids":[&id],"properties":["title"]}, "0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(native[0][1]["list"][0]["title"], "Response fixture");
+        let cleanup = live
+            .call_using(
+                serde_json::json!([
+            ["CalendarEvent/set", {"accountId":live.account,"destroy":[id]}, "0"],
+            ["Calendar/set", {"accountId":live.account,"destroy":[calendar]}, "1"]]),
+                &using,
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_calendar_uid_matches_stalwart_and_other_device() {
         use eas::calendar as cal;
         let live = Live::new("E2E_USER2").await;

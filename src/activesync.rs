@@ -5433,6 +5433,7 @@ async fn sync_calendar_collection(
             || command.calendar.unsupported_attendees
             || command.calendar.unsupported_categories
             || command.calendar.unsupported_recurrence
+            || command.calendar.unsupported_response_type
             || command.calendar.unsupported_sensitivity
         {
             match command.kind {
@@ -5813,6 +5814,7 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     event.organizer_email.hash(&mut hasher);
     event.organizer_name.hash(&mut hasher);
     event.is_organizer.hash(&mut hasher);
+    event.response_type.hash(&mut hasher);
     event.attendees.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
@@ -5943,10 +5945,12 @@ fn write_calendar_fields(
         // listed as an Attendee (confirmed against the live spec's own
         // worked example) -- OrganizerName/OrganizerEmail above already
         // covers that, so `attendees` here only ever holds everyone else.
-        builder.leaf(
-            cal::MEETING_STATUS,
-            if event.is_organizer { "1" } else { "3" },
-        );
+        if event.organizer_email.is_some() {
+            builder.leaf(
+                cal::MEETING_STATUS,
+                if event.is_organizer { "1" } else { "3" },
+            );
+        }
         builder.start(cal::ATTENDEES);
         for attendee in &event.attendees {
             builder.start(cal::ATTENDEE);
@@ -5978,6 +5982,9 @@ fn write_calendar_fields(
     } else if is_change {
         builder.leaf(cal::MEETING_STATUS, "0");
         builder.empty_tag(cal::ATTENDEES);
+    }
+    if let Some(response) = event.response_type {
+        builder.leaf(cal::RESPONSE_TYPE, response.to_string());
     }
 }
 
@@ -7384,6 +7391,37 @@ mod tests {
     #[test]
     fn eas_datetime_strips_dashes_and_colons() {
         assert_eq!(eas_datetime("2026-08-24T02:05:00Z"), "20260824T020500Z");
+    }
+
+    #[test]
+    fn calendar_response_type_is_omitted_when_not_known() {
+        use crate::wbxml::eas::{airsync as air, calendar as cal, DocumentBuilder};
+        let mut event = crate::model::CalendarEvent::default();
+        let mut builder = DocumentBuilder::new();
+        super::write_calendar_command(
+            &mut builder,
+            air::CHANGE,
+            &event,
+            super::ProtocolVersion::V16_1,
+            &[],
+        );
+        assert!(!crate::wbxml::eas::contains_token(
+            &builder.finish(),
+            cal::RESPONSE_TYPE
+        ));
+        event.response_type = Some(3);
+        let mut builder = DocumentBuilder::new();
+        super::write_calendar_command(
+            &mut builder,
+            air::CHANGE,
+            &event,
+            super::ProtocolVersion::V16_1,
+            &[],
+        );
+        assert_eq!(
+            crate::wbxml::eas::find_text_after(&builder.finish(), cal::RESPONSE_TYPE),
+            Some("3")
+        );
     }
 
     #[test]

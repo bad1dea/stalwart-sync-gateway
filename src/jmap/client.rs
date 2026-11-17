@@ -2039,6 +2039,7 @@ impl JmapClient {
                     "alerts",
                     "useDefaultAlerts",
                     "participants",
+                    "replyTo",
                 ]),
                 limit,
             )
@@ -2106,6 +2107,7 @@ impl JmapClient {
                     .as_deref()
                     .map(|email| email.eq_ignore_ascii_case(auth.username()))
                     .unwrap_or(true);
+                event.response_type = calendar_response_type(&event, auth.username());
                 event
             })
             .collect())
@@ -2634,6 +2636,14 @@ impl JmapClient {
                 .as_object()
                 .cloned()
                 .unwrap_or_default();
+            anyhow::ensure!(
+                participants
+                    .values()
+                    .filter(|participant| participant["roles"]["owner"] == true)
+                    .count()
+                    <= 1,
+                "multiple calendar owners cannot be modified safely"
+            );
             let mut owner_email = None;
             let mut changes = serde_json::Map::new();
             let mut existing_emails = std::collections::HashSet::new();
@@ -4969,6 +4979,8 @@ struct CalendarEventObject {
     /// capability. See `save_calendar_event` for the write side.
     #[serde(default)]
     participants: Option<BTreeMap<String, ParticipantObject>>,
+    #[serde(default)]
+    reply_to: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4996,6 +5008,35 @@ struct ParticipantObject {
     participation_status: Option<String>,
 }
 
+fn calendar_response_type(event: &CalendarEvent, user: &str) -> Option<u8> {
+    if event.attendees.is_empty() || event.organizer_email.is_none() {
+        return None;
+    }
+    let mut matches = event
+        .attendees
+        .iter()
+        .filter(|attendee| attendee.email.eq_ignore_ascii_case(user));
+    let attendee = matches.next();
+    if matches.next().is_some() {
+        return None;
+    }
+    if event
+        .organizer_email
+        .as_deref()
+        .is_some_and(|email| email.eq_ignore_ascii_case(user))
+    {
+        return attendee.is_none().then_some(1);
+    }
+    let attendee = attendee?;
+    match attendee.participation_status.as_deref() {
+        Some("tentative") => Some(2),
+        Some("accepted") => Some(3),
+        Some("declined") => Some(4),
+        Some("needs-action") | None => Some(5),
+        _ => None,
+    }
+}
+
 impl From<CalendarEventObject> for CalendarEvent {
     fn from(value: CalendarEventObject) -> Self {
         let start_utc = value
@@ -5021,14 +5062,59 @@ impl From<CalendarEventObject> for CalendarEvent {
             .flatten()
             .find_map(|(_, location)| location.name);
 
+        let participants: Vec<_> = value
+            .participants
+            .into_iter()
+            .flatten()
+            .map(|(_, participant)| participant)
+            .collect();
+        let reply_address = value
+            .reply_to
+            .as_ref()
+            .and_then(|reply| reply.get("imip"))
+            .and_then(|uri| {
+                uri.get(..7)
+                    .filter(|prefix| prefix.eq_ignore_ascii_case("mailto:"))?;
+                uri.get(7..)
+            });
+        let has_owner = participants
+            .iter()
+            .any(|participant| participant.roles.get("owner") == Some(&true));
+        let reply_matches: Vec<_> = participants
+            .iter()
+            .enumerate()
+            .filter(|(_, participant)| {
+                (!has_owner || participant.roles.get("owner") == Some(&true))
+                    && participant
+                        .email
+                        .as_deref()
+                        .zip(reply_address)
+                        .is_some_and(|(email, reply)| email.eq_ignore_ascii_case(reply))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let owners: Vec<_> = participants
+            .iter()
+            .enumerate()
+            .filter(|(_, participant)| participant.roles.get("owner") == Some(&true))
+            .map(|(index, _)| index)
+            .collect();
+        let organizer = match reply_matches.as_slice() {
+            [index] => Some(*index),
+            [] => match owners.as_slice() {
+                [index] => Some(*index),
+                _ => None,
+            },
+            _ => None,
+        };
         let mut organizer_email = None;
         let mut organizer_name = None;
         let mut attendees = Vec::new();
-        for participant in value.participants.into_iter().flatten().map(|(_, p)| p) {
+        for (index, participant) in participants.into_iter().enumerate() {
             let Some(email) = participant.email else {
                 continue;
             };
-            if participant.roles.get("owner").copied().unwrap_or(false) {
+            if Some(index) == organizer {
                 organizer_email = Some(email);
                 organizer_name = participant.name;
             } else {
@@ -5096,6 +5182,7 @@ impl From<CalendarEventObject> for CalendarEvent {
             organizer_name,
             attendees,
             is_organizer: false,
+            response_type: None,
         }
     }
 }
@@ -5347,6 +5434,100 @@ mod tests {
                 serde_json::from_value(response).unwrap();
             assert_eq!(super::confirm_submission(&parsed).is_ok(), expected);
         }
+    }
+
+    #[test]
+    fn calendar_organizer_uses_reply_address_when_multiple_owners_exist() {
+        let item: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
+            "id":"e", "replyTo":{"imip":"mailto:owner@example.test"},
+            "participants":{
+                "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                "guest":{"email":"guest@example.test","roles":{"owner":true},"participationStatus":"accepted"}
+            }
+        })).unwrap();
+        let event = crate::model::CalendarEvent::from(item);
+        assert_eq!(event.organizer_email.as_deref(), Some("owner@example.test"));
+        assert_eq!(event.attendees.len(), 1);
+        assert_eq!(
+            super::calendar_response_type(&event, "guest@example.test"),
+            Some(3)
+        );
+        assert_eq!(
+            super::calendar_response_type(&event, "owner@example.test"),
+            Some(1)
+        );
+
+        let ambiguous: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
+            "id":"e", "participants":{
+                "a":{"email":"a@example.test","roles":{"owner":true}},
+                "b":{"email":"b@example.test","roles":{"owner":true}}
+            }
+        }))
+        .unwrap();
+        let ambiguous = crate::model::CalendarEvent::from(ambiguous);
+        assert!(ambiguous.organizer_email.is_none());
+        assert_eq!(
+            super::calendar_response_type(&ambiguous, "a@example.test"),
+            None
+        );
+        let delegated_reply: super::CalendarEventObject =
+            serde_json::from_value(serde_json::json!({
+                "id":"e", "replyTo":{"imip":"mailto:guest@example.test"},
+                "participants":{
+                    "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                    "guest":{"email":"guest@example.test","roles":{"attendee":true}}
+                }
+            }))
+            .unwrap();
+        let event = crate::model::CalendarEvent::from(delegated_reply);
+        assert_eq!(event.organizer_email.as_deref(), Some("owner@example.test"));
+    }
+
+    #[test]
+    fn calendar_response_type_uses_the_authenticated_participant() {
+        let mut event = crate::model::CalendarEvent {
+            organizer_email: Some("owner@example.test".into()),
+            attendees: vec![crate::model::Attendee {
+                email: "guest@example.test".into(),
+                name: None,
+                participation_status: None,
+                optional: false,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            super::calendar_response_type(&event, "OWNER@example.test"),
+            Some(1)
+        );
+        for (status, expected) in [
+            (None, Some(5)),
+            (Some("needs-action"), Some(5)),
+            (Some("tentative"), Some(2)),
+            (Some("accepted"), Some(3)),
+            (Some("declined"), Some(4)),
+            (Some("delegated"), None),
+        ] {
+            event.attendees[0].participation_status = status.map(str::to_owned);
+            assert_eq!(
+                super::calendar_response_type(&event, "GUEST@example.test"),
+                expected
+            );
+        }
+        assert_eq!(
+            super::calendar_response_type(&event, "other@example.test"),
+            None
+        );
+        event.attendees[0].participation_status = Some("accepted".into());
+        event.attendees.push(event.attendees[0].clone());
+        assert_eq!(
+            super::calendar_response_type(&event, "guest@example.test"),
+            None
+        );
+        event.attendees.clear();
+        assert_eq!(
+            super::calendar_response_type(&event, "owner@example.test"),
+            None
+        );
     }
 
     #[test]
