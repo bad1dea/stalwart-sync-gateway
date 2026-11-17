@@ -1446,6 +1446,7 @@ pub struct SearchRequest {
     pub store_name: String,
     /// Optional item-class filter for a Mailbox search.
     pub class: Option<String>,
+    pub classes: Vec<String>,
     pub unsupported_class_query: bool,
     pub free_text: Option<String>,
     pub free_texts: Vec<String>,
@@ -1482,7 +1483,8 @@ pub struct SearchOrTerms {
 /// naturally picks up the first (only) occurrence of each element.
 pub fn search_request(document: &Document) -> Option<SearchRequest> {
     let store_name = find_text_after(document, search::NAME)?.to_owned();
-    let (class, unsupported_class_query) = search_classes(document);
+    let (classes, unsupported_class_query) = search_classes(document);
+    let class = classes.first().cloned();
     let free_texts = search_texts(document, false);
     let free_text = free_texts
         .first()
@@ -1533,6 +1535,7 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
     Some(SearchRequest {
         store_name,
         class,
+        classes,
         unsupported_class_query,
         free_text,
         free_texts,
@@ -1561,7 +1564,7 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
     })
 }
 
-fn search_classes(document: &Document) -> (Option<String>, bool) {
+fn search_classes(document: &Document) -> (Vec<String>, bool) {
     fn visit(
         document: &Document,
         parent: Option<Token>,
@@ -1588,23 +1591,24 @@ fn search_classes(document: &Document) -> (Option<String>, bool) {
     let mut values = Vec::new();
     let mut invalid = false;
     visit(document, None, &mut values, &mut invalid);
-    if let Some(first) = values.first() {
-        if !first.eq_ignore_ascii_case("Email")
-            && !first.eq_ignore_ascii_case("Contacts")
-            && !first.eq_ignore_ascii_case("Calendar")
-            && !first.eq_ignore_ascii_case("Tasks")
-            && !first.eq_ignore_ascii_case("Notes")
-        {
-            invalid = true;
-        }
-        if values
+    for class in &values {
+        if !["Email", "Contacts", "Calendar", "Tasks", "Notes"]
             .iter()
-            .any(|class| !class.eq_ignore_ascii_case(first))
+            .any(|supported| class.eq_ignore_ascii_case(supported))
         {
             invalid = true;
         }
     }
-    (values.into_iter().next(), invalid)
+    let mut classes: Vec<String> = Vec::new();
+    for class in values {
+        if !classes
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&class))
+        {
+            classes.push(class);
+        }
+    }
+    (classes, invalid)
 }
 
 fn search_conversation(store: &Document) -> (Option<uuid::Uuid>, bool) {

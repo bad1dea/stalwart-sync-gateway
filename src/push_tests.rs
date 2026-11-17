@@ -5017,6 +5017,26 @@ mod e2e {
         b.leaf(srch::NAME, "Mailbox");
         b.start(srch::QUERY);
         b.start(srch::AND);
+        b.leaf(srch::FREE_TEXT, &marker);
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        let mixed = live
+            .wbxml_version("Search", &peer, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&mixed, srch::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(eas::find_text_after(&mixed, srch::TOTAL), Some("1"));
+        assert_eq!(eas::find_text_after(&mixed, air::CLASS), Some("Notes"));
+        let mut b = eas::DocumentBuilder::new();
+        b.start(srch::SEARCH);
+        b.start(srch::STORE);
+        b.leaf(srch::NAME, "Mailbox");
+        b.start(srch::QUERY);
+        b.start(srch::AND);
         b.leaf(air::CLASS, "Email");
         b.leaf(srch::FREE_TEXT, &subject);
         b.end();
@@ -5076,7 +5096,9 @@ mod e2e {
             .call_using(
                 serde_json::json!([["CalendarEvent/set", {"accountId":live.account,
             "create":{"e":{"@type":"Task","calendarIds":{&calendar:true}, "title":"Task search fixture",
-            "description":&marker, "due":"2042-07-06T10:00:00", "progress":"needs-action"}}}, "0"]]),
+            "description":&marker, "due":"2042-07-06T10:00:00", "progress":"needs-action"},
+            "c":{"@type":"Event","calendarIds":{&calendar:true},"title":&marker,
+            "start":"2042-07-06T10:00:00","duration":"PT1H"}}}, "0"]]),
                 &using,
             )
             .await;
@@ -5084,6 +5106,88 @@ mod e2e {
             .as_str()
             .unwrap_or_else(|| panic!("event create failed: {events}"))
             .to_owned();
+        let calendar_event_id = events[0][1]["created"]["c"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let contact_caps = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:contacts"];
+        let books = live
+            .call_using(
+                serde_json::json!([["AddressBook/get", {"accountId":live.account}, "0"]]),
+                &contact_caps,
+            )
+            .await;
+        let book = books[0][1]["list"][0]["id"].as_str().unwrap();
+        let created_contact = live.call_using(serde_json::json!([["ContactCard/set", {"accountId":live.account,
+            "create":{"c":{"@type":"Card", "version":"1.0", "addressBookIds":{book:true}, "name":{"full":&marker}}}}, "0"]]), &contact_caps).await;
+        let contact_id = created_contact[0][1]["created"]["c"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let email_ids = live.seed(&live.inbox, 1, &marker, false).await;
+        let mut b = eas::DocumentBuilder::new();
+        b.start(srch::SEARCH);
+        b.start(srch::STORE);
+        b.leaf(srch::NAME, "Mailbox");
+        b.start(srch::QUERY);
+        b.start(srch::AND);
+        b.leaf(srch::FREE_TEXT, &marker);
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        let mixed = live
+            .wbxml_version(
+                "Search",
+                &dev("mixed-search"),
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&mixed, srch::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(eas::find_text_after(&mixed, srch::TOTAL), Some("4"));
+        assert_eq!(
+            eas::find_all_text_after(&mixed, air::CLASS),
+            vec!["Email", "Contacts", "Calendar", "Tasks"]
+        );
+        let mut b = eas::DocumentBuilder::new();
+        b.start(srch::SEARCH);
+        b.start(srch::STORE);
+        b.leaf(srch::NAME, "Mailbox");
+        b.start(srch::QUERY);
+        b.start(srch::AND);
+        for class in ["Email", "Contacts", "Calendar", "Tasks"] {
+            b.leaf(air::CLASS, class);
+        }
+        b.leaf(srch::FREE_TEXT, &marker);
+        b.end();
+        b.end();
+        b.start(srch::OPTIONS);
+        b.leaf(srch::RANGE, "1-2");
+        b.end();
+        b.end();
+        b.end();
+        let page = live
+            .wbxml_version(
+                "Search",
+                &dev("mixed-search"),
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&page, srch::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(eas::find_text_after(&page, srch::TOTAL), Some("4"));
+        assert_eq!(eas::find_text_after(&page, srch::RANGE), Some("1-2"));
+        assert_eq!(
+            eas::find_all_text_after(&page, air::CLASS),
+            vec!["Contacts", "Calendar"]
+        );
         let folder = format!("task_{calendar}");
         let mut b = eas::DocumentBuilder::new();
         b.start(srch::SEARCH);
@@ -5220,13 +5324,17 @@ mod e2e {
         let cleanup = live
             .call_using(
                 serde_json::json!([
-            ["CalendarEvent/set", {"accountId":live.account,"destroy":[id]}, "0"],
+            ["CalendarEvent/set", {"accountId":live.account,"destroy":[id,calendar_event_id]}, "0"],
             ["Calendar/set", {"accountId":live.account,"destroy":[calendar]}, "1"]]),
                 &using,
             )
             .await;
         assert!(cleanup[0][1]["notDestroyed"].is_null());
         assert!(cleanup[1][1]["notDestroyed"].is_null());
+        let cleanup_contact = live.call_using(serde_json::json!([["ContactCard/set", {"accountId":live.account,"destroy":[contact_id]}, "0"]]), &contact_caps).await;
+        assert!(cleanup_contact[0][1]["notDestroyed"].is_null());
+        let cleanup_mail = live.call(serde_json::json!([["Email/set", {"accountId":live.account,"destroy":email_ids}, "0"]])).await;
+        assert!(cleanup_mail[0][1]["notDestroyed"].is_null());
     }
 
     #[tokio::test]
@@ -11639,7 +11747,7 @@ async fn search_rejects_unsupported_or_misplaced_classes() {
     for (classes, nested, expected) in [
         (vec!["Email"], true, "1"),
         (vec!["SMS"], true, "8"),
-        (vec!["Email", "Contacts"], true, "8"),
+        (vec!["Email", "SMS"], true, "8"),
         (vec!["Email"], false, "8"),
     ] {
         let mut b = eas::DocumentBuilder::new();
@@ -11716,6 +11824,96 @@ async fn email_search_excludes_hidden_notes_but_keeps_shared_mail() {
         eas::find_text_after(&doc, air::COLLECTION_ID),
         Some("inbox")
     );
+}
+
+#[tokio::test]
+async fn unscoped_and_mixed_searches_page_across_classes() {
+    use eas::{airsync as air, search as srch};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 2);
+    {
+        let mut all = env.mock.groupware.lock().unwrap();
+        for contact in all.get_mut("contacts").unwrap() {
+            contact["name"]["full"] = serde_json::json!("subject contact");
+        }
+        for item in all.get_mut("calendar").unwrap() {
+            item["title"] = serde_json::json!("subject event");
+        }
+    }
+    for (classes, expected_total, expected_classes) in [
+        (
+            vec![],
+            "10",
+            vec!["Email", "Contacts", "Contacts", "Calendar"],
+        ),
+        (
+            vec!["Contacts", "Calendar"],
+            "4",
+            vec!["Contacts", "Calendar", "Calendar"],
+        ),
+    ] {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(srch::SEARCH);
+        b.start(srch::STORE);
+        b.leaf(srch::NAME, "Mailbox");
+        b.start(srch::QUERY);
+        b.start(srch::AND);
+        for class in classes {
+            b.leaf(air::CLASS, class);
+        }
+        b.leaf(srch::FREE_TEXT, "subject");
+        b.end();
+        b.end();
+        b.start(srch::OPTIONS);
+        b.leaf(srch::RANGE, "1-4");
+        b.end();
+        b.end();
+        b.end();
+        let response = env
+            .req("Search", "multi")
+            .body(wbxml::encode_document(&b.finish()))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, srch::STATUS), vec!["1", "1"]);
+        assert_eq!(
+            eas::find_text_after(&doc, srch::TOTAL),
+            Some(expected_total)
+        );
+        assert_eq!(eas::find_all_text_after(&doc, air::CLASS), expected_classes);
+    }
+}
+
+#[tokio::test]
+async fn mixed_search_does_not_return_partial_results_when_a_class_changes() {
+    use eas::{airsync as air, search as srch};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 80);
+    env.mock.snapshot_changes.store(true, Ordering::SeqCst);
+    let mut b = eas::DocumentBuilder::new();
+    b.start(srch::SEARCH);
+    b.start(srch::STORE);
+    b.leaf(srch::NAME, "Mailbox");
+    b.start(srch::QUERY);
+    b.start(srch::AND);
+    b.leaf(air::CLASS, "Email");
+    b.leaf(air::CLASS, "Contacts");
+    b.leaf(srch::FREE_TEXT, "contact");
+    b.end();
+    b.end();
+    b.end();
+    b.end();
+    let response = env
+        .req("Search", "multi")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, srch::STATUS), vec!["1", "3"]);
+    assert!(!eas::contains_token(&doc, srch::RESULT));
+    assert!(!eas::contains_token(&doc, srch::TOTAL));
 }
 
 #[tokio::test]

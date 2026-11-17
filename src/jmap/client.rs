@@ -1458,6 +1458,37 @@ impl JmapClient {
         }
     }
 
+    pub async fn contact_snapshot_state(
+        &self,
+        auth: &AuthenticatedSession,
+    ) -> anyhow::Result<String> {
+        let account = auth
+            .session
+            .primary_account_for(capabilities::CONTACTS)
+            .context("JMAP Contacts capability is unavailable")?;
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CONTACTS.to_owned(),
+                ],
+                vec![MethodCall::new(
+                    "ContactCard/get",
+                    serde_json::json!({"accountId":account,"ids":[]}),
+                    "snapshot",
+                )],
+            )
+            .await?;
+        response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "ContactCard/get")
+            .and_then(|method| method.1["state"].as_str())
+            .map(str::to_owned)
+            .context("contact snapshot state unavailable")
+    }
+
     pub async fn search_contacts(
         &self,
         auth: &AuthenticatedSession,

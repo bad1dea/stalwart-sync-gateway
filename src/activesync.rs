@@ -1,6 +1,7 @@
 mod draft;
 mod find;
 mod item_operations;
+mod search_multi;
 mod sync_options;
 mod sync_request;
 
@@ -920,6 +921,17 @@ async fn search(
     version: ProtocolVersion,
     command: &str,
 ) -> Response {
+    search_inner(state, auth, document, version, command, false).await
+}
+
+async fn search_inner(
+    state: &AppState,
+    auth: &crate::jmap::client::AuthenticatedSession,
+    document: &wbxml::Document,
+    version: ProtocolVersion,
+    command: &str,
+    internal: bool,
+) -> Response {
     use wbxml::eas::{airsync as air, gal, search as srch};
 
     let Some(request) = wbxml::eas::search_request(document) else {
@@ -934,6 +946,25 @@ async fn search(
         )
             .into_response();
     };
+
+    if !internal
+        && request.store_name.eq_ignore_ascii_case("Mailbox")
+        && request.range_error.is_none()
+        && !request.unsupported_class_query
+        && !request.unsupported_query
+        && !request.invalid_conversation
+        && (request.classes.len() > 1
+            || (request.classes.is_empty() && request.collection_id.is_none()))
+    {
+        let response =
+            search_multi::handle(state, auth, document, &request, version, command).await;
+        state
+            .metrics
+            .eas_requests_total
+            .with_label_values(&[command, "200"])
+            .inc();
+        return response;
+    }
 
     // (position, limit): default to the first 25 results when the device omits Range
     // entirely -- the schema marks it optional inside Options.
@@ -1677,11 +1708,13 @@ async fn search(
     builder.end();
 
     let body = wbxml::encode_document(&builder.finish());
-    state
-        .metrics
-        .eas_requests_total
-        .with_label_values(&[command, "200"])
-        .inc();
+    if !internal {
+        state
+            .metrics
+            .eas_requests_total
+            .with_label_values(&[command, "200"])
+            .inc();
+    }
     (
         StatusCode::OK,
         [("Content-Type", "application/vnd.ms-sync.wbxml")],
