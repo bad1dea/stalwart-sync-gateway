@@ -4246,7 +4246,6 @@ mod e2e {
             b.leaf(srch::NAME, "Mailbox");
             b.start(srch::QUERY);
             b.start(srch::AND);
-            b.leaf(air::CLASS, "Contacts");
             b.leaf(air::COLLECTION_ID, format!("ab_{book}"));
             b.leaf(srch::FREE_TEXT, &marker);
             b.end();
@@ -4889,7 +4888,6 @@ mod e2e {
         b.leaf(srch::NAME, "Mailbox");
         b.start(srch::QUERY);
         b.start(srch::AND);
-        b.leaf(air::CLASS, "Calendar");
         b.leaf(air::COLLECTION_ID, &folder);
         b.leaf(srch::FREE_TEXT, &marker);
         b.end();
@@ -11295,6 +11293,53 @@ async fn search_rejects_unsupported_or_misplaced_classes() {
         if expected == "8" {
             assert!(!eas::contains_token(&doc, srch::TOTAL));
         }
+    }
+}
+
+#[tokio::test]
+async fn classless_search_uses_the_scoped_groupware_folder() {
+    use eas::{airsync as air, calendar as cal, contacts, search as srch};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 3);
+    for (folder, text, class, subject, expected) in [
+        (
+            "ab_book",
+            "Contact 1",
+            "Contacts",
+            contacts::FILE_AS,
+            "Contact 1",
+        ),
+        (
+            "cal_calendar",
+            "Event 1",
+            "Calendar",
+            cal::SUBJECT,
+            "Event 1",
+        ),
+    ] {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(srch::SEARCH);
+        b.start(srch::STORE);
+        b.leaf(srch::NAME, "Mailbox");
+        b.start(srch::QUERY);
+        b.start(srch::AND);
+        b.leaf(air::COLLECTION_ID, folder);
+        b.leaf(srch::FREE_TEXT, text);
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        let response = env
+            .req("Search", "client")
+            .body(wbxml::encode_document(&b.finish()))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, srch::STATUS), vec!["1", "1"]);
+        assert_eq!(eas::find_text_after(&doc, srch::TOTAL), Some("1"));
+        assert_eq!(eas::find_text_after(&doc, air::CLASS), Some(class));
+        assert_eq!(eas::find_text_after(&doc, subject), Some(expected));
     }
 }
 

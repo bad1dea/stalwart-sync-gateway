@@ -972,6 +972,18 @@ async fn search(
     builder.start(srch::RESPONSE);
     builder.start(srch::STORE);
 
+    let search_class = request.class.as_deref().or_else(|| {
+        request.collection_id.as_deref().and_then(|folder| {
+            if folder.starts_with("ab_") {
+                Some("Contacts")
+            } else if folder.starts_with("cal_") {
+                Some("Calendar")
+            } else {
+                None
+            }
+        })
+    });
+
     if let Some(status) = request.range_error {
         builder.leaf(srch::STATUS, status);
     } else if request.store_name.eq_ignore_ascii_case("Mailbox") {
@@ -979,11 +991,7 @@ async fn search(
             builder.leaf(srch::STATUS, "8");
         } else if request.unsupported_query {
             builder.leaf(srch::STATUS, "2");
-        } else if request
-            .class
-            .as_deref()
-            .is_some_and(|class| class.eq_ignore_ascii_case("Calendar"))
-        {
+        } else if search_class.is_some_and(|class| class.eq_ignore_ascii_case("Calendar")) {
             if request.received_after.is_some()
                 || request.received_before.is_some()
                 || request.conversation_id.is_some()
@@ -1127,11 +1135,7 @@ async fn search(
                     }
                 }
             }
-        } else if request
-            .class
-            .as_deref()
-            .is_some_and(|class| class.eq_ignore_ascii_case("Contacts"))
-        {
+        } else if search_class.is_some_and(|class| class.eq_ignore_ascii_case("Contacts")) {
             if request.received_after.is_some()
                 || request.received_before.is_some()
                 || request.conversation_id.is_some()
