@@ -2122,12 +2122,10 @@ async fn options_advertises_methods_versions_and_commands() {
     // Only the version every response is actually shaped for.
     assert_eq!(h.get("MS-ASProtocolVersions").unwrap(), "14.0");
     let commands = h.get("MS-ASProtocolCommands").unwrap().to_str().unwrap();
-    for unhandled in [
-        "MeetingResponse",
-        "ResolveRecipients",
-        "ValidateCert",
-        "Find",
-    ] {
+    assert!(commands
+        .split(',')
+        .any(|command| command == "ResolveRecipients"));
+    for unhandled in ["MeetingResponse", "ValidateCert", "Find"] {
         assert!(
             !commands.split(',').any(|c| c == unhandled),
             "advertises {unhandled}"
@@ -4207,6 +4205,69 @@ mod e2e {
                 &using,
             )
             .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_resolve_recipients_contacts_and_ambiguity() {
+        use eas::resolve_recipients as rr;
+        let live = Live::new("E2E_USER2").await;
+        let using = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:contacts"];
+        let books = live
+            .call_using(
+                serde_json::json!([["AddressBook/get", {"accountId":live.account}, "0"]]),
+                &using,
+            )
+            .await;
+        let book = books[0][1]["list"][0]["id"].as_str().unwrap();
+        let marker = format!("resolverfixture{}", std::process::id());
+        let first = format!("{marker}1@example.test");
+        let second = format!("{marker}2@example.test");
+        let created = live.call_using(serde_json::json!([["ContactCard/set", {"accountId":live.account,
+            "create":{"a":{"@type":"Card","version":"1.0","addressBookIds":{book:true},"name":{"full":format!("{marker} one")},"emails":{"e":{"address":&first}}},
+                      "b":{"@type":"Card","version":"1.0","addressBookIds":{book:true},"name":{"full":format!("{marker} two")},"emails":{"e":{"address":&second}}}}}, "0"]]), &using).await;
+        let ids = [
+            created[0][1]["created"]["a"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            created[0][1]["created"]["b"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        ];
+        let mut b = eas::DocumentBuilder::new();
+        b.start(rr::RESOLVE_RECIPIENTS);
+        b.leaf(rr::TO, &first);
+        b.leaf(rr::TO, &marker);
+        b.leaf(rr::TO, "nobody-resolver@example.invalid");
+        b.start(rr::OPTIONS);
+        b.leaf(rr::MAX_AMBIGUOUS_RECIPIENTS, "1");
+        b.end();
+        b.end();
+        let result = live
+            .wbxml_version(
+                "ResolveRecipients",
+                &dev("resolve"),
+                wbxml::encode_document(&b.finish()),
+                "14.0",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&result, rr::STATUS),
+            vec!["1", "1", "3", "4"]
+        );
+        assert_eq!(
+            eas::find_all_text_after(&result, rr::RECIPIENT_COUNT),
+            vec!["1", "2", "0"]
+        );
+        assert_eq!(eas::find_all_text_after(&result, rr::TYPE), vec!["2", "2"]);
+        assert_eq!(
+            eas::find_all_text_after(&result, rr::EMAIL_ADDRESS)[0],
+            first
+        );
+        let cleanup = live.call_using(serde_json::json!([["ContactCard/set", {"accountId":live.account,"destroy":ids}, "0"]]), &using).await;
         assert!(cleanup[0][1]["notDestroyed"].is_null());
     }
 
