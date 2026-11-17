@@ -1305,7 +1305,7 @@ pub struct AttendeeField {
 /// ActiveSync Tasks class fields decoded from one Add/Change command's
 /// ApplicationData, limited to the subset this gateway round-trips (see
 /// `write_task_command` in activesync.rs) -- same minimal-non-recurring
-/// scoping as `CalendarFields`. `due_date` accepts EAS dateTime and the
+/// scoping as `CalendarFields`. Due dates accept EAS dateTime and the
 /// compact form used by older clients.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskFields {
@@ -1314,6 +1314,7 @@ pub struct TaskFields {
     pub body_type: Option<u8>,
     pub unsupported_body: bool,
     pub due_date: Option<String>,
+    pub utc_due_date: Option<String>,
     pub complete: Option<bool>,
 }
 
@@ -2685,6 +2686,8 @@ fn extract_task_fields(nodes: &[Node]) -> TaskFields {
                     fields.subject = Some(text.clone());
                 } else if same_token(top, tasks::DUE_DATE) {
                     fields.due_date = Some(text.clone());
+                } else if same_token(top, tasks::UTC_DUE_DATE) {
+                    fields.utc_due_date = Some(text.clone());
                 } else if same_token(top, tasks::COMPLETE) {
                     fields.complete = Some(text != "0");
                 }

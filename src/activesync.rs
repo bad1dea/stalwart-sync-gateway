@@ -6241,6 +6241,7 @@ fn task_hash(task: &crate::model::Task) -> String {
     }
     task.completed.hash(&mut hasher);
     task.due.hash(&mut hasher);
+    task.due_local.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -6308,12 +6309,17 @@ fn write_task_fields(
         }
     }
     builder.leaf(tasks::COMPLETE, if task.completed { "1" } else { "0" });
-    if let Some(due) = &task.due {
-        if let Ok(due) = chrono::NaiveDateTime::parse_from_str(due, "%Y%m%dT%H%M%SZ") {
-            let due = due.format("%Y-%m-%dT%H:%M:%S.000Z").to_string();
-            builder.leaf(tasks::DUE_DATE, &due);
-            builder.leaf(tasks::UTC_DUE_DATE, &due);
-        }
+    let format_due = |due: &str| {
+        chrono::NaiveDateTime::parse_from_str(due, "%Y%m%dT%H%M%SZ")
+            .ok()
+            .map(|date| date.format("%Y-%m-%dT%H:%M:%S.000Z").to_string())
+    };
+    if let (Some(local), Some(utc)) = (
+        task.due_local.as_deref().and_then(format_due),
+        task.due.as_deref().and_then(format_due),
+    ) {
+        builder.leaf(tasks::DUE_DATE, local);
+        builder.leaf(tasks::UTC_DUE_DATE, utc);
     }
 }
 

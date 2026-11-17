@@ -5315,7 +5315,7 @@ mod e2e {
             .call_using(
                 serde_json::json!([["CalendarEvent/set", {"accountId":live.account,
             "create":{"e":{"@type":"Task","calendarIds":{&calendar:true}, "title":"Task search fixture",
-            "description":&marker, "due":"2042-07-06T10:00:00", "progress":"needs-action"},
+            "description":&marker, "due":"2042-07-06T10:00:00", "timeZone":"America/Toronto", "progress":"needs-action"},
             "c":{"@type":"Event","calendarIds":{&calendar:true},"title":&marker,
             "start":"2042-07-06T10:00:00","duration":"PT1H"}}}, "0"]]),
                 &using,
@@ -5466,6 +5466,10 @@ mod e2e {
             Some("2042-07-06T10:00:00.000Z")
         );
         assert_eq!(
+            eas::find_text_after(&fetched, tasks::UTC_DUE_DATE),
+            Some("2042-07-06T14:00:00.000Z")
+        );
+        assert_eq!(
             eas::find_text_after(&fetched, base::DATA),
             Some(marker.as_str())
         );
@@ -5521,6 +5525,7 @@ mod e2e {
         b.leaf(air::SERVER_ID, &id);
         b.start(air::APPLICATION_DATA);
         b.leaf(tasks::DUE_DATE, "2042-07-07T12:30:00.000Z");
+        b.leaf(tasks::UTC_DUE_DATE, "2042-07-07T16:30:00.000Z");
         b.start(base::BODY);
         b.leaf(base::TYPE, "1");
         b.leaf(base::DATA, "updated task description");
@@ -5556,6 +5561,36 @@ mod e2e {
         b.start(air::CHANGE);
         b.leaf(air::SERVER_ID, &id);
         b.start(air::APPLICATION_DATA);
+        b.leaf(tasks::UTC_DUE_DATE, "2042-07-07T17:30:00.000Z");
+        for _ in 0..6 {
+            b.end();
+        }
+        let utc_updated = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&utc_updated, air::STATUS),
+            vec!["1", "1"]
+        );
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get", {"accountId":live.account,
+            "ids":[&id],"properties":["due"]}, "0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(native[0][1]["list"][0]["due"], "2042-07-07T13:30:00");
+
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&utc_updated));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, &id);
+        b.start(air::APPLICATION_DATA);
         b.leaf(tasks::DUE_DATE, "invalid-date");
         for _ in 0..6 {
             b.end();
@@ -5571,7 +5606,7 @@ mod e2e {
                 &using,
             )
             .await;
-        assert_eq!(native[0][1]["list"][0]["due"], "2042-07-07T12:30:00");
+        assert_eq!(native[0][1]["list"][0]["due"], "2042-07-07T13:30:00");
 
         let cleanup = live
             .call_using(

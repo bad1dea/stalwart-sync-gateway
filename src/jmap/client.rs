@@ -3005,6 +3005,7 @@ impl JmapClient {
                     "description",
                     "descriptionContentType",
                     "due",
+                    "timeZone",
                     "progress",
                 ]),
                 limit,
@@ -3046,8 +3047,7 @@ impl JmapClient {
     /// `CalendarEvent`, mirroring `save_calendar_event`'s structure and
     /// the same live-confirmed in-place `update` support (the JMAP id is
     /// a stable ActiveSync ServerId across edits, no workaround needed).
-    /// `due` deliberately omits `timeZone`, same "absent == already UTC"
-    /// convention `save_calendar_event` uses for `start`.
+    /// Existing time-zoned tasks retain their zone when their UTC due date changes.
     pub async fn save_task(
         &self,
         auth: &AuthenticatedSession,
@@ -3082,14 +3082,81 @@ impl JmapClient {
                 serde_json::Value::String(subject.clone()),
             );
         }
-        if let Some(due) = &fields.due_date {
-            let due = eas_compact_to_local_iso(due)
-                .or_else(|| {
-                    chrono::DateTime::parse_from_rfc3339(due)
-                        .ok()
-                        .map(|date| date.naive_utc().format("%Y-%m-%dT%H:%M:%S").to_string())
-                })
-                .context("invalid task due date")?;
+        let mut update_state = None;
+        if fields.due_date.is_some() || fields.utc_due_date.is_some() {
+            let parse = |value: &str| -> anyhow::Result<String> {
+                eas_compact_to_local_iso(value)
+                    .or_else(|| {
+                        chrono::DateTime::parse_from_rfc3339(value)
+                            .ok()
+                            .filter(|date| date.timestamp_subsec_nanos() == 0)
+                            .map(|date| date.naive_utc().format("%Y-%m-%dT%H:%M:%S").to_string())
+                    })
+                    .context("invalid task due date")
+            };
+            let local = fields.due_date.as_deref().map(parse).transpose()?;
+            let utc = fields.utc_due_date.as_deref().map(parse).transpose()?;
+            let timezone = if let Some(id) = id {
+                let response: JmapResponse<serde_json::Value> = self
+                    .api_call(
+                        auth,
+                        &[
+                            capabilities::CORE.to_owned(),
+                            capabilities::CALENDARS.to_owned(),
+                        ],
+                        vec![MethodCall::new(
+                            "CalendarEvent/get",
+                            serde_json::json!({
+                                "accountId":account_id,"ids":[id],"properties":["id","timeZone"]
+                            }),
+                            "0",
+                        )],
+                    )
+                    .await?;
+                let result = response
+                    .method_responses
+                    .iter()
+                    .find(|method| method.0 == "CalendarEvent/get")
+                    .context("task timezone lookup failed")?;
+                update_state = Some(
+                    result.1["state"]
+                        .as_str()
+                        .context("task state missing")?
+                        .to_owned(),
+                );
+                let item = result.1["list"]
+                    .as_array()
+                    .and_then(|list| list.iter().find(|item| item["id"] == id))
+                    .context("task not found")?;
+                let zone = item.get("timeZone").context("task time zone missing")?;
+                if zone.is_null() {
+                    None
+                } else {
+                    Some(zone.as_str().context("invalid task time zone")?.to_owned())
+                }
+            } else {
+                None
+            };
+            let due = if let Some(timezone) = timezone.as_deref() {
+                let utc = utc
+                    .as_deref()
+                    .context("task UTC due date required for a time-zoned task")?;
+                let compact = chrono::NaiveDateTime::parse_from_str(utc, "%Y-%m-%dT%H:%M:%S")?
+                    .format("%Y%m%dT%H%M%SZ")
+                    .to_string();
+                eas_to_calendar_local(&compact, Some(timezone))
+                    .context("task due date cannot be represented in its time zone")?
+                    .format("%Y-%m-%dT%H:%M:%S")
+                    .to_string()
+            } else {
+                if let (Some(local), Some(utc)) = (&local, &utc) {
+                    anyhow::ensure!(
+                        local == utc,
+                        "task local and UTC dates require a known time zone"
+                    );
+                }
+                utc.or(local).context("task due date missing")?
+            };
             task.insert("due".to_owned(), serde_json::Value::String(due));
         }
         if let Some(complete) = fields.complete {
@@ -3111,6 +3178,7 @@ impl JmapClient {
                 "CalendarEvent/set",
                 serde_json::json!({
                     "accountId": account_id,
+                    "ifInState": update_state,
                     "update": { existing_id: task }
                 }),
                 "0",
@@ -5206,6 +5274,8 @@ struct TaskObject {
     description_content_type: Option<String>,
     #[serde(default)]
     due: Option<String>,
+    #[serde(default, rename = "timeZone")]
+    time_zone: Option<String>,
     #[serde(default)]
     progress: Option<String>,
     #[serde(rename = "@type", default)]
@@ -5227,15 +5297,22 @@ impl From<TaskObject> for Task {
                 is_truncated: false,
             }),
             completed: value.progress.as_deref() == Some("completed"),
-            due: value.due.as_deref().and_then(local_to_utc_eas_no_tz),
+            due: value.due.as_deref().and_then(|due| {
+                if value
+                    .time_zone
+                    .as_deref()
+                    .is_some_and(|zone| zone.parse::<chrono_tz::Tz>().is_err())
+                {
+                    return None;
+                }
+                local_to_utc_eas(due, value.time_zone.as_deref())
+            }),
+            due_local: value.due.as_deref().and_then(local_to_utc_eas_no_tz),
         }
     }
 }
 
-/// `due` on a JSCalendar Task is a LocalDateTime with no accompanying
-/// `timeZone` property fetched here (this gateway doesn't currently
-/// request/round-trip Task time zones) -- treated as already-UTC, the
-/// same "absent timeZone" convention `local_to_utc_eas` itself uses.
+// Format the local wall time without applying a timezone offset.
 fn local_to_utc_eas_no_tz(local_iso: &str) -> Option<String> {
     local_to_utc_eas(local_iso, None)
 }

@@ -330,6 +330,7 @@ pub struct Task {
     pub description: Option<EmailBody>,
     pub completed: bool,
     pub due: Option<String>,
+    pub due_local: Option<String>,
 }
 
 /// `id` is the note's permanent stable id (see jmap/notes.rs), never the
