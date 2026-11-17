@@ -59,6 +59,8 @@ struct Mock {
     change_log: Mutex<Vec<String>>,
     groupware: Mutex<std::collections::BTreeMap<String, Vec<serde_json::Value>>>,
     snapshot_changes: AtomicBool,
+    delay_mail_set: AtomicBool,
+    delayed_mail_sets: AtomicUsize,
     snapshot_missing_item: AtomicBool,
     identity_error: AtomicBool,
     item_set_error: AtomicBool,
@@ -366,6 +368,10 @@ async fn mock_api(
                 serde_json::json!({"state":"stable", "list": list})
             }
             "Email/set" => {
+                if m.delay_mail_set.load(Ordering::SeqCst) {
+                    m.delayed_mail_sets.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
                 if m.item_set_error.load(Ordering::SeqCst) {
                     let not_updated = args["update"]
                         .as_object()
@@ -606,6 +612,8 @@ async fn start_mock() -> Arc<Mock> {
         change_log: Mutex::new(Vec::new()),
         groupware: Mutex::new(Default::default()),
         snapshot_changes: AtomicBool::new(false),
+        delay_mail_set: AtomicBool::new(false),
+        delayed_mail_sets: AtomicUsize::new(0),
         snapshot_missing_item: AtomicBool::new(false),
         identity_error: AtomicBool::new(false),
         item_set_error: AtomicBool::new(false),
@@ -5121,6 +5129,84 @@ mod e2e {
             )
             .await;
         assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_overlapping_sync_commands_apply_once() {
+        use eas::email;
+        let live = Live::new("E2E_USER2").await;
+        let created = live
+            .call(
+                serde_json::json!([["Mailbox/set", {"accountId":live.account,
+            "create":{"m":{"name":format!("Overlap fixture {}", std::process::id())}}}, "0"]]),
+            )
+            .await;
+        let folder = created[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let ids = live.seed(&folder, 1, "overlap-fixture", false).await;
+        let device = dev("overlap");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let synced = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let key = sync_key(&synced);
+        let change = |read: &str| {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(air::SYNC);
+            b.start(air::COLLECTIONS);
+            b.start(air::COLLECTION);
+            b.leaf(air::SYNC_KEY, &key);
+            b.leaf(air::COLLECTION_ID, &folder);
+            b.start(air::COMMANDS);
+            b.start(air::CHANGE);
+            b.leaf(air::SERVER_ID, &ids[0]);
+            b.start(air::APPLICATION_DATA);
+            b.leaf(email::READ, read);
+            for _ in 0..6 {
+                b.end();
+            }
+            wbxml::encode_document(&b.finish())
+        };
+        let first = live
+            .req_version("Sync", &device, "16.1")
+            .body(change("1"))
+            .send();
+        let second = live
+            .req_version("Sync", &device, "16.1")
+            .body(change("0"))
+            .send();
+        let (first, second) = tokio::join!(first, second);
+        let first = wbxml::decode_document(&first.unwrap().bytes().await.unwrap()).unwrap();
+        let second = wbxml::decode_document(&second.unwrap().bytes().await.unwrap()).unwrap();
+        let first_status = eas::find_text_after(&first, air::STATUS).unwrap();
+        let second_status = eas::find_text_after(&second, air::STATUS).unwrap();
+        assert!(matches!(
+            (first_status, second_status),
+            ("1", "3") | ("3", "1")
+        ));
+        let native = live
+            .call(serde_json::json!([["Email/get", {"accountId":live.account,
+            "ids":&ids,"properties":["keywords"]}, "0"]]))
+            .await;
+        let seen = native[0][1]["list"][0]["keywords"]["$seen"] == true;
+        assert_eq!(seen, first_status == "1");
+        let cleanup = live
+            .call(serde_json::json!([
+            ["Email/set", {"accountId":live.account,"destroy":ids}, "0"],
+            ["Mailbox/set", {"accountId":live.account,"destroy":[folder]}, "1"]]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
     }
 
     #[tokio::test]
@@ -13004,6 +13090,128 @@ async fn sync_heartbeat_timeout_is_empty_and_cached_request_receives_later_chang
     let reply = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
     assert!(eas::find_all_text_after(&reply, air::SERVER_ID)
         .contains(&"after-heartbeat-timeout".to_owned()));
+}
+
+#[tokio::test]
+async fn overlapping_sync_commands_do_not_reuse_a_sync_key() {
+    use eas::{airsync as air, email};
+    let env = start_env(Opts::default()).await;
+    let prime = env
+        .req("Sync", "overlap")
+        .body(sync_body("0", "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let prime = wbxml::decode_document(&prime.bytes().await.unwrap()).unwrap();
+    let synced = env
+        .req("Sync", "overlap")
+        .body(sync_body(&sync_key(&prime), "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let synced = wbxml::decode_document(&synced.bytes().await.unwrap()).unwrap();
+    let key = sync_key(&synced);
+    let change = |read: &str| {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, &key);
+        b.leaf(air::COLLECTION_ID, "inbox");
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, "m1");
+        b.start(air::APPLICATION_DATA);
+        b.leaf(email::READ, read);
+        for _ in 0..6 {
+            b.end();
+        }
+        wbxml::encode_document(&b.finish())
+    };
+    env.mock.delay_mail_set.store(true, Ordering::SeqCst);
+    let first = tokio::spawn(env.req("Sync", "overlap").body(change("1")).send());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while env.mock.delayed_mail_sets.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let second = tokio::spawn(env.req("Sync", "overlap").body(change("0")).send());
+    let first =
+        wbxml::decode_document(&first.await.unwrap().unwrap().bytes().await.unwrap()).unwrap();
+    let second =
+        wbxml::decode_document(&second.await.unwrap().unwrap().bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&first, air::STATUS), Some("1"));
+    assert_eq!(eas::find_text_after(&second, air::STATUS), Some("3"));
+    assert!(env
+        .mock
+        .keywords
+        .lock()
+        .unwrap()
+        .get("m1")
+        .unwrap()
+        .contains("$seen"));
+    assert_eq!(env.mock.delayed_mail_sets.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn waiting_sync_does_not_block_a_newer_sync() {
+    use eas::airsync as air;
+    let env = start_env(Opts::default()).await;
+    let prime = env
+        .req("Sync", "waiting")
+        .body(sync_body("0", "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let prime = wbxml::decode_document(&prime.bytes().await.unwrap()).unwrap();
+    let synced = env
+        .req("Sync", "waiting")
+        .body(sync_body(&sync_key(&prime), "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let synced = wbxml::decode_document(&synced.bytes().await.unwrap()).unwrap();
+    let key = sync_key(&synced);
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.leaf(air::HEARTBEAT_INTERVAL, "60");
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, &key);
+    b.leaf(air::COLLECTION_ID, "inbox");
+    b.empty_tag(air::GET_CHANGES);
+    b.end();
+    b.end();
+    b.end();
+    let pending = tokio::spawn(
+        env.req("Sync", "waiting")
+            .body(wbxml::encode_document(&b.finish()))
+            .send(),
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!pending.is_finished());
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        env.req("Sync", "waiting")
+            .body(sync_body(&key, "inbox"))
+            .send(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, air::STATUS), Some("1"));
+    env.mock.add_mail("inbox", "after-overlap");
+    env.mock.emit_email_change();
+    let response = tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert!(eas::find_all_text_after(&doc, air::SERVER_ID).contains(&"after-overlap".to_owned()));
 }
 
 #[tokio::test]

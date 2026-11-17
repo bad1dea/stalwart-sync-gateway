@@ -16,7 +16,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, Weak,
     },
     time::{Duration, Instant},
 };
@@ -65,6 +65,7 @@ pub struct DeviceState {
     synced_since_status2: bool,
     /// Newest Ping request number for this device; older ones are stale.
     ping_epoch: u64,
+    sync_lock: Weak<tokio::sync::Mutex<()>>,
     /// Folder id -> Status 2 answers naming it since the device last synced
     /// that folder. iOS blacklists a folder from push after more than 5.
     announced: HashMap<String, u32>,
@@ -192,6 +193,17 @@ impl UserPush {
         for f in folders {
             *d.announced.entry(f.clone()).or_default() += 1;
         }
+    }
+
+    pub fn sync_lock(&self, device: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut inner = self.inner.lock().unwrap();
+        let device = inner.devices.entry(device.to_owned()).or_default();
+        if let Some(lock) = device.sync_lock.upgrade() {
+            return lock;
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        device.sync_lock = Arc::downgrade(&lock);
+        lock
     }
 
     /// The device synced `folder`: it may be told about it again.

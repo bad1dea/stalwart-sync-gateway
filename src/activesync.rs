@@ -2632,6 +2632,7 @@ async fn sync_mail(
 ) -> Response {
     let user = auth.username();
     let device = query.device_id.as_deref().unwrap_or("unknown");
+    let original_request = document;
     let effective = match sync_request::resolve(state, user, device, version, document).await {
         Ok(document) => document,
         Err(status) => return sync_request::error(state, command, status),
@@ -2657,10 +2658,9 @@ async fn sync_mail(
         return (StatusCode::BAD_REQUEST, "Sync missing Collections\n").into_response();
     }
 
-    let mut remaining = match sync_request::global_window(document) {
-        Ok(window) => window,
-        Err(status) => return sync_request::error(state, command, status),
-    };
+    if let Err(status) = sync_request::global_window(document) {
+        return sync_request::error(state, command, status);
+    }
 
     let wait_expired = match sync_request::wait_seconds(document) {
         Ok(Some(seconds)) => wait_for_sync_changes(state, auth, query, &collections, seconds).await,
@@ -2668,6 +2668,21 @@ async fn sync_mail(
         Err((status, limit)) => {
             return sync_request::error_with_limit(state, command, status, limit)
         }
+    };
+
+    let push = state.push.user(&auth.username().to_ascii_lowercase());
+    let sync_lock = push.sync_lock(device);
+    let _sync_guard = sync_lock.lock().await;
+    let effective =
+        match sync_request::resolve(state, user, device, version, original_request).await {
+            Ok(document) => document,
+            Err(status) => return sync_request::error(state, command, status),
+        };
+    let document = &effective;
+    let collections = wbxml::eas::sync_collections(document);
+    let mut remaining = match sync_request::global_window(document) {
+        Ok(window) => window,
+        Err(status) => return sync_request::error(state, command, status),
     };
 
     if let Some(device) = query.device_id.as_deref() {
