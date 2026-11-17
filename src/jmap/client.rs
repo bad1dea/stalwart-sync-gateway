@@ -1445,7 +1445,12 @@ impl JmapClient {
                 }
             }
             let count = count.context("missing JMAP query response")?;
-            objects.extend(page.context("missing JMAP get response")?);
+            let page = page.context("missing JMAP get response")?;
+            anyhow::ensure!(
+                page.len() == count,
+                "JMAP {object_type} changed during snapshot; retry Sync"
+            );
+            objects.extend(page);
             position += count;
             if count == 0 || (limit != 0 && position >= limit) {
                 return Ok(objects);

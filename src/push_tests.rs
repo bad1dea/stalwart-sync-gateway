@@ -59,6 +59,7 @@ struct Mock {
     change_log: Mutex<Vec<String>>,
     groupware: Mutex<std::collections::BTreeMap<String, Vec<serde_json::Value>>>,
     snapshot_changes: AtomicBool,
+    snapshot_missing_item: AtomicBool,
     identity_error: AtomicBool,
     item_set_error: AtomicBool,
     drop_flag_keywords: AtomicBool,
@@ -352,13 +353,16 @@ async fn mock_api(
                     "calendar"
                 };
                 let items = m.groupware.lock().unwrap();
-                let list: Vec<_> = items
+                let mut list: Vec<_> = items
                     .get(kind)
                     .into_iter()
                     .flatten()
                     .filter(|v| last_query.iter().any(|id| v["id"] == id.as_str()))
                     .cloned()
                     .collect();
+                if m.snapshot_missing_item.load(Ordering::SeqCst) {
+                    list.pop();
+                }
                 serde_json::json!({"list": list})
             }
             "Email/set" => {
@@ -596,6 +600,7 @@ async fn start_mock() -> Arc<Mock> {
         change_log: Mutex::new(Vec::new()),
         groupware: Mutex::new(Default::default()),
         snapshot_changes: AtomicBool::new(false),
+        snapshot_missing_item: AtomicBool::new(false),
         identity_error: AtomicBool::new(false),
         item_set_error: AtomicBool::new(false),
         drop_flag_keywords: AtomicBool::new(false),
@@ -9179,6 +9184,34 @@ async fn a_changing_backend_snapshot_does_not_delete_held_contacts() {
         .unwrap();
     assert_eq!(previous.len(), 80);
     env.mock.snapshot_changes.store(true, Ordering::SeqCst);
+    let failed = item_sync(&env, "ipad", "ab_book", &key, "100").await;
+    assert_eq!(eas::find_text_after(&failed, air::STATUS), Some("5"));
+    assert_eq!(sync_key(&failed), key);
+    assert!(!eas::contains_token(&failed, air::DELETE));
+    assert_eq!(
+        env.state
+            .item_states("u@test", "ipad", "ab_book")
+            .await
+            .unwrap(),
+        previous
+    );
+}
+
+#[tokio::test]
+async fn missing_fetched_contact_does_not_delete_held_contacts() {
+    use eas::airsync as air;
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 3);
+    let prime = item_sync(&env, "ipad", "ab_book", "0", "100").await;
+    let page = item_sync(&env, "ipad", "ab_book", &sync_key(&prime), "100").await;
+    let key = sync_key(&page);
+    let previous = env
+        .state
+        .item_states("u@test", "ipad", "ab_book")
+        .await
+        .unwrap();
+    assert_eq!(previous.len(), 3);
+    env.mock.snapshot_missing_item.store(true, Ordering::SeqCst);
     let failed = item_sync(&env, "ipad", "ab_book", &key, "100").await;
     assert_eq!(eas::find_text_after(&failed, air::STATUS), Some("5"));
     assert_eq!(sync_key(&failed), key);
