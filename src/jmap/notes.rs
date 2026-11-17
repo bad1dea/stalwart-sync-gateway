@@ -355,7 +355,7 @@ impl JmapClient {
                             "textBody", "htmlBody", "bodyValues"
                         ],
                         "fetchAllBodyValues": true,
-                        "maxBodyValueBytes": 262144
+                        "maxBodyValueBytes": 0
                     }),
                     "0",
                 )],
@@ -369,7 +369,7 @@ impl JmapClient {
                 let Some(email) = get.list.into_iter().next() else {
                     return Ok(None);
                 };
-                let (body_type, body) = select_note_body(&email);
+                let (body_type, body) = select_note_body(&email)?;
                 return Ok(Some(Note {
                     id: stable_id.to_owned(),
                     title: email.subject.clone(),
@@ -611,25 +611,31 @@ struct NoteBodyPart {
 struct NoteBodyValue {
     #[serde(default)]
     value: String,
+    #[serde(default, rename = "isTruncated")]
+    is_truncated: bool,
 }
 
 /// Stalwart reports a single-part HTML-only message's part under BOTH
 /// htmlBody and textBody (verified live) -- prefer html explicitly rather
 /// than relying on array presence alone, matching the PHP reference fix.
-fn select_note_body(email: &NoteEmailObject) -> (EmailBodyType, String) {
+fn select_note_body(email: &NoteEmailObject) -> anyhow::Result<(EmailBodyType, String)> {
+    anyhow::ensure!(
+        email.body_values.values().all(|value| !value.is_truncated),
+        "JMAP returned a truncated note body"
+    );
     let html = body_value_for(&email.html_body, &email.body_values);
     if let Some(html) = html.clone() {
         if !html.is_empty() {
-            return (EmailBodyType::Html, html);
+            return Ok((EmailBodyType::Html, html));
         }
     }
     let text = body_value_for(&email.text_body, &email.body_values).unwrap_or_default();
     if let Some(html) = html {
         if text.is_empty() && !html.is_empty() {
-            return (EmailBodyType::Html, html);
+            return Ok((EmailBodyType::Html, html));
         }
     }
-    (EmailBodyType::Plain, text)
+    Ok((EmailBodyType::Plain, text))
 }
 
 fn body_value_for(
@@ -815,6 +821,16 @@ mod tests {
         assert!(mime.contains("Content-Type: text/html"));
         assert!(mime.contains("Subject: hello"));
         assert!(mime.ends_with("<b>hi</b>"));
+    }
+
+    #[test]
+    fn truncated_jmap_note_body_is_rejected() {
+        let email: super::NoteEmailObject = serde_json::from_value(serde_json::json!({
+            "id":"e", "textBody":[{"partId":"p"}],
+            "bodyValues":{"p":{"value":"partial", "isTruncated":true}}
+        }))
+        .unwrap();
+        assert!(super::select_note_body(&email).is_err());
     }
 
     #[test]

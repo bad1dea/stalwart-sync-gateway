@@ -4850,6 +4850,110 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_large_note_body_is_not_truncated() {
+        use eas::{airsync_base as base, notes};
+        let live = Live::new("E2E_USER2").await;
+        let mailboxes = live
+            .call(serde_json::json!([["Mailbox/get", {"accountId":live.account}, "0"]]))
+            .await;
+        let existing = mailboxes[0][1]["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == "Notes" && item["parentId"].is_null())
+            .and_then(|item| item["id"].as_str())
+            .map(str::to_owned);
+        let (mailbox, created) = if let Some(id) = existing {
+            (id, false)
+        } else {
+            let result = live
+                .call(
+                    serde_json::json!([["Mailbox/set", {"accountId":live.account,
+                "create":{"n":{"name":"Notes"}}}, "0"]]),
+                )
+                .await;
+            (
+                result[0][1]["created"]["n"]["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+                true,
+            )
+        };
+        let folder = format!("note_{mailbox}");
+        let device = dev("large-note");
+        let peer = dev("large-note-peer");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let initial = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let content = format!("{}END_MARKER", "x".repeat(270_000));
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&initial));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::ADD);
+        b.leaf(air::CLIENT_ID, "large-note-fixture");
+        b.start(air::APPLICATION_DATA);
+        b.leaf(notes::SUBJECT, "Large note fixture");
+        b.start(base::BODY);
+        b.leaf(base::TYPE, "1");
+        b.leaf(base::DATA, &content);
+        for _ in 0..7 {
+            b.end();
+        }
+        let added = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        let id = eas::find_text_after(&added, air::SERVER_ID)
+            .unwrap()
+            .to_owned();
+        let peer_prime = live
+            .wbxml_version("Sync", &peer, sync_body("0", &folder), "16.1")
+            .await;
+        let received = live
+            .wbxml_version(
+                "Sync",
+                &peer,
+                sync_body(&sync_key(&peer_prime), &folder),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&received, base::DATA)
+            .iter()
+            .any(|body| body == &content));
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&added));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::DELETE);
+        b.leaf(air::SERVER_ID, &id);
+        for _ in 0..5 {
+            b.end();
+        }
+        live.wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        if created {
+            let result = live.call(serde_json::json!([["Mailbox/set", {"accountId":live.account,"destroy":[mailbox]}, "0"]])).await;
+            assert!(result[0][1]["notDestroyed"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_task_search_and_fetch() {
         use eas::{airsync_base as base, item_operations as ops, search as srch, tasks};
         let live = Live::new("E2E_USER2").await;
