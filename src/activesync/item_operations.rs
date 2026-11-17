@@ -6,7 +6,8 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 
 use super::{
-    body_preferences_for_email, write_contact_fields, write_email_fields, ProtocolVersion,
+    body_preferences_for_email, write_calendar_fields, write_contact_fields, write_email_fields,
+    ProtocolVersion,
 };
 use crate::{
     http_server::AppState,
@@ -182,6 +183,72 @@ async fn fetch_item(
         .as_deref()
         .or(fetch.server_id.as_deref())
         .unwrap();
+    let calendar_target = if let Some(long_id) = fetch
+        .long_id
+        .as_deref()
+        .and_then(|id| id.strip_prefix("calendar:"))
+    {
+        long_id.split_once(":")
+    } else if fetch.long_id.is_none() {
+        fetch
+            .collection_id
+            .as_deref()
+            .and_then(|id| id.strip_prefix("cal_"))
+            .map(|id| (id, target))
+    } else {
+        None
+    };
+    if fetch
+        .long_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("calendar:"))
+        && calendar_target.is_none()
+    {
+        builder.leaf(ops::STATUS, "6");
+        return;
+    }
+    if let Some((calendar, event_id)) = calendar_target {
+        if calendar.is_empty()
+            || event_id.is_empty()
+            || event_id.contains(":")
+            || fetch
+                .collection_id
+                .as_deref()
+                .is_some_and(|folder| folder.strip_prefix("cal_") != Some(calendar))
+        {
+            builder.leaf(ops::STATUS, "6");
+            return;
+        }
+        match state
+            .jmap
+            .calendar_events_in_calendar(auth, calendar, 0)
+            .await
+        {
+            Ok(events) => match events.into_iter().find(|event| event.id == event_id) {
+                Some(event) => {
+                    builder.leaf(ops::STATUS, "1");
+                    if let Some(id) = fetch.collection_id.as_deref() {
+                        builder.leaf(air::COLLECTION_ID, id);
+                    }
+                    if let Some(id) = fetch.long_id.as_deref() {
+                        builder.leaf(eas::search::LONG_ID, id);
+                    } else {
+                        builder.leaf(air::SERVER_ID, event_id);
+                    }
+                    builder.leaf(air::CLASS, "Calendar");
+                    builder.start(ops::PROPERTIES);
+                    write_calendar_fields(builder, &event, version, &fetch.body_preferences, false);
+                    builder.end();
+                }
+                None => builder.leaf(ops::STATUS, "6"),
+            },
+            Err(error) => {
+                tracing::warn!(%error, "ItemOperations calendar fetch failed");
+                builder.leaf(ops::STATUS, "3");
+            }
+        }
+        return;
+    }
     let contact_id = fetch
         .long_id
         .as_deref()

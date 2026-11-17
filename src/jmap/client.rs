@@ -1937,6 +1937,47 @@ impl JmapClient {
     /// happened to not visibly break anything -- iOS's Calendar app just
     /// doesn't render a start-less event -- but that was luck, not a
     /// guarantee, so filter explicitly rather than rely on it.
+    pub async fn calendar_snapshot_state(
+        &self,
+        auth: &AuthenticatedSession,
+    ) -> anyhow::Result<(String, String)> {
+        let account = auth
+            .session
+            .primary_account_for(capabilities::CALENDARS)
+            .context("JMAP Calendars capability is unavailable")?;
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CALENDARS.to_owned(),
+                ],
+                vec![
+                    MethodCall::new(
+                        "Calendar/get",
+                        serde_json::json!({"accountId": account, "ids": []}),
+                        "c",
+                    ),
+                    MethodCall::new(
+                        "CalendarEvent/get",
+                        serde_json::json!({"accountId": account, "ids": []}),
+                        "e",
+                    ),
+                ],
+            )
+            .await?;
+        let state = |name: &str| -> anyhow::Result<String> {
+            Ok(response
+                .method_responses
+                .iter()
+                .find(|method| method.0 == name)
+                .and_then(|method| method.1["state"].as_str())
+                .context("calendar snapshot state unavailable")?
+                .to_owned())
+        };
+        Ok((state("Calendar/get")?, state("CalendarEvent/get")?))
+    }
+
     pub async fn calendar_events_in_calendar(
         &self,
         auth: &AuthenticatedSession,

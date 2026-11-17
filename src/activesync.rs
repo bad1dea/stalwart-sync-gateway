@@ -982,6 +982,154 @@ async fn search(
         } else if request
             .class
             .as_deref()
+            .is_some_and(|class| class.eq_ignore_ascii_case("Calendar"))
+        {
+            if request.received_after.is_some()
+                || request.received_before.is_some()
+                || request.conversation_id.is_some()
+                || request.or_terms.as_ref().is_some_and(|terms| {
+                    terms.received_after.is_some() || terms.received_before.is_some()
+                })
+            {
+                builder.leaf(srch::STATUS, "8");
+            } else {
+                let result = async {
+                    let before = state.jmap.calendar_snapshot_state(auth).await?;
+                    let collections = state.jmap.collections(auth).await?;
+                    let mut calendars: Vec<_> = collections
+                        .into_iter()
+                        .filter(|item| item.kind == crate::model::CollectionKind::Calendar)
+                        .map(|item| item.id)
+                        .collect();
+                    calendars.sort();
+                    if let Some(folder) = &request.collection_id {
+                        anyhow::ensure!(
+                            calendars.contains(folder),
+                            "unknown calendar search folder"
+                        );
+                        calendars.retain(|id| id == folder);
+                    }
+                    let terms: Vec<_> = request
+                        .free_texts
+                        .iter()
+                        .filter(|term| !term.is_empty())
+                        .map(|term| term.to_lowercase())
+                        .collect();
+                    let alternatives = request.or_terms.as_ref().map(|or| {
+                        or.texts
+                            .iter()
+                            .filter(|term| !term.is_empty())
+                            .map(|term| term.to_lowercase())
+                            .collect::<Vec<_>>()
+                    });
+                    let mut matches = BTreeMap::new();
+                    for folder in calendars {
+                        let calendar = folder
+                            .strip_prefix("cal_")
+                            .context("invalid calendar folder")?;
+                        for event in state
+                            .jmap
+                            .calendar_events_in_calendar(auth, calendar, 0)
+                            .await?
+                        {
+                            let has =
+                                |term: &str| {
+                                    event.title.to_lowercase().contains(term)
+                                        || event.location.as_ref().is_some_and(|value| {
+                                            value.to_lowercase().contains(term)
+                                        })
+                                        || event.description.as_ref().is_some_and(|value| {
+                                            value.value.to_lowercase().contains(term)
+                                        })
+                                        || event.organizer_name.as_ref().is_some_and(|value| {
+                                            value.to_lowercase().contains(term)
+                                        })
+                                        || event.organizer_email.as_ref().is_some_and(|value| {
+                                            value.to_lowercase().contains(term)
+                                        })
+                                        || event
+                                            .categories
+                                            .iter()
+                                            .any(|value| value.to_lowercase().contains(term))
+                                        || event.attendees.iter().any(|attendee| {
+                                            attendee.email.to_lowercase().contains(term)
+                                                || attendee.name.as_ref().is_some_and(|value| {
+                                                    value.to_lowercase().contains(term)
+                                                })
+                                        })
+                                };
+                            if terms.iter().all(|term| has(term))
+                                && alternatives
+                                    .as_ref()
+                                    .is_none_or(|terms| terms.iter().any(|term| has(term)))
+                            {
+                                anyhow::ensure!(
+                                    !calendar.contains(":") && !event.id.contains(":"),
+                                    "invalid calendar search identifier"
+                                );
+                                let long_id = format!("calendar:{calendar}:{}", event.id);
+                                anyhow::ensure!(
+                                    long_id.len() <= 256,
+                                    "calendar search identifier too long"
+                                );
+                                matches.entry(event.id.clone()).or_insert((
+                                    folder.clone(),
+                                    long_id,
+                                    event,
+                                ));
+                            }
+                        }
+                    }
+                    anyhow::ensure!(
+                        before == state.jmap.calendar_snapshot_state(auth).await?,
+                        "calendar changed during search"
+                    );
+                    let total = matches.len();
+                    let events: Vec<_> = matches
+                        .into_values()
+                        .skip(position as usize)
+                        .take(limit)
+                        .collect();
+                    Ok::<_, anyhow::Error>((events, total))
+                }
+                .await;
+                match result {
+                    Ok((events, total)) => {
+                        builder.leaf(srch::STATUS, "1");
+                        let count = events.len();
+                        for (folder, long_id, event) in events {
+                            builder.start(srch::RESULT);
+                            builder.leaf(air::CLASS, "Calendar");
+                            builder.leaf(srch::LONG_ID, long_id);
+                            builder.leaf(air::COLLECTION_ID, folder);
+                            builder.start(srch::PROPERTIES);
+                            write_calendar_fields(
+                                &mut builder,
+                                &event,
+                                version,
+                                &request.body_preferences,
+                                false,
+                            );
+                            builder.end();
+                            builder.end();
+                        }
+                        if count > 0 {
+                            builder.leaf(
+                                srch::RANGE,
+                                format!("{position}-{}", position + count as i64 - 1),
+                            );
+                        }
+                        builder.leaf(srch::TOTAL, total.to_string());
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Search calendar query failed");
+                        builder.leaf(srch::STATUS, "3");
+                    }
+                }
+            }
+        } else if request
+            .class
+            .as_deref()
             .is_some_and(|class| class.eq_ignore_ascii_case("Contacts"))
         {
             if request.received_after.is_some()
@@ -5352,7 +5500,30 @@ fn write_calendar_command(
     version: ProtocolVersion,
     requests: &[RequestedBodyPreference],
 ) {
-    use wbxml::eas::{airsync as air, calendar as cal};
+    use wbxml::eas::airsync as air;
+
+    builder.start(tag);
+    builder.leaf(air::SERVER_ID, event.id.clone());
+    builder.start(air::APPLICATION_DATA);
+    write_calendar_fields(
+        builder,
+        event,
+        version,
+        requests,
+        tag.code_page == air::PAGE && tag.token == air::CHANGE.token,
+    );
+    builder.end();
+    builder.end();
+}
+
+fn write_calendar_fields(
+    builder: &mut wbxml::eas::DocumentBuilder,
+    event: &crate::model::CalendarEvent,
+    version: ProtocolVersion,
+    requests: &[RequestedBodyPreference],
+    is_change: bool,
+) {
+    use wbxml::eas::calendar as cal;
 
     // Field order matches the real z-push-stalwart-jmap source (PR #187,
     // pinned in config/z-push/Dockerfile: src/lib/syncobjects/
@@ -5363,9 +5534,6 @@ fn write_calendar_command(
     // not just the PHP source, for the Organizer/MeetingStatus/Attendees
     // placement specifically -- the PR #187 mapping doesn't cover those
     // three since z-push-stalwart-jmap never implemented them).
-    builder.start(tag);
-    builder.leaf(air::SERVER_ID, event.id.clone());
-    builder.start(air::APPLICATION_DATA);
     builder.leaf(
         cal::DTSTAMP,
         eas_datetime(&chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
@@ -5382,9 +5550,10 @@ fn write_calendar_command(
         value: String::new(),
         is_truncated: false,
     };
-    let description = event.description.as_ref().or_else(|| {
-        (tag.code_page == air::PAGE && tag.token == air::CHANGE.token).then_some(&empty_body)
-    });
+    let description = event
+        .description
+        .as_ref()
+        .or_else(|| (is_change).then_some(&empty_body));
     if let Some(body) = description {
         use wbxml::eas::airsync_base as base;
         let preference = select_body_preference(Some(body), None, requests);
@@ -5436,15 +5605,12 @@ fn write_calendar_command(
             builder.leaf(cal::CATEGORY, category);
         }
         builder.end();
-    } else if tag.code_page == air::PAGE && tag.token == air::CHANGE.token {
+    } else if is_change {
         builder.empty_tag(cal::CATEGORIES);
     }
     if let Some(minutes) = event.reminder_minutes {
         builder.leaf(cal::REMINDER, minutes.to_string());
-    } else if tag.code_page == air::PAGE
-        && tag.token == air::CHANGE.token
-        && matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1)
-    {
+    } else if is_change && matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
         builder.empty_tag(cal::REMINDER);
     }
     if !event.attendees.is_empty() {
@@ -5485,12 +5651,10 @@ fn write_calendar_command(
             builder.end();
         }
         builder.end();
-    } else if tag.code_page == air::PAGE && tag.token == air::CHANGE.token {
+    } else if is_change {
         builder.leaf(cal::MEETING_STATUS, "0");
         builder.empty_tag(cal::ATTENDEES);
     }
-    builder.end();
-    builder.end();
 }
 
 /// Same Add/Change/Delete + hash-diff shape as `sync_calendar_collection`

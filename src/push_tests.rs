@@ -324,7 +324,7 @@ async fn mock_api(
                 serde_json::json!({"list": [{"id": "book", "name": "Contacts", "isDefault": true}]})
             }
             "Calendar/get" => {
-                serde_json::json!({"list": [{"id": "calendar", "name": "Calendar", "isDefault": true}]})
+                serde_json::json!({"state":"stable", "list": [{"id": "calendar", "name": "Calendar", "isDefault": true}]})
             }
             "ContactCard/query" | "CalendarEvent/query" => {
                 let kind = if name == "ContactCard/query" {
@@ -363,7 +363,7 @@ async fn mock_api(
                 if m.snapshot_missing_item.load(Ordering::SeqCst) {
                     list.pop();
                 }
-                serde_json::json!({"list": list})
+                serde_json::json!({"state":"stable", "list": list})
             }
             "Email/set" => {
                 if m.item_set_error.load(Ordering::SeqCst) {
@@ -4843,6 +4843,106 @@ mod e2e {
             .call(
                 serde_json::json!([["Email/set",{"accountId":live.account,"destroy":ids},"0"],
             ["Mailbox/set",{"accountId":live.account,"destroy":[child,parent,outside]},"1"]]),
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_calendar_search_and_fetch() {
+        use eas::{calendar as cal, item_operations as ops, search as srch};
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let created = live
+            .call_using(
+                serde_json::json!([["Calendar/set", {"accountId":live.account,
+            "create":{"c":{"name":format!("Search fixture {}", std::process::id())}}}, "0"]]),
+                &using,
+            )
+            .await;
+        let calendar = created[0][1]["created"]["c"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let marker = format!("calendarsearchfixture{}", std::process::id());
+        let events = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set", {"accountId":live.account,
+            "create":{"e":{"@type":"Event","calendarIds":{&calendar:true}, "title":&marker,
+            "start":"2042-07-06T10:00:00", "duration":"PT1H"}}}, "0"]]),
+                &using,
+            )
+            .await;
+        let id = events[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("event create failed: {events}"))
+            .to_owned();
+        let folder = format!("cal_{calendar}");
+        let mut b = eas::DocumentBuilder::new();
+        b.start(srch::SEARCH);
+        b.start(srch::STORE);
+        b.leaf(srch::NAME, "Mailbox");
+        b.start(srch::QUERY);
+        b.start(srch::AND);
+        b.leaf(air::CLASS, "Calendar");
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.leaf(srch::FREE_TEXT, &marker);
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        let result = live
+            .wbxml_version(
+                "Search",
+                &dev("calendar-search"),
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&result, srch::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(eas::find_text_after(&result, srch::TOTAL), Some("1"));
+        assert_eq!(
+            eas::find_text_after(&result, cal::SUBJECT),
+            Some(marker.as_str())
+        );
+        let long_id = eas::find_text_after(&result, srch::LONG_ID).unwrap();
+        let mut b = eas::DocumentBuilder::new();
+        b.start(ops::ITEM_OPERATIONS);
+        b.start(ops::FETCH);
+        b.leaf(ops::STORE, "Mailbox");
+        b.leaf(srch::LONG_ID, long_id);
+        b.end();
+        b.end();
+        let fetched = live
+            .wbxml_version(
+                "ItemOperations",
+                &dev("calendar-search"),
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&fetched, ops::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(
+            eas::find_text_after(&fetched, cal::SUBJECT),
+            Some(marker.as_str())
+        );
+        let cleanup = live
+            .call_using(
+                serde_json::json!([
+            ["CalendarEvent/set", {"accountId":live.account,"destroy":[id]}, "0"],
+            ["Calendar/set", {"accountId":live.account,"destroy":[calendar]}, "1"]]),
+                &using,
             )
             .await;
         assert!(cleanup[0][1]["notDestroyed"].is_null());
@@ -11159,7 +11259,7 @@ async fn search_rejects_unsupported_or_misplaced_classes() {
     let env = start_env(Opts::default()).await;
     for (classes, nested, expected) in [
         (vec!["Email"], true, "1"),
-        (vec!["Calendar"], true, "8"),
+        (vec!["Tasks"], true, "8"),
         (vec!["Email", "Contacts"], true, "8"),
         (vec!["Email"], false, "8"),
     ] {
@@ -11196,6 +11296,112 @@ async fn search_rejects_unsupported_or_misplaced_classes() {
             assert!(!eas::contains_token(&doc, srch::TOTAL));
         }
     }
+}
+
+#[tokio::test]
+async fn calendar_search_pages_and_fetches_results() {
+    use eas::{airsync as air, calendar as cal, item_operations as ops, search as srch};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 12);
+    let mut b = eas::DocumentBuilder::new();
+    b.start(srch::SEARCH);
+    b.start(srch::STORE);
+    b.leaf(srch::NAME, "Mailbox");
+    b.start(srch::QUERY);
+    b.start(srch::AND);
+    b.leaf(air::CLASS, "Calendar");
+    b.leaf(srch::FREE_TEXT, "EVENT");
+    b.end();
+    b.end();
+    b.start(srch::OPTIONS);
+    b.leaf(srch::RANGE, "2-3");
+    b.end();
+    b.end();
+    b.end();
+    let response = env
+        .req("Search", "client")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, srch::STATUS), vec!["1", "1"]);
+    assert_eq!(eas::find_text_after(&doc, srch::TOTAL), Some("12"));
+    assert_eq!(eas::find_text_after(&doc, srch::RANGE), Some("2-3"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, cal::SUBJECT),
+        vec!["Event 2", "Event 3"]
+    );
+    let id = eas::find_text_after(&doc, srch::LONG_ID).unwrap();
+    let mut b = eas::DocumentBuilder::new();
+    b.start(ops::ITEM_OPERATIONS);
+    b.start(ops::FETCH);
+    b.leaf(ops::STORE, "Mailbox");
+    b.leaf(srch::LONG_ID, id);
+    b.end();
+    b.end();
+    let response = env
+        .req("ItemOperations", "client")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, ops::STATUS), vec!["1", "1"]);
+    assert_eq!(eas::find_text_after(&doc, cal::SUBJECT), Some("Event 2"));
+
+    for (long_id, folder) in [
+        ("calendar:calendar:e0002", Some("cal_other")),
+        ("calendar:bad", None),
+    ] {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(ops::ITEM_OPERATIONS);
+        b.start(ops::FETCH);
+        b.leaf(ops::STORE, "Mailbox");
+        b.leaf(srch::LONG_ID, long_id);
+        if let Some(folder) = folder {
+            b.leaf(air::COLLECTION_ID, folder);
+        }
+        b.end();
+        b.end();
+        let response = env
+            .req("ItemOperations", "client")
+            .body(wbxml::encode_document(&b.finish()))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, ops::STATUS), vec!["1", "6"]);
+    }
+}
+
+#[tokio::test]
+async fn calendar_search_rejects_a_changing_snapshot() {
+    use eas::{airsync as air, search as srch};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 80);
+    env.mock.snapshot_changes.store(true, Ordering::SeqCst);
+    let mut b = eas::DocumentBuilder::new();
+    b.start(srch::SEARCH);
+    b.start(srch::STORE);
+    b.leaf(srch::NAME, "Mailbox");
+    b.start(srch::QUERY);
+    b.start(srch::AND);
+    b.leaf(air::CLASS, "Calendar");
+    b.leaf(srch::FREE_TEXT, "Event");
+    b.end();
+    b.end();
+    b.end();
+    b.end();
+    let response = env
+        .req("Search", "client")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, srch::STATUS), vec!["1", "3"]);
+    assert!(!eas::contains_token(&doc, srch::TOTAL));
 }
 
 #[tokio::test]

@@ -1586,7 +1586,10 @@ fn search_classes(document: &Document) -> (Option<String>, bool) {
     let mut invalid = false;
     visit(document, None, &mut values, &mut invalid);
     if let Some(first) = values.first() {
-        if !first.eq_ignore_ascii_case("Email") && !first.eq_ignore_ascii_case("Contacts") {
+        if !first.eq_ignore_ascii_case("Email")
+            && !first.eq_ignore_ascii_case("Contacts")
+            && !first.eq_ignore_ascii_case("Calendar")
+        {
             invalid = true;
         }
         if values
