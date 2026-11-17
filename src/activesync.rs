@@ -1492,12 +1492,12 @@ async fn search(
         } else {
             let texts = &request.free_texts;
             let results = async {
+                let collections = state.jmap.collections(auth).await?;
+                let mailboxes: Vec<_> = collections
+                    .iter()
+                    .filter(|item| item.kind == crate::model::CollectionKind::Mail)
+                    .collect();
                 let folders = if let Some(folder) = &request.collection_id {
-                    let collections = state.jmap.collections(auth).await?;
-                    let mailboxes: Vec<_> = collections
-                        .iter()
-                        .filter(|item| item.kind == crate::model::CollectionKind::Mail)
-                        .collect();
                     if !mailboxes.iter().any(|item| &item.id == folder) {
                         anyhow::bail!("unknown search folder");
                     }
@@ -1521,8 +1521,11 @@ async fn search(
                     }
                     Some(scope.into_iter().collect::<Vec<_>>())
                 } else {
-                    None
+                    Some(mailboxes.iter().map(|mailbox| mailbox.id.clone()).collect::<Vec<_>>())
                 };
+                if folders.as_ref().is_some_and(Vec::is_empty) {
+                    return Ok((Vec::new(), 0, folders));
+                }
                 // Stalwart indexes receivedAt at whole-second precision.
                 let boundary = |value: &str, upper: bool| -> anyhow::Result<String> {
                     let time = chrono::DateTime::parse_from_rfc3339(value)?;

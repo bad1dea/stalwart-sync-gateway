@@ -481,6 +481,11 @@ async fn mock_api(
                                 keyword_map.get(&id).unwrap_or(&Default::default()),
                                 &m.date_of(&id),
                             );
+                            email["mailboxIds"] = serde_json::json!(boxes
+                                .iter()
+                                .filter(|(_, items)| items.contains(&id))
+                                .map(|(mailbox, _)| (mailbox.clone(), true))
+                                .collect::<std::collections::BTreeMap<_, _>>());
                             if let Some(structure) = m.mail_structures.lock().unwrap().get(&id) {
                                 email["bodyStructure"] = structure.clone();
                             }
@@ -523,10 +528,11 @@ async fn mock_api(
                                     serde_json::json!([])
                                 };
                             }
-                            if mb == "notes" {
+                            if boxes.get("notes").is_some_and(|items| items.contains(&id)) {
                                 email["keywords"] = serde_json::json!({format!("noteid-{id}"): true, "$note": true});
                             }
                             list.push(email);
+                            break;
                         }
                     }
                 }
@@ -4896,6 +4902,7 @@ mod e2e {
             .await;
         let marker = format!("note_end_marker_{}", std::process::id());
         let content = format!("{}{marker}", "x".repeat(270_000));
+        let subject = format!("Noteonlyfixture{}", std::process::id());
         let mut b = eas::DocumentBuilder::new();
         b.start(air::SYNC);
         b.start(air::COLLECTIONS);
@@ -4906,7 +4913,7 @@ mod e2e {
         b.start(air::ADD);
         b.leaf(air::CLIENT_ID, "large-note-fixture");
         b.start(air::APPLICATION_DATA);
-        b.leaf(notes::SUBJECT, "Large note fixture");
+        b.leaf(notes::SUBJECT, &subject);
         b.start(base::BODY);
         b.leaf(base::TYPE, "1");
         b.leaf(base::DATA, &content);
@@ -5004,6 +5011,26 @@ mod e2e {
                 vec!["1", "6"]
             );
         }
+        let mut b = eas::DocumentBuilder::new();
+        b.start(srch::SEARCH);
+        b.start(srch::STORE);
+        b.leaf(srch::NAME, "Mailbox");
+        b.start(srch::QUERY);
+        b.start(srch::AND);
+        b.leaf(air::CLASS, "Email");
+        b.leaf(srch::FREE_TEXT, &subject);
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        let email_result = live
+            .wbxml_version("Search", &peer, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&email_result, srch::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(eas::find_text_after(&email_result, srch::TOTAL), Some("0"));
         let mut b = eas::DocumentBuilder::new();
         b.start(air::SYNC);
         b.start(air::COLLECTIONS);
@@ -11648,6 +11675,47 @@ async fn search_rejects_unsupported_or_misplaced_classes() {
             assert!(!eas::contains_token(&doc, srch::TOTAL));
         }
     }
+}
+
+#[tokio::test]
+async fn email_search_excludes_hidden_notes_but_keeps_shared_mail() {
+    use eas::{airsync as air, search as srch};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 1);
+    let mut b = eas::DocumentBuilder::new();
+    b.start(srch::SEARCH);
+    b.start(srch::STORE);
+    b.leaf(srch::NAME, "Mailbox");
+    b.start(srch::QUERY);
+    b.start(srch::AND);
+    b.leaf(air::CLASS, "Email");
+    b.leaf(srch::FREE_TEXT, "n0000");
+    b.end();
+    b.end();
+    b.end();
+    b.end();
+    let request = wbxml::encode_document(&b.finish());
+    let response = env
+        .req("Search", "client")
+        .body(request.clone())
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, srch::TOTAL), Some("0"));
+    env.mock.add_mail("inbox", "n0000");
+    let response = env
+        .req("Search", "client")
+        .body(request)
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, srch::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_text_after(&doc, air::COLLECTION_ID),
+        Some("inbox")
+    );
 }
 
 #[tokio::test]
