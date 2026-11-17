@@ -1593,6 +1593,7 @@ fn search_classes(document: &Document) -> (Option<String>, bool) {
             && !first.eq_ignore_ascii_case("Contacts")
             && !first.eq_ignore_ascii_case("Calendar")
             && !first.eq_ignore_ascii_case("Tasks")
+            && !first.eq_ignore_ascii_case("Notes")
         {
             invalid = true;
         }

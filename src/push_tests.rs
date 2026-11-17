@@ -4851,7 +4851,7 @@ mod e2e {
     #[tokio::test]
     #[ignore]
     async fn e2e_large_note_body_is_not_truncated() {
-        use eas::{airsync_base as base, notes};
+        use eas::{airsync_base as base, item_operations as ops, notes, search as srch};
         let live = Live::new("E2E_USER2").await;
         let mailboxes = live
             .call(serde_json::json!([["Mailbox/get", {"accountId":live.account}, "0"]]))
@@ -4894,7 +4894,8 @@ mod e2e {
                 "16.1",
             )
             .await;
-        let content = format!("{}END_MARKER", "x".repeat(270_000));
+        let marker = format!("note_end_marker_{}", std::process::id());
+        let content = format!("{}{marker}", "x".repeat(270_000));
         let mut b = eas::DocumentBuilder::new();
         b.start(air::SYNC);
         b.start(air::COLLECTIONS);
@@ -4932,6 +4933,77 @@ mod e2e {
         assert!(eas::find_all_text_after(&received, base::DATA)
             .iter()
             .any(|body| body == &content));
+        for explicit in [true, false] {
+            let mut b = eas::DocumentBuilder::new();
+            b.start(srch::SEARCH);
+            b.start(srch::STORE);
+            b.leaf(srch::NAME, "Mailbox");
+            b.start(srch::QUERY);
+            b.start(srch::AND);
+            if explicit {
+                b.leaf(air::CLASS, "Notes");
+            }
+            b.leaf(air::COLLECTION_ID, &folder);
+            b.leaf(srch::FREE_TEXT, &marker);
+            b.end();
+            b.end();
+            b.end();
+            b.end();
+            let result = live
+                .wbxml_version("Search", &peer, wbxml::encode_document(&b.finish()), "16.1")
+                .await;
+            assert_eq!(
+                eas::find_all_text_after(&result, srch::STATUS),
+                vec!["1", "1"]
+            );
+            assert_eq!(eas::find_text_after(&result, srch::TOTAL), Some("1"));
+            assert_eq!(eas::find_text_after(&result, air::CLASS), Some("Notes"));
+            let long_id = eas::find_text_after(&result, srch::LONG_ID).unwrap();
+            let mut b = eas::DocumentBuilder::new();
+            b.start(ops::ITEM_OPERATIONS);
+            b.start(ops::FETCH);
+            b.leaf(ops::STORE, "Mailbox");
+            b.leaf(srch::LONG_ID, long_id);
+            b.end();
+            b.end();
+            let fetched = live
+                .wbxml_version(
+                    "ItemOperations",
+                    &peer,
+                    wbxml::encode_document(&b.finish()),
+                    "16.1",
+                )
+                .await;
+            assert_eq!(
+                eas::find_all_text_after(&fetched, ops::STATUS),
+                vec!["1", "1"]
+            );
+            assert_eq!(
+                eas::find_text_after(&fetched, base::DATA),
+                Some(content.as_str())
+            );
+            assert_eq!(eas::find_text_after(&result, base::TRUNCATED), Some("1"));
+            let mut b = eas::DocumentBuilder::new();
+            b.start(ops::ITEM_OPERATIONS);
+            b.start(ops::FETCH);
+            b.leaf(ops::STORE, "Mailbox");
+            b.leaf(srch::LONG_ID, long_id);
+            b.leaf(air::COLLECTION_ID, "note_wrongfolder");
+            b.end();
+            b.end();
+            let denied = live
+                .wbxml_version(
+                    "ItemOperations",
+                    &peer,
+                    wbxml::encode_document(&b.finish()),
+                    "16.1",
+                )
+                .await;
+            assert_eq!(
+                eas::find_all_text_after(&denied, ops::STATUS),
+                vec!["1", "6"]
+            );
+        }
         let mut b = eas::DocumentBuilder::new();
         b.start(air::SYNC);
         b.start(air::COLLECTIONS);
@@ -11539,7 +11611,7 @@ async fn search_rejects_unsupported_or_misplaced_classes() {
     let env = start_env(Opts::default()).await;
     for (classes, nested, expected) in [
         (vec!["Email"], true, "1"),
-        (vec!["Notes"], true, "8"),
+        (vec!["SMS"], true, "8"),
         (vec!["Email", "Contacts"], true, "8"),
         (vec!["Email"], false, "8"),
     ] {

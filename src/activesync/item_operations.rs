@@ -7,7 +7,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 
 use super::{
     body_preferences_for_email, write_calendar_fields, write_contact_fields, write_email_fields,
-    write_task_fields, ProtocolVersion,
+    write_note_fields, write_task_fields, ProtocolVersion,
 };
 use crate::{
     http_server::AppState,
@@ -183,6 +183,82 @@ async fn fetch_item(
         .as_deref()
         .or(fetch.server_id.as_deref())
         .unwrap();
+    let note_target = if let Some(long_id) = fetch
+        .long_id
+        .as_deref()
+        .and_then(|id| id.strip_prefix("note:"))
+    {
+        long_id.split_once(':')
+    } else if fetch.long_id.is_none() {
+        fetch
+            .collection_id
+            .as_deref()
+            .and_then(|id| id.strip_prefix("note_"))
+            .map(|id| (id, target))
+    } else {
+        None
+    };
+    if fetch
+        .long_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("note:"))
+        && note_target.is_none()
+    {
+        builder.leaf(ops::STATUS, "6");
+        return;
+    }
+    if let Some((mailbox, note_id)) = note_target {
+        if mailbox.is_empty()
+            || note_id.is_empty()
+            || note_id.contains(':')
+            || fetch
+                .collection_id
+                .as_deref()
+                .is_some_and(|folder| folder.strip_prefix("note_") != Some(mailbox))
+        {
+            builder.leaf(ops::STATUS, "6");
+            return;
+        }
+        let result = async {
+            let folder = format!("note_{mailbox}");
+            let collections = state.jmap.collections(auth).await?;
+            if !collections
+                .iter()
+                .any(|item| item.id == folder && item.kind == crate::model::CollectionKind::Notes)
+            {
+                return Ok::<_, anyhow::Error>(None);
+            }
+            let summaries = state.jmap.list_notes(auth, mailbox, 0).await?;
+            if !summaries.iter().any(|item| item.id == note_id) {
+                return Ok(None);
+            }
+            state.jmap.get_note(auth, note_id).await
+        }
+        .await;
+        match result {
+            Ok(Some(note)) => {
+                builder.leaf(ops::STATUS, "1");
+                if let Some(id) = fetch.collection_id.as_deref() {
+                    builder.leaf(air::COLLECTION_ID, id);
+                }
+                if let Some(id) = fetch.long_id.as_deref() {
+                    builder.leaf(eas::search::LONG_ID, id);
+                } else {
+                    builder.leaf(air::SERVER_ID, note_id);
+                }
+                builder.leaf(air::CLASS, "Notes");
+                builder.start(ops::PROPERTIES);
+                write_note_fields(builder, &note, &fetch.body_preferences);
+                builder.end();
+            }
+            Ok(None) => builder.leaf(ops::STATUS, "6"),
+            Err(error) => {
+                tracing::warn!(%error, "ItemOperations note fetch failed");
+                builder.leaf(ops::STATUS, "3");
+            }
+        }
+        return;
+    }
     let task_target = if let Some(long_id) = fetch
         .long_id
         .as_deref()

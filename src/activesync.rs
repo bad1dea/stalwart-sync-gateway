@@ -980,6 +980,8 @@ async fn search(
                 Some("Calendar")
             } else if folder.starts_with("task_") {
                 Some("Tasks")
+            } else if folder.starts_with("note_") {
+                Some("Notes")
             } else {
                 None
             }
@@ -993,6 +995,133 @@ async fn search(
             builder.leaf(srch::STATUS, "8");
         } else if request.unsupported_query {
             builder.leaf(srch::STATUS, "2");
+        } else if search_class.is_some_and(|class| class.eq_ignore_ascii_case("Notes")) {
+            if request.received_after.is_some()
+                || request.received_before.is_some()
+                || request.conversation_id.is_some()
+                || request.or_terms.as_ref().is_some_and(|terms| {
+                    terms.received_after.is_some() || terms.received_before.is_some()
+                })
+            {
+                builder.leaf(srch::STATUS, "8");
+            } else {
+                let result = async {
+                    let before = state.jmap.email_state(auth).await?;
+                    anyhow::ensure!(!before.is_empty(), "note search state unavailable");
+                    let collections = state.jmap.collections(auth).await?;
+                    let mut folders: Vec<_> = collections
+                        .into_iter()
+                        .filter(|item| item.kind == crate::model::CollectionKind::Notes)
+                        .map(|item| item.id)
+                        .collect();
+                    folders.sort();
+                    if let Some(folder) = &request.collection_id {
+                        anyhow::ensure!(folders.contains(folder), "unknown note search folder");
+                        folders.retain(|id| id == folder);
+                    }
+                    let terms: Vec<_> = request
+                        .free_texts
+                        .iter()
+                        .filter(|term| !term.is_empty())
+                        .map(|term| term.to_lowercase())
+                        .collect();
+                    let alternatives = request.or_terms.as_ref().map(|or| {
+                        or.texts
+                            .iter()
+                            .filter(|term| !term.is_empty())
+                            .map(|term| term.to_lowercase())
+                            .collect::<Vec<_>>()
+                    });
+                    let mut matches = BTreeMap::new();
+                    for folder in folders {
+                        let mailbox = folder
+                            .strip_prefix("note_")
+                            .context("invalid notes folder")?;
+                        let summaries = state.jmap.list_notes(auth, mailbox, 0).await?;
+                        for summary in summaries {
+                            let note = state
+                                .jmap
+                                .get_note(auth, &summary.id)
+                                .await?
+                                .context("note disappeared during search")?;
+                            let has = |term: &str| {
+                                note.title.to_lowercase().contains(term)
+                                    || note.body.to_lowercase().contains(term)
+                                    || note
+                                        .categories
+                                        .iter()
+                                        .any(|category| category.to_lowercase().contains(term))
+                            };
+                            if terms.iter().all(|term| has(term))
+                                && alternatives
+                                    .as_ref()
+                                    .is_none_or(|terms| terms.iter().any(|term| has(term)))
+                            {
+                                anyhow::ensure!(
+                                    !mailbox.contains(':') && !note.id.contains(':'),
+                                    "invalid note search identifier"
+                                );
+                                let long_id = format!("note:{mailbox}:{}", note.id);
+                                anyhow::ensure!(
+                                    long_id.len() <= 256,
+                                    "note search identifier too long"
+                                );
+                                matches.entry(note.id.clone()).or_insert((
+                                    folder.clone(),
+                                    long_id,
+                                    note,
+                                ));
+                            }
+                        }
+                    }
+                    anyhow::ensure!(
+                        before == state.jmap.email_state(auth).await?,
+                        "notes changed during search"
+                    );
+                    let total = matches.len();
+                    let notes: Vec<_> = matches
+                        .into_values()
+                        .skip(position as usize)
+                        .take(limit)
+                        .collect();
+                    Ok::<_, anyhow::Error>((notes, total))
+                }
+                .await;
+                match result {
+                    Ok((notes, total)) => {
+                        builder.leaf(srch::STATUS, "1");
+                        let count = notes.len();
+                        for (folder, long_id, note) in notes {
+                            builder.start(srch::RESULT);
+                            builder.leaf(air::CLASS, "Notes");
+                            builder.leaf(srch::LONG_ID, long_id);
+                            builder.leaf(air::COLLECTION_ID, folder);
+                            builder.start(srch::PROPERTIES);
+                            write_note_fields(
+                                &mut builder,
+                                &note,
+                                body_pref
+                                    .as_ref()
+                                    .map(|pref| pref.requests.as_slice())
+                                    .unwrap_or_default(),
+                            );
+                            builder.end();
+                            builder.end();
+                        }
+                        if count > 0 {
+                            builder.leaf(
+                                srch::RANGE,
+                                format!("{position}-{}", position + count as i64 - 1),
+                            );
+                        }
+                        builder.leaf(srch::TOTAL, total.to_string());
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Search notes query failed");
+                        builder.leaf(srch::STATUS, "3");
+                    }
+                }
+            }
         } else if search_class.is_some_and(|class| class.eq_ignore_ascii_case("Tasks")) {
             if request.received_after.is_some()
                 || request.received_before.is_some()
@@ -6402,7 +6531,7 @@ fn write_note_command(
     tag: wbxml::token::Token,
     note: &Note,
 ) {
-    use wbxml::eas::{airsync as air, airsync_base as base, notes};
+    use wbxml::eas::airsync as air;
 
     // Field order matches the real z-push-stalwart-jmap source (PR #187,
     // pinned in config/z-push/Dockerfile: src/lib/syncobjects/
@@ -6413,12 +6542,34 @@ fn write_note_command(
     builder.start(tag);
     builder.leaf(air::SERVER_ID, note.id.clone());
     builder.start(air::APPLICATION_DATA);
-    builder.start(base::BODY);
-    builder.leaf(base::TYPE, note.body_type.eas_value());
-    builder.leaf(base::ESTIMATED_DATA_SIZE, note.body.len().to_string());
-    builder.leaf(base::TRUNCATED, "0");
-    builder.leaf(base::DATA, note.body.clone());
+    write_note_fields(builder, note, &[]);
     builder.end();
+    builder.end();
+}
+
+fn write_note_fields(
+    builder: &mut wbxml::eas::DocumentBuilder,
+    note: &Note,
+    requests: &[RequestedBodyPreference],
+) {
+    use wbxml::eas::{airsync_base as base, notes};
+    let body = crate::model::EmailBody {
+        body_type: note.body_type,
+        value: note.body.clone(),
+        is_truncated: false,
+    };
+    let preference = select_body_preference(Some(&body), None, requests);
+    if requests.is_empty() || preference.is_some() {
+        let (kind, data, size, truncated) = apply_body_preference(body, preference);
+        builder.start(base::BODY);
+        builder.leaf(base::TYPE, kind.eas_value());
+        builder.leaf(base::ESTIMATED_DATA_SIZE, size.to_string());
+        builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
+        if !truncated || !preference.is_some_and(|pref| pref.all_or_none) {
+            builder.leaf(base::DATA, data);
+        }
+        builder.end();
+    }
     if !note.categories.is_empty() {
         builder.start(notes::CATEGORIES);
         for category in &note.categories {
@@ -6431,8 +6582,6 @@ fn write_note_command(
     }
     builder.leaf(notes::MESSAGE_CLASS, "IPM.StickyNote");
     builder.leaf(notes::SUBJECT, note.title.clone());
-    builder.end();
-    builder.end();
 }
 
 /// `Notes:LastModifiedDate`, `Calendar:DtStamp/StartTime/EndTime` want the
