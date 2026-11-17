@@ -3082,11 +3082,14 @@ impl JmapClient {
                 serde_json::Value::String(subject.clone()),
             );
         }
-        if let Some(due) = fields
-            .due_date
-            .as_deref()
-            .and_then(eas_compact_to_local_iso)
-        {
+        if let Some(due) = &fields.due_date {
+            let due = eas_compact_to_local_iso(due)
+                .or_else(|| {
+                    chrono::DateTime::parse_from_rfc3339(due)
+                        .ok()
+                        .map(|date| date.naive_utc().format("%Y-%m-%dT%H:%M:%S").to_string())
+                })
+                .context("invalid task due date")?;
             task.insert("due".to_owned(), serde_json::Value::String(due));
         }
         if let Some(complete) = fields.complete {

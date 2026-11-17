@@ -1305,9 +1305,8 @@ pub struct AttendeeField {
 /// ActiveSync Tasks class fields decoded from one Add/Change command's
 /// ApplicationData, limited to the subset this gateway round-trips (see
 /// `write_task_command` in activesync.rs) -- same minimal-non-recurring
-/// scoping as `CalendarFields`. `due_date` arrives already in EAS's
-/// compact UTC DateTime form (`YYYYMMDDTHHMMSSZ`), same convention as
-/// `CalendarFields::start_time`/`end_time`.
+/// scoping as `CalendarFields`. `due_date` accepts EAS dateTime and the
+/// compact form used by older clients.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskFields {
     pub subject: Option<String>,

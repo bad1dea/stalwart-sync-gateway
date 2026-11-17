@@ -5462,6 +5462,10 @@ mod e2e {
             Some("Task search fixture")
         );
         assert_eq!(
+            eas::find_text_after(&fetched, tasks::DUE_DATE),
+            Some("2042-07-06T10:00:00.000Z")
+        );
+        assert_eq!(
             eas::find_text_after(&fetched, base::DATA),
             Some(marker.as_str())
         );
@@ -5516,6 +5520,7 @@ mod e2e {
         b.start(air::CHANGE);
         b.leaf(air::SERVER_ID, &id);
         b.start(air::APPLICATION_DATA);
+        b.leaf(tasks::DUE_DATE, "2042-07-07T12:30:00.000Z");
         b.start(base::BODY);
         b.leaf(base::TYPE, "1");
         b.leaf(base::DATA, "updated task description");
@@ -5532,7 +5537,7 @@ mod e2e {
         let native = live
             .call_using(
                 serde_json::json!([["CalendarEvent/get", {"accountId":live.account,
-            "ids":[&id],"properties":["description"]}, "0"]]),
+            "ids":[&id],"properties":["description","due"]}, "0"]]),
                 &using,
             )
             .await;
@@ -5540,6 +5545,34 @@ mod e2e {
             native[0][1]["list"][0]["description"],
             "updated task description"
         );
+        assert_eq!(native[0][1]["list"][0]["due"], "2042-07-07T12:30:00");
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&updated));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, &id);
+        b.start(air::APPLICATION_DATA);
+        b.leaf(tasks::DUE_DATE, "invalid-date");
+        for _ in 0..6 {
+            b.end();
+        }
+        let rejected = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert!(eas::find_all_text_after(&rejected, air::STATUS).contains(&"5".to_owned()));
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get", {"accountId":live.account,
+            "ids":[&id],"properties":["due"]}, "0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(native[0][1]["list"][0]["due"], "2042-07-07T12:30:00");
+
         let cleanup = live
             .call_using(
                 serde_json::json!([

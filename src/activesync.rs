@@ -6309,8 +6309,11 @@ fn write_task_fields(
     }
     builder.leaf(tasks::COMPLETE, if task.completed { "1" } else { "0" });
     if let Some(due) = &task.due {
-        builder.leaf(tasks::DUE_DATE, due.clone());
-        builder.leaf(tasks::UTC_DUE_DATE, due.clone());
+        if let Ok(due) = chrono::NaiveDateTime::parse_from_str(due, "%Y%m%dT%H%M%SZ") {
+            let due = due.format("%Y-%m-%dT%H:%M:%S.000Z").to_string();
+            builder.leaf(tasks::DUE_DATE, &due);
+            builder.leaf(tasks::UTC_DUE_DATE, &due);
+        }
     }
 }
 
