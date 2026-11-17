@@ -1310,6 +1310,9 @@ pub struct AttendeeField {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskFields {
     pub subject: Option<String>,
+    pub body: Option<String>,
+    pub body_type: Option<u8>,
+    pub unsupported_body: bool,
     pub due_date: Option<String>,
     pub complete: Option<bool>,
 }
@@ -1589,6 +1592,7 @@ fn search_classes(document: &Document) -> (Option<String>, bool) {
         if !first.eq_ignore_ascii_case("Email")
             && !first.eq_ignore_ascii_case("Contacts")
             && !first.eq_ignore_ascii_case("Calendar")
+            && !first.eq_ignore_ascii_case("Tasks")
         {
             invalid = true;
         }
@@ -2651,7 +2655,13 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
 /// Same shape as `extract_calendar_fields` -- flat leaves, no nesting for
 /// the fields this gateway round-trips.
 fn extract_task_fields(nodes: &[Node]) -> TaskFields {
-    let mut fields = TaskFields::default();
+    let body = extract_calendar_fields(nodes);
+    let mut fields = TaskFields {
+        body: body.body,
+        body_type: body.body_type,
+        unsupported_body: body.unsupported_body,
+        ..Default::default()
+    };
     let mut path: Vec<Token> = Vec::new();
 
     for node in nodes {

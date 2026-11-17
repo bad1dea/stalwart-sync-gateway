@@ -978,6 +978,8 @@ async fn search(
                 Some("Contacts")
             } else if folder.starts_with("cal_") {
                 Some("Calendar")
+            } else if folder.starts_with("task_") {
+                Some("Tasks")
             } else {
                 None
             }
@@ -991,6 +993,144 @@ async fn search(
             builder.leaf(srch::STATUS, "8");
         } else if request.unsupported_query {
             builder.leaf(srch::STATUS, "2");
+        } else if search_class.is_some_and(|class| class.eq_ignore_ascii_case("Tasks")) {
+            if request.received_after.is_some()
+                || request.received_before.is_some()
+                || request.conversation_id.is_some()
+                || request.or_terms.as_ref().is_some_and(|terms| {
+                    terms.received_after.is_some() || terms.received_before.is_some()
+                })
+            {
+                builder.leaf(srch::STATUS, "8");
+            } else {
+                let result = async {
+                    fn has_text(value: &serde_json::Value, needle: &str) -> bool {
+                        match value {
+                            serde_json::Value::String(text) => text.to_lowercase().contains(needle),
+                            serde_json::Value::Array(items) => {
+                                items.iter().any(|item| has_text(item, needle))
+                            }
+                            serde_json::Value::Object(items) => {
+                                items.values().any(|item| has_text(item, needle))
+                            }
+                            _ => false,
+                        }
+                    }
+                    let before = state.jmap.calendar_snapshot_state(auth).await?;
+                    let collections = state.jmap.collections(auth).await?;
+                    let mut calendars: Vec<_> = collections
+                        .into_iter()
+                        .filter(|item| item.kind == crate::model::CollectionKind::Tasks)
+                        .map(|item| item.id)
+                        .collect();
+                    calendars.sort();
+                    if let Some(folder) = &request.collection_id {
+                        anyhow::ensure!(calendars.contains(folder), "unknown task search folder");
+                        calendars.retain(|id| id == folder);
+                    }
+                    let terms: Vec<_> = request
+                        .free_texts
+                        .iter()
+                        .filter(|term| !term.is_empty())
+                        .map(|term| term.to_lowercase())
+                        .collect();
+                    let alternatives = request.or_terms.as_ref().map(|or| {
+                        or.texts
+                            .iter()
+                            .filter(|term| !term.is_empty())
+                            .map(|term| term.to_lowercase())
+                            .collect::<Vec<_>>()
+                    });
+                    let fields = ["title", "description", "locations", "participants"];
+                    let mut matches = BTreeMap::new();
+                    for folder in calendars {
+                        let calendar = folder
+                            .strip_prefix("task_")
+                            .context("invalid task folder")?;
+                        for (task, raw) in state
+                            .jmap
+                            .searchable_tasks_in_calendar(auth, calendar)
+                            .await?
+                        {
+                            let has = |term: &str| {
+                                fields.iter().any(|field| has_text(&raw[*field], term))
+                                    || raw["keywords"].as_object().is_some_and(|keywords| {
+                                        keywords.iter().any(|(key, value)| {
+                                            value == true && key.to_lowercase().contains(term)
+                                        })
+                                    })
+                            };
+                            if terms.iter().all(|term| has(term))
+                                && alternatives
+                                    .as_ref()
+                                    .is_none_or(|terms| terms.iter().any(|term| has(term)))
+                            {
+                                anyhow::ensure!(
+                                    !calendar.contains(':') && !task.id.contains(':'),
+                                    "invalid task search identifier"
+                                );
+                                let long_id = format!("task:{calendar}:{}", task.id);
+                                anyhow::ensure!(
+                                    long_id.len() <= 256,
+                                    "task search identifier too long"
+                                );
+                                matches.entry(task.id.clone()).or_insert((
+                                    folder.clone(),
+                                    long_id,
+                                    task,
+                                ));
+                            }
+                        }
+                    }
+                    anyhow::ensure!(
+                        before == state.jmap.calendar_snapshot_state(auth).await?,
+                        "tasks changed during search"
+                    );
+                    let total = matches.len();
+                    let tasks: Vec<_> = matches
+                        .into_values()
+                        .skip(position as usize)
+                        .take(limit)
+                        .collect();
+                    Ok::<_, anyhow::Error>((tasks, total))
+                }
+                .await;
+                match result {
+                    Ok((tasks, total)) => {
+                        builder.leaf(srch::STATUS, "1");
+                        let count = tasks.len();
+                        for (folder, long_id, task) in tasks {
+                            builder.start(srch::RESULT);
+                            builder.leaf(air::CLASS, "Tasks");
+                            builder.leaf(srch::LONG_ID, long_id);
+                            builder.leaf(air::COLLECTION_ID, folder);
+                            builder.start(srch::PROPERTIES);
+                            write_task_fields(
+                                &mut builder,
+                                &task,
+                                body_pref
+                                    .as_ref()
+                                    .map(|pref| pref.requests.as_slice())
+                                    .unwrap_or_default(),
+                                false,
+                            );
+                            builder.end();
+                            builder.end();
+                        }
+                        if count > 0 {
+                            builder.leaf(
+                                srch::RANGE,
+                                format!("{position}-{}", position + count as i64 - 1),
+                            );
+                        }
+                        builder.leaf(srch::TOTAL, total.to_string());
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Search task query failed");
+                        builder.leaf(srch::STATUS, "3");
+                    }
+                }
+            }
         } else if search_class.is_some_and(|class| class.eq_ignore_ascii_case("Calendar")) {
             if request.received_after.is_some()
                 || request.received_before.is_some()
@@ -5879,12 +6019,12 @@ async fn sync_tasks_collection(
         builder.start(air::COMMANDS);
         for id in &to_add {
             if let Some((_, task)) = current_by_id.get(id) {
-                write_task_command(builder, air::ADD, task);
+                write_task_command(builder, air::ADD, task, &collection.body_preferences);
             }
         }
         for id in &to_change {
             if let Some((_, task)) = current_by_id.get(id) {
-                write_task_command(builder, air::CHANGE, task);
+                write_task_command(builder, air::CHANGE, task, &collection.body_preferences);
             }
         }
         for id in &to_remove {
@@ -5902,6 +6042,10 @@ async fn sync_tasks_collection(
 fn task_hash(task: &crate::model::Task) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     task.title.hash(&mut hasher);
+    if let Some(body) = &task.description {
+        body.value.hash(&mut hasher);
+        body.body_type.eas_value().hash(&mut hasher);
+    }
     task.completed.hash(&mut hasher);
     task.due.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
@@ -5922,20 +6066,59 @@ fn write_task_command(
     builder: &mut wbxml::eas::DocumentBuilder,
     tag: wbxml::token::Token,
     task: &crate::model::Task,
+    requests: &[RequestedBodyPreference],
 ) {
-    use wbxml::eas::{airsync as air, tasks};
+    use wbxml::eas::airsync as air;
 
     builder.start(tag);
     builder.leaf(air::SERVER_ID, task.id.clone());
     builder.start(air::APPLICATION_DATA);
+    write_task_fields(
+        builder,
+        task,
+        requests,
+        tag.code_page == air::PAGE && tag.token == air::CHANGE.token,
+    );
+    builder.end();
+    builder.end();
+}
+
+fn write_task_fields(
+    builder: &mut wbxml::eas::DocumentBuilder,
+    task: &crate::model::Task,
+    requests: &[RequestedBodyPreference],
+    is_change: bool,
+) {
+    use wbxml::eas::{airsync_base as base, tasks};
     builder.leaf(tasks::SUBJECT, task.title.clone());
+    let empty_body = crate::model::EmailBody {
+        body_type: EmailBodyType::Plain,
+        value: String::new(),
+        is_truncated: false,
+    };
+    if let Some(body) = task
+        .description
+        .as_ref()
+        .or_else(|| is_change.then_some(&empty_body))
+    {
+        let preference = select_body_preference(Some(body), None, requests);
+        if requests.is_empty() || preference.is_some() {
+            let (kind, data, size, truncated) = apply_body_preference(body.clone(), preference);
+            builder.start(base::BODY);
+            builder.leaf(base::TYPE, kind.eas_value());
+            builder.leaf(base::ESTIMATED_DATA_SIZE, size.to_string());
+            builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
+            if !truncated || !preference.is_some_and(|pref| pref.all_or_none) {
+                builder.leaf(base::DATA, data);
+            }
+            builder.end();
+        }
+    }
     builder.leaf(tasks::COMPLETE, if task.completed { "1" } else { "0" });
     if let Some(due) = &task.due {
         builder.leaf(tasks::DUE_DATE, due.clone());
         builder.leaf(tasks::UTC_DUE_DATE, due.clone());
     }
-    builder.end();
-    builder.end();
 }
 
 /// Handles one Notes collection's Sync round-trip end to end: applies any

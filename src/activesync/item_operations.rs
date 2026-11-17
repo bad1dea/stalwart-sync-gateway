@@ -7,7 +7,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 
 use super::{
     body_preferences_for_email, write_calendar_fields, write_contact_fields, write_email_fields,
-    ProtocolVersion,
+    write_task_fields, ProtocolVersion,
 };
 use crate::{
     http_server::AppState,
@@ -183,6 +183,68 @@ async fn fetch_item(
         .as_deref()
         .or(fetch.server_id.as_deref())
         .unwrap();
+    let task_target = if let Some(long_id) = fetch
+        .long_id
+        .as_deref()
+        .and_then(|id| id.strip_prefix("task:"))
+    {
+        long_id.split_once(':')
+    } else if fetch.long_id.is_none() {
+        fetch
+            .collection_id
+            .as_deref()
+            .and_then(|id| id.strip_prefix("task_"))
+            .map(|id| (id, target))
+    } else {
+        None
+    };
+    if fetch
+        .long_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("task:"))
+        && task_target.is_none()
+    {
+        builder.leaf(ops::STATUS, "6");
+        return;
+    }
+    if let Some((calendar, task_id)) = task_target {
+        if calendar.is_empty()
+            || task_id.is_empty()
+            || task_id.contains(':')
+            || fetch
+                .collection_id
+                .as_deref()
+                .is_some_and(|folder| folder.strip_prefix("task_") != Some(calendar))
+        {
+            builder.leaf(ops::STATUS, "6");
+            return;
+        }
+        match state.jmap.tasks_in_calendar(auth, calendar, 0).await {
+            Ok(tasks) => match tasks.into_iter().find(|task| task.id == task_id) {
+                Some(task) => {
+                    builder.leaf(ops::STATUS, "1");
+                    if let Some(id) = fetch.collection_id.as_deref() {
+                        builder.leaf(air::COLLECTION_ID, id);
+                    }
+                    if let Some(id) = fetch.long_id.as_deref() {
+                        builder.leaf(eas::search::LONG_ID, id);
+                    } else {
+                        builder.leaf(air::SERVER_ID, task_id);
+                    }
+                    builder.leaf(air::CLASS, "Tasks");
+                    builder.start(ops::PROPERTIES);
+                    write_task_fields(builder, &task, &fetch.body_preferences, false);
+                    builder.end();
+                }
+                None => builder.leaf(ops::STATUS, "6"),
+            },
+            Err(error) => {
+                tracing::warn!(%error, "ItemOperations task fetch failed");
+                builder.leaf(ops::STATUS, "3");
+            }
+        }
+        return;
+    }
     let calendar_target = if let Some(long_id) = fetch
         .long_id
         .as_deref()

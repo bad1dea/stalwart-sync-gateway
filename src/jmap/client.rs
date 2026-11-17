@@ -2954,7 +2954,15 @@ impl JmapClient {
                 capabilities::CALENDARS,
                 "CalendarEvent",
                 serde_json::json!({ "inCalendar": calendar_id }),
-                Some(&["id", "@type", "title", "due", "progress"]),
+                Some(&[
+                    "id",
+                    "@type",
+                    "title",
+                    "description",
+                    "descriptionContentType",
+                    "due",
+                    "progress",
+                ]),
                 limit,
             )
             .await?;
@@ -2963,6 +2971,31 @@ impl JmapClient {
             .filter(|item| item.kind == "Task")
             .map(Task::from)
             .collect())
+    }
+
+    pub async fn searchable_tasks_in_calendar(
+        &self,
+        auth: &AuthenticatedSession,
+        calendar_id: &str,
+    ) -> anyhow::Result<Vec<(Task, serde_json::Value)>> {
+        let items: Vec<serde_json::Value> = self
+            .query_objects(
+                auth,
+                capabilities::CALENDARS,
+                "CalendarEvent",
+                serde_json::json!({ "inCalendar": calendar_id }),
+                None,
+                0,
+            )
+            .await?;
+        items
+            .into_iter()
+            .filter(|item| item["@type"] == "Task")
+            .map(|item| {
+                let task = Task::from(serde_json::from_value::<TaskObject>(item.clone())?);
+                Ok((task, item))
+            })
+            .collect()
     }
 
     /// Creates (`id: None`) or updates (`id: Some`) a Task-typed
@@ -2982,7 +3015,19 @@ impl JmapClient {
             anyhow::bail!("JMAP Calendars capability is not available");
         };
 
+        anyhow::ensure!(!fields.unsupported_body, "unsupported task body");
         let mut task = serde_json::Map::new();
+        if let Some(body) = &fields.body {
+            task.insert("description".to_owned(), serde_json::json!(body));
+            task.insert(
+                "descriptionContentType".to_owned(),
+                serde_json::json!(if fields.body_type == Some(2) {
+                    "text/html"
+                } else {
+                    "text/plain"
+                }),
+            );
+        }
         task.insert(
             "@type".to_owned(),
             serde_json::Value::String("Task".to_owned()),
@@ -5023,6 +5068,10 @@ struct TaskObject {
     #[serde(default)]
     title: String,
     #[serde(default)]
+    description: Option<String>,
+    #[serde(default, rename = "descriptionContentType")]
+    description_content_type: Option<String>,
+    #[serde(default)]
     due: Option<String>,
     #[serde(default)]
     progress: Option<String>,
@@ -5035,6 +5084,15 @@ impl From<TaskObject> for Task {
         Self {
             id: value.id,
             title: value.title,
+            description: value.description.map(|description| EmailBody {
+                body_type: if value.description_content_type.as_deref() == Some("text/html") {
+                    EmailBodyType::Html
+                } else {
+                    EmailBodyType::Plain
+                },
+                value: description,
+                is_truncated: false,
+            }),
             completed: value.progress.as_deref() == Some("completed"),
             due: value.due.as_deref().and_then(local_to_utc_eas_no_tz),
         }

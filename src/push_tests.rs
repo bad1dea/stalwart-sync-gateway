@@ -4850,6 +4850,184 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_task_search_and_fetch() {
+        use eas::{airsync_base as base, item_operations as ops, search as srch, tasks};
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let created = live
+            .call_using(
+                serde_json::json!([["Calendar/set", {"accountId":live.account,
+            "create":{"c":{"name":format!("Search fixture {}", std::process::id())}}}, "0"]]),
+                &using,
+            )
+            .await;
+        let calendar = created[0][1]["created"]["c"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let marker = format!("tasksearchfixture{}", std::process::id());
+        let events = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set", {"accountId":live.account,
+            "create":{"e":{"@type":"Task","calendarIds":{&calendar:true}, "title":"Task search fixture",
+            "description":&marker, "due":"2042-07-06T10:00:00", "progress":"needs-action"}}}, "0"]]),
+                &using,
+            )
+            .await;
+        let id = events[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("event create failed: {events}"))
+            .to_owned();
+        let folder = format!("task_{calendar}");
+        let mut b = eas::DocumentBuilder::new();
+        b.start(srch::SEARCH);
+        b.start(srch::STORE);
+        b.leaf(srch::NAME, "Mailbox");
+        b.start(srch::QUERY);
+        b.start(srch::AND);
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.leaf(srch::FREE_TEXT, &marker);
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        let result = live
+            .wbxml_version(
+                "Search",
+                &dev("task-search"),
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&result, srch::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(eas::find_text_after(&result, srch::TOTAL), Some("1"));
+        assert_eq!(
+            eas::find_text_after(&result, tasks::SUBJECT),
+            Some("Task search fixture")
+        );
+        let long_id = eas::find_text_after(&result, srch::LONG_ID).unwrap();
+        let mut b = eas::DocumentBuilder::new();
+        b.start(ops::ITEM_OPERATIONS);
+        b.start(ops::FETCH);
+        b.leaf(ops::STORE, "Mailbox");
+        b.leaf(srch::LONG_ID, long_id);
+        b.end();
+        b.end();
+        let fetched = live
+            .wbxml_version(
+                "ItemOperations",
+                &dev("task-search"),
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&fetched, ops::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(
+            eas::find_text_after(&fetched, tasks::SUBJECT),
+            Some("Task search fixture")
+        );
+        assert_eq!(
+            eas::find_text_after(&fetched, base::DATA),
+            Some(marker.as_str())
+        );
+        let device = dev("task-body-edit");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let initial = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&initial));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, &id);
+        b.start(air::APPLICATION_DATA);
+        b.start(base::BODY);
+        b.leaf(base::TYPE, "1");
+        b.leaf(base::TRUNCATED, "1");
+        b.leaf(base::DATA, "incomplete");
+        for _ in 0..7 {
+            b.end();
+        }
+        let rejected = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert!(eas::find_all_text_after(&rejected, air::STATUS).contains(&"5".to_owned()));
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get", {"accountId":live.account,
+            "ids":[&id],"properties":["description"]}, "0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(native[0][1]["list"][0]["description"], marker);
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&rejected));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, &id);
+        b.start(air::APPLICATION_DATA);
+        b.start(base::BODY);
+        b.leaf(base::TYPE, "1");
+        b.leaf(base::DATA, "updated task description");
+        for _ in 0..7 {
+            b.end();
+        }
+        let updated = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&updated, air::STATUS),
+            vec!["1", "1"]
+        );
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get", {"accountId":live.account,
+            "ids":[&id],"properties":["description"]}, "0"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(
+            native[0][1]["list"][0]["description"],
+            "updated task description"
+        );
+        let cleanup = live
+            .call_using(
+                serde_json::json!([
+            ["CalendarEvent/set", {"accountId":live.account,"destroy":[id]}, "0"],
+            ["Calendar/set", {"accountId":live.account,"destroy":[calendar]}, "1"]]),
+                &using,
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_calendar_search_and_fetch() {
         use eas::{calendar as cal, item_operations as ops, search as srch};
         let live = Live::new("E2E_USER2").await;
@@ -11257,7 +11435,7 @@ async fn search_rejects_unsupported_or_misplaced_classes() {
     let env = start_env(Opts::default()).await;
     for (classes, nested, expected) in [
         (vec!["Email"], true, "1"),
-        (vec!["Tasks"], true, "8"),
+        (vec!["Notes"], true, "8"),
         (vec!["Email", "Contacts"], true, "8"),
         (vec!["Email"], false, "8"),
     ] {
@@ -11341,6 +11519,98 @@ async fn classless_search_uses_the_scoped_groupware_folder() {
         assert_eq!(eas::find_text_after(&doc, air::CLASS), Some(class));
         assert_eq!(eas::find_text_after(&doc, subject), Some(expected));
     }
+}
+
+#[tokio::test]
+async fn task_search_returns_results_and_fetches_them() {
+    use eas::{
+        airsync as air, airsync_base as base, item_operations as ops, search as srch, tasks,
+    };
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 4);
+    {
+        let mut items = env.mock.groupware.lock().unwrap();
+        let task = items
+            .get_mut("calendar")
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["id"] == "t0002")
+            .unwrap();
+        task["description"] = serde_json::json!("a unique description token");
+    }
+    for explicit in [true, false] {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(srch::SEARCH);
+        b.start(srch::STORE);
+        b.leaf(srch::NAME, "Mailbox");
+        b.start(srch::QUERY);
+        b.start(srch::AND);
+        if explicit {
+            b.leaf(air::CLASS, "Tasks");
+        }
+        b.leaf(air::COLLECTION_ID, "task_calendar");
+        b.leaf(srch::FREE_TEXT, "DESCRIPTION TOKEN");
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        let response = env
+            .req("Search", "client")
+            .body(wbxml::encode_document(&b.finish()))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, srch::STATUS), vec!["1", "1"]);
+        assert_eq!(eas::find_text_after(&doc, srch::TOTAL), Some("1"));
+        assert_eq!(eas::find_text_after(&doc, tasks::SUBJECT), Some("Task 2"));
+        let id = eas::find_text_after(&doc, srch::LONG_ID).unwrap();
+        let mut b = eas::DocumentBuilder::new();
+        b.start(ops::ITEM_OPERATIONS);
+        b.start(ops::FETCH);
+        b.leaf(ops::STORE, "Mailbox");
+        b.leaf(srch::LONG_ID, id);
+        b.end();
+        b.end();
+        let response = env
+            .req("ItemOperations", "client")
+            .body(wbxml::encode_document(&b.finish()))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, ops::STATUS), vec!["1", "1"]);
+        assert_eq!(eas::find_text_after(&doc, tasks::SUBJECT), Some("Task 2"));
+        assert_eq!(
+            eas::find_text_after(&doc, base::DATA),
+            Some("a unique description token")
+        );
+    }
+}
+
+#[tokio::test]
+async fn task_description_changes_are_synced() {
+    use eas::{airsync as air, airsync_base as base};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 1);
+    let prime = item_sync(&env, "ipad", "task_calendar", "0", "100").await;
+    let first = item_sync(&env, "ipad", "task_calendar", &sync_key(&prime), "100").await;
+    {
+        let mut items = env.mock.groupware.lock().unwrap();
+        let task = items
+            .get_mut("calendar")
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["id"] == "t0000")
+            .unwrap();
+        task["description"] = serde_json::json!("edited description");
+    }
+    let update = item_sync(&env, "ipad", "task_calendar", &sync_key(&first), "100").await;
+    assert!(eas::contains_token(&update, air::CHANGE));
+    assert_eq!(
+        eas::find_text_after(&update, base::DATA),
+        Some("edited description")
+    );
 }
 
 #[tokio::test]

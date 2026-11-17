@@ -325,6 +325,7 @@ pub struct Attendee {
 pub struct Task {
     pub id: String,
     pub title: String,
+    pub description: Option<EmailBody>,
     pub completed: bool,
     pub due: Option<String>,
 }
