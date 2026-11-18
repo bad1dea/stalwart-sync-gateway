@@ -4245,6 +4245,7 @@ mod e2e {
         b.leaf(rr::TO, &first);
         b.leaf(rr::TO, &marker);
         b.leaf(rr::TO, "nobody-resolver@example.invalid");
+        b.leaf(rr::TO, &live.user);
         b.start(rr::OPTIONS);
         b.leaf(rr::MAX_AMBIGUOUS_RECIPIENTS, "1");
         b.end();
@@ -4259,13 +4260,16 @@ mod e2e {
             .await;
         assert_eq!(
             eas::find_all_text_after(&result, rr::STATUS),
-            vec!["1", "1", "3", "4"]
+            vec!["1", "1", "3", "4", "1"]
         );
         assert_eq!(
             eas::find_all_text_after(&result, rr::RECIPIENT_COUNT),
-            vec!["1", "2", "0"]
+            vec!["1", "2", "0", "1"]
         );
-        assert_eq!(eas::find_all_text_after(&result, rr::TYPE), vec!["2", "2"]);
+        assert_eq!(
+            eas::find_all_text_after(&result, rr::TYPE),
+            vec!["2", "2", "1"]
+        );
         assert_eq!(
             eas::find_all_text_after(&result, rr::EMAIL_ADDRESS)[0],
             first
