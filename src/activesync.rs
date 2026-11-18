@@ -1,6 +1,7 @@
 mod draft;
 mod find;
 mod item_operations;
+mod meeting_response;
 mod resolve_recipients;
 mod search_multi;
 mod sync_options;
@@ -314,6 +315,10 @@ pub async fn post_handler(
                         &state, &auth, &document, multipart, version, command,
                     )
                     .await;
+                }
+                if command.eq_ignore_ascii_case("MeetingResponse") {
+                    return meeting_response::handle(&state, &auth, &query, &document, version)
+                        .await;
                 }
                 if command.eq_ignore_ascii_case("ResolveRecipients") {
                     return resolve_recipients::handle(&state, &auth, &document).await;

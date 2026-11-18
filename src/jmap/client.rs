@@ -2114,6 +2114,136 @@ impl JmapClient {
             .collect())
     }
 
+    pub async fn respond_calendar_event(
+        &self,
+        auth: &AuthenticatedSession,
+        calendar_id: &str,
+        event_id: &str,
+        participation: &str,
+    ) -> anyhow::Result<bool> {
+        let account = auth
+            .session
+            .primary_account_for(capabilities::CALENDARS)
+            .context("JMAP Calendars capability is unavailable")?;
+        let using = [
+            capabilities::CORE.to_owned(),
+            capabilities::CALENDARS.to_owned(),
+        ];
+        let response: JmapResponse<serde_json::Value> = self.api_call(auth, &using,
+            vec![MethodCall::new("CalendarEvent/get", serde_json::json!({"accountId":account,
+                "ids":[event_id],"properties":["id","@type","calendarIds","participants","replyTo","recurrenceRules","recurrenceOverrides"]}), "get")]).await?;
+        let result = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/get")
+            .context("calendar lookup failed")?;
+        let Some(event) = result.1["list"]
+            .as_array()
+            .and_then(|items| items.iter().find(|event| event["id"] == event_id))
+        else {
+            return Ok(false);
+        };
+        if event["@type"] != "Event" || event["calendarIds"][calendar_id] != true {
+            return Ok(false);
+        }
+        if event["recurrenceRules"]
+            .as_array()
+            .is_some_and(|rules| !rules.is_empty())
+            || event["recurrenceOverrides"]
+                .as_object()
+                .is_some_and(|overrides| !overrides.is_empty())
+        {
+            anyhow::bail!("recurring meeting responses are not supported");
+        }
+        let Some(participants) = event["participants"].as_object() else {
+            return Ok(false);
+        };
+        let owners: Vec<_> = participants
+            .values()
+            .filter(|p| p["roles"]["owner"] == true)
+            .collect();
+        if owners.len() != 1
+            || owners[0]["email"]
+                .as_str()
+                .is_none_or(|email| email.eq_ignore_ascii_case(auth.username()))
+        {
+            return Ok(false);
+        }
+        let matches: Vec<_> = participants
+            .iter()
+            .filter(|(_, p)| {
+                p["email"]
+                    .as_str()
+                    .is_some_and(|email| email.eq_ignore_ascii_case(auth.username()))
+            })
+            .collect();
+        let [(key, participant)] = matches.as_slice() else {
+            return Ok(false);
+        };
+        if participant["roles"]["owner"] == true {
+            return Ok(false);
+        }
+        let state = result.1["state"]
+            .as_str()
+            .context("calendar state missing")?;
+        let participant_id = (*key).clone();
+        let original_roles = participant["roles"].clone();
+        let owner_email = owners[0]["email"].clone();
+        let key = key.replace('~', "~0").replace('/', "~1");
+        let path = format!("participants/{key}/participationStatus");
+        let response: JmapResponse<serde_json::Value> = self.api_call(auth, &using,
+            vec![MethodCall::new("CalendarEvent/set", serde_json::json!({"accountId":account,
+                "ifInState":state,"sendSchedulingMessages":false,
+                "update":{event_id:{path:participation, format!("participants/{key}/roles"):participant["roles"].clone()}}}), "set")]).await?;
+        let result = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/set")
+            .context("calendar response update failed")?;
+        anyhow::ensure!(
+            result.1["updated"]
+                .as_object()
+                .is_some_and(|items| items.contains_key(event_id)),
+            "calendar response update was not confirmed"
+        );
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &using,
+                vec![MethodCall::new(
+                    "CalendarEvent/get",
+                    serde_json::json!({"accountId":account,
+                "ids":[event_id],"properties":["id","participants"]}),
+                    "verify",
+                )],
+            )
+            .await?;
+        let participants = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/get")
+            .and_then(|method| method.1["list"].as_array())
+            .and_then(|items| items.iter().find(|event| event["id"] == event_id))
+            .and_then(|event| event["participants"].as_object())
+            .context("meeting response verification failed")?;
+        let attendee = participants
+            .get(&participant_id)
+            .context("meeting attendee disappeared")?;
+        anyhow::ensure!(
+            attendee["participationStatus"] == participation && attendee["roles"] == original_roles,
+            "meeting attendee state was not retained"
+        );
+        let owners: Vec<_> = participants
+            .values()
+            .filter(|p| p["roles"]["owner"] == true)
+            .collect();
+        anyhow::ensure!(
+            owners.len() == 1 && owners[0]["email"] == owner_email,
+            "meeting organizer was not retained"
+        );
+        Ok(true)
+    }
+
     pub async fn calendar_event_by_uid(
         &self,
         auth: &AuthenticatedSession,
