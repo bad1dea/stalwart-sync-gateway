@@ -5374,6 +5374,32 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_autodiscover_returns_requested_address() {
+        let live = Live::new("E2E_USER2").await;
+        let base = live
+            .gw
+            .strip_suffix("/Microsoft-Server-ActiveSync")
+            .unwrap();
+        let email = quick_xml::escape::escape(&live.user);
+        let request = format!(
+            r#"<Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/mobilesync/requestschema/2006"><Request><EMailAddress>{email}</EMailAddress><AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/mobilesync/responseschema/2006</AcceptableResponseSchema></Request></Autodiscover>"#
+        );
+        let result = live
+            .http
+            .post(format!("{base}/autodiscover/autodiscover.xml"))
+            .header("Content-Type", "text/xml")
+            .body(request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(result.status(), 200);
+        let body = result.text().await.unwrap();
+        assert!(body.contains(&format!("<EMailAddress>{email}</EMailAddress>")));
+        assert!(body.contains("<Type>MobileSync</Type>"));
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_smart_reply_quotes_original_text() {
         use eas::compose_mail as cm;
         let live = Live::new("E2E_USER2").await;
@@ -11888,8 +11914,27 @@ async fn autodiscover_accepts_standard_lowercase_and_existing_paths() {
         );
         let body = response.text().await.unwrap();
         assert!(body.contains("<Type>MobileSync</Type>"));
+        assert!(body.contains("<EMailAddress>u@test</EMailAddress>"));
         assert!(body.contains("<Url>http://localhost/Microsoft-Server-ActiveSync</Url>"));
     }
+    let invalid = request.replace(
+        "mobilesync/responseschema/2006",
+        "outlook/responseschema/2006a",
+    );
+    let response = env
+        .http
+        .post(format!("{base}/autodiscover/autodiscover.xml"))
+        .header("Content-Type", "text/xml")
+        .body(invalid)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert!(response
+        .text()
+        .await
+        .unwrap()
+        .contains("<ErrorCode>601</ErrorCode>"));
 }
 
 #[tokio::test]
