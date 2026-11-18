@@ -4,6 +4,7 @@ mod item_operations;
 mod meeting_response;
 mod resolve_recipients;
 mod search_multi;
+mod smart_forward;
 mod sync_options;
 mod sync_request;
 mod validate_cert;
@@ -1748,9 +1749,8 @@ async fn search_inner(
 /// treating it as raw MIME when it doesn't. The WBXML-wrapped form
 /// (older/other clients) is also handled via `compose_mail_request`.
 ///
-/// SmartReply and SmartForward submit the supplied MIME and mark an identified
-/// source after submission. Combining a partial MIME body with the original
-/// message remains unsupported.
+/// SmartForward attaches the original message when the client supplies only a
+/// partial MIME. SmartReply still requires a complete client-supplied message.
 async fn send_mail(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
@@ -1767,7 +1767,8 @@ async fn send_mail(
         return (StatusCode::BAD_REQUEST, "SendMail requires a body\n").into_response();
     }
 
-    let (mime, save_in_sent_items, source) = match wbxml::decode_document(body) {
+    let (mut mime, save_in_sent_items, source, combine_forward) = match wbxml::decode_document(body)
+    {
         Ok(document) => match wbxml::eas::compose_mail_request(&document) {
             Some(request) => {
                 let source = match (
@@ -1781,7 +1782,12 @@ async fn send_mail(
                     (None, None, Some(id)) if !id.is_empty() => Some((id, None)),
                     _ => None,
                 };
-                (request.mime, request.save_in_sent_items, source)
+                (
+                    request.mime,
+                    request.save_in_sent_items,
+                    source,
+                    command.eq_ignore_ascii_case("SmartForward") && !request.replace_mime,
+                )
             }
             None => {
                 state
@@ -1804,8 +1810,50 @@ async fn send_mail(
             body.to_vec(),
             query.save_in_sent_items.is_none() || query.save_in_sent_items.as_deref() != Some("F"),
             None,
+            false,
         ),
     };
+
+    if combine_forward {
+        let Some((id, folder)) = &source else {
+            return compose_error(command, "150");
+        };
+        let original = match state.jmap.get_email_by_id(auth, id).await {
+            Ok(Some(email))
+                if folder
+                    .as_ref()
+                    .is_none_or(|folder| email.mailbox_ids.contains(folder)) =>
+            {
+                email
+            }
+            Ok(_) => return compose_error(command, "150"),
+            Err(error) => {
+                tracing::warn!(%error, "failed to find forwarded message");
+                return compose_error(command, "110");
+            }
+        };
+        let Some(blob) = original.blob_id else {
+            return compose_error(command, "110");
+        };
+        let original = match state
+            .jmap
+            .download_blob(auth, &blob, "forwarded_message.eml")
+            .await
+        {
+            Ok(original) => original,
+            Err(error) => {
+                tracing::warn!(%error, "failed to fetch forwarded message");
+                return compose_error(command, "110");
+            }
+        };
+        mime = match smart_forward::attach_original(&mime, &original) {
+            Ok(mime) => mime,
+            Err(error) => {
+                tracing::warn!(%error, "failed to prepare forwarded message");
+                return compose_error(command, "110");
+            }
+        };
+    }
 
     match state.jmap.send_email(auth, mime, save_in_sent_items).await {
         Ok(()) => {
@@ -1846,6 +1894,24 @@ async fn send_mail(
                 .into_response()
         }
     }
+}
+
+fn compose_error(command: &str, status: &str) -> Response {
+    let mut builder = wbxml::eas::DocumentBuilder::new();
+    let root = if command.eq_ignore_ascii_case("SmartForward") {
+        wbxml::eas::compose_mail::SMART_FORWARD
+    } else {
+        wbxml::eas::compose_mail::SMART_REPLY
+    };
+    builder.start(root);
+    builder.leaf(wbxml::eas::compose_mail::STATUS, status);
+    builder.end();
+    (
+        StatusCode::OK,
+        [("Content-Type", "application/vnd.ms-sync.wbxml")],
+        wbxml::encode_document(&builder.finish()),
+    )
+        .into_response()
 }
 
 /// Writes the `Get` block's content (OofState, StartTime/EndTime,

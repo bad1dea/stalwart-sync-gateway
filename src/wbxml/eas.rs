@@ -1789,6 +1789,7 @@ pub fn find_opaque_after(document: &Document, token: Token) -> Option<&[u8]> {
 pub struct ComposeMailRequest {
     pub mime: Vec<u8>,
     pub save_in_sent_items: bool,
+    pub replace_mime: bool,
     pub source_item_id: Option<String>,
     pub source_folder_id: Option<String>,
     pub source_long_id: Option<String>,
@@ -1808,6 +1809,7 @@ pub fn compose_mail_request(document: &Document) -> Option<ComposeMailRequest> {
     Some(ComposeMailRequest {
         mime,
         save_in_sent_items,
+        replace_mime: contains_token(document, compose_mail::REPLACE_MIME),
         source_item_id,
         source_folder_id,
         source_long_id,
