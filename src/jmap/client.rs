@@ -2194,6 +2194,97 @@ impl JmapClient {
         let state = result.1["state"]
             .as_str()
             .context("calendar state missing")?;
+        if participation == "declined" {
+            if auth.capabilities.submission {
+                let identities = self.mail_identities(auth).await?;
+                if identities.iter().any(|identity| {
+                    owners[0]["email"]
+                        .as_str()
+                        .is_some_and(|email| email.eq_ignore_ascii_case(&identity.email))
+                }) {
+                    return Ok(false);
+                }
+            }
+            let calendars = event["calendarIds"]
+                .as_object()
+                .context("meeting calendar membership missing")?;
+            let count = calendars.values().filter(|value| **value == true).count();
+            let arguments = if count == 1 {
+                serde_json::json!({"accountId":account,"ifInState":state,"sendSchedulingMessages":false,"destroy":[event_id]})
+            } else {
+                let path = format!(
+                    "calendarIds/{}",
+                    calendar_id.replace('~', "~0").replace('/', "~1")
+                );
+                serde_json::json!({"accountId":account,"ifInState":state,"sendSchedulingMessages":false,"update":{event_id:{path:null}}})
+            };
+            let response: JmapResponse<serde_json::Value> = self
+                .api_call(
+                    auth,
+                    &using,
+                    vec![MethodCall::new("CalendarEvent/set", arguments, "decline")],
+                )
+                .await?;
+            let result = response
+                .method_responses
+                .iter()
+                .find(|method| method.0 == "CalendarEvent/set")
+                .context("meeting decline failed")?;
+            let confirmed = if count == 1 {
+                result.1["destroyed"]
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().any(|id| id == event_id))
+            } else {
+                result.1["updated"]
+                    .as_object()
+                    .is_some_and(|items| items.contains_key(event_id))
+            };
+            anyhow::ensure!(confirmed, "meeting decline was not confirmed");
+            let response: JmapResponse<serde_json::Value> = self
+                .api_call(
+                    auth,
+                    &using,
+                    vec![MethodCall::new(
+                        "CalendarEvent/get",
+                        serde_json::json!({"accountId":account,
+                    "ids":[event_id],"properties":["id","calendarIds"]}),
+                        "verify",
+                    )],
+                )
+                .await?;
+            let result = response
+                .method_responses
+                .iter()
+                .find(|method| method.0 == "CalendarEvent/get")
+                .context("meeting decline verification failed")?;
+            let items = result.1["list"]
+                .as_array()
+                .context("meeting decline verification failed")?;
+            if count == 1 {
+                anyhow::ensure!(
+                    !items.iter().any(|item| item["id"] == event_id),
+                    "declined meeting still exists"
+                );
+            } else {
+                let remaining = items
+                    .iter()
+                    .find(|item| item["id"] == event_id)
+                    .context("shared meeting disappeared")?;
+                anyhow::ensure!(
+                    remaining["calendarIds"][calendar_id] != true,
+                    "declined calendar still contains meeting"
+                );
+                for (id, member) in calendars {
+                    if id != calendar_id && *member == true {
+                        anyhow::ensure!(
+                            remaining["calendarIds"][id] == true,
+                            "another calendar lost the meeting"
+                        );
+                    }
+                }
+            }
+            return Ok(true);
+        }
         let participant_id = (*key).clone();
         let original_roles = participant["roles"].clone();
         let owner_email = owners[0]["email"].clone();
@@ -2415,6 +2506,13 @@ impl JmapClient {
         else {
             return Ok(None);
         };
+        if participation == "declined" {
+            return Ok(Some((
+                calendar_id.to_owned(),
+                String::new(),
+                organizer.to_owned(),
+            )));
+        }
         let response: JmapResponse<serde_json::Value> = self.api_call(auth, &using,
             vec![MethodCall::new("CalendarEvent/set", serde_json::json!({"accountId":calendar_account,
                 "ifInState":before.1,"sendSchedulingMessages":false,"create":{"invitation":created.take()}}), "create")]).await?;

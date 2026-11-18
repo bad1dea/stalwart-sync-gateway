@@ -76,7 +76,7 @@ pub(super) async fn handle(
                 || !matches!(response, "1" | "2" | "3")
             {
                 "2"
-            } else if unsupported || response == "3" {
+            } else if unsupported {
                 "4"
             } else if matches!(version, ProtocolVersion::V14_0) && folder.starts_with("cal_") {
                 "2"
@@ -96,10 +96,10 @@ pub(super) async fn handle(
                         "4"
                     }
                     Ok(Some(_)) => {
-                        let participation = if response == "1" {
-                            "accepted"
-                        } else {
-                            "tentative"
+                        let participation = match response {
+                            "1" => "accepted",
+                            "2" => "tentative",
+                            _ => "declined",
                         };
                         let user_push = state.push.user(&auth.username().to_ascii_lowercase());
                         let lock = user_push.sync_lock("__meeting_response__");
@@ -118,6 +118,7 @@ pub(super) async fn handle(
                                 })
                         };
                         match target {
+                            Ok(Some((_, event, _))) if event.is_empty() && response == "3" => "1",
                             Ok(Some((calendar, event, organizer))) => match state
                                 .jmap
                                 .respond_calendar_event(
@@ -149,7 +150,7 @@ pub(super) async fn handle(
                 }
             };
             b.leaf(mr::STATUS, status);
-            if status == "1" {
+            if status == "1" && response != "3" {
                 b.leaf(
                     mr::CALENDAR_ID,
                     calendar_id.expect("successful meeting has a calendar id"),

@@ -5878,7 +5878,6 @@ mod e2e {
         );
 
         for (answer, version, send, expected) in [
-            ("3", "16.1", false, "4"),
             ("1", "14.0", false, "2"),
             ("1", "16.1", true, "4"),
             ("9", "16.1", false, "2"),
@@ -6062,11 +6061,121 @@ mod e2e {
         assert_eq!(query[0][1]["ids"].as_array().unwrap().len(), 1);
         let removed = live.call_using(serde_json::json!([["CalendarEvent/set", {"accountId":live.account,"destroy":[new_id]}, "0"]]), &using).await;
         assert!(removed[0][1]["notDestroyed"].is_null());
+        let mut b = eas::DocumentBuilder::new();
+        b.start(mr::MEETING_RESPONSE);
+        b.start(mr::REQUEST);
+        b.leaf(mr::USER_RESPONSE, "3");
+        b.leaf(mr::COLLECTION_ID, &folder);
+        b.leaf(mr::REQUEST_ID, &id);
+        b.end();
+        b.end();
+        let declined = live
+            .wbxml_version(
+                "MeetingResponse",
+                &device,
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&declined, mr::STATUS), Some("1"));
+        assert!(eas::find_text_after(&declined, mr::CALENDAR_ID).is_none());
+        let gone = live.call_using(serde_json::json!([["CalendarEvent/get", {"accountId":live.account,"ids":[&id]}, "0"]]), &using).await;
+        assert!(gone[0][1]["list"].as_array().unwrap().is_empty());
+        let mut b = eas::DocumentBuilder::new();
+        b.start(mr::MEETING_RESPONSE);
+        b.start(mr::REQUEST);
+        b.leaf(mr::USER_RESPONSE, "3");
+        b.leaf(mr::COLLECTION_ID, &live.inbox);
+        b.leaf(mr::REQUEST_ID, &mail_id);
+        b.end();
+        b.end();
+        let declined = live
+            .wbxml_version(
+                "MeetingResponse",
+                &inbox_device,
+                wbxml::encode_document(&b.finish()),
+                "14.0",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&declined, mr::STATUS), Some("1"));
+        assert!(eas::find_text_after(&declined, mr::CALENDAR_ID).is_none());
+        let query = live.call_using(serde_json::json!([["CalendarEvent/query", {"accountId":live.account,"filter":{"uid":uid}}, "0"]]), &using).await;
+        assert!(query[0][1]["ids"].as_array().unwrap().is_empty());
+        let second = live.call_using(serde_json::json!([["Calendar/set", {"accountId":live.account,"create":{"c":{"name":format!("Meeting shared fixture {}",std::process::id())}}}, "0"]]), &using).await;
+        let second_calendar = second[0][1]["created"]["c"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let shared = live.call_using(serde_json::json!([["CalendarEvent/set", {"accountId":live.account,"create":{"e":{
+            "@type":"Event","calendarIds":{&calendar:true,&second_calendar:true},"title":"Shared meeting fixture",
+            "start":"2042-07-06T10:00:00","duration":"PT1H","replyTo":{"imip":"mailto:owner@example.test"},
+            "participants":{
+                "owner":{"@type":"Participant","email":"owner@example.test","calendarAddress":"mailto:owner@example.test","roles":{"owner":true},"sendTo":{"imip":"mailto:owner@example.test"},"scheduleAgent":"client"},
+                "self":{"@type":"Participant","email":live.user,"calendarAddress":format!("mailto:{}",live.user),"roles":{"attendee":true},"participationStatus":"needs-action","sendTo":{"imip":format!("mailto:{}",live.user)},"scheduleAgent":"client"}
+            }} }}, "0"]]), &using).await;
+        let shared_id = shared[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut b = eas::DocumentBuilder::new();
+        b.start(mr::MEETING_RESPONSE);
+        b.start(mr::REQUEST);
+        b.leaf(mr::USER_RESPONSE, "3");
+        b.leaf(mr::COLLECTION_ID, &folder);
+        b.leaf(mr::REQUEST_ID, &shared_id);
+        b.end();
+        b.end();
+        let declined = live
+            .wbxml_version(
+                "MeetingResponse",
+                &device,
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&declined, mr::STATUS), Some("1"));
+        let remaining = live.call_using(serde_json::json!([["CalendarEvent/get", {"accountId":live.account,"ids":[&shared_id],"properties":["calendarIds"]}, "0"]]), &using).await;
+        assert!(remaining[0][1]["list"][0]["calendarIds"][&calendar] != true);
+        assert_eq!(
+            remaining[0][1]["list"][0]["calendarIds"][&second_calendar],
+            true
+        );
+        let cleanup_shared = live.call_using(serde_json::json!([["CalendarEvent/set", {"accountId":live.account,"destroy":[shared_id]}, "0"], ["Calendar/set", {"accountId":live.account,"destroy":[second_calendar]}, "1"]]), &using).await;
+        assert!(cleanup_shared[0][1]["notDestroyed"].is_null());
+        assert!(cleanup_shared[1][1]["notDestroyed"].is_null());
+        let own = live.call_using(serde_json::json!([["CalendarEvent/set", {"accountId":live.account,"create":{"e":{
+            "@type":"Event","calendarIds":{&calendar:true},"title":"Organizer fixture",
+            "start":"2042-07-06T10:00:00","duration":"PT1H","replyTo":{"imip":format!("mailto:{}",live.user)},
+            "participants":{
+                "owner":{"@type":"Participant","email":live.user,"calendarAddress":format!("mailto:{}",live.user),"roles":{"owner":true},"sendTo":{"imip":format!("mailto:{}",live.user)},"scheduleAgent":"client"},
+                "other":{"@type":"Participant","email":"other@example.test","calendarAddress":"mailto:other@example.test","roles":{"attendee":true},"sendTo":{"imip":"mailto:other@example.test"},"scheduleAgent":"client"}
+            }} }}, "0"]]), &using).await;
+        let own_id = own[0][1]["created"]["e"]["id"].as_str().unwrap().to_owned();
+        let mut b = eas::DocumentBuilder::new();
+        b.start(mr::MEETING_RESPONSE);
+        b.start(mr::REQUEST);
+        b.leaf(mr::USER_RESPONSE, "3");
+        b.leaf(mr::COLLECTION_ID, &folder);
+        b.leaf(mr::REQUEST_ID, &own_id);
+        b.end();
+        b.end();
+        let rejected = live
+            .wbxml_version(
+                "MeetingResponse",
+                &device,
+                wbxml::encode_document(&b.finish()),
+                "16.1",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&rejected, mr::STATUS), Some("2"));
+        let still_there = live.call_using(serde_json::json!([["CalendarEvent/get", {"accountId":live.account,"ids":[&own_id]}, "0"]]), &using).await;
+        assert_eq!(still_there[0][1]["list"].as_array().unwrap().len(), 1);
+        let removed = live.call_using(serde_json::json!([["CalendarEvent/set", {"accountId":live.account,"destroy":[own_id]}, "0"]]), &using).await;
+        assert!(removed[0][1]["notDestroyed"].is_null());
         let cleanup_mail = live.call(serde_json::json!([["Email/set", {"accountId":live.account,"destroy":[mail_id,forged_id,new_mail]}, "0"]])).await;
         assert!(cleanup_mail[0][1]["notDestroyed"].is_null());
-        let cleanup = live.call_using(serde_json::json!([["CalendarEvent/set", {"accountId":live.account,"destroy":[id]}, "0"], ["Calendar/set", {"accountId":live.account,"destroy":[calendar]}, "1"]]), &using).await;
+        let cleanup = live.call_using(serde_json::json!([["Calendar/set", {"accountId":live.account,"destroy":[calendar]}, "0"]]), &using).await;
         assert!(cleanup[0][1]["notDestroyed"].is_null());
-        assert!(cleanup[1][1]["notDestroyed"].is_null());
     }
 
     #[tokio::test]
