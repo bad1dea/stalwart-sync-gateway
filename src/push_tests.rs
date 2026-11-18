@@ -5903,6 +5903,108 @@ mod e2e {
             assert!(eas::find_text_after(&doc, mr::CALENDAR_ID).is_none());
         }
 
+        let event = live.call_using(serde_json::json!([["CalendarEvent/get", {"accountId":live.account,"ids":[&id],"properties":["uid"]}, "0"]]), &using).await;
+        let uid = event[0][1]["list"][0]["uid"].as_str().unwrap();
+        let calendar_text = format!("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//EAS Test//EN\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nDTSTAMP:20420701T100000Z\r\nDTSTART:20420706T100000Z\r\nDTEND:20420706T110000Z\r\nSUMMARY:Meeting response fixture\r\nORGANIZER:mailto:owner@example.test\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:{}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n", live.user);
+        let message = format!("From: owner@example.test\r\nTo: {}\r\nSubject: Meeting response fixture\r\nMIME-Version: 1.0\r\nContent-Type: text/calendar; charset=utf-8; method=REQUEST\r\n\r\n{calendar_text}", live.user);
+        let upload: serde_json::Value = live
+            .http
+            .post(format!("{}/jmap/upload/{}/", live.jmap, live.account))
+            .basic_auth(&live.user, Some(&live.pass))
+            .header("Content-Type", "message/rfc822")
+            .body(message)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let imported = live.call(serde_json::json!([["Email/import", {"accountId":live.account,
+            "emails":{"m":{"blobId":upload["blobId"],"mailboxIds":{&live.inbox:true},"keywords":{}}}}, "0"]])).await;
+        let mail_id = imported[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let inbox_device = dev("meeting-inbox");
+        let prime = live
+            .wbxml_version("Sync", &inbox_device, sync_body("0", &live.inbox), "14.0")
+            .await;
+        let _initial = live
+            .wbxml_version(
+                "Sync",
+                &inbox_device,
+                sync_body(&sync_key(&prime), &live.inbox),
+                "14.0",
+            )
+            .await;
+        let mut b = eas::DocumentBuilder::new();
+        b.start(mr::MEETING_RESPONSE);
+        b.start(mr::REQUEST);
+        b.leaf(mr::USER_RESPONSE, "1");
+        b.leaf(mr::COLLECTION_ID, &live.inbox);
+        b.leaf(mr::REQUEST_ID, &mail_id);
+        b.end();
+        b.end();
+        let result = live
+            .wbxml_version(
+                "MeetingResponse",
+                &inbox_device,
+                wbxml::encode_document(&b.finish()),
+                "14.0",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&result, mr::STATUS), Some("1"));
+        assert_eq!(
+            eas::find_text_after(&result, mr::CALENDAR_ID),
+            Some(id.as_str())
+        );
+        let forged = calendar_text.replace(
+            "ORGANIZER:mailto:owner@example.test",
+            "ORGANIZER:mailto:other@example.test",
+        );
+        let message = format!("From: other@example.test\r\nTo: {}\r\nSubject: Meeting response fixture\r\nMIME-Version: 1.0\r\nContent-Type: text/calendar; charset=utf-8; method=REQUEST\r\n\r\n{forged}", live.user);
+        let upload: serde_json::Value = live
+            .http
+            .post(format!("{}/jmap/upload/{}/", live.jmap, live.account))
+            .basic_auth(&live.user, Some(&live.pass))
+            .header("Content-Type", "message/rfc822")
+            .body(message)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let imported = live.call(serde_json::json!([["Email/import", {"accountId":live.account,
+            "emails":{"m":{"blobId":upload["blobId"],"mailboxIds":{&live.inbox:true},"keywords":{}}}}, "0"]])).await;
+        let forged_id = imported[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut b = eas::DocumentBuilder::new();
+        b.start(mr::MEETING_RESPONSE);
+        b.start(mr::REQUEST);
+        b.leaf(mr::USER_RESPONSE, "2");
+        b.leaf(mr::COLLECTION_ID, &live.inbox);
+        b.leaf(mr::REQUEST_ID, &forged_id);
+        b.end();
+        b.end();
+        let rejected = live
+            .wbxml_version(
+                "MeetingResponse",
+                &inbox_device,
+                wbxml::encode_document(&b.finish()),
+                "14.0",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&rejected, mr::STATUS), Some("2"));
+        let native = live.call_using(serde_json::json!([["CalendarEvent/get", {"accountId":live.account,"ids":[&id],"properties":["participants"]}, "0"]]), &using).await;
+        assert_eq!(
+            native[0][1]["list"][0]["participants"]["self"]["participationStatus"],
+            "accepted"
+        );
+        let cleanup_mail = live.call(serde_json::json!([["Email/set", {"accountId":live.account,"destroy":[mail_id,forged_id]}, "0"]])).await;
+        assert!(cleanup_mail[0][1]["notDestroyed"].is_null());
         let cleanup = live.call_using(serde_json::json!([["CalendarEvent/set", {"accountId":live.account,"destroy":[id]}, "0"], ["Calendar/set", {"accountId":live.account,"destroy":[calendar]}, "1"]]), &using).await;
         assert!(cleanup[0][1]["notDestroyed"].is_null());
         assert!(cleanup[1][1]["notDestroyed"].is_null());

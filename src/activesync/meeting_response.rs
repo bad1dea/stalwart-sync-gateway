@@ -68,6 +68,7 @@ pub(super) async fn handle(
                         )
                         .any(|token| is(field, *token))
                 });
+            let mut calendar_id = None;
             let status = if !is(&request, mr::REQUEST)
                 || !valid_fields
                 || id.is_empty()
@@ -77,7 +78,7 @@ pub(super) async fn handle(
                 "2"
             } else if unsupported || response == "3" {
                 "4"
-            } else if matches!(version, ProtocolVersion::V14_0) || !folder.starts_with("cal_") {
+            } else if matches!(version, ProtocolVersion::V14_0) && folder.starts_with("cal_") {
                 "2"
             } else {
                 match state
@@ -100,15 +101,44 @@ pub(super) async fn handle(
                         } else {
                             "tentative"
                         };
-                        match state
-                            .jmap
-                            .respond_calendar_event(auth, &folder[4..], id, participation)
-                            .await
-                        {
-                            Ok(true) => "1",
-                            Ok(false) => "2",
+                        let target = if let Some(calendar) = folder.strip_prefix("cal_") {
+                            Ok(Some((calendar.to_owned(), id.to_owned(), None)))
+                        } else {
+                            state
+                                .jmap
+                                .calendar_event_for_invitation(auth, folder, id)
+                                .await
+                                .map(|target| {
+                                    target.map(|(calendar, event, organizer)| {
+                                        (calendar, event, Some(organizer))
+                                    })
+                                })
+                        };
+                        match target {
+                            Ok(Some((calendar, event, organizer))) => match state
+                                .jmap
+                                .respond_calendar_event(
+                                    auth,
+                                    &calendar,
+                                    &event,
+                                    participation,
+                                    organizer.as_deref(),
+                                )
+                                .await
+                            {
+                                Ok(true) => {
+                                    calendar_id = Some(event);
+                                    "1"
+                                }
+                                Ok(false) => "2",
+                                Err(error) => {
+                                    tracing::warn!(%error, "meeting response failed");
+                                    "4"
+                                }
+                            },
+                            Ok(None) => "2",
                             Err(error) => {
-                                tracing::warn!(%error, "meeting response failed");
+                                tracing::warn!(%error, "meeting invitation lookup failed");
                                 "4"
                             }
                         }
@@ -117,7 +147,10 @@ pub(super) async fn handle(
             };
             b.leaf(mr::STATUS, status);
             if status == "1" {
-                b.leaf(mr::CALENDAR_ID, id);
+                b.leaf(
+                    mr::CALENDAR_ID,
+                    calendar_id.expect("successful meeting has a calendar id"),
+                );
             }
             b.end();
         }

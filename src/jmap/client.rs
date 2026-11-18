@@ -2120,6 +2120,7 @@ impl JmapClient {
         calendar_id: &str,
         event_id: &str,
         participation: &str,
+        expected_organizer: Option<&str>,
     ) -> anyhow::Result<bool> {
         let account = auth
             .session
@@ -2167,6 +2168,13 @@ impl JmapClient {
                 .as_str()
                 .is_none_or(|email| email.eq_ignore_ascii_case(auth.username()))
         {
+            return Ok(false);
+        }
+        if expected_organizer.is_some_and(|expected| {
+            owners[0]["email"]
+                .as_str()
+                .is_none_or(|email| !email.eq_ignore_ascii_case(expected))
+        }) {
             return Ok(false);
         }
         let matches: Vec<_> = participants
@@ -2242,6 +2250,139 @@ impl JmapClient {
             "meeting organizer was not retained"
         );
         Ok(true)
+    }
+
+    pub async fn calendar_event_for_invitation(
+        &self,
+        auth: &AuthenticatedSession,
+        mailbox: &str,
+        email_id: &str,
+    ) -> anyhow::Result<Option<(String, String, String)>> {
+        let mail_account = auth
+            .session
+            .primary_account_for(capabilities::MAIL)
+            .context("JMAP Mail capability is unavailable")?;
+        let calendar_account = auth
+            .session
+            .primary_account_for(capabilities::CALENDARS)
+            .context("JMAP Calendars capability is unavailable")?;
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::MAIL.to_owned()],
+                vec![MethodCall::new(
+                    "Email/get",
+                    serde_json::json!({"accountId":mail_account,"ids":[email_id],
+                "properties":["id","mailboxIds","bodyStructure"]}),
+                    "mail",
+                )],
+            )
+            .await?;
+        let result = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "Email/get")
+            .context("meeting invitation lookup failed")?;
+        let Some(email) = result.1["list"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["id"] == email_id))
+        else {
+            return Ok(None);
+        };
+        if email["mailboxIds"][mailbox] != true {
+            return Ok(None);
+        }
+        fn calendar_blobs(part: &serde_json::Value, blobs: &mut Vec<String>) {
+            if part["type"]
+                .as_str()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("text/calendar"))
+            {
+                if let Some(id) = part["blobId"].as_str() {
+                    blobs.push(id.to_owned());
+                }
+            }
+            if let Some(children) = part["subParts"].as_array() {
+                for child in children {
+                    calendar_blobs(child, blobs);
+                }
+            }
+        }
+        let mut blobs = Vec::new();
+        calendar_blobs(&email["bodyStructure"], &mut blobs);
+        let [blob] = blobs.as_slice() else {
+            return Ok(None);
+        };
+        let using = [
+            capabilities::CORE.to_owned(),
+            capabilities::CALENDARS.to_owned(),
+        ];
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &using,
+                vec![
+                    MethodCall::new(
+                        "CalendarEvent/parse",
+                        serde_json::json!({"accountId":calendar_account,"blobIds":[blob]}),
+                        "parse",
+                    ),
+                    MethodCall::new(
+                        "Calendar/get",
+                        serde_json::json!({"accountId":calendar_account,"properties":["id"]}),
+                        "calendars",
+                    ),
+                ],
+            )
+            .await?;
+        let parsed = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/parse")
+            .and_then(|method| method.1["parsed"][blob].as_array())
+            .context("meeting invitation could not be parsed")?;
+        let [event] = parsed.as_slice() else {
+            return Ok(None);
+        };
+        if event["@type"] != "Event"
+            || event["method"]
+                .as_str()
+                .is_none_or(|method| !method.eq_ignore_ascii_case("request"))
+        {
+            return Ok(None);
+        }
+        let Some(uid) = event["uid"].as_str().filter(|uid| !uid.is_empty()) else {
+            return Ok(None);
+        };
+        let Some(organizer) = event["organizerCalendarAddress"]
+            .as_str()
+            .or_else(|| event["replyTo"]["imip"].as_str())
+            .and_then(|uri| {
+                uri.get(..7)
+                    .filter(|prefix| prefix.eq_ignore_ascii_case("mailto:"))
+                    .and_then(|_| uri.get(7..))
+            })
+            .filter(|email| !email.is_empty())
+        else {
+            return Ok(None);
+        };
+        let calendars = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "Calendar/get")
+            .and_then(|method| method.1["list"].as_array())
+            .context("calendar list unavailable")?;
+        let mut found = Vec::new();
+        for calendar in calendars {
+            let id = calendar["id"].as_str().context("calendar id missing")?;
+            if let Some(event_id) = self.calendar_event_by_uid(auth, id, uid).await? {
+                found.push((id.to_owned(), event_id, organizer.to_owned()));
+            }
+        }
+        match found.as_slice() {
+            [item] => Ok(Some(item.clone())),
+            [] => Ok(None),
+            _ => anyhow::bail!("meeting invitation matches multiple calendar events"),
+        }
     }
 
     pub async fn calendar_event_by_uid(
