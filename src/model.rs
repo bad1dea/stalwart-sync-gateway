@@ -283,6 +283,7 @@ pub struct CalendarEvent {
     pub uid: Option<String>,
     pub calendar_ids: Vec<String>,
     pub title: String,
+    pub updated_utc: Option<String>,
     pub description: Option<EmailBody>,
     pub location: Option<String>,
     pub location_coordinates: Option<(String, String)>,

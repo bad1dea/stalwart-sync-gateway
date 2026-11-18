@@ -3635,6 +3635,72 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_calendar_timestamp_matches_stalwart() {
+        use eas::calendar as cal;
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let created = live.call_using(serde_json::json!([["Calendar/set", {"accountId":live.account,"create":{"c":{"name":format!("Timestamp fixture {}",std::process::id())}}},"0"]]), &using).await;
+        let calendar = created[0][1]["created"]["c"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let created = live.call_using(serde_json::json!([["CalendarEvent/set", {"accountId":live.account,"create":{"e":{"@type":"Event","calendarIds":{&calendar:true},"title":"Timestamp fixture","start":"2042-05-05T10:00:00","duration":"PT1H"}}},"0"]]), &using).await;
+        let id = created[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let current = live.call_using(serde_json::json!([["CalendarEvent/get", {"accountId":live.account,"ids":[&id],"properties":["updated"]},"0"]]), &using).await;
+        let updated = current[0][1]["list"][0]["updated"]
+            .as_str()
+            .expect("Stalwart event update timestamp");
+        let expected = chrono::DateTime::parse_from_rfc3339(updated)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            .format("%Y%m%dT%H%M%SZ")
+            .to_string();
+        let folder = format!("cal_{calendar}");
+        let device = dev("calendar-stamp");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let response = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&response, cal::DTSTAMP),
+            Some(expected.as_str())
+        );
+        let second = dev("calendar-stamp-second");
+        let prime = live
+            .wbxml_version("Sync", &second, sync_body("0", &folder), "14.0")
+            .await;
+        let response = live
+            .wbxml_version(
+                "Sync",
+                &second,
+                sync_body(&sync_key(&prime), &folder),
+                "14.0",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&response, cal::DTSTAMP),
+            Some(expected.as_str())
+        );
+        let removed = live.call_using(serde_json::json!([["CalendarEvent/set", {"accountId":live.account,"destroy":[id]},"0"],["Calendar/set", {"accountId":live.account,"destroy":[calendar]},"1"]]), &using).await;
+        assert!(removed[0][1]["notDestroyed"].is_null());
+        assert!(removed[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_calendar_location_coordinates_sync() {
         use eas::airsync_base as base;
         let live = Live::new("E2E_USER2").await;

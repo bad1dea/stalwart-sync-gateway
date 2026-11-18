@@ -5936,6 +5936,7 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     event.uid.hash(&mut hasher);
     event.title.hash(&mut hasher);
+    event.updated_utc.hash(&mut hasher);
     if let Some(body) = &event.description {
         body.body_type.eas_value().hash(&mut hasher);
         body.value.hash(&mut hasher);
@@ -5999,10 +6000,9 @@ fn write_calendar_fields(
     // not just the PHP source, for the Organizer/MeetingStatus/Attendees
     // placement specifically -- the PR #187 mapping doesn't cover those
     // three since z-push-stalwart-jmap never implemented them).
-    builder.leaf(
-        cal::DTSTAMP,
-        eas_datetime(&chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-    );
+    if let Some(updated) = &event.updated_utc {
+        builder.leaf(cal::DTSTAMP, updated);
+    }
     if let Some(start) = &event.start_utc {
         builder.leaf(cal::START_TIME, start.clone());
     }
@@ -7496,6 +7496,24 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn calendar_timestamp_is_stable_and_tracks_modification() {
+        use crate::wbxml::eas::{self, airsync as air, calendar as cal};
+        let mut event = crate::model::CalendarEvent::default();
+        let before = super::calendar_event_hash(&event);
+        let mut b = eas::DocumentBuilder::new();
+        super::write_calendar_command(&mut b, air::ADD, &event, ProtocolVersion::V16_1, &[]);
+        assert_eq!(eas::find_text_after(&b.finish(), cal::DTSTAMP), None);
+        event.updated_utc = Some("20240229T235958Z".into());
+        assert_ne!(super::calendar_event_hash(&event), before);
+        let mut b = eas::DocumentBuilder::new();
+        super::write_calendar_command(&mut b, air::ADD, &event, ProtocolVersion::V16_1, &[]);
+        assert_eq!(
+            eas::find_text_after(&b.finish(), cal::DTSTAMP),
+            Some("20240229T235958Z")
+        );
     }
 
     #[test]

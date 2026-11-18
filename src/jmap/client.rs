@@ -2027,6 +2027,7 @@ impl JmapClient {
                     "uid",
                     "@type",
                     "title",
+                    "updated",
                     "description",
                     "descriptionContentType",
                     "start",
@@ -5688,6 +5689,8 @@ struct CalendarEventObject {
     #[serde(default)]
     title: String,
     #[serde(default)]
+    updated: Option<String>,
+    #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     description_content_type: Option<String>,
@@ -5889,6 +5892,15 @@ impl From<CalendarEventObject> for CalendarEvent {
             uid: value.uid,
             calendar_ids: Vec::new(),
             title: value.title,
+            updated_utc: value
+                .updated
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|date| {
+                    date.with_timezone(&chrono::Utc)
+                        .format("%Y%m%dT%H%M%SZ")
+                        .to_string()
+                }),
             description: value.description.map(|description| {
                 let content_type = value
                     .description_content_type
@@ -6202,6 +6214,19 @@ impl From<CalendarObject> for Collection {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn calendar_updated_time_uses_compact_utc() {
+        let event: super::CalendarEventObject = serde_json::from_value(
+            serde_json::json!({"id":"e", "updated":"2024-02-29T23:59:58.123Z"}),
+        )
+        .unwrap();
+        let event = crate::model::CalendarEvent::from(event);
+        assert_eq!(event.updated_utc.as_deref(), Some("20240229T235958Z"));
+        let event: super::CalendarEventObject =
+            serde_json::from_value(serde_json::json!({"id":"e", "updated":"invalid"})).unwrap();
+        assert_eq!(crate::model::CalendarEvent::from(event).updated_utc, None);
+    }
+
     #[test]
     fn calendar_coordinates_require_valid_simple_wgs84_uri() {
         for (coordinates, expected) in [
