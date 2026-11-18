@@ -9,6 +9,8 @@ services:
       EAS_PUBLIC_URL: https://mail.example.com/Microsoft-Server-ActiveSync
       STATE_BACKEND: sqlite
       STATE_SQLITE_PATH: /data/state.db
+      VALIDATE_CERT_CA_FILE: ${VALIDATE_CERT_CA_FILE:-/etc/ssl/certs/ca-certificates.crt}
+      VALIDATE_CERT_CRL_FILE: ${VALIDATE_CERT_CRL_FILE:-}
       RUST_LOG: info
     ports:
       - "8080:8080"

@@ -13,6 +13,8 @@ pub struct Config {
     pub state_sqlite_path: String,
     pub log_level: String,
     pub max_wbxml_bytes: usize,
+    pub validate_cert_ca_file: String,
+    pub validate_cert_crl_file: Option<String>,
     /// Heartbeat limits advertised via Ping Status 5, seconds.
     pub ping_max_seconds: u64,
     pub ping_min_seconds: u64,
@@ -83,6 +85,13 @@ impl Config {
             max_wbxml_bytes: env_or("MAX_WBXML_BYTES", "1048576")
                 .parse()
                 .context("MAX_WBXML_BYTES must be an integer")?,
+            validate_cert_ca_file: env_or(
+                "VALIDATE_CERT_CA_FILE",
+                "/etc/ssl/certs/ca-certificates.crt",
+            ),
+            validate_cert_crl_file: env::var("VALIDATE_CERT_CRL_FILE")
+                .ok()
+                .filter(|path| !path.is_empty()),
             ping_max_seconds: env_or("PING_MAX_SECONDS", "1800")
                 .parse()
                 .context("PING_MAX_SECONDS must be an integer")?,

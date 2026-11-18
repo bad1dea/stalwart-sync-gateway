@@ -729,6 +729,8 @@ async fn spawn_gateway(
         state_sqlite_path: opts.sqlite.clone().unwrap_or_default(),
         log_level: "info".into(),
         max_wbxml_bytes: 1 << 20,
+        validate_cert_ca_file: "/etc/ssl/certs/ca-certificates.crt".into(),
+        validate_cert_crl_file: None,
         ping_max_seconds: 30,
         ping_min_seconds: 1,
         ping_max_concurrent: opts.max_concurrent,
@@ -1350,6 +1352,8 @@ async fn existing_sqlite_device_state_is_honoured() {
             state_sqlite_path: path.clone(),
             log_level: "info".into(),
             max_wbxml_bytes: 1,
+            validate_cert_ca_file: "/etc/ssl/certs/ca-certificates.crt".into(),
+            validate_cert_crl_file: None,
             ping_max_seconds: 30,
             ping_min_seconds: 1,
             ping_max_concurrent: 1,
@@ -2128,12 +2132,8 @@ async fn options_advertises_methods_versions_and_commands() {
     assert!(commands
         .split(',')
         .any(|command| command == "MeetingResponse"));
-    for unhandled in ["ValidateCert", "Find"] {
-        assert!(
-            !commands.split(',').any(|c| c == unhandled),
-            "advertises {unhandled}"
-        );
-    }
+    assert!(commands.split(',').any(|command| command == "ValidateCert"));
+    assert!(!commands.split(',').any(|command| command == "Find"));
 }
 
 #[tokio::test]
@@ -4209,6 +4209,38 @@ mod e2e {
             )
             .await;
         assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_validate_certificates() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use eas::validate_cert as vc;
+        let live = Live::new("E2E_USER").await;
+        let mut b = eas::DocumentBuilder::new();
+        b.start(vc::VALIDATE_CERT);
+        b.start(vc::CERTIFICATES);
+        for cert in [
+            include_bytes!("../tests/fixtures/validate-cert/good.der").as_slice(),
+            include_bytes!("../tests/fixtures/validate-cert/revoked.der").as_slice(),
+        ] {
+            b.leaf(vc::CERTIFICATE, STANDARD.encode(cert));
+        }
+        b.end();
+        b.leaf(vc::CHECK_CRL, "1");
+        b.end();
+        let result = live
+            .wbxml_version(
+                "ValidateCert",
+                &dev("cert"),
+                wbxml::encode_document(&b.finish()),
+                "14.0",
+            )
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&result, vc::STATUS),
+            vec!["1", "1", "13"]
+        );
     }
 
     #[tokio::test]

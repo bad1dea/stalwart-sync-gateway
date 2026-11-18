@@ -6,6 +6,7 @@ mod resolve_recipients;
 mod search_multi;
 mod sync_options;
 mod sync_request;
+mod validate_cert;
 
 use crate::wbxml::eas::RequestedBodyPreference;
 use anyhow::Context;
@@ -32,7 +33,7 @@ use crate::{
 // shapes and commands are implemented and checked with independent clients.
 const SUPPORTED_PROTOCOLS: &str = "14.0";
 // Advertise only commands with handlers.
-const SUPPORTED_COMMANDS: &str = "Sync,SendMail,SmartForward,SmartReply,GetAttachment,FolderSync,FolderCreate,FolderDelete,FolderUpdate,MoveItems,GetItemEstimate,Search,Settings,Ping,ItemOperations,Provision,ResolveRecipients,MeetingResponse";
+const SUPPORTED_COMMANDS: &str = "Sync,SendMail,SmartForward,SmartReply,GetAttachment,FolderSync,FolderCreate,FolderDelete,FolderUpdate,MoveItems,GetItemEstimate,Search,Settings,Ping,ItemOperations,Provision,ResolveRecipients,MeetingResponse,ValidateCert";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProtocolVersion {
@@ -315,6 +316,9 @@ pub async fn post_handler(
                         &state, &auth, &document, multipart, version, command,
                     )
                     .await;
+                }
+                if command.eq_ignore_ascii_case("ValidateCert") {
+                    return validate_cert::handle(&state.config, &document);
                 }
                 if command.eq_ignore_ascii_case("MeetingResponse") {
                     return meeting_response::handle(&state, &auth, &query, &document, version)
