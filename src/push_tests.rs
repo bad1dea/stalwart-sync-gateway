@@ -2125,7 +2125,10 @@ async fn options_advertises_methods_versions_and_commands() {
     assert!(commands
         .split(',')
         .any(|command| command == "ResolveRecipients"));
-    for unhandled in ["MeetingResponse", "ValidateCert", "Find"] {
+    assert!(commands
+        .split(',')
+        .any(|command| command == "MeetingResponse"));
+    for unhandled in ["ValidateCert", "Find"] {
         assert!(
             !commands.split(',').any(|c| c == unhandled),
             "advertises {unhandled}"
@@ -6003,7 +6006,63 @@ mod e2e {
             native[0][1]["list"][0]["participants"]["self"]["participationStatus"],
             "accepted"
         );
-        let cleanup_mail = live.call(serde_json::json!([["Email/set", {"accountId":live.account,"destroy":[mail_id,forged_id]}, "0"]])).await;
+        let new_uid = format!("new-invite-{}@example.test", std::process::id());
+        let new_calendar_text = calendar_text.replace(uid, &new_uid);
+        let message = format!("From: owner@example.test\r\nTo: {}\r\nSubject: Meeting response fixture\r\nMIME-Version: 1.0\r\nContent-Type: text/calendar; charset=utf-8; method=REQUEST\r\n\r\n{new_calendar_text}", live.user);
+        let upload: serde_json::Value = live
+            .http
+            .post(format!("{}/jmap/upload/{}/", live.jmap, live.account))
+            .basic_auth(&live.user, Some(&live.pass))
+            .header("Content-Type", "message/rfc822")
+            .body(message)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let imported = live.call(serde_json::json!([["Email/import", {"accountId":live.account,
+            "emails":{"m":{"blobId":upload["blobId"],"mailboxIds":{&live.inbox:true},"keywords":{}}}}, "0"]])).await;
+        let new_mail = imported[0][1]["created"]["m"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut b = eas::DocumentBuilder::new();
+        b.start(mr::MEETING_RESPONSE);
+        b.start(mr::REQUEST);
+        b.leaf(mr::USER_RESPONSE, "1");
+        b.leaf(mr::COLLECTION_ID, &live.inbox);
+        b.leaf(mr::REQUEST_ID, &new_mail);
+        b.end();
+        b.end();
+        let request = wbxml::encode_document(&b.finish());
+        let (first_response, second_response) = tokio::join!(
+            live.wbxml_version("MeetingResponse", &inbox_device, request.clone(), "14.0"),
+            live.wbxml_version("MeetingResponse", &inbox_device, request, "14.0")
+        );
+        assert_eq!(eas::find_text_after(&first_response, mr::STATUS), Some("1"));
+        assert_eq!(
+            eas::find_text_after(&second_response, mr::STATUS),
+            Some("1")
+        );
+        let new_id = eas::find_text_after(&first_response, mr::CALENDAR_ID)
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            eas::find_text_after(&second_response, mr::CALENDAR_ID),
+            Some(new_id.as_str())
+        );
+        let got = live.call_using(serde_json::json!([["CalendarEvent/get", {"accountId":live.account,"ids":[&new_id],"properties":["uid","participants"]}, "0"]]), &using).await;
+        assert_eq!(got[0][1]["list"][0]["uid"], new_uid);
+        let participants = got[0][1]["list"][0]["participants"].as_object().unwrap();
+        assert!(participants
+            .values()
+            .any(|p| p["email"] == live.user && p["participationStatus"] == "accepted"));
+        let query = live.call_using(serde_json::json!([["CalendarEvent/query", {"accountId":live.account,"filter":{"uid":&new_uid}}, "0"]]), &using).await;
+        assert_eq!(query[0][1]["ids"].as_array().unwrap().len(), 1);
+        let removed = live.call_using(serde_json::json!([["CalendarEvent/set", {"accountId":live.account,"destroy":[new_id]}, "0"]]), &using).await;
+        assert!(removed[0][1]["notDestroyed"].is_null());
+        let cleanup_mail = live.call(serde_json::json!([["Email/set", {"accountId":live.account,"destroy":[mail_id,forged_id,new_mail]}, "0"]])).await;
         assert!(cleanup_mail[0][1]["notDestroyed"].is_null());
         let cleanup = live.call_using(serde_json::json!([["CalendarEvent/set", {"accountId":live.account,"destroy":[id]}, "0"], ["Calendar/set", {"accountId":live.account,"destroy":[calendar]}, "1"]]), &using).await;
         assert!(cleanup[0][1]["notDestroyed"].is_null());

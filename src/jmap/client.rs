@@ -2257,6 +2257,7 @@ impl JmapClient {
         auth: &AuthenticatedSession,
         mailbox: &str,
         email_id: &str,
+        participation: &str,
     ) -> anyhow::Result<Option<(String, String, String)>> {
         let mail_account = auth
             .session
@@ -2328,7 +2329,7 @@ impl JmapClient {
                     ),
                     MethodCall::new(
                         "Calendar/get",
-                        serde_json::json!({"accountId":calendar_account,"properties":["id"]}),
+                        serde_json::json!({"accountId":calendar_account,"properties":["id","isDefault"]}),
                         "calendars",
                     ),
                 ],
@@ -2365,12 +2366,19 @@ impl JmapClient {
         else {
             return Ok(None);
         };
-        let calendars = response
+        let calendar_result = response
             .method_responses
             .iter()
             .find(|method| method.0 == "Calendar/get")
-            .and_then(|method| method.1["list"].as_array())
             .context("calendar list unavailable")?;
+        let calendars = calendar_result.1["list"]
+            .as_array()
+            .context("calendar list unavailable")?;
+        let before = self.calendar_snapshot_state(auth).await?;
+        anyhow::ensure!(
+            calendar_result.1["state"].as_str() == Some(before.0.as_str()),
+            "calendar list changed during invitation lookup"
+        );
         let mut found = Vec::new();
         for calendar in calendars {
             let id = calendar["id"].as_str().context("calendar id missing")?;
@@ -2379,10 +2387,51 @@ impl JmapClient {
             }
         }
         match found.as_slice() {
-            [item] => Ok(Some(item.clone())),
-            [] => Ok(None),
+            [item] => return Ok(Some(item.clone())),
+            [] => {}
             _ => anyhow::bail!("meeting invitation matches multiple calendar events"),
         }
+        anyhow::ensure!(
+            before == self.calendar_snapshot_state(auth).await?,
+            "calendars changed during invitation lookup"
+        );
+        let defaults: Vec<_> = calendars
+            .iter()
+            .filter(|calendar| calendar["isDefault"] == true)
+            .collect();
+        let calendar = match defaults.as_slice() {
+            [calendar] => *calendar,
+            [] if calendars.len() == 1 => &calendars[0],
+            _ => anyhow::bail!("default calendar unavailable"),
+        };
+        let calendar_id = calendar["id"].as_str().context("calendar id missing")?;
+        let Some(mut created) = invitation_event_for_create(
+            event,
+            organizer,
+            auth.username(),
+            calendar_id,
+            participation,
+        )?
+        else {
+            return Ok(None);
+        };
+        let response: JmapResponse<serde_json::Value> = self.api_call(auth, &using,
+            vec![MethodCall::new("CalendarEvent/set", serde_json::json!({"accountId":calendar_account,
+                "ifInState":before.1,"sendSchedulingMessages":false,"create":{"invitation":created.take()}}), "create")]).await?;
+        let result = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/set")
+            .context("meeting creation failed")?;
+        let event_id = result.1["created"]["invitation"]["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .context("meeting creation was not confirmed")?;
+        Ok(Some((
+            calendar_id.to_owned(),
+            event_id.to_owned(),
+            organizer.to_owned(),
+        )))
     }
 
     pub async fn calendar_event_by_uid(
@@ -4723,6 +4772,99 @@ pub(crate) struct JmapResponse<T> {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct MethodResponse<T>(pub(crate) String, pub(crate) T, pub(crate) String);
+fn invitation_event_for_create(
+    event: &serde_json::Value,
+    organizer: &str,
+    user: &str,
+    calendar_id: &str,
+    participation: &str,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    if event["recurrenceRules"]
+        .as_array()
+        .is_some_and(|rules| !rules.is_empty())
+        || event["recurrenceOverrides"]
+            .as_object()
+            .is_some_and(|overrides| !overrides.is_empty())
+    {
+        anyhow::bail!("recurring invitations are not supported");
+    }
+    let mut event = event.clone();
+    let object = event.as_object_mut().context("invalid meeting event")?;
+    object.remove("method");
+    object.remove("iCalendar");
+    object.remove("organizerCalendarAddress");
+    object.insert(
+        "replyTo".into(),
+        serde_json::json!({"imip":format!("mailto:{organizer}")}),
+    );
+    object.insert("calendarIds".into(), serde_json::json!({calendar_id:true}));
+    let Some(participants) = object
+        .get_mut("participants")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(None);
+    };
+    let mut owners = 0;
+    let mut attendees = 0;
+    for participant in participants.values_mut() {
+        let Some(participant) = participant.as_object_mut() else {
+            return Ok(None);
+        };
+        let address = participant
+            .get("calendarAddress")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| participant.get("sendTo").and_then(|v| v["imip"].as_str()))
+            .map(str::to_owned);
+        let email = participant
+            .get("email")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                address
+                    .as_deref()
+                    .and_then(|value| {
+                        value
+                            .get(..7)
+                            .filter(|prefix| prefix.eq_ignore_ascii_case("mailto:"))
+                            .and_then(|_| value.get(7..))
+                    })
+                    .map(str::to_owned)
+            });
+        let Some(email) =
+            email.filter(|email| !email.is_empty() && !email.chars().any(char::is_control))
+        else {
+            return Ok(None);
+        };
+        if participant
+            .get("roles")
+            .is_some_and(|roles| roles["owner"] == true)
+        {
+            if !email.eq_ignore_ascii_case(organizer) {
+                return Ok(None);
+            }
+            owners += 1;
+        } else if email.eq_ignore_ascii_case(user) {
+            participant.insert(
+                "participationStatus".into(),
+                serde_json::json!(participation),
+            );
+            attendees += 1;
+        }
+        participant.insert("email".into(), serde_json::json!(email));
+        if !participant.contains_key("sendTo") {
+            let Some(address) = address else {
+                return Ok(None);
+            };
+            participant.insert("sendTo".into(), serde_json::json!({"imip":address}));
+        }
+        participant.insert("scheduleAgent".into(), serde_json::json!("client"));
+    }
+    if owners != 1 || attendees != 1 {
+        return Ok(None);
+    }
+    Ok(Some(event))
+}
+
 fn confirm_submission(response: &JmapResponse<serde_json::Value>) -> anyhow::Result<()> {
     let method = response
         .method_responses

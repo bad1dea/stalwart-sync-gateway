@@ -101,12 +101,15 @@ pub(super) async fn handle(
                         } else {
                             "tentative"
                         };
+                        let user_push = state.push.user(&auth.username().to_ascii_lowercase());
+                        let lock = user_push.sync_lock("__meeting_response__");
+                        let _guard = lock.lock().await;
                         let target = if let Some(calendar) = folder.strip_prefix("cal_") {
                             Ok(Some((calendar.to_owned(), id.to_owned(), None)))
                         } else {
                             state
                                 .jmap
-                                .calendar_event_for_invitation(auth, folder, id)
+                                .calendar_event_for_invitation(auth, folder, id, participation)
                                 .await
                                 .map(|target| {
                                     target.map(|(calendar, event, organizer)| {

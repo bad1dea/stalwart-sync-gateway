@@ -32,7 +32,7 @@ use crate::{
 // shapes and commands are implemented and checked with independent clients.
 const SUPPORTED_PROTOCOLS: &str = "14.0";
 // Advertise only commands with handlers.
-const SUPPORTED_COMMANDS: &str = "Sync,SendMail,SmartForward,SmartReply,GetAttachment,FolderSync,FolderCreate,FolderDelete,FolderUpdate,MoveItems,GetItemEstimate,Search,Settings,Ping,ItemOperations,Provision,ResolveRecipients";
+const SUPPORTED_COMMANDS: &str = "Sync,SendMail,SmartForward,SmartReply,GetAttachment,FolderSync,FolderCreate,FolderDelete,FolderUpdate,MoveItems,GetItemEstimate,Search,Settings,Ping,ItemOperations,Provision,ResolveRecipients,MeetingResponse";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProtocolVersion {
