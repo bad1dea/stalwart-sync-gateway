@@ -232,6 +232,16 @@ fn combine(operator: &str, mut left: Value, right: Value) -> Value {
 }
 
 fn size_condition(operator: &str, value: &str) -> Result<Value, &'static str> {
+    if operator == ":" {
+        if let Some((start, end)) = value.split_once("..") {
+            let start = start.parse::<u64>().map_err(|_| "invalid size range")?;
+            let end = end.parse::<u64>().map_err(|_| "invalid size range")?;
+            if start > end || end >= 9_007_199_254_740_991 {
+                return Err("invalid size range");
+            }
+            return Ok(json!({"minSize":start,"maxSize":end + 1}));
+        }
+    }
     let size = value.parse::<u64>().map_err(|_| "invalid size")?;
     // JMAP UnsignedInt is limited to the interoperable JSON integer range.
     if size >= 9_007_199_254_740_991 {
@@ -255,6 +265,13 @@ fn received_condition(operator: &str, value: &str) -> Result<Value, &'static str
         .strip_prefix('"')
         .and_then(|v| v.strip_suffix('"'))
         .unwrap_or(value);
+    if operator == ":" {
+        if let Some((start, end)) = value.split_once("..") {
+            return Ok(json!({"operator":"AND", "conditions":[
+                received_condition(">=", start)?, received_condition("<=", end)?
+            ]}));
+        }
+    }
     let (start, end) = match value.to_ascii_lowercase().as_str() {
         "today" => (today, today.succ_opt().ok_or("date out of range")?),
         "yesterday" => (today.pred_opt().ok_or("date out of range")?, today),
@@ -407,6 +424,26 @@ mod tests {
             ]})
         );
     }
+    #[test]
+    fn translates_inclusive_size_and_received_ranges() {
+        assert_eq!(
+            to_filter("size:10..20").unwrap(),
+            json!({"minSize":10,"maxSize":21})
+        );
+        assert!(to_filter("size:20..10").is_err());
+        assert!(to_filter("size:1..").is_err());
+        assert_eq!(
+            to_filter("received:2024-02-29..2024-03-01").unwrap(),
+            json!({
+                "operator":"AND", "conditions":[
+                    {"operator":"NOT", "conditions":[{"before":"2024-02-29T00:00:00Z"}]},
+                    {"before":"2024-03-02T00:00:00Z"}
+                ]
+            })
+        );
+        assert!(to_filter("received:2024-02-29..").is_err());
+    }
+
     #[test]
     fn quoted_terms_are_not_property_restrictions_or_operators() {
         assert_eq!(

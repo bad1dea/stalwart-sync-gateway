@@ -3050,7 +3050,7 @@ mod e2e {
         assert_eq!(ids.len(), 4);
         let fetched = live
             .call(serde_json::json!([["Email/get",{
-            "accountId":live.account,"ids":ids,"properties":["id","receivedAt"]
+            "accountId":live.account,"ids":ids,"properties":["id","receivedAt","size"]
         },"0"]]))
             .await;
         let dates: Vec<_> = fetched[0][1]["list"]
@@ -3097,6 +3097,48 @@ mod e2e {
                 "{operator}"
             );
         }
+        let response = live
+            .req_version("Find", &device, "16.1")
+            .body(find_body(
+                &uuid::Uuid::new_v4().to_string(),
+                &format!("subject:{tag} received:2024-02-29..2024-03-01"),
+                Some(&folder),
+                "0-9",
+            ))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+        assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("3"));
+        let sizes: Vec<_> = fetched[0][1]["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["size"].as_u64().unwrap())
+            .collect();
+        let smallest = *sizes.iter().min().unwrap();
+        let expected = sizes.iter().filter(|size| **size == smallest).count();
+        let response = live
+            .req_version("Find", &device, "16.1")
+            .body(find_body(
+                &uuid::Uuid::new_v4().to_string(),
+                &format!("subject:{tag} size:{smallest}..{smallest}"),
+                Some(&folder),
+                "0-9",
+            ))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+        assert_eq!(
+            eas::find_text_after(&doc, f::TOTAL)
+                .unwrap()
+                .parse::<usize>()
+                .unwrap(),
+            expected
+        );
         let result = live
             .call(serde_json::json!([
                 ["Email/set",{"accountId":live.account,"destroy":ids},"0"],
