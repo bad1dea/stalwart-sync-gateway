@@ -4704,7 +4704,7 @@ impl JmapClient {
             .unwrap_or_default())
     }
 
-    async fn find_mailbox_by_role(
+    pub(crate) async fn find_mailbox_by_role(
         &self,
         auth: &AuthenticatedSession,
         role: &str,

@@ -5996,6 +5996,45 @@ mod e2e {
             eas::find_text_after(&result, mr::CALENDAR_ID),
             Some(id.as_str())
         );
+        let mut b = eas::DocumentBuilder::new();
+        b.start(mr::MEETING_RESPONSE);
+        b.start(mr::REQUEST);
+        b.leaf(mr::USER_RESPONSE, "1");
+        b.leaf(eas::search::LONG_ID, &mail_id);
+        b.end();
+        b.end();
+        let result = live
+            .wbxml_version(
+                "MeetingResponse",
+                &inbox_device,
+                wbxml::encode_document(&b.finish()),
+                "14.0",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&result, mr::STATUS), Some("1"));
+        assert_eq!(
+            eas::find_text_after(&result, mr::CALENDAR_ID),
+            Some(id.as_str())
+        );
+        assert!(eas::find_text_after(&result, mr::REQUEST_ID).is_none());
+        let mut b = eas::DocumentBuilder::new();
+        b.start(mr::MEETING_RESPONSE);
+        b.start(mr::REQUEST);
+        b.leaf(mr::USER_RESPONSE, "2");
+        b.leaf(eas::search::LONG_ID, &mail_id);
+        b.leaf(mr::COLLECTION_ID, &live.inbox);
+        b.leaf(mr::REQUEST_ID, &mail_id);
+        b.end();
+        b.end();
+        let result = live
+            .wbxml_version(
+                "MeetingResponse",
+                &inbox_device,
+                wbxml::encode_document(&b.finish()),
+                "14.0",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&result, mr::STATUS), Some("2"));
         let forged = calendar_text.replace(
             "ORGANIZER:mailto:owner@example.test",
             "ORGANIZER:mailto:other@example.test",

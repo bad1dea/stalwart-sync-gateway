@@ -39,7 +39,24 @@ pub(super) async fn handle(
             if !id.is_empty() {
                 b.leaf(mr::REQUEST_ID, id);
             }
-            let folder = eas::find_text_after(&request, mr::COLLECTION_ID).unwrap_or("");
+            let long_id = eas::find_text_after(&request, eas::search::LONG_ID);
+            let (folder, lookup_failed) = if long_id.is_some() {
+                match state.jmap.find_mailbox_by_role(auth, "inbox").await {
+                    Ok(folder) => (folder.unwrap_or_default(), false),
+                    Err(error) => {
+                        tracing::warn!(%error, "meeting inbox lookup failed");
+                        (String::new(), true)
+                    }
+                }
+            } else {
+                (
+                    eas::find_text_after(&request, mr::COLLECTION_ID)
+                        .unwrap_or("")
+                        .to_owned(),
+                    false,
+                )
+            };
+            let item_id = long_id.unwrap_or(id);
             let response = eas::find_text_after(&request, mr::USER_RESPONSE).unwrap_or("");
             let unsupported = [
                 mr::INSTANCE_ID,
@@ -51,12 +68,22 @@ pub(super) async fn handle(
             .any(|t| eas::contains_token(&request, *t));
             let fields = eas::child_elements(&request);
             let required = [mr::REQUEST_ID, mr::COLLECTION_ID, mr::USER_RESPONSE];
-            let valid_fields = required
-                .iter()
-                .all(|token| fields.iter().filter(|field| is(field, *token)).count() == 1)
+            let count = |token| fields.iter().filter(|field| is(field, token)).count();
+            let valid_target = match (
+                count(eas::search::LONG_ID),
+                count(mr::REQUEST_ID),
+                count(mr::COLLECTION_ID),
+            ) {
+                (1, 0, 0) => long_id.is_some_and(|id| !id.is_empty() && id.len() <= 256),
+                (0, 1, 1) => !id.is_empty(),
+                _ => false,
+            };
+            let valid_fields = valid_target
+                && count(mr::USER_RESPONSE) == 1
                 && fields.iter().all(|field| {
                     required
                         .iter()
+                        .chain([eas::search::LONG_ID].iter())
                         .chain(
                             [
                                 mr::INSTANCE_ID,
@@ -71,12 +98,12 @@ pub(super) async fn handle(
             let mut calendar_id = None;
             let status = if !is(&request, mr::REQUEST)
                 || !valid_fields
-                || id.is_empty()
-                || folder.is_empty()
+                || item_id.is_empty()
+                || (!lookup_failed && folder.is_empty())
                 || !matches!(response, "1" | "2" | "3")
             {
                 "2"
-            } else if unsupported {
+            } else if lookup_failed || unsupported {
                 "4"
             } else if matches!(version, ProtocolVersion::V14_0) && folder.starts_with("cal_") {
                 "2"
@@ -86,7 +113,7 @@ pub(super) async fn handle(
                     .get(
                         auth.username(),
                         query.device_id.as_deref().unwrap_or(""),
-                        folder,
+                        &folder,
                     )
                     .await
                 {
@@ -109,7 +136,12 @@ pub(super) async fn handle(
                         } else {
                             state
                                 .jmap
-                                .calendar_event_for_invitation(auth, folder, id, participation)
+                                .calendar_event_for_invitation(
+                                    auth,
+                                    &folder,
+                                    item_id,
+                                    participation,
+                                )
                                 .await
                                 .map(|target| {
                                     target.map(|(calendar, event, organizer)| {
