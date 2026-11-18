@@ -5374,6 +5374,104 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_smart_compose_marks_source() {
+        use eas::compose_mail as cm;
+        let live = Live::new("E2E_USER2").await;
+        let caps = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:mail",
+            "urn:ietf:params:jmap:submission",
+        ];
+        let before = live
+            .call_using(
+                serde_json::json!([["EmailSubmission/query", {"accountId":live.account}, "0"]]),
+                &caps,
+            )
+            .await;
+        let before: std::collections::BTreeSet<_> = before[0][1]["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect();
+        let marker = format!("smartfixture{}", std::process::id());
+        let source = live
+            .seed(&live.inbox, 2, &format!("{marker}source"), false)
+            .await;
+        for (command, token, keyword, id) in [
+            ("SmartReply", cm::SMART_REPLY, "$answered", &source[0]),
+            ("SmartForward", cm::SMART_FORWARD, "$forwarded", &source[1]),
+        ] {
+            let mime = format!("From: {}\r\nTo: {}\r\nSubject: {}\r\nMessage-ID: <{}-{}@e2e.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nComplete message", live.user, live.user, marker, marker, command);
+            let mut b = eas::DocumentBuilder::new();
+            b.start(token);
+            b.start(cm::SOURCE);
+            if command == "SmartReply" {
+                b.leaf(cm::FOLDER_ID, &live.inbox);
+                b.leaf(cm::ITEM_ID, id);
+            } else {
+                b.leaf(cm::LONG_ID, id);
+            }
+            b.end();
+            b.empty_tag(cm::REPLACE_MIME);
+            b.opaque_leaf(cm::MIME, mime.into_bytes());
+            b.end();
+            let sent = live
+                .req(command, &dev("smart-mark"))
+                .body(wbxml::encode_document(&b.finish()))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(sent.status(), 200);
+            let mut marked = false;
+            for _ in 0..50 {
+                let result = live.call(serde_json::json!([["Email/get", {"accountId":live.account,"ids":[id],"properties":["keywords"]}, "0"]])).await;
+                if result[0][1]["list"][0]["keywords"][keyword] == true {
+                    marked = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert!(marked, "source message was not marked {keyword}");
+        }
+        let mut delivered = Vec::new();
+        for _ in 0..50 {
+            let result = live.call(serde_json::json!([["Email/query", {"accountId":live.account,"filter":{"subject":&marker}}, "0"]])).await;
+            delivered = result[0][1]["ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|id| id.as_str().map(str::to_owned))
+                .collect();
+            if delivered.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(delivered.len(), 2);
+        delivered.extend(source);
+        let after = live
+            .call_using(
+                serde_json::json!([["EmailSubmission/query", {"accountId":live.account}, "0"]]),
+                &caps,
+            )
+            .await;
+        let created: Vec<_> = after[0][1]["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|id| id.as_str())
+            .filter(|id| !before.contains(*id))
+            .collect();
+        assert_eq!(created.len(), 2);
+        let removed = live.call_using(serde_json::json!([["EmailSubmission/set", {"accountId":live.account,"destroy":created}, "0"]]), &caps).await;
+        assert!(removed[0][1]["notDestroyed"].is_null());
+        let removed = live.call(serde_json::json!([["Email/set", {"accountId":live.account,"destroy":delivered}, "0"]])).await;
+        assert!(removed[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_sendmail_without_sent_copy() {
         let live = Live::new("E2E_USER2").await;
         let caps = [

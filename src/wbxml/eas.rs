@@ -553,9 +553,11 @@ pub mod compose_mail {
     pub const SMART_FORWARD: Token = tag(0x06, false);
     pub const SMART_REPLY: Token = tag(0x07, false);
     pub const SAVE_IN_SENT_ITEMS: Token = tag(0x08, false);
+    pub const REPLACE_MIME: Token = tag(0x09, false);
     pub const SOURCE: Token = tag(0x0b, false);
     pub const FOLDER_ID: Token = tag(0x0c, false);
     pub const ITEM_ID: Token = tag(0x0d, false);
+    pub const LONG_ID: Token = tag(0x0e, false);
     pub const MIME: Token = tag(0x10, false);
     pub const CLIENT_ID: Token = tag(0x11, false);
     pub const STATUS: Token = tag(0x12, false);
@@ -1788,6 +1790,8 @@ pub struct ComposeMailRequest {
     pub mime: Vec<u8>,
     pub save_in_sent_items: bool,
     pub source_item_id: Option<String>,
+    pub source_folder_id: Option<String>,
+    pub source_long_id: Option<String>,
 }
 
 /// Parses a WBXML-wrapped SendMail/SmartForward/SmartReply request. Real
@@ -1799,10 +1803,14 @@ pub fn compose_mail_request(document: &Document) -> Option<ComposeMailRequest> {
     let mime = find_opaque_after(document, compose_mail::MIME)?.to_vec();
     let save_in_sent_items = contains_token(document, compose_mail::SAVE_IN_SENT_ITEMS);
     let source_item_id = find_text_after(document, compose_mail::ITEM_ID).map(str::to_owned);
+    let source_folder_id = find_text_after(document, compose_mail::FOLDER_ID).map(str::to_owned);
+    let source_long_id = find_text_after(document, compose_mail::LONG_ID).map(str::to_owned);
     Some(ComposeMailRequest {
         mime,
         save_in_sent_items,
         source_item_id,
+        source_folder_id,
+        source_long_id,
     })
 }
 

@@ -4727,6 +4727,39 @@ impl JmapClient {
         Ok(())
     }
 
+    pub async fn mark_reply_or_forward(
+        &self,
+        auth: &AuthenticatedSession,
+        id: &str,
+        folder: Option<&str>,
+        forwarded: bool,
+    ) -> anyhow::Result<()> {
+        let email = self
+            .get_email_by_id(auth, id)
+            .await?
+            .context("source message not found")?;
+        anyhow::ensure!(
+            folder.is_none_or(|folder| email.mailbox_ids.iter().any(|id| id == folder)),
+            "source message not in requested folder"
+        );
+        let account = auth
+            .session
+            .primary_account_for(capabilities::MAIL)
+            .context("JMAP Mail capability is unavailable")?;
+        let identities = self.draft_identity_map(auth).await?;
+        let backend = identities.backend(id);
+        let key = if forwarded {
+            "keywords/$forwarded"
+        } else {
+            "keywords/$answered"
+        };
+        self.email_set(
+            auth,
+            serde_json::json!({"accountId":account, "update":{backend:{key:true}}}),
+        )
+        .await
+    }
+
     pub async fn mail_identities(
         &self,
         auth: &AuthenticatedSession,

@@ -1748,17 +1748,9 @@ async fn search_inner(
 /// treating it as raw MIME when it doesn't. The WBXML-wrapped form
 /// (older/other clients) is also handled via `compose_mail_request`.
 ///
-/// SmartForward/SmartReply both submit a complete, client-composed MIME
-/// message exactly like SendMail -- the only EAS-level difference is the
-/// `Source` element referencing the original message (used by some
-/// servers to mark it Answered/Forwarded), which write_email_fields's
-/// caller for Change commands (`apply_mail_client_commands`) already
-/// handles via a plain flag update if the client separately sends one;
-/// this handler does not attempt to set that flag itself, matching the
-/// PHP reference's own scope (it links `replyflag`/`forwardflag` from
-/// the same request, which isn't parsed by compose_mail_request here --
-/// a reasonable gap given a subsequent Sync will independently mark the
-/// original as Answered/Forwarded when clients set those flags).
+/// SmartReply and SmartForward submit the supplied MIME and mark an identified
+/// source after submission. Combining a partial MIME body with the original
+/// message remains unsupported.
 async fn send_mail(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
@@ -1775,9 +1767,22 @@ async fn send_mail(
         return (StatusCode::BAD_REQUEST, "SendMail requires a body\n").into_response();
     }
 
-    let (mime, save_in_sent_items) = match wbxml::decode_document(body) {
+    let (mime, save_in_sent_items, source) = match wbxml::decode_document(body) {
         Ok(document) => match wbxml::eas::compose_mail_request(&document) {
-            Some(request) => (request.mime, request.save_in_sent_items),
+            Some(request) => {
+                let source = match (
+                    request.source_item_id,
+                    request.source_folder_id,
+                    request.source_long_id,
+                ) {
+                    (Some(id), Some(folder), None) if !id.is_empty() && !folder.is_empty() => {
+                        Some((id, Some(folder)))
+                    }
+                    (None, None, Some(id)) if !id.is_empty() => Some((id, None)),
+                    _ => None,
+                };
+                (request.mime, request.save_in_sent_items, source)
+            }
             None => {
                 state
                     .metrics
@@ -1798,11 +1803,28 @@ async fn send_mail(
         Err(_) => (
             body.to_vec(),
             query.save_in_sent_items.is_none() || query.save_in_sent_items.as_deref() != Some("F"),
+            None,
         ),
     };
 
     match state.jmap.send_email(auth, mime, save_in_sent_items).await {
         Ok(()) => {
+            if let Some((id, folder)) = source.filter(|_| {
+                command.eq_ignore_ascii_case("SmartReply")
+                    || command.eq_ignore_ascii_case("SmartForward")
+            }) {
+                let jmap = state.jmap.clone();
+                let auth = auth.clone();
+                let forwarded = command.eq_ignore_ascii_case("SmartForward");
+                tokio::spawn(async move {
+                    if let Err(error) = jmap
+                        .mark_reply_or_forward(&auth, &id, folder.as_deref(), forwarded)
+                        .await
+                    {
+                        tracing::warn!(%error, "failed to update replied or forwarded state");
+                    }
+                });
+            }
             state
                 .metrics
                 .eas_requests_total
