@@ -2496,6 +2496,15 @@ impl JmapClient {
             _ => anyhow::bail!("default calendar unavailable"),
         };
         let calendar_id = calendar["id"].as_str().context("calendar id missing")?;
+        if auth.capabilities.submission
+            && self
+                .mail_identities(auth)
+                .await?
+                .iter()
+                .any(|identity| identity.email.eq_ignore_ascii_case(organizer))
+        {
+            return Ok(None);
+        }
         let Some(mut created) = invitation_event_for_create(
             event,
             organizer,
@@ -4877,6 +4886,9 @@ fn invitation_event_for_create(
     calendar_id: &str,
     participation: &str,
 ) -> anyhow::Result<Option<serde_json::Value>> {
+    if organizer.eq_ignore_ascii_case(user) {
+        return Ok(None);
+    }
     if event["recurrenceRules"]
         .as_array()
         .is_some_and(|rules| !rules.is_empty())
@@ -6027,6 +6039,23 @@ mod tests {
         calendar_end_utc, eas_compact_to_local_iso, eas_to_calendar_local, local_to_utc_eas,
         parse_calendar_duration,
     };
+
+    #[test]
+    fn invitation_creation_rejects_the_organizer_as_attendee() {
+        let event = serde_json::json!({"participants": {
+            "owner":{"email":"self@example.test","roles":{"owner":true}},
+            "attendee":{"email":"self@example.test"}
+        }});
+        assert!(super::invitation_event_for_create(
+            &event,
+            "self@example.test",
+            "SELF@example.test",
+            "cal",
+            "accepted"
+        )
+        .unwrap()
+        .is_none());
+    }
 
     #[test]
     fn submission_requires_a_confirmed_created_id() {
