@@ -5237,6 +5237,82 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_sendmail_without_sent_copy() {
+        let live = Live::new("E2E_USER2").await;
+        let caps = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:mail",
+            "urn:ietf:params:jmap:submission",
+        ];
+        let before = live
+            .call_using(
+                serde_json::json!([["EmailSubmission/query", {"accountId":live.account}, "0"]]),
+                &caps,
+            )
+            .await;
+        let before: std::collections::BTreeSet<_> = before[0][1]["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect();
+        let marker = format!("unsavedfixture{}", std::process::id());
+        let mime = format!("From: {}\r\nTo: {}\r\nSubject: {}\r\nMessage-ID: <{}@e2e.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nfixture", live.user, live.user, marker, marker);
+        let response = live
+            .req("SendMail", &dev("send-unsaved"))
+            .query(&[("SaveInSentItems", "F")])
+            .header("Content-Type", "message/rfc822")
+            .body(mime)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let mut ids = Vec::new();
+        for _ in 0..50 {
+            let found = live
+                .call(
+                    serde_json::json!([["Email/query", {"accountId":live.account,
+                "filter":{"subject":&marker}}, "0"]]),
+                )
+                .await;
+            ids = found[0][1]["ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|id| id.as_str().map(str::to_owned))
+                .collect();
+            if !ids.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(ids.len(), 1, "expected only the delivered inbox copy");
+        let got = live.call(serde_json::json!([["Email/get", {"accountId":live.account,"ids":ids,"properties":["id","mailboxIds"]}, "0"]])).await;
+        assert_eq!(got[0][1]["list"][0]["mailboxIds"][&live.inbox], true);
+        let after = live
+            .call_using(
+                serde_json::json!([["EmailSubmission/query", {"accountId":live.account}, "0"]]),
+                &caps,
+            )
+            .await;
+        let created: Vec<_> = after[0][1]["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|id| id.as_str())
+            .filter(|id| !before.contains(*id))
+            .collect();
+        assert_eq!(created.len(), 1);
+        let removed = live.call_using(serde_json::json!([["EmailSubmission/set", {"accountId":live.account,"destroy":created}, "0"]]), &caps).await;
+        assert!(removed[0][1]["notDestroyed"].is_null());
+        let cleanup = live
+            .call(serde_json::json!([["Email/set", {"accountId":live.account,"destroy":ids}, "0"]]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_sendmail_confirms_real_submission() {
         let live = Live::new("E2E_USER2").await;
         let marker = format!("sendfixture{}", std::process::id());

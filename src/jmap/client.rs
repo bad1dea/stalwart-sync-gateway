@@ -4577,15 +4577,12 @@ impl JmapClient {
         };
 
         let blob_id = self.upload_blob(auth, mime, "message/rfc822").await?;
-        let sent_mailbox_id = if save_in_sent_items {
-            self.find_mailbox_by_role(auth, "sent").await?
-        } else {
-            None
-        };
-        let mailbox_ids = match &sent_mailbox_id {
-            Some(id) => serde_json::json!({ id: true }),
-            None => serde_json::json!({}),
-        };
+        let role = if save_in_sent_items { "sent" } else { "drafts" };
+        let mailbox_id = self
+            .find_mailbox_by_role(auth, role)
+            .await?
+            .with_context(|| format!("account has no {role} mailbox"))?;
+        let mailbox_ids = serde_json::json!({ mailbox_id: true });
 
         let import_response: JmapResponse<serde_json::Value> = self
             .api_call(
@@ -4629,6 +4626,13 @@ impl JmapClient {
             anyhow::bail!("Email/import response was missing");
         };
 
+        let mut submission = serde_json::json!({
+            "accountId": account_id,
+            "create": {"s1": {"emailId": imported_id, "identityId": identity_id, "envelope": null}}
+        });
+        if !save_in_sent_items {
+            submission["onSuccessDestroyEmail"] = serde_json::json!(["#s1"]);
+        }
         let submit_response: JmapResponse<serde_json::Value> = self
             .api_call(
                 auth,
@@ -4637,24 +4641,22 @@ impl JmapClient {
                     capabilities::MAIL.to_owned(),
                     capabilities::SUBMISSION.to_owned(),
                 ],
-                vec![MethodCall::new(
-                    "EmailSubmission/set",
-                    serde_json::json!({
-                        "accountId": account_id,
-                        "create": {
-                            "s1": {
-                                "emailId": imported_id,
-                                "identityId": identity_id,
-                                "envelope": null,
-                            }
-                        }
-                    }),
-                    "sub",
-                )],
+                vec![MethodCall::new("EmailSubmission/set", submission, "sub")],
             )
             .await?;
 
-        confirm_submission(&submit_response)
+        confirm_submission(&submit_response)?;
+        if !save_in_sent_items
+            && !submit_response.method_responses.iter().any(|method| {
+                method.0 == "Email/set"
+                    && method.1["destroyed"]
+                        .as_array()
+                        .is_some_and(|ids| ids.iter().any(|id| id == &imported_id))
+            })
+        {
+            tracing::warn!("submitted message temporary copy was not removed");
+        }
+        Ok(())
     }
 
     pub async fn mail_identities(
