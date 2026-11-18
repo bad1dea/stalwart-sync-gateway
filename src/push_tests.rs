@@ -3111,6 +3111,20 @@ mod e2e {
         let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
         assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
         assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("3"));
+        let response = live
+            .req_version("Find", &device, "16.1")
+            .body(find_body(
+                &uuid::Uuid::new_v4().to_string(),
+                &format!("subject:{tag} received:2024-02-29T12:34:56"),
+                Some(&folder),
+                "0-9",
+            ))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+        assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("2"));
         let sizes: Vec<_> = fetched[0][1]["list"]
             .as_array()
             .unwrap()

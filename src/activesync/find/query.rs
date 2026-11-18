@@ -324,9 +324,13 @@ fn received_condition(operator: &str, value: &str) -> Result<Value, &'static str
         }
         _ => {
             let day = if value.len() > 10 {
-                chrono::DateTime::parse_from_rfc3339(value)
-                    .map_err(|_| "invalid received date")?
-                    .date_naive()
+                if let Ok(date) = chrono::DateTime::parse_from_rfc3339(value) {
+                    date.date_naive()
+                } else {
+                    chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
+                        .map_err(|_| "invalid received date")?
+                        .date()
+                }
             } else {
                 chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
                     .map_err(|_| "invalid received date")?
@@ -442,6 +446,15 @@ mod tests {
             })
         );
         assert!(to_filter("received:2024-02-29..").is_err());
+        assert_eq!(
+            to_filter("received:2024-02-29T12:34:56").unwrap(),
+            to_filter("received:2024-02-29").unwrap()
+        );
+        assert_eq!(
+            to_filter("received:2024-02-29T12:34:56.123").unwrap(),
+            to_filter("received:2024-02-29").unwrap()
+        );
+        assert!(to_filter("received:2024-02-29T25:00:00").is_err());
     }
 
     #[test]
