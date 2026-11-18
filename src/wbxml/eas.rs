@@ -353,6 +353,8 @@ pub mod airsync_base {
     // attachment context, and NEVER sent the real NativeBodyType at all.
     pub const NATIVE_BODY_TYPE: Token = tag(0x16, false);
     pub const LOCATION: Token = tag(0x20, true);
+    pub const LATITUDE: Token = tag(0x27, false);
+    pub const LONGITUDE: Token = tag(0x28, false);
     pub const CONTENT_TYPE: Token = tag(0x17, false);
     pub const PREVIEW: Token = tag(0x18, false);
     pub const ATTACHMENTS: Token = tag(0x0e, false);
@@ -1268,6 +1270,7 @@ pub struct SyncClientCommand {
 pub struct CalendarFields {
     pub subject: Option<String>,
     pub location: Option<String>,
+    pub location_coordinates: Option<(String, String)>,
     pub unsupported_location: bool,
     pub body: Option<String>,
     pub body_type: Option<u8>,
@@ -2397,6 +2400,8 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     let mut sensitivity_text = String::new();
     let mut reminder_count = 0;
     let mut reminder_text = String::new();
+    let mut latitude: Option<String> = None;
+    let mut longitude: Option<String> = None;
 
     for node in nodes {
         match node {
@@ -2513,7 +2518,21 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                     .is_some_and(|t| same_token(*t, airsync_base::LOCATION))
                     && !same_token(*token, airsync_base::DISPLAY_NAME)
                 {
-                    fields.unsupported_location = true;
+                    let coordinate = if same_token(*token, airsync_base::LATITUDE) {
+                        Some(&mut latitude)
+                    } else if same_token(*token, airsync_base::LONGITUDE) {
+                        Some(&mut longitude)
+                    } else {
+                        None
+                    };
+                    if let Some(coordinate) = coordinate {
+                        if coordinate.is_some() || !token.has_content {
+                            fields.unsupported_location = true;
+                        }
+                        *coordinate = Some(String::new());
+                    } else {
+                        fields.unsupported_location = true;
+                    }
                 }
                 if same_token(*token, calendar::LOCATION)
                     || same_token(*token, airsync_base::LOCATION)
@@ -2561,6 +2580,18 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                         && path.iter().any(|t| same_token(*t, airsync_base::LOCATION)))
                 {
                     fields.location = Some(text.clone());
+                } else if same_token(top, airsync_base::LATITUDE)
+                    && path.iter().any(|t| same_token(*t, airsync_base::LOCATION))
+                {
+                    if let Some(value) = &mut latitude {
+                        value.push_str(text);
+                    }
+                } else if same_token(top, airsync_base::LONGITUDE)
+                    && path.iter().any(|t| same_token(*t, airsync_base::LOCATION))
+                {
+                    if let Some(value) = &mut longitude {
+                        value.push_str(text);
+                    }
                 } else if same_token(top, calendar::START_TIME) {
                     fields.start_time = Some(text.clone());
                 } else if same_token(top, calendar::END_TIME) {
@@ -2647,6 +2678,20 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
         }
     }
 
+    match (latitude, longitude) {
+        (None, None) => {}
+        (Some(latitude), Some(longitude)) => {
+            match (latitude.parse::<f64>(), longitude.parse::<f64>()) {
+                (Ok(lat), Ok(lon))
+                    if (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon) =>
+                {
+                    fields.location_coordinates = Some((lat.to_string(), lon.to_string()));
+                }
+                _ => fields.unsupported_location = true,
+            }
+        }
+        _ => fields.unsupported_location = true,
+    }
     fields.unsupported_sensitivity |=
         sensitivity_count > 1 || (sensitivity_count == 1 && fields.sensitivity.is_none());
     fields.unsupported_reminder |= reminder_count > 1;
@@ -3323,6 +3368,30 @@ mod tests {
         b.leaf(airsync_base::tag(0x22, false), "Example Street");
         b.end();
         assert!(super::extract_calendar_fields(&b.finish().nodes).unsupported_location);
+        let mut b = DocumentBuilder::new();
+        b.start(airsync_base::LOCATION);
+        b.leaf(airsync_base::LATITUDE, "43.65");
+        b.leaf(airsync_base::LONGITUDE, "-79.38");
+        b.end();
+        let fields = super::extract_calendar_fields(&b.finish().nodes);
+        assert_eq!(
+            fields.location_coordinates,
+            Some(("43.65".into(), "-79.38".into()))
+        );
+        assert!(!fields.unsupported_location);
+        let mut b = DocumentBuilder::new();
+        b.start(airsync_base::LOCATION);
+        b.leaf(airsync_base::LATITUDE, "43");
+        b.end();
+        assert!(super::extract_calendar_fields(&b.finish().nodes).unsupported_location);
+        for (lat, lon) in [("91", "0"), ("0", "181"), ("NaN", "0")] {
+            let mut b = DocumentBuilder::new();
+            b.start(airsync_base::LOCATION);
+            b.leaf(airsync_base::LATITUDE, lat);
+            b.leaf(airsync_base::LONGITUDE, lon);
+            b.end();
+            assert!(super::extract_calendar_fields(&b.finish().nodes).unsupported_location);
+        }
         assert_eq!(super::extract_calendar_fields(&[]).location, None);
     }
 

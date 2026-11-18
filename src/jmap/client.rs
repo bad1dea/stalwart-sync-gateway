@@ -2559,6 +2559,38 @@ impl JmapClient {
         }
     }
 
+    async fn verify_calendar_coordinates(
+        &self,
+        auth: &AuthenticatedSession,
+        id: &str,
+        expected: &(String, String),
+    ) -> anyhow::Result<()> {
+        let account = auth
+            .session
+            .primary_account_for(capabilities::CALENDARS)
+            .context("JMAP Calendars capability is unavailable")?;
+        let response: JmapResponse<serde_json::Value> = self.api_call(auth,
+            &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
+            vec![MethodCall::new("CalendarEvent/get", serde_json::json!({"accountId":account,"ids":[id],"properties":["id","locations"]}), "get")]).await?;
+        let item = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/get")
+            .and_then(|method| method.1["list"].as_array())
+            .and_then(|items| items.iter().find(|item| item["id"] == id))
+            .context("calendar coordinate verification failed")?;
+        let expected = format!("geo:{},{}", expected.0, expected.1);
+        anyhow::ensure!(
+            item["locations"]
+                .as_object()
+                .is_some_and(|locations| locations
+                    .values()
+                    .any(|location| location["coordinates"] == expected)),
+            "JMAP did not retain calendar coordinates"
+        );
+        Ok(())
+    }
+
     pub async fn verify_calendar_reminder(
         &self,
         auth: &AuthenticatedSession,
@@ -2881,7 +2913,7 @@ impl JmapClient {
             );
         }
         if let Some(location) = &fields.location {
-            if location.is_empty() {
+            if location.is_empty() && fields.location_coordinates.is_none() {
                 event.insert("locations".to_owned(), serde_json::Value::Null);
             } else if let Some(id) = id {
                 let response: JmapResponse<serde_json::Value> = self.api_call(
@@ -2905,22 +2937,50 @@ impl JmapClient {
                     locations
                         .iter()
                         .find(|(_, value)| value["name"].is_string())
+                        .or_else(|| {
+                            locations
+                                .iter()
+                                .find(|(_, value)| value["coordinates"].is_string())
+                        })
                         .or_else(|| locations.iter().next())
                 });
-                if let Some((key, _)) = selected {
+                if let Some((key, previous)) = selected {
+                    if fields.location_coordinates.is_some()
+                        && previous["coordinates"]
+                            .as_str()
+                            .is_some_and(|value| simple_geo(value).is_none())
+                    {
+                        anyhow::bail!("cannot replace extended location coordinates");
+                    }
                     let key = key.replace('~', "~0").replace('/', "~1");
-                    event.insert(format!("locations/{key}/name"), serde_json::json!(location));
+                    if !location.is_empty() {
+                        event.insert(format!("locations/{key}/name"), serde_json::json!(location));
+                    }
+                    if let Some((lat, lon)) = &fields.location_coordinates {
+                        event.insert(
+                            format!("locations/{key}/coordinates"),
+                            serde_json::json!(format!("geo:{lat},{lon}")),
+                        );
+                    }
                 } else {
-                    event.insert(
-                        "locations".to_owned(),
-                        serde_json::json!({"loc1": {"@type": "Location", "name": location}}),
-                    );
+                    let mut value = serde_json::json!({"@type": "Location"});
+                    if !location.is_empty() {
+                        value["name"] = serde_json::json!(location);
+                    }
+                    if let Some((lat, lon)) = &fields.location_coordinates {
+                        value["coordinates"] = serde_json::json!(format!("geo:{lat},{lon}"));
+                    }
+                    event.insert("locations".to_owned(), serde_json::json!({"loc1":value}));
                 }
             } else {
-                event.insert(
-                    "locations".to_owned(),
-                    serde_json::json!({"loc1": {"@type": "Location", "name": location}}),
-                );
+                let mut value = serde_json::json!({"@type": "Location"});
+                if !location.is_empty() {
+                    value["name"] = serde_json::json!(location);
+                }
+                if let Some((lat, lon)) = &fields.location_coordinates {
+                    value["coordinates"] = serde_json::json!(format!("geo:{lat},{lon}"));
+                }
+                event.insert("locations".to_owned(), serde_json::json!({"loc1":value}));
             }
         }
         if id.is_none() && fields.start_time.is_some() && fields.end_time.is_none() {
@@ -3307,6 +3367,10 @@ impl JmapClient {
                                 );
                             }
                         }
+                        if let Some(coordinates) = &fields.location_coordinates {
+                            self.verify_calendar_coordinates(auth, existing_id, coordinates)
+                                .await?;
+                        }
                         if let Some(sensitivity) = fields.sensitivity {
                             self.verify_calendar_privacy(auth, existing_id, sensitivity)
                                 .await?;
@@ -3331,6 +3395,10 @@ impl JmapClient {
                 {
                     if let Some(reminder) = fields.reminder {
                         self.verify_calendar_reminder(auth, new_id, reminder)
+                            .await?;
+                    }
+                    if let Some(coordinates) = &fields.location_coordinates {
+                        self.verify_calendar_coordinates(auth, new_id, coordinates)
                             .await?;
                     }
                     if let Some(sensitivity) = fields.sensitivity {
@@ -5585,6 +5653,7 @@ struct CalendarEventObject {
 #[derive(Debug, Default, Deserialize)]
 struct CalendarEventLocation {
     name: Option<String>,
+    coordinates: Option<String>,
 }
 
 /// One JSCalendar `Participant` (RFC 8984 §4.4.2). The organizer is the
@@ -5636,6 +5705,16 @@ fn calendar_response_type(event: &CalendarEvent, user: &str) -> Option<u8> {
     }
 }
 
+fn simple_geo(value: &str) -> Option<(&str, &str)> {
+    let (latitude, longitude) = value.strip_prefix("geo:")?.split_once(',')?;
+    let lat = latitude.parse::<f64>().ok()?;
+    let lon = longitude.parse::<f64>().ok()?;
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return None;
+    }
+    Some((latitude, longitude))
+}
+
 impl From<CalendarEventObject> for CalendarEvent {
     fn from(value: CalendarEventObject) -> Self {
         let start_utc = value
@@ -5649,11 +5728,20 @@ impl From<CalendarEventObject> for CalendarEvent {
                 value.duration.as_deref().unwrap_or("PT0S"),
             )
         });
-        let location = value
-            .locations
-            .into_iter()
-            .flatten()
-            .find_map(|(_, location)| location.name);
+        let selected_location = value.locations.as_ref().and_then(|locations| {
+            locations
+                .values()
+                .find(|location| location.name.is_some())
+                .or_else(|| {
+                    locations
+                        .values()
+                        .find(|location| location.coordinates.is_some())
+                })
+        });
+        let location = selected_location.and_then(|location| location.name.clone());
+        let location_coordinates = selected_location
+            .and_then(|location| simple_geo(location.coordinates.as_deref()?))
+            .map(|(latitude, longitude)| (latitude.to_owned(), longitude.to_owned()));
 
         let participants: Vec<_> = value
             .participants
@@ -5746,6 +5834,7 @@ impl From<CalendarEventObject> for CalendarEvent {
                 }
             }),
             location,
+            location_coordinates,
             start_utc,
             end_utc,
             all_day: value.show_without_time,
@@ -6037,6 +6126,31 @@ impl From<CalendarObject> for Collection {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn calendar_coordinates_require_valid_simple_wgs84_uri() {
+        for (coordinates, expected) in [
+            ("geo:43.65,-79.38", Some(("43.65", "-79.38"))),
+            ("geo:91,0", None),
+            ("geo:0,181", None),
+            ("geo:NaN,0", None),
+            ("geo:43,-79;crs=other", None),
+            ("geo:43,-79,4", None),
+        ] {
+            let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
+                "id":"e", "locations":{"l":{"name":"Room", "coordinates":coordinates}}
+            }))
+            .unwrap();
+            let event = crate::model::CalendarEvent::from(object);
+            assert_eq!(
+                event
+                    .location_coordinates
+                    .as_ref()
+                    .map(|(a, b)| (a.as_str(), b.as_str())),
+                expected
+            );
+        }
+    }
+
     use super::{
         calendar_end_utc, eas_compact_to_local_iso, eas_to_calendar_local, local_to_utc_eas,
         parse_calendar_duration,

@@ -3560,6 +3560,143 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_calendar_location_coordinates_sync() {
+        use eas::airsync_base as base;
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let created = live.call_using(serde_json::json!([["Calendar/set", {"accountId":live.account,"create":{"c":{"name":format!("Geo fixture {}",std::process::id())}}},"0"]]), &using).await;
+        let calendar = created[0][1]["created"]["c"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let created = live.call_using(serde_json::json!([["CalendarEvent/set", {"accountId":live.account,"create":{"e":{"@type":"Event","calendarIds":{&calendar:true},"title":"Coordinates fixture","start":"2042-05-05T10:00:00","duration":"PT1H","locations":{"a":{"@type":"Location","name":"Room","coordinates":"geo:43.65,-79.38"}}}}},"0"]]), &using).await;
+        let id = created[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let folder = format!("cal_{calendar}");
+        let device = dev("geo");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let response = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&response, base::LATITUDE),
+            Some("43.65")
+        );
+        assert_eq!(
+            eas::find_text_after(&response, base::LONGITUDE),
+            Some("-79.38")
+        );
+        let changed = live.call_using(serde_json::json!([["CalendarEvent/set", {"accountId":live.account,"update":{&id:{"locations/a/coordinates":"geo:44,-80"}}},"0"]]), &using).await;
+        assert!(changed[0][1]["notUpdated"].is_null());
+        let response = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&response), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(eas::find_text_after(&response, base::LATITUDE), Some("44"));
+        assert_eq!(
+            eas::find_text_after(&response, base::LONGITUDE),
+            Some("-80")
+        );
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&response));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, &id);
+        b.start(air::APPLICATION_DATA);
+        b.start(base::LOCATION);
+        b.leaf(base::DISPLAY_NAME, "Room");
+        b.leaf(base::LATITUDE, "45.2");
+        b.leaf(base::LONGITUDE, "-81.4");
+        for _ in 0..7 {
+            b.end();
+        }
+        let changed = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        assert!(!eas::find_all_text_after(&changed, air::STATUS).contains(&"6".to_owned()));
+        let got = live.call_using(serde_json::json!([["CalendarEvent/get", {"accountId":live.account,"ids":[&id],"properties":["locations"]},"0"]]), &using).await;
+        assert_eq!(
+            got[0][1]["list"][0]["locations"]["a"]["coordinates"],
+            "geo:45.2,-81.4"
+        );
+        let second = dev("geo-second");
+        let prime = live
+            .wbxml_version("Sync", &second, sync_body("0", &folder), "16.1")
+            .await;
+        let response = live
+            .wbxml_version(
+                "Sync",
+                &second,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&response, base::LATITUDE),
+            Some("45.2")
+        );
+        assert_eq!(
+            eas::find_text_after(&response, base::LONGITUDE),
+            Some("-81.4")
+        );
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&changed));
+        b.leaf(air::COLLECTION_ID, &folder);
+        b.leaf(air::GET_CHANGES, "0");
+        b.start(air::COMMANDS);
+        b.start(air::ADD);
+        b.leaf(air::CLIENT_ID, "geo-created");
+        b.start(air::APPLICATION_DATA);
+        b.leaf(eas::calendar::SUBJECT, "Created coordinates fixture");
+        b.leaf(eas::calendar::START_TIME, "20420505T100000Z");
+        b.leaf(eas::calendar::END_TIME, "20420505T110000Z");
+        b.start(base::LOCATION);
+        b.leaf(base::LATITUDE, "12.5");
+        b.leaf(base::LONGITUDE, "-3.25");
+        for _ in 0..7 {
+            b.end();
+        }
+        let created = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .await;
+        let new_id = eas::find_text_after(&created, air::SERVER_ID)
+            .expect("created calendar ID")
+            .to_owned();
+        let got = live.call_using(serde_json::json!([["CalendarEvent/get", {"accountId":live.account,"ids":[&new_id],"properties":["locations"]},"0"]]), &using).await;
+        assert_eq!(
+            got[0][1]["list"][0]["locations"]["loc1"]["coordinates"],
+            "geo:12.5,-3.25"
+        );
+        let removed = live.call_using(serde_json::json!([["CalendarEvent/set", {"accountId":live.account,"destroy":[id,new_id]},"0"],["Calendar/set", {"accountId":live.account,"destroy":[calendar]},"1"]]), &using).await;
+        assert!(removed[0][1]["notDestroyed"].is_null());
+        assert!(removed[1][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_calendar_privacy_round_trips_and_unsupported_values_are_rejected() {
         use eas::calendar as cal;
         let live = Live::new("E2E_USER2").await;

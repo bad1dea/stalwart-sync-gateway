@@ -285,6 +285,7 @@ pub struct CalendarEvent {
     pub title: String,
     pub description: Option<EmailBody>,
     pub location: Option<String>,
+    pub location_coordinates: Option<(String, String)>,
     /// UTC, compact EAS DateTime form (already converted from JSCalendar's
     /// local `start` + `timeZone` -- see jmap::client's
     /// `local_to_utc_eas`). None if `start` was missing or unparseable.

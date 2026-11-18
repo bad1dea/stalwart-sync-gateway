@@ -5817,6 +5817,7 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
         body.value.hash(&mut hasher);
     }
     event.location.hash(&mut hasher);
+    event.location_coordinates.hash(&mut hasher);
     event.start_utc.hash(&mut hasher);
     event.end_utc.hash(&mut hasher);
     event.all_day.hash(&mut hasher);
@@ -5917,9 +5918,15 @@ fn write_calendar_fields(
     }
     if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
         use wbxml::eas::airsync_base as base;
-        if let Some(location) = &event.location {
+        if event.location.is_some() || event.location_coordinates.is_some() {
             builder.start(base::LOCATION);
-            builder.leaf(base::DISPLAY_NAME, location.clone());
+            if let Some(location) = &event.location {
+                builder.leaf(base::DISPLAY_NAME, location.clone());
+            }
+            if let Some((latitude, longitude)) = &event.location_coordinates {
+                builder.leaf(base::LATITUDE, latitude);
+                builder.leaf(base::LONGITUDE, longitude);
+            }
             builder.end();
         } else {
             builder.empty_tag(base::LOCATION);
@@ -7364,6 +7371,23 @@ mod tests {
                 eas::find_text_after(&b.finish(), cal::BUSY_STATUS),
                 Some(expected)
             );
+        }
+    }
+
+    #[test]
+    fn calendar_coordinates_are_versioned_and_trigger_changes() {
+        use crate::wbxml::eas::{self, airsync as air, airsync_base as base};
+        let mut event = crate::model::CalendarEvent::default();
+        let original = super::calendar_event_hash(&event);
+        event.location_coordinates = Some(("43.65".into(), "-79.38".into()));
+        assert_ne!(super::calendar_event_hash(&event), original);
+        for (version, expected) in [
+            (ProtocolVersion::V14_0, None),
+            (ProtocolVersion::V16_1, Some("43.65")),
+        ] {
+            let mut b = eas::DocumentBuilder::new();
+            super::write_calendar_command(&mut b, air::CHANGE, &event, version, &[]);
+            assert_eq!(eas::find_text_after(&b.finish(), base::LATITUDE), expected);
         }
     }
 
