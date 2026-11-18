@@ -4,7 +4,7 @@ mod item_operations;
 mod meeting_response;
 mod resolve_recipients;
 mod search_multi;
-mod smart_forward;
+mod smart_compose;
 mod sync_options;
 mod sync_request;
 mod validate_cert;
@@ -1749,8 +1749,8 @@ async fn search_inner(
 /// treating it as raw MIME when it doesn't. The WBXML-wrapped form
 /// (older/other clients) is also handled via `compose_mail_request`.
 ///
-/// SmartForward attaches the original message when the client supplies only a
-/// partial MIME. SmartReply still requires a complete client-supplied message.
+/// Partial SmartForward attaches the original; partial plain-text SmartReply
+/// quotes the original text without including its attachments.
 async fn send_mail(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
@@ -1767,7 +1767,7 @@ async fn send_mail(
         return (StatusCode::BAD_REQUEST, "SendMail requires a body\n").into_response();
     }
 
-    let (mut mime, save_in_sent_items, source, combine_forward) = match wbxml::decode_document(body)
+    let (mut mime, save_in_sent_items, source, partial_compose) = match wbxml::decode_document(body)
     {
         Ok(document) => match wbxml::eas::compose_mail_request(&document) {
             Some(request) => {
@@ -1786,7 +1786,9 @@ async fn send_mail(
                     request.mime,
                     request.save_in_sent_items,
                     source,
-                    command.eq_ignore_ascii_case("SmartForward") && !request.replace_mime,
+                    (command.eq_ignore_ascii_case("SmartForward")
+                        || command.eq_ignore_ascii_case("SmartReply"))
+                        && !request.replace_mime,
                 )
             }
             None => {
@@ -1814,7 +1816,7 @@ async fn send_mail(
         ),
     };
 
-    if combine_forward {
+    if partial_compose {
         let Some((id, folder)) = &source else {
             return compose_error(command, "150");
         };
@@ -1832,27 +1834,45 @@ async fn send_mail(
                 return compose_error(command, "110");
             }
         };
-        let Some(blob) = original.blob_id else {
-            return compose_error(command, "110");
-        };
-        let original = match state
-            .jmap
-            .download_blob(auth, &blob, "forwarded_message.eml")
-            .await
-        {
-            Ok(original) => original,
-            Err(error) => {
-                tracing::warn!(%error, "failed to fetch forwarded message");
+        if command.eq_ignore_ascii_case("SmartForward") {
+            let Some(blob) = original.blob_id else {
                 return compose_error(command, "110");
-            }
-        };
-        mime = match smart_forward::attach_original(&mime, &original) {
-            Ok(mime) => mime,
-            Err(error) => {
-                tracing::warn!(%error, "failed to prepare forwarded message");
-                return compose_error(command, "110");
-            }
-        };
+            };
+            let original = match state
+                .jmap
+                .download_blob(auth, &blob, "forwarded_message.eml")
+                .await
+            {
+                Ok(original) => original,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to fetch forwarded message");
+                    return compose_error(command, "110");
+                }
+            };
+            mime = match smart_compose::attach_original(&mime, &original) {
+                Ok(mime) => mime,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to prepare forwarded message");
+                    return compose_error(command, "110");
+                }
+            };
+        } else {
+            let original = match state.jmap.email_plain_body_by_id(auth, id).await {
+                Ok(Some(body)) if !body.is_truncated => body.value,
+                Ok(_) => return compose_error(command, "110"),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to fetch original reply text");
+                    return compose_error(command, "110");
+                }
+            };
+            mime = match smart_compose::inline_plain_reply(&mime, &original) {
+                Ok(mime) => mime,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to prepare reply text");
+                    return compose_error(command, "110");
+                }
+            };
+        }
     }
 
     match state.jmap.send_email(auth, mime, save_in_sent_items).await {

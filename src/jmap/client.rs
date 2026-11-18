@@ -3806,6 +3806,25 @@ impl JmapClient {
         email_id: &str,
         max_bytes: usize,
     ) -> anyhow::Result<Option<EmailBody>> {
+        self.email_body_with_format(auth, email_id, max_bytes, false)
+            .await
+    }
+
+    pub async fn email_plain_body_by_id(
+        &self,
+        auth: &AuthenticatedSession,
+        email_id: &str,
+    ) -> anyhow::Result<Option<EmailBody>> {
+        self.email_body_with_format(auth, email_id, 0, true).await
+    }
+
+    async fn email_body_with_format(
+        &self,
+        auth: &AuthenticatedSession,
+        email_id: &str,
+        max_bytes: usize,
+        plain: bool,
+    ) -> anyhow::Result<Option<EmailBody>> {
         let account_id = auth
             .session
             .primary_account_for(capabilities::MAIL)
@@ -3836,7 +3855,28 @@ impl JmapClient {
                         .list
                         .into_iter()
                         .find(|email| email.id == backend_id)
-                        .and_then(|mut email| select_body(&mut email)));
+                        .and_then(|mut email| {
+                            if plain {
+                                let [part] = email.text_body.as_slice() else {
+                                    return None;
+                                };
+                                let valid = part
+                                    .part_id
+                                    .as_ref()
+                                    .and_then(|id| email.body_values.get(id))
+                                    .is_some_and(|value| !value.is_encoding_problem);
+                                if !valid {
+                                    return None;
+                                }
+                                body_value_for(
+                                    &email.text_body,
+                                    &mut email.body_values,
+                                    EmailBodyType::Plain,
+                                )
+                            } else {
+                                select_body(&mut email)
+                            }
+                        }));
                 }
                 "error" => anyhow::bail!("JMAP method error fetching the message body"),
                 _ => {}
@@ -5312,6 +5352,8 @@ struct EmailBodyValue {
     value: String,
     #[serde(default)]
     is_truncated: bool,
+    #[serde(default)]
+    is_encoding_problem: bool,
 }
 
 impl From<EmailObject> for Email {

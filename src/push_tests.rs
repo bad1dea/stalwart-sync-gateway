@@ -5374,6 +5374,116 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_smart_reply_quotes_original_text() {
+        use eas::compose_mail as cm;
+        let live = Live::new("E2E_USER2").await;
+        let caps = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:mail",
+            "urn:ietf:params:jmap:submission",
+        ];
+        let before = live
+            .call_using(
+                serde_json::json!([["EmailSubmission/query", {"accountId":live.account}, "0"]]),
+                &caps,
+            )
+            .await;
+        let before: std::collections::BTreeSet<_> = before[0][1]["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect();
+        let marker = format!("replyfixture{}", std::process::id());
+        let source = live
+            .seed(&live.inbox, 1, &format!("{marker}source"), true)
+            .await
+            .remove(0);
+        let mime = format!("From: {}\r\nTo: {}\r\nSubject: {}\r\nMessage-ID: <{}@e2e.test>\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nReply text", live.user, live.user, marker, marker);
+        let mut b = eas::DocumentBuilder::new();
+        b.start(cm::SMART_REPLY);
+        b.start(cm::SOURCE);
+        b.leaf(cm::FOLDER_ID, &live.inbox);
+        b.leaf(cm::ITEM_ID, &source);
+        b.end();
+        b.empty_tag(cm::SAVE_IN_SENT_ITEMS);
+        b.opaque_leaf(cm::MIME, mime.into_bytes());
+        b.end();
+        let sent = live
+            .req("SmartReply", &dev("smart-reply-original"))
+            .body(wbxml::encode_document(&b.finish()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sent.status(), 200);
+        assert!(sent.bytes().await.unwrap().is_empty());
+        let mut ids = Vec::new();
+        for _ in 0..50 {
+            let result = live.call(serde_json::json!([["Email/query", {"accountId":live.account,"filter":{"subject":&marker}}, "0"]])).await;
+            ids = result[0][1]["ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|id| id.as_str().map(str::to_owned))
+                .collect();
+            if ids.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(ids.len(), 2);
+        let messages = live.call(serde_json::json!([["Email/get", {"accountId":live.account,"ids":ids,"properties":["bodyValues","textBody","attachments"],"fetchTextBodyValues":true}, "0"]])).await;
+        for item in messages[0][1]["list"].as_array().unwrap() {
+            let values = item["bodyValues"].as_object().unwrap();
+            assert!(values.values().any(|body| body["value"]
+                .as_str()
+                .is_some_and(|text| text.contains("Reply text") && text.contains("> body 0"))));
+            assert!(item["attachments"].as_array().unwrap().is_empty());
+        }
+        let mut b = eas::DocumentBuilder::new();
+        b.start(cm::SMART_REPLY);
+        b.start(cm::SOURCE);
+        b.leaf(cm::FOLDER_ID, &live.inbox);
+        b.leaf(cm::ITEM_ID, &source);
+        b.end();
+        b.opaque_leaf(
+            cm::MIME,
+            b"Content-Type: text/html\r\n\r\n<p>Reply</p>".as_slice(),
+        );
+        b.end();
+        let rejected = live
+            .req("SmartReply", &dev("smart-reply-html"))
+            .body(wbxml::encode_document(&b.finish()))
+            .send()
+            .await
+            .unwrap();
+        let rejected = wbxml::decode_document(&rejected.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&rejected, cm::STATUS), Some("110"));
+        ids.push(source);
+        let after = live
+            .call_using(
+                serde_json::json!([["EmailSubmission/query", {"accountId":live.account}, "0"]]),
+                &caps,
+            )
+            .await;
+        let created: Vec<_> = after[0][1]["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|id| id.as_str())
+            .filter(|id| !before.contains(*id))
+            .collect();
+        assert_eq!(created.len(), 1);
+        let removed = live.call_using(serde_json::json!([["EmailSubmission/set", {"accountId":live.account,"destroy":created}, "0"]]), &caps).await;
+        assert!(removed[0][1]["notDestroyed"].is_null());
+        let removed = live
+            .call(serde_json::json!([["Email/set", {"accountId":live.account,"destroy":ids}, "0"]]))
+            .await;
+        assert!(removed[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_smart_forward_preserves_original_message() {
         use base64::{engine::general_purpose::STANDARD, Engine};
         use eas::compose_mail as cm;
