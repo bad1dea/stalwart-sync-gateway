@@ -421,7 +421,7 @@ async fn changed_mail_folders(
     eas_user: &str,
     device: &str,
     mail_ids: &[String],
-) -> Vec<String> {
+) -> anyhow::Result<Vec<String>> {
     let mut changed = Vec::new();
     for id in mail_ids {
         let record = match state.state.get(eas_user, device, id).await {
@@ -475,13 +475,12 @@ async fn changed_mail_folders(
             }
             Ok(None) => {}
             Err(error) => {
-                // Be conservative on a probe failure: let the client sync.
                 tracing::warn!(%error, collection = %id, "push: change probe failed");
-                changed.push(id.clone());
+                return Err(error);
             }
         }
     }
-    changed
+    Ok(changed)
 }
 
 async fn item_collection_hashes(
@@ -732,7 +731,14 @@ async fn ping_inner(
         let seen_generation = *rx.borrow_and_update();
 
         {
-            let mut found = changed_mail_folders(state, auth, &eas_user, &device, &mail_ids).await;
+            let mut found =
+                match changed_mail_folders(state, auth, &eas_user, &device, &mail_ids).await {
+                    Ok(found) => found,
+                    Err(error) => {
+                        tracing::warn!(%error, "ping: mail change probe failed");
+                        return ping_response(state, command, 8, &[], None);
+                    }
+                };
             match changed_item_folders(state, auth, &eas_user, &device, &folders).await {
                 Ok(items) => found.extend(items),
                 Err(error) => {
@@ -2723,13 +2729,23 @@ async fn wait_for_sync_changes(
         .collect();
     let mail = watched_mail_ids(&folders);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
+    let mut probe_failures = 0;
     loop {
         rx.borrow_and_update();
-        if !changed_mail_folders(state, auth, user, device, &mail)
-            .await
-            .is_empty()
-        {
-            return false;
+        match changed_mail_folders(state, auth, user, device, &mail).await {
+            Ok(changed) if changed.is_empty() => probe_failures = 0,
+            Ok(_) => return false,
+            Err(_) => {
+                probe_failures += 1;
+                if probe_failures > 2 || tokio::time::Instant::now() >= deadline {
+                    return false;
+                }
+                tokio::time::sleep_until(
+                    (tokio::time::Instant::now() + Duration::from_millis(250)).min(deadline),
+                )
+                .await;
+                continue;
+            }
         }
         match changed_item_folders(state, auth, user, device, &folders).await {
             Ok(items) if items.is_empty() => {}

@@ -63,6 +63,7 @@ struct Mock {
     delayed_mail_sets: AtomicUsize,
     snapshot_missing_item: AtomicBool,
     identity_error: AtomicBool,
+    mail_query_error: AtomicBool,
     item_set_error: AtomicBool,
     drop_flag_keywords: AtomicBool,
     download_error: AtomicBool,
@@ -284,6 +285,10 @@ async fn mock_api(
                 serde_json::json!({ "list": list })
             }
             "Email/query" => {
+                if m.mail_query_error.load(Ordering::SeqCst) {
+                    responses.push(serde_json::json!(["error", {"type":"serverFail"}, cid]));
+                    continue;
+                }
                 let mb = args["filter"]["inMailbox"].as_str().unwrap_or("inbox");
                 let mut ids = boxes.get(mb).cloned().unwrap_or_default();
                 for (smb, sid) in m.stale_listing.lock().unwrap().iter() {
@@ -616,6 +621,7 @@ async fn start_mock() -> Arc<Mock> {
         delayed_mail_sets: AtomicUsize::new(0),
         snapshot_missing_item: AtomicBool::new(false),
         identity_error: AtomicBool::new(false),
+        mail_query_error: AtomicBool::new(false),
         item_set_error: AtomicBool::new(false),
         drop_flag_keywords: AtomicBool::new(false),
         download_error: AtomicBool::new(false),
@@ -1096,6 +1102,75 @@ async fn new_email_during_active_ping_then_sync_then_idle() {
     let reply = env.ping("devA", Some(ping_body(2, INBOX))).await;
     assert_eq!(reply.status, "1");
     assert!(t.elapsed() >= Duration::from_millis(1900));
+}
+
+#[tokio::test]
+async fn sync_long_poll_retries_transient_mail_probe_error() {
+    use eas::airsync as air;
+    let env = Arc::new(start_env(Opts::default()).await);
+    let prime = env
+        .req("Sync", "sync-probe-error")
+        .body(sync_body("0", "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let prime = wbxml::decode_document(&prime.bytes().await.unwrap()).unwrap();
+    let synced = env
+        .req("Sync", "sync-probe-error")
+        .body(sync_body(&sync_key(&prime), "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let synced = wbxml::decode_document(&synced.bytes().await.unwrap()).unwrap();
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.leaf(air::HEARTBEAT_INTERVAL, "60");
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, sync_key(&synced));
+    b.leaf(air::COLLECTION_ID, "inbox");
+    b.empty_tag(air::GET_CHANGES);
+    b.end();
+    b.end();
+    b.end();
+    env.mock.mail_query_error.store(true, Ordering::SeqCst);
+    let request = env
+        .req("Sync", "sync-probe-error")
+        .body(wbxml::encode_document(&b.finish()))
+        .send();
+    tokio::pin!(request);
+    tokio::select! {
+        result = &mut request => panic!("Sync returned before recovery: {:?}", result.unwrap().status()),
+        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+    }
+    env.mock.mail_query_error.store(false, Ordering::SeqCst);
+    env.mock.add_mail("inbox", "after-sync-probe-error");
+    let response = tokio::time::timeout(Duration::from_secs(5), &mut request)
+        .await
+        .unwrap()
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert!(eas::find_all_text_after(&doc, air::SERVER_ID)
+        .contains(&"after-sync-probe-error".to_owned()));
+}
+
+#[tokio::test]
+async fn ping_reports_mail_probe_failure_and_recovers() {
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.sync_all("probe-error").await;
+    env.mock.mail_query_error.store(true, Ordering::SeqCst);
+    let failed = env.ping("probe-error", Some(ping_body(5, INBOX))).await;
+    assert_eq!(failed.status, "8");
+    assert!(failed.folders.is_empty());
+    env.mock.mail_query_error.store(false, Ordering::SeqCst);
+    env.mock.add_mail("inbox", "after-probe-error");
+    let recovered = env.ping("probe-error", Some(ping_body(5, INBOX))).await;
+    assert_eq!(recovered.status, "2");
+    assert_eq!(recovered.folders, vec!["inbox"]);
+    assert!(env
+        .sync_all("probe-error")
+        .await
+        .contains(&"after-probe-error".to_owned()));
 }
 
 #[tokio::test]

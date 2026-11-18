@@ -207,7 +207,8 @@ impl JmapClient {
         let http = reqwest::Client::builder()
             .user_agent("stalwart-sync-gateway/0.1")
             .danger_accept_invalid_certs(!config.stalwart_tls_verify)
-            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            // Stalwart can close idle connections before the next 30-second probe.
+            .pool_idle_timeout(std::time::Duration::from_secs(20))
             .http2_adaptive_window(true)
             .build()
             .context("failed to build JMAP HTTP client")?;
