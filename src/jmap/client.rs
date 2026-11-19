@@ -6786,4 +6786,94 @@ mod email_state_retry_tests {
         assert_eq!(calls.load(Ordering::SeqCst), 5);
         server.abort();
     }
+
+    #[tokio::test]
+    async fn flag_retry_merges_metadata_from_the_latest_state() {
+        let old = crate::model::MailFlag {
+            status: 2,
+            fields: vec![(2, 1, "old".into())],
+        };
+        let latest = crate::model::MailFlag {
+            status: 2,
+            fields: vec![(2, 1, "external".into())],
+        };
+        let requested = crate::model::MailFlag {
+            status: u8::MAX,
+            fields: vec![(2, 2, "client".into())],
+        };
+        let merged = crate::model::MailFlag {
+            status: 2,
+            fields: vec![(2, 1, "external".into()), (2, 2, "client".into())],
+        };
+        let keywords = |flag: &crate::model::MailFlag| {
+            let mut values = serde_json::Map::new();
+            values.insert("$flagged".into(), serde_json::json!(true));
+            for key in flag.keywords().unwrap() {
+                values.insert(key, serde_json::json!(true));
+            }
+            values
+        };
+        let old_keys = keywords(&old);
+        let latest_keys = keywords(&latest);
+        let merged_keys = keywords(&merged);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let captured = calls.clone();
+        let app = Router::new().route("/", post(move |Json(request): Json<serde_json::Value>| {
+            let calls = captured.clone();
+            let old_keys = old_keys.clone();
+            let latest_keys = latest_keys.clone();
+            let merged_keys = merged_keys.clone();
+            async move {
+                let call = &request["methodCalls"][0];
+                let number = calls.fetch_add(1, Ordering::SeqCst);
+                let response = match number {
+                    0 => serde_json::json!(["Email/get", {"state":"before", "list":[{"id":"m", "keywords":old_keys}]}, "get"]),
+                    1 => serde_json::json!(["error", {"type":"stateMismatch"}, "set"]),
+                    2 => serde_json::json!(["Email/get", {"state":"after", "list":[{"id":"m", "keywords":latest_keys}]}, "get"]),
+                    3 => {
+                        assert_eq!(call[1]["ifInState"], "after");
+                        let patch = call[1]["update"]["m"].as_object().unwrap();
+                        let mut applied = latest_keys;
+                        for (path, value) in patch {
+                            let key = path.strip_prefix("keywords/").unwrap();
+                            if value.is_null() { applied.remove(key); } else { applied.insert(key.into(), value.clone()); }
+                        }
+                        assert_eq!(applied, merged_keys);
+                        serde_json::json!(["Email/set", {"updated":{"m":null}}, "set"])
+                    }
+                    4 => serde_json::json!(["Email/get", {"list":[{"id":"m", "keywords":merged_keys}]}, "verify"]),
+                    _ => panic!("unexpected JMAP request"),
+                };
+                Json(serde_json::json!({"methodResponses":[response]}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::MAIL:"a"}, "apiUrl":url,
+            "downloadUrl":url, "uploadUrl":url, "username":"user", "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let state = client
+            .update_email_state(&auth, "m", None, Some(&requested))
+            .await
+            .unwrap();
+        assert_eq!(state.flag, Some(merged));
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+        server.abort();
+    }
 }
