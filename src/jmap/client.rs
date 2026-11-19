@@ -18,6 +18,10 @@ use crate::{
     },
 };
 
+#[derive(Debug, thiserror::Error)]
+#[error("JMAP email state changed")]
+struct EmailStateMismatch;
+
 /// Stalwart's JMAP session response returns ABSOLUTE apiUrl/uploadUrl/
 /// downloadUrl/eventSourceUrl fields built from its own configured
 /// `server.hostname` -- which is not necessarily reachable from wherever
@@ -4120,6 +4124,25 @@ impl JmapClient {
         read: Option<bool>,
         flag: Option<&crate::model::MailFlag>,
     ) -> anyhow::Result<EmailState> {
+        for attempt in 0..3 {
+            match self
+                .update_email_state_once(auth, email_id, read, flag)
+                .await
+            {
+                Err(error) if error.is::<EmailStateMismatch>() && attempt < 2 => continue,
+                result => return result,
+            }
+        }
+        unreachable!()
+    }
+
+    async fn update_email_state_once(
+        &self,
+        auth: &AuthenticatedSession,
+        email_id: &str,
+        read: Option<bool>,
+        flag: Option<&crate::model::MailFlag>,
+    ) -> anyhow::Result<EmailState> {
         let account_id = auth
             .session
             .primary_account_for(capabilities::MAIL)
@@ -4931,6 +4954,9 @@ impl JmapClient {
                         }
                     }
                     return Ok(());
+                }
+                "error" if method.1["type"] == "stateMismatch" => {
+                    return Err(EmailStateMismatch.into());
                 }
                 "error" => anyhow::bail!("JMAP method error in Email/set"),
                 other => {
@@ -6691,6 +6717,73 @@ mod calendar_update_state_tests {
             .await
             .is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+}
+
+#[cfg(test)]
+mod email_state_retry_tests {
+    use super::*;
+    use axum::{routing::post, Json, Router};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[tokio::test]
+    async fn retries_a_state_mismatch_with_fresh_keywords() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let captured = calls.clone();
+        let app = Router::new().route("/", post(move |Json(request): Json<serde_json::Value>| {
+            let calls = captured.clone();
+            async move {
+                let call = &request["methodCalls"][0];
+                let number = calls.fetch_add(1, Ordering::SeqCst);
+                let response = match number {
+                    0 => serde_json::json!(["Email/get", {"state":"before", "list":[{"id":"m", "keywords":{}}]}, "get"]),
+                    1 => {
+                        assert_eq!(call[1]["ifInState"], "before");
+                        serde_json::json!(["error", {"type":"stateMismatch"}, "set"])
+                    }
+                    2 => serde_json::json!(["Email/get", {"state":"after", "list":[{"id":"m", "keywords":{"other-client":true}}]}, "get"]),
+                    3 => {
+                        assert_eq!(call[1]["ifInState"], "after");
+                        assert_eq!(call[1]["update"]["m"], serde_json::json!({"keywords/$seen":true}));
+                        serde_json::json!(["Email/set", {"updated":{"m":null}}, "set"])
+                    }
+                    4 => serde_json::json!(["Email/get", {"list":[{"id":"m", "keywords":{"other-client":true,"$seen":true}}]}, "verify"]),
+                    _ => panic!("unexpected JMAP request"),
+                };
+                Json(serde_json::json!({"methodResponses":[response]}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::MAIL:"a"}, "apiUrl":url,
+            "downloadUrl":url, "uploadUrl":url, "username":"user", "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let state = client
+            .update_email_state(&auth, "m", Some(true), None)
+            .await
+            .unwrap();
+        assert!(state.read);
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
         server.abort();
     }
 }
