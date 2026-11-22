@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `a23c7f8` (2026-11-22)
+## Reconciled status for source `main` at `641d41f` (2026-11-22)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -27,20 +27,19 @@ Current prioritized work:
    iOS/Outlook negotiate or behave correctly against an advertised 16.1 build.
    Keep 16.1 unadvertised until the implementation and a fresh device pass are
    complete.
-4. **Legacy/low-priority commands and operations.** The source implements mail
-   Sync Add, ResolveRecipients, ValidateCert, MeetingResponse, and ItemOperations
-   fetches for mail, contacts, calendars, tasks, notes, and attachment blobs.
-   The older status rows below have not all been reconciled; inspect source and
-   current client requirements before treating them as remaining gaps.
-   Enterprise IRM remains out of scope for the personal-account gateway.
+4. **Legacy/low-priority commands and operations.** Mail Sync Add now creates
+   drafts and non-draft Email items in the requested Mailbox. ResolveRecipients,
+   ValidateCert, MeetingResponse, and ItemOperations fetches for mail, contacts,
+   calendars, tasks, notes, and attachment blobs are implemented. Enterprise
+   IRM remains out of scope for the personal-account gateway.
 
 Audit corrections from the current source: mail Sync Add creates idempotent
-drafts with attachment/MIME support; ResolveRecipients and ValidateCert have
-handlers and end-to-end tests; MeetingResponse has an Inbox invitation path;
-ItemOperations Fetch supports attachment FileReference and non-Mailbox object
-classes. The historical table below still contains older claims that contradict
-these implementations and should be read as historical evidence pending a
-full row-by-row rewrite.
+drafts and non-draft Email items with attachment/MIME support;
+ResolveRecipients and ValidateCert have handlers and end-to-end tests;
+MeetingResponse has an Inbox invitation path; ItemOperations Fetch supports
+attachment FileReference and non-Mailbox object classes. The historical table
+below still contains older claims that contradict these implementations and
+should be read as historical evidence pending a full row-by-row rewrite.
 
 Completed since this reconciliation began: **RTF body preference Type 3**.
 Native plain/HTML content is now converted to escaped RTF, the body is marked
@@ -74,6 +73,14 @@ The new container started with restart count zero; mesh and public health and
 readiness endpoints all returned successfully. Production continues to
 advertise only EAS 14.0.
 
+Also completed (`641d41f`): **Mail Sync Add to non-draft mailboxes**. Sync Add now writes
+the requested target mailbox through `Email/set` or `Email/import`, keeps
+idempotent replay markers, and omits the `$draft` keyword outside the Drafts
+folder. A new regression test checks the non-draft mailbox properties; the full
+suite passes (254 passed, 73 ignored), and clippy with warnings denied passes.
+Production still advertises 14.0, so the Sync Add path remains version-gated to
+16.0/16.1 until the planned client certification.
+
 This reconciliation supersedes older status claims in this document where
 they conflict with source `main` at the stated revision. Update this section
 after each completed feature and retain historical observations below as
@@ -95,7 +102,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Sync: Mail (mark read) | **Done** | `Email/set` (keywords `$seen`) | `apply_mail_client_commands`, Change command. |
 | Sync: Mail (delete) | **Done** | `Email/set` destroy / `Email/destroy`-equivalent | Delete command, `destroy_email()`. |
 | Sync: Mail (move) | **Done** | `Email/set` (`mailboxIds`) | Separate `MoveItems` command, not a Sync-embedded move. |
-| Sync: Mail (client Add, e.g. append-to-Sent) | **Done for drafts** | `Email/set` / `Email/import` + blob | The mail Sync path extracts Add commands before `apply_mail_client_commands` and creates drafts with stable replay markers, attachment handling, MIME import, response mapping, and recovery after a server write. Regression coverage includes replay, content changes, attachments, Bcc, and retries (`src/push_tests.rs`). This does not claim arbitrary append-to-Sent semantics. |
+| Sync: Mail (client Add) | **Done (`16.0`/`16.1`)** | `Email/set` / `Email/import` + blob | The mail Sync path creates drafts in Drafts and non-draft items in the requested Mailbox with stable replay markers, attachment handling, MIME import, response mapping, and recovery after a server write. Regression coverage includes draft replay/content changes/attachments/Bcc/retries plus non-draft property generation (`src/activesync/draft.rs`, `src/push_tests.rs`). |
 | Sync: Mail (server-side delete surfaced to client) | **Done** (`deploy-2026-08-25v`) | Targeted `Email/get` (id + mailboxIds) per previously-seen-but-absent-from-window candidate | `emails_still_in_mailbox()` in `src/jmap/client.rs` — deliberately NOT a naive "absent from this fetch = deleted" diff, since `emails_in_mailbox`'s query is sorted newest-first and capped at the window size, so an old message pushed out of the window by newer mail looks identical to a real deletion under a plain diff. Live-verified both directions: a real destroyed message correctly surfaced as a Delete on the next Sync, and a real non-deleted message correctly confirmed present (not flagged) via the same JMAP call shape. |
 | Sync: Contacts (read) | **Done** | `ContactCard/query`+`/get` (JSContact, RFC 9553) | Confirmed live against a real card. |
 | Sync: Contacts (write: add/edit/delete) | **Done** (`deploy-2026-08-25s`) | `ContactCard/set` | `sync_contacts_collection` now handles Add/Change/Delete + a real hash-diff (same shape as Notes), backed by `save_contact`/`destroy_contact`. `ContactCard/set` confirmed live to support real in-place update, so the JMAP id is a stable ServerId with no workaround. Full lifecycle live-verified with a throwaway contact. |
