@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `979d749` (2026-11-22)
+## Reconciled status for source `main` at `a23c7f8` (2026-11-22)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -67,6 +67,12 @@ certificates. The full suite passes (253 passed, 73 ignored), and
 `cargo clippy --all-targets -- -D warnings` passes. This follows the MS-ASCMD
 rule that the default is 0 and unverifiable revocation status should then be
 ignored; strict checking must not ignore it.
+Deployed as `deploy-2026-11-22-eas-checkcrl-a23c7f8`; homelab commit
+`06ad1d0`. The forced Compose rebuild produced image
+`sha256:28b76f2b4935e3260872baa7217db91833190ae96fce2b2cb86609e21cbbc3af`.
+The new container started with restart count zero; mesh and public health and
+readiness endpoints all returned successfully. Production continues to
+advertise only EAS 14.0.
 
 This reconciliation supersedes older status claims in this document where
 they conflict with source `main` at the stated revision. Update this section
