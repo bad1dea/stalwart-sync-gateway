@@ -35,13 +35,13 @@ The spec's own overview lays out the intended command sequence:
 12. **Find** / **Search** — locate items (Find is the newer, GAL-search-
     capable command; Search is the older mailbox/GAL search command).
 
-This gateway currently implements FolderSync, Sync, MoveItems, Provision,
+This gateway implements FolderSync, Sync, MoveItems, Provision,
 GetItemEstimate, Settings, Ping, ItemOperations, SendMail/SmartForward/
-SmartReply, and GetAttachment (legacy, see below) — see
-`src/activesync.rs`'s `post_handler`/`get_handler` dispatch. Not yet
-implemented: FolderCreate/Update/Delete, MeetingResponse, Search, Find,
-ResolveRecipients, ValidateCert (all fall through to a 501). `Autodiscover`
-is intentionally out of scope for the A/B test instance.
+SmartReply, GetAttachment, FolderCreate/Update/Delete, MeetingResponse,
+Search, Find, ResolveRecipients, and ValidateCert — see
+`src/activesync.rs`'s `post_handler`/`get_handler` dispatch. `Autodiscover`
+is also implemented. This command inventory describes code presence; it does
+not establish real-client 16.1 certification.
 
 ## Commands
 
@@ -129,20 +129,16 @@ whether it supports free-text directory search the way GAL does is
 Principal/get,query support before scoping this.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
-SendMail posts a full new outgoing message; SmartReply/SmartForward post
-just the new content plus a reference to the item being replied-to/
-forwarded (letting the server splice quoting/threading). From EAS 14.0
+SendMail posts a full new outgoing message; SmartReply/SmartForward use
+the same transport but the client supplies the reply/forward MIME. From EAS 14.0
 this uses the "simplified" transport: the POST body is raw RFC822 MIME
 directly (not WBXML), with `SaveInSentItems`/`ClientId`/`ItemId`/
 `CollectionId` as query params. This gateway implements all three
 (`send_mail()`), backed by JMAP `EmailSubmission/set` (confirmed live —
-see `src/jmap/client.rs`'s `send_email()`). SmartReply/SmartForward
-currently treat the reference item the same as SendMail treats a bare new
-message — **[needs verification]** whether the reference-item threading
-metadata (In-Reply-To/References headers, or EAS's own `ReplaceMime`
-semantics) is actually being spliced correctly; worth a live pcap check
-before calling this fully correct, the same way DateReceived/OofMessage
-turned out to need one.
+see `src/jmap/client.rs`'s `send_email()`). A live self-addressed reply test
+confirmed the submitted Message-ID, In-Reply-To, and References values were
+preserved byte-for-byte in Sent Items and the delivered copy. The client
+composes the quoted content; the gateway does not synthesize it from ItemId.
 
 ### ResolveRecipients / ValidateCert (§2.2.1.15/.22)
 `ResolveRecipients` resolves principals and contacts with case-insensitive

@@ -58,6 +58,16 @@ restart count zero, and mesh/public health plus public readiness returned 200.
 No real-device RTF request was observed during rollout, so device rendering
 remains unverified. Production protocol advertisement remains unchanged.
 
+Also completed: **ValidateCert CheckCRL semantics**. `CheckCRL` now defaults
+to false, accepts only one explicit `0`/`1` value, and controls whether an
+unverifiable revocation status is returned as status 16. A certificate that
+is verifiably revoked remains status 13 in either mode. Regression coverage
+checks missing/invalid/duplicate values, missing/future CRLs, and revoked
+certificates. The full suite passes (253 passed, 73 ignored), and
+`cargo clippy --all-targets -- -D warnings` passes. This follows the MS-ASCMD
+rule that the default is 0 and unverifiable revocation status should then be
+ignored; strict checking must not ignore it.
+
 This reconciliation supersedes older status claims in this document where
 they conflict with source `main` at the stated revision. Update this section
 after each completed feature and retain historical observations below as

@@ -42,6 +42,7 @@ fn certificates(doc: &Document) -> Result<Vec<Vec<u8>>, ()> {
 struct Request {
     targets: Vec<Vec<u8>>,
     chain: Vec<Vec<u8>>,
+    check_crl: bool,
 }
 
 fn request(doc: &Document) -> Result<Request, ()> {
@@ -50,17 +51,19 @@ fn request(doc: &Document) -> Result<Request, ()> {
     }
     let mut targets = None;
     let mut chain = None;
-    let mut check = false;
+    let mut check_crl = false;
+    let mut check_seen = false;
     for child in eas::child_elements(doc) {
         if is(&child, vc::CERTIFICATES) && targets.is_none() {
             targets = Some(certificates(&child)?);
         } else if is(&child, vc::CERTIFICATE_CHAIN) && chain.is_none() {
             chain = Some(certificates(&child)?);
-        } else if is(&child, vc::CHECK_CRL) && !check {
-            check = true;
+        } else if is(&child, vc::CHECK_CRL) && !check_seen {
+            check_seen = true;
             if !matches!(eas::find_text_after(&child, vc::CHECK_CRL), Some("0" | "1")) {
                 return Err(());
             }
+            check_crl = eas::find_text_after(&child, vc::CHECK_CRL) == Some("1");
         } else {
             return Err(());
         }
@@ -68,6 +71,7 @@ fn request(doc: &Document) -> Result<Request, ()> {
     Ok(Request {
         targets: targets.ok_or(())?,
         chain: chain.unwrap_or_default(),
+        check_crl,
     })
 }
 
@@ -84,7 +88,13 @@ fn pem_file(path: &str, label: &str) -> anyhow::Result<Vec<Vec<u8>>> {
     Ok(output)
 }
 
-fn status(leaf: &[u8], chain: &[Vec<u8>], roots: &[Vec<u8>], crls: &[Vec<u8>]) -> &'static str {
+fn status(
+    leaf: &[u8],
+    chain: &[Vec<u8>],
+    roots: &[Vec<u8>],
+    crls: &[Vec<u8>],
+    check_crl: bool,
+) -> &'static str {
     let Ok((remaining, parsed)) = parse_x509_certificate(leaf) else {
         return "5";
     };
@@ -125,7 +135,10 @@ fn status(leaf: &[u8], chain: &[Vec<u8>], roots: &[Vec<u8>], crls: &[Vec<u8>]) -
         let Ok((remaining, crl)) = parse_x509_crl(der) else {
             return "17";
         };
-        if !remaining.is_empty() || crl.last_update().timestamp() > now_seconds as i64 {
+        if !remaining.is_empty() {
+            return "16";
+        }
+        if check_crl && crl.last_update().timestamp() > now_seconds as i64 {
             return "16";
         }
     }
@@ -162,7 +175,13 @@ fn status(leaf: &[u8], chain: &[Vec<u8>], roots: &[Vec<u8>], crls: &[Vec<u8>]) -
         revocation,
         None,
     ) {
-        Ok(_) if refs.is_empty() => "16",
+        Ok(_) if refs.is_empty() => {
+            if check_crl {
+                "16"
+            } else {
+                "1"
+            }
+        }
         Ok(_) => "1",
         Err(webpki::Error::UnknownIssuer) => "4",
         Err(webpki::Error::CertExpired { .. } | webpki::Error::CertNotValidYet { .. }) => "7",
@@ -187,7 +206,13 @@ fn status(leaf: &[u8], chain: &[Vec<u8>], roots: &[Vec<u8>], crls: &[Vec<u8>]) -
                 _ => "15",
             }
         }
-        Err(webpki::Error::UnknownRevocationStatus | webpki::Error::CrlExpired { .. }) => "16",
+        Err(webpki::Error::UnknownRevocationStatus | webpki::Error::CrlExpired { .. }) => {
+            if check_crl {
+                "16"
+            } else {
+                "1"
+            }
+        }
         Err(webpki::Error::CaUsedAsEndEntity | webpki::Error::EndEntityUsedAsCa) => "11",
         Err(_) => "5",
     }
@@ -200,7 +225,11 @@ pub(super) fn handle(config: &Config, document: &Document) -> Response {
         Err(()) => {
             b.leaf(vc::STATUS, "17");
         }
-        Ok(Request { targets, chain }) => {
+        Ok(Request {
+            targets,
+            chain,
+            check_crl,
+        }) => {
             let roots = pem_file(&config.validate_cert_ca_file, "CERTIFICATE");
             let crls = config
                 .validate_cert_crl_file
@@ -213,7 +242,7 @@ pub(super) fn handle(config: &Config, document: &Document) -> Response {
                     let crls = crls.unwrap_or_default();
                     for leaf in targets {
                         b.start(vc::CERTIFICATE);
-                        b.leaf(vc::STATUS, status(&leaf, &chain, &roots, &crls));
+                        b.leaf(vc::STATUS, status(&leaf, &chain, &roots, &crls, check_crl));
                         b.end();
                     }
                 }
@@ -249,13 +278,47 @@ mod tests {
     fn validates_signing_certificates_and_revocation() {
         let roots = [ROOT.to_vec()];
         let crls = [CRL.to_vec()];
-        assert_eq!(status(GOOD, &[], &roots, &crls), "1");
-        assert_eq!(status(REVOKED, &[], &roots, &crls), "13");
-        assert_eq!(status(NO_SIGN, &[], &roots, &crls), "6");
-        assert_eq!(status(WRONG_EKU, &[], &roots, &crls), "6");
-        assert_eq!(status(GOOD, &[], &roots, &[]), "16");
-        assert_eq!(status(GOOD, &[], &roots, &[FUTURE_CRL.to_vec()]), "16");
-        assert_eq!(status(b"invalid", &[], &roots, &crls), "5");
-        assert_eq!(status(GOOD, &[], &roots, &[b"invalid".to_vec()]), "17");
+        assert_eq!(status(GOOD, &[], &roots, &crls, false), "1");
+        assert_eq!(status(REVOKED, &[], &roots, &crls, false), "13");
+        assert_eq!(status(REVOKED, &[], &roots, &crls, true), "13");
+        assert_eq!(status(NO_SIGN, &[], &roots, &crls, false), "6");
+        assert_eq!(status(WRONG_EKU, &[], &roots, &crls, false), "6");
+        assert_eq!(status(GOOD, &[], &roots, &[], false), "1");
+        assert_eq!(status(GOOD, &[], &roots, &[], true), "16");
+        assert_eq!(
+            status(GOOD, &[], &roots, &[FUTURE_CRL.to_vec()], false),
+            "1"
+        );
+        assert_eq!(
+            status(GOOD, &[], &roots, &[FUTURE_CRL.to_vec()], true),
+            "16"
+        );
+        assert_eq!(status(b"invalid", &[], &roots, &crls, false), "5");
+        assert_eq!(
+            status(GOOD, &[], &roots, &[b"invalid".to_vec()], false),
+            "17"
+        );
+    }
+
+    #[test]
+    fn check_crl_defaults_to_false_and_accepts_one_boolean_value() {
+        fn document(check_values: &[&str]) -> Document {
+            let mut builder = DocumentBuilder::new();
+            builder.start(vc::VALIDATE_CERT);
+            builder.start(vc::CERTIFICATES);
+            builder.leaf(vc::CERTIFICATE, STANDARD.encode(GOOD));
+            builder.end();
+            for value in check_values {
+                builder.leaf(vc::CHECK_CRL, *value);
+            }
+            builder.end();
+            builder.finish()
+        }
+
+        assert!(!request(&document(&[])).unwrap().check_crl);
+        assert!(!request(&document(&["0"])).unwrap().check_crl);
+        assert!(request(&document(&["1"])).unwrap().check_crl);
+        assert!(request(&document(&["2"])).is_err());
+        assert!(request(&document(&["0", "1"])).is_err());
     }
 }
