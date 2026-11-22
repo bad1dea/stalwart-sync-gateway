@@ -36,7 +36,15 @@ as type 3, and byte truncation plus AllOrNone are applied after conversion.
 Coverage includes conversion escaping, Unicode control output, truncation,
 AllOrNone, and an HTTP-level Sync Fetch. `cargo fmt`, clippy with warnings
 denied, and the full suite passed (252 passed, 73 ignored). Production
-integration is pending.
+was updated through the homelab GitOps pin `deploy-2026-11-22-eas-rtf-59ed916`
+(homelab commit `3c40737`). The first Komodo pass did not rebuild the external
+git context; verification caught the unchanged image, and the documented
+forced Compose build then produced image
+`sha256:f7dc7d00c3a52c34286017997860c6c659552e4206c854b14db1e221b6a9d7a0`.
+The pre-deploy SQLite backup passed `PRAGMA quick_check`; the new container has
+restart count zero, and mesh/public health plus public readiness returned 200.
+No real-device RTF request was observed during rollout, so device rendering
+remains unverified. Production protocol advertisement remains unchanged.
 
 This reconciliation supersedes older status claims in this document where
 they conflict with source `main` at the stated revision. Update this section
