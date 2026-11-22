@@ -145,21 +145,21 @@ before calling this fully correct, the same way DateReceived/OofMessage
 turned out to need one.
 
 ### ResolveRecipients / ValidateCert (§2.2.1.15/.22)
-S/MIME support — resolving a recipient's certificate and free/busy status,
-and validating a client-presented cert against the server's trust chain.
-**Not implemented.** Given this gateway's target use case (a personal
-iPad, not enterprise S/MIME), this is a fair candidate to leave
-unimplemented indefinitely — flag to the user before investing here.
+`ResolveRecipients` resolves principals and contacts with case-insensitive
+exact-match preference, then substring matching. Certificate retrieval and
+free/busy are not provided. `ValidateCert` validates supplied certificates
+against configured trust roots and optional CRLs. These command handlers have
+end-to-end regression coverage; neither implies S/MIME message signing.
+See `src/activesync/resolve_recipients.rs` and
+`src/activesync/validate_cert.rs`.
 
 ### Settings (§2.2.1.18)
 Get/set server-side settings: DeviceInformation, UserInformation,
-Oof (out-of-office), RightsManagementInformation. This gateway implements
-Oof (Get only — Set/enabling real vacation-responder text is not yet
-wired to Stalwart's ManageSieve vacation extension, per the standing
-code comment in `settings()`) and presumably DeviceInformation/
-UserInformation acknowledgment (**verify**: re-read `settings()` for the
-current full field coverage before assuming). RightsManagementInformation
-(IRM) is out of scope — enterprise feature, not relevant to this account.
+Oof (out-of-office), RightsManagementInformation. The gateway reads and
+writes Oof through JMAP `VacationResponse`; DeviceInformation/UserInformation
+are handled at the protocol edge. Enabled vacation behavior has not been
+verified on a real client. RightsManagementInformation (IRM) remains out of
+scope for this personal-account gateway.
 
 ### Provision (§2.2.1.14)
 Device sends its info, gets security policy (PIN requirements, remote
@@ -169,10 +169,11 @@ PolicyStatus bug (SUCCESS vs NOPOLICY) was fixed this session
 (`5a49f9e`).
 
 ### MeetingResponse (§2.2.1.11)
-Accept/decline/tentatively-accept a meeting invite, updating the
-organizer's copy and the user's own calendar. **Not implemented.**
-High-value gap for the calendar daily-driver use case — see the
-gap-analysis doc's roadmap section.
+Accept/decline/tentatively-accept a meeting invite. The handler resolves an
+Inbox invitation to its CalendarEvent and writes the participation response;
+calendar-folder target behavior is protocol-version gated. The path is
+end-to-end covered in `src/push_tests.rs`. Real-client 16.1 certification
+remains separate from handler coverage.
 
 ## WBXML codepages (MS-ASWBXML)
 
@@ -214,7 +215,9 @@ the *highest* version the server advertises, so it was parsing 16.x-shaped
 fields (e.g. Attachment's `ContentType`, gated ≥16.0 in the real z-push
 reference) that this gateway never intended to send — silent WBXML parse
 failures on the client side. Fixed by capping `SUPPORTED_PROTOCOLS` to
-`"12.0,12.1,14.0"`, matching z-push's own real advertised ceiling exactly.
+`"14.0"`. The current source still advertises only 14.0; although many
+handlers have forced-version 16.1 tests, no 16.1 version bump should be made
+without the full field-shape audit and real-device certification below.
 
 **Implication for any future version bump** (e.g. targeting real 16.1 to
 pick up native Notes support, RightsManagement, or other 16.x-only
@@ -227,12 +230,13 @@ verification) called out explicitly this session. Don't bump
 every change against a live device request/response diff the way this
 session's fixes were, not against spec-reading alone.
 
-## Open items for next session
+## Remaining verification items
 
 - Full WBXML codepage number table (all ~24 pages) — pull from
   Microsoft Learn's per-codepage subpages, not re-derived.
-- SmartReply/SmartForward threading-header correctness — needs a live
-  pcap comparison against z-push, same method used for DateReceived/Oof.
-- MeetingResponse, Search/Find, FolderCreate/Update/Delete: no
-  implementation exists yet; see gap-analysis doc for JMAP-side feasibility
-  and priority.
+- Exact KQL phrase semantics — Stalwart 0.16.27 returns the same message for
+  reversed quoted words, so native `Email/query` cannot safely implement it.
+- Recurrence — Stalwart 0.16.27 rejects `recurrenceRules` on create and omits
+  it on read; recheck after a backend upgrade.
+- Real-client 16.1 negotiation and behavior, including Tasks field order and
+  enabled Oof rendering. Production remains on 14.0 until that pass.
