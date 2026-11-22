@@ -3134,14 +3134,25 @@ async fn sync_mail(
                     status,
                     fields: command.flag_fields.clone(),
                 });
+                let is_draft = match state.jmap.find_mailbox_by_role(auth, "drafts").await {
+                    Ok(folder) => folder.as_deref() == Some(collection.collection_id.as_str()),
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to identify draft mailbox for Sync Add");
+                        add_responses.push((command.client_id, None, "5"));
+                        continue;
+                    }
+                };
                 let mut draft = match draft::create_properties(
                     &command.document,
                     &collection.collection_id,
                     auth.username(),
-                    &marker,
-                    &content_marker,
-                    command.read,
-                    flag.as_ref(),
+                    draft::CreateOptions {
+                        marker: &marker,
+                        content_marker: &content_marker,
+                        is_draft,
+                        read: command.read,
+                        flag: flag.as_ref(),
+                    },
                 ) {
                     Ok(properties) => properties,
                     Err(_) => {
@@ -3201,10 +3212,13 @@ async fn sync_mail(
                         &command.document,
                         &collection.collection_id,
                         auth.username(),
-                        &saved_marker,
-                        &content_marker,
-                        command.read,
-                        flag.as_ref(),
+                        draft::CreateOptions {
+                            marker: &saved_marker,
+                            content_marker: &content_marker,
+                            is_draft,
+                            read: command.read,
+                            flag: flag.as_ref(),
+                        },
                     ) {
                         Ok(properties) => properties,
                         Err(_) => {
@@ -3215,24 +3229,23 @@ async fn sync_mail(
                 }
                 match state
                     .jmap
-                    .create_email_draft(
+                    .create_email_sync_item(
                         auth,
-                        &collection.collection_id,
-                        (&saved_marker, &content_marker, &baseline),
-                        draft.properties,
-                        draft.mime,
-                        &draft.attachments,
+                        crate::jmap::client::EmailSyncItem {
+                            folder: collection.collection_id.clone(),
+                            is_draft,
+                            replay: (saved_marker, content_marker, baseline),
+                            properties: draft.properties,
+                            mime: draft.mime,
+                            attachments: draft.attachments,
+                        },
                     )
                     .await
                 {
-                    Ok(Some(created)) => {
+                    Ok(created) => {
                         draft_completed.push(reservation);
                         added_ids.insert(created.id.clone());
                         add_responses.push((command.client_id, Some(created), "1"));
-                    }
-                    Ok(None) => {
-                        draft_completed.push(reservation);
-                        add_responses.push((command.client_id, None, "6"));
                     }
                     Err(error) => {
                         tracing::warn!(%error, "failed to create draft");

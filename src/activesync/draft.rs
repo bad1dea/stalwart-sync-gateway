@@ -28,6 +28,14 @@ pub(super) struct DraftCreate {
     pub attachments: Vec<crate::model::DraftAttachment>,
 }
 
+pub(super) struct CreateOptions<'a> {
+    pub marker: &'a str,
+    pub content_marker: &'a str,
+    pub is_draft: bool,
+    pub read: Option<bool>,
+    pub flag: Option<&'a crate::model::MailFlag>,
+}
+
 fn bytes(doc: &wbxml::Document) -> Result<Vec<u8>, &'static str> {
     let mut value = Vec::new();
     for node in doc.nodes.iter().skip(1) {
@@ -156,10 +164,7 @@ pub(super) fn create_properties(
     command: &wbxml::Document,
     folder: &str,
     sender: &str,
-    marker: &str,
-    content_marker: &str,
-    read: Option<bool>,
-    flag: Option<&crate::model::MailFlag>,
+    options: CreateOptions<'_>,
 ) -> Result<DraftCreate, &'static str> {
     let children = eas::child_elements(command);
     for child in &children {
@@ -291,13 +296,15 @@ pub(super) fn create_properties(
         return Err("MIME drafts cannot include separate headers");
     }
     let mut keywords = Map::new();
-    keywords.insert("$draft".into(), json!(true));
-    keywords.insert(marker.to_owned(), json!(true));
-    keywords.insert(content_marker.to_owned(), json!(true));
-    if read == Some(true) {
+    if options.is_draft {
+        keywords.insert("$draft".into(), json!(true));
+    }
+    keywords.insert(options.marker.to_owned(), json!(true));
+    keywords.insert(options.content_marker.to_owned(), json!(true));
+    if options.read == Some(true) {
         keywords.insert("$seen".into(), json!(true));
     }
-    if let Some(flag) = flag {
+    if let Some(flag) = options.flag {
         if flag.status == 2 {
             keywords.insert("$flagged".into(), json!(true));
         }
@@ -352,10 +359,13 @@ mod tests {
                 doc,
                 "drafts",
                 "sender@example.test",
-                "identity",
-                "content",
-                None,
-                None,
+                CreateOptions {
+                    marker: "identity",
+                    content_marker: "content",
+                    is_draft: true,
+                    read: None,
+                    flag: None,
+                },
             )
         };
         assert!(parse(&draft_with(
@@ -365,6 +375,27 @@ mod tests {
         .is_err());
         assert!(parse(&draft_with(email::IMPORTANCE, "9")).is_err());
         assert!(parse(&draft_with(email::TO, "a@example.test")).is_ok());
+    }
+
+    #[test]
+    fn creates_non_draft_sync_items_in_the_requested_mailbox() {
+        let item = create_properties(
+            &draft_with(email::TO, "a@example.test"),
+            "sent-mailbox",
+            "sender@example.test",
+            CreateOptions {
+                marker: "identity",
+                content_marker: "content",
+                is_draft: false,
+                read: None,
+                flag: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(item.properties["mailboxIds"]["sent-mailbox"], true);
+        assert!(item.properties["keywords"]["$draft"].is_null());
+        assert_eq!(item.properties["keywords"]["identity"], true);
+        assert_eq!(item.properties["keywords"]["content"], true);
     }
 
     #[test]
@@ -397,10 +428,13 @@ mod tests {
                 doc,
                 "drafts",
                 "sender@example.test",
-                "identity",
-                "content",
-                None,
-                None,
+                CreateOptions {
+                    marker: "identity",
+                    content_marker: "content",
+                    is_draft: true,
+                    read: None,
+                    flag: None,
+                },
             )
         };
         assert!(parse(&build(false, false)).is_err());

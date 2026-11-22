@@ -145,6 +145,15 @@ pub struct DraftCreated {
     pub attachments: Vec<(String, String, String)>,
 }
 
+pub struct EmailSyncItem {
+    pub folder: String,
+    pub is_draft: bool,
+    pub replay: (String, String, String),
+    pub properties: serde_json::Value,
+    pub mime: Option<Vec<u8>>,
+    pub attachments: Vec<crate::model::DraftAttachment>,
+}
+
 pub struct EmailSearchPage {
     pub emails: Vec<Email>,
     pub total: u64,
@@ -3891,22 +3900,31 @@ impl JmapClient {
         anyhow::bail!("Email/get body response was missing")
     }
 
-    pub async fn create_email_draft(
+    pub async fn create_email_sync_item(
         &self,
         auth: &AuthenticatedSession,
-        folder: &str,
-        replay: (&str, &str, &str),
-        properties: serde_json::Value,
-        mime: Option<Vec<u8>>,
-        attachments: &[crate::model::DraftAttachment],
-    ) -> anyhow::Result<Option<DraftCreated>> {
+        item: EmailSyncItem,
+    ) -> anyhow::Result<DraftCreated> {
+        let EmailSyncItem {
+            folder,
+            is_draft,
+            replay,
+            mut properties,
+            mime,
+            attachments,
+        } = item;
+        let identity_marker = replay.0.as_str();
+        let content_marker = replay.1.as_str();
+        let baseline = replay.2.as_str();
         let account_id = auth
             .session
             .primary_account_for(capabilities::MAIL)
             .context("JMAP Mail capability is not available")?;
-        if self.find_mailbox_by_role(auth, "drafts").await?.as_deref() != Some(folder) {
-            return Ok(None);
-        }
+        anyhow::ensure!(
+            properties["mailboxIds"][folder] == true,
+            "Sync Add target mailbox does not match its collection"
+        );
+        let item_key = if is_draft { "draft" } else { "item" };
         let response: JmapResponse<serde_json::Value> = self
             .api_call(
                 auth,
@@ -3914,7 +3932,7 @@ impl JmapClient {
                 vec![MethodCall::new(
                     "Email/query",
                     serde_json::json!({
-                        "accountId":account_id, "filter":{"hasKeyword":replay.0}, "limit":2
+                        "accountId":account_id, "filter":{"hasKeyword":identity_marker}, "limit":2
                     }),
                     "q",
                 )],
@@ -3924,7 +3942,7 @@ impl JmapClient {
             .method_responses
             .iter()
             .find(|method| method.0 == "Email/query")
-            .ok_or_else(|| anyhow::anyhow!("draft replay query failed"))?;
+            .ok_or_else(|| anyhow::anyhow!("Sync Add replay query failed"))?;
         let ids = query.1["ids"]
             .as_array()
             .context("draft replay query omitted ids")?;
@@ -3950,19 +3968,18 @@ impl JmapClient {
                     .find(|method| method.0 == "Email/get")
                     .and_then(|method| method.1["list"].as_array())
                     .and_then(|items| items.iter().find(|item| item["id"] == id))
-                    .context("draft replay item disappeared")?;
-                if object["keywords"][replay.1] != true {
+                    .context("Sync Add replay item disappeared")?;
+                if object["keywords"][content_marker] != true {
                     anyhow::bail!("draft replay content differs");
                 }
-                return Ok(Some(self.finish_draft(auth, id, attachments).await?));
+                return self.finish_created_email(auth, id, &attachments).await;
             }
             [] => {}
             _ => anyhow::bail!("duplicate draft replay identity"),
         }
-        let mut properties = properties;
         if !attachments.is_empty() {
             let mut parts = Vec::new();
-            for attachment in attachments {
+            for attachment in &attachments {
                 let blob = self
                     .upload_blob(auth, attachment.content.clone(), &attachment.content_type)
                     .await?;
@@ -3982,18 +3999,25 @@ impl JmapClient {
         }
         let (method, arguments) = if let Some(mime) = mime {
             let blob = self.upload_blob(auth, mime, "message/rfc822").await?;
+            let mut emails = serde_json::Map::new();
+            emails.insert(
+                item_key.to_owned(),
+                serde_json::json!({"blobId":blob,"mailboxIds":properties["mailboxIds"],"keywords":properties["keywords"]}),
+            );
             (
                 "Email/import",
                 serde_json::json!({
-                    "accountId":account_id, "ifInState":replay.2,
-                    "emails":{"draft":{"blobId":blob,"mailboxIds":properties["mailboxIds"],"keywords":properties["keywords"]}}
+                    "accountId":account_id, "ifInState":baseline,
+                    "emails":emails
                 }),
             )
         } else {
+            let mut create = serde_json::Map::new();
+            create.insert(item_key.to_owned(), properties);
             (
                 "Email/set",
                 serde_json::json!({
-                    "accountId":account_id, "ifInState":replay.2, "create":{"draft":properties}
+                    "accountId":account_id, "ifInState":baseline, "create":create
                 }),
             )
         };
@@ -4008,10 +4032,10 @@ impl JmapClient {
             .method_responses
             .iter()
             .find(|response| response.0 == method)
-            .ok_or_else(|| anyhow::anyhow!("draft creation failed"))?;
-        let id = result.1["created"]["draft"]["id"]
+            .ok_or_else(|| anyhow::anyhow!("Sync Add creation failed"))?;
+        let id = result.1["created"][item_key]["id"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("JMAP did not create draft"))?;
+            .ok_or_else(|| anyhow::anyhow!("JMAP did not create Sync Add item"))?;
         let verify: JmapResponse<serde_json::Value> = self
             .api_call(
                 auth,
@@ -4031,14 +4055,15 @@ impl JmapClient {
             .find(|method| method.0 == "Email/get")
             .and_then(|method| method.1["list"].as_array())
             .and_then(|items| items.iter().find(|item| item["id"] == id))
-            .context("created draft is unavailable")?;
-        if object["keywords"][replay.0] != true || object["keywords"][replay.1] != true {
-            anyhow::bail!("JMAP did not retain draft replay markers");
+            .context("created Sync Add item is unavailable")?;
+        if object["keywords"][identity_marker] != true || object["keywords"][content_marker] != true
+        {
+            anyhow::bail!("JMAP did not retain Sync Add replay markers");
         }
-        Ok(Some(self.finish_draft(auth, id, attachments).await?))
+        self.finish_created_email(auth, id, &attachments).await
     }
 
-    async fn finish_draft(
+    async fn finish_created_email(
         &self,
         auth: &AuthenticatedSession,
         id: &str,
@@ -4073,13 +4098,13 @@ impl JmapClient {
             .find(|method| method.0 == "Email/get")
             .and_then(|method| method.1["list"].as_array())
             .and_then(|items| items.iter().find(|item| item["id"] == id))
-            .context("created draft is unavailable")?;
+            .context("created Sync Add item is unavailable")?;
         let mut candidates = object["attachments"]
             .as_array()
             .context("created draft omitted attachments")?
             .clone();
         if candidates.len() != attachments.len() {
-            anyhow::bail!("draft attachment count differs");
+            anyhow::bail!("Sync Add attachment count differs");
         }
         let mut refs = Vec::new();
         for expected in attachments {
@@ -4107,7 +4132,7 @@ impl JmapClient {
                     break;
                 }
             }
-            let (index, blob) = matched.context("draft attachment did not round-trip")?;
+            let (index, blob) = matched.context("Sync Add attachment did not round-trip")?;
             candidates.remove(index);
             refs.push((expected.client_id.clone(), blob, expected.name.clone()));
         }
