@@ -755,6 +755,7 @@ fn build_note_mime(
     let content_type = match body_type {
         EmailBodyType::Html => "text/html; charset=utf-8",
         EmailBodyType::Plain => "text/plain; charset=utf-8",
+        EmailBodyType::Rtf => "text/rtf; charset=utf-8",
     };
     let display_name = account_address.split('@').next().unwrap_or(account_address);
     let domain = account_address.split('@').nth(1).unwrap_or("localhost");

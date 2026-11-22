@@ -1,5 +1,48 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
+## Reconciled status for source `main` at `1738fb5` (2026-11-22)
+
+The historical tables and roadmap below describe an August 2026 source snapshot;
+they are not a current implementation inventory. The November source contains
+draft create/edit with stable EAS identity, versioned flags and their metadata,
+Find (mailbox and GAL), versioned calendar fields, multiple body preferences,
+MIME policy, partial Sync/options persistence, and Sync long-poll/window
+handling. Check the current Rust implementation before treating any older
+“Missing” or “Not implemented” statement below as actionable.
+
+Current prioritized work:
+
+1. **Find/KQL parity.** The handler deliberately rejects query forms that
+   Stalwart 0.16.19 indexes incorrectly, including multiword exact phrases.
+   Improve supported query coverage only where backend semantics can be shown
+   to preserve EAS meaning; do not silently broaden phrase matches.
+2. **Recurring calendar events.** The old 0.16.19 probe found JMAP recurrence
+   unsupported. A direct create/read probe against the available Stalwart
+   0.16.27 sandbox still rejected `recurrenceRules`; this remains blocked by the
+   backend and needs rechecking after a backend upgrade.
+3. **Real-client 16.1 certification and rollout.** Production remains pinned
+   to a tagged 14.0 build. Forced-version protocol tests do not establish that
+   iOS/Outlook negotiate or behave correctly against an advertised 16.1 build.
+   Keep 16.1 unadvertised until the implementation and a fresh device pass are
+   complete.
+4. **Legacy/low-priority commands and operations.** Reassess mail Sync Add,
+   ResolveRecipients/ValidateCert details, and non-Mailbox ItemOperations
+   against current client requirements and the current code before choosing
+   work. Enterprise IRM remains out of scope for the personal-account gateway.
+
+Completed since this reconciliation began: **RTF body preference Type 3**.
+Native plain/HTML content is now converted to escaped RTF, the body is marked
+as type 3, and byte truncation plus AllOrNone are applied after conversion.
+Coverage includes conversion escaping, Unicode control output, truncation,
+AllOrNone, and an HTTP-level Sync Fetch. `cargo fmt`, clippy with warnings
+denied, and the full suite passed (252 passed, 73 ignored). Production
+integration is pending.
+
+This reconciliation supersedes older status claims in this document where
+they conflict with source `main` at the stated revision. Update this section
+after each completed feature and retain historical observations below as
+evidence, not as current status.
+
 Written by re-reading the actual Rust source on disk (not carried over
 from any prior session's summary) at commit `c6beadf` (main,
 2026-08-24/25), cross-referenced against

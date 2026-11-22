@@ -251,6 +251,7 @@ pub struct EmailBody {
 pub enum EmailBodyType {
     Plain,
     Html,
+    Rtf,
 }
 
 impl EmailBodyType {
@@ -258,6 +259,7 @@ impl EmailBodyType {
         match self {
             Self::Plain => "1",
             Self::Html => "2",
+            Self::Rtf => "3",
         }
     }
 }

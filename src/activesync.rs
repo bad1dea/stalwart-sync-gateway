@@ -4495,7 +4495,7 @@ async fn body_preferences_for_email(
     }
     let requests = effective.as_slice();
     let complete_body = if email.body.as_ref().is_some_and(|body| body.is_truncated)
-        && (requests.is_empty() || requests.iter().any(|pref| matches!(pref.body_type, 1 | 2)))
+        && (requests.is_empty() || requests.iter().any(|pref| matches!(pref.body_type, 1..=3)))
     {
         let body = state
             .jmap
@@ -4514,6 +4514,7 @@ async fn body_preferences_for_email(
         let native_type = match body.body_type {
             EmailBodyType::Plain => 1,
             EmailBodyType::Html => 2,
+            EmailBodyType::Rtf => 3,
         };
         requests.iter().any(|pref| {
             pref.body_type == native_type
@@ -4540,7 +4541,7 @@ async fn body_preferences_for_email(
     };
     let selected = select_body_preference(body, mime_data.as_ref(), requests);
     let text_body = complete_body
-        .filter(|_| selected.is_none_or(|pref| matches!(pref.body_type, 1 | 2)))
+        .filter(|_| selected.is_none_or(|pref| matches!(pref.body_type, 1..=3)))
         .map(|body| prepare_text_body(body, selected, email.preview.as_deref()));
     Ok(BodyPreference {
         requests: if text_body.is_some() || selected.is_some_and(|pref| pref.body_type == 4) {
@@ -4881,6 +4882,18 @@ fn eas_conversation_id(thread_id: &str) -> [u8; 16] {
 
 fn converted_body(body: crate::model::EmailBody, target: u8) -> crate::model::EmailBody {
     use crate::model::{EmailBody, EmailBodyType};
+    if target == 3 {
+        let text = match body.body_type {
+            EmailBodyType::Html => collapse_whitespace(&strip_html_tags(&body.value)),
+            EmailBodyType::Plain => body.value.clone(),
+            EmailBodyType::Rtf => rtf_to_plain_text(&body.value),
+        };
+        return EmailBody {
+            is_truncated: body.is_truncated,
+            body_type: EmailBodyType::Rtf,
+            value: plain_text_to_rtf(&text),
+        };
+    }
     match (body.body_type, target) {
         (EmailBodyType::Html, 1) => EmailBody {
             is_truncated: body.is_truncated,
@@ -4902,13 +4915,91 @@ fn converted_body(body: crate::model::EmailBody, target: u8) -> crate::model::Em
     }
 }
 
+fn plain_text_to_rtf(text: &str) -> String {
+    let mut result =
+        String::from("{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0\\fswiss Arial;}}\\f0\\fs20 ");
+    for ch in text.chars() {
+        match ch {
+            '\\' => result.push_str("\\\\"),
+            '{' => result.push_str("\\{"),
+            '}' => result.push_str("\\}"),
+            '\n' => result.push_str("\\line "),
+            '\r' => {}
+            c if c.is_ascii() => result.push(c),
+            c => {
+                let mut units = [0u16; 2];
+                for unit in c.encode_utf16(&mut units).iter() {
+                    result.push_str(&format!("\\u{}?", *unit as i16));
+                }
+            }
+        }
+    }
+    result.push('}');
+    result
+}
+
+fn rtf_to_plain_text(rtf: &str) -> String {
+    // This only handles the RTF subset emitted above. Incoming JMAP bodies
+    // are plain text or HTML, so this is a defensive conversion path.
+    let mut out = String::new();
+    let mut chars = rtf.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => match chars.next() {
+                Some('\'') => {
+                    let hex: String = chars.by_ref().take(2).collect();
+                    if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                        out.push(byte as char);
+                    }
+                }
+                Some('\n') | Some('\r') => {}
+                Some(control) if control.is_ascii_alphabetic() => {
+                    let mut word = String::from(control);
+                    while chars.peek().is_some_and(|c| c.is_ascii_alphabetic()) {
+                        word.push(chars.next().unwrap());
+                    }
+                    let mut number = String::new();
+                    if chars
+                        .peek()
+                        .is_some_and(|c| *c == '-' || c.is_ascii_digit())
+                    {
+                        number.push(chars.next().unwrap());
+                        while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+                            number.push(chars.next().unwrap());
+                        }
+                    }
+                    if chars.peek() == Some(&' ') {
+                        chars.next();
+                    }
+                    if word == "line" || word == "par" {
+                        out.push('\n');
+                    }
+                    if word == "u" {
+                        if let Ok(code) = number.parse::<i16>() {
+                            out.push(char::from_u32(code as u16 as u32).unwrap_or('\u{fffd}'));
+                        }
+                        if chars.peek().is_some() {
+                            chars.next();
+                        }
+                    }
+                }
+                Some(escaped @ ('\\' | '{' | '}')) => out.push(escaped),
+                _ => {}
+            },
+            '{' | '}' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn select_body_preference(
     body: Option<&crate::model::EmailBody>,
     mime: Option<&MimeBody>,
     requests: &[RequestedBodyPreference],
 ) -> Option<RequestedBodyPreference> {
     let size = |preference: &RequestedBodyPreference| match preference.body_type {
-        1 | 2 => body.map(|body| {
+        1..=3 => body.map(|body| {
             converted_body(body.clone(), preference.body_type)
                 .value
                 .len()
@@ -4925,6 +5016,7 @@ fn select_body_preference(
                 == match body.body_type {
                     EmailBodyType::Plain => 1,
                     EmailBodyType::Html => 2,
+                    EmailBodyType::Rtf => 3,
                 }
         })
     });
@@ -4991,6 +5083,7 @@ fn plain_text_preview(body: &crate::model::EmailBody) -> String {
     let text = match body.body_type {
         crate::model::EmailBodyType::Html => strip_html_tags(&body.value),
         crate::model::EmailBodyType::Plain => body.value.clone(),
+        crate::model::EmailBodyType::Rtf => rtf_to_plain_text(&body.value),
     };
     collapse_whitespace(&text)
         .chars()
@@ -7953,6 +8046,58 @@ mod tests {
         assert_eq!(out_value, "<p>Hello there</p>");
         assert_eq!(full_len, "<p>Hello there</p>".len());
         assert!(!truncated);
+    }
+
+    #[test]
+    fn rtf_body_preference_converts_text_and_escapes_rtf_metacharacters() {
+        let body = EmailBody {
+            is_truncated: false,
+            body_type: EmailBodyType::Plain,
+            value: "Hi {you}\\\n雪".to_owned(),
+        };
+        let (kind, value, size, truncated) = apply_body_preference(
+            body,
+            Some(BodyPreference {
+                body_type: 3,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(kind, EmailBodyType::Rtf);
+        assert!(value.starts_with(r"{\rtf1"));
+        assert!(value.contains(r"\{you\}"));
+        assert!(value.contains(r"\line "));
+        assert!(value.contains(r"\u-"));
+        assert_eq!(size, value.len());
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn rtf_output_obeys_byte_truncation_and_all_or_none() {
+        let body = EmailBody {
+            is_truncated: false,
+            body_type: EmailBodyType::Plain,
+            value: "long text".to_owned(),
+        };
+        let request = BodyPreference {
+            body_type: 3,
+            truncation_size: Some(12),
+            ..Default::default()
+        };
+        let (kind, value, full_size, truncated) =
+            apply_body_preference(body.clone(), Some(request));
+        assert_eq!(kind, EmailBodyType::Rtf);
+        assert_eq!(value.len(), 12);
+        assert!(truncated);
+        let (_, omitted, size, truncated) = apply_body_preference(
+            body,
+            Some(BodyPreference {
+                all_or_none: true,
+                ..request
+            }),
+        );
+        assert!(omitted.is_empty());
+        assert_eq!(size, full_size);
+        assert!(truncated);
     }
 
     #[test]

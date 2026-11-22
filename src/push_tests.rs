@@ -14143,6 +14143,51 @@ async fn search_and_sync_fetch_use_the_requested_body_preferences() {
 }
 
 #[tokio::test]
+async fn sync_fetch_converts_native_text_to_rtf_when_requested() {
+    use eas::{airsync as air, airsync_base as base, RequestedBodyPreference as Pref};
+    let env = start_env(Opts::default()).await;
+    let response = env
+        .req("Sync", "client")
+        .body(sync_body("0", "inbox"))
+        .send()
+        .await
+        .unwrap();
+    let prime = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    let options = requested_body_options(&[Pref {
+        body_type: 3,
+        ..Default::default()
+    }]);
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, sync_key(&prime));
+    b.leaf(air::COLLECTION_ID, "inbox");
+    b.leaf(air::GET_CHANGES, "0");
+    b.extend(options.nodes);
+    b.start(air::COMMANDS);
+    b.start(air::FETCH);
+    b.leaf(air::SERVER_ID, "m1");
+    for _ in 0..5 {
+        b.end();
+    }
+    let response = env
+        .req("Sync", "client")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, air::STATUS), vec!["1", "1"]);
+    assert_eq!(eas::find_text_after(&doc, base::TYPE), Some("3"));
+    assert!(body_data_bytes(&doc).unwrap().starts_with(b"{\\rtf1"));
+    assert!(body_data_bytes(&doc)
+        .unwrap()
+        .windows(4)
+        .any(|part| part == b"body"));
+}
+
+#[tokio::test]
 async fn large_text_is_completed_before_format_selection_and_all_fetch_paths() {
     use eas::{
         airsync as air, airsync_base as base, item_operations as ops, search as srch,
