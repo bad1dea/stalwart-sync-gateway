@@ -5543,7 +5543,9 @@ async fn sync_contacts_collection(
 fn contact_hash(contact: &crate::model::Contact) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     contact.first_name.hash(&mut hasher);
+    contact.middle_name.hash(&mut hasher);
     contact.last_name.hash(&mut hasher);
+    contact.suffix.hash(&mut hasher);
     contact.file_as.hash(&mut hasher);
     contact.emails.hash(&mut hasher);
     contact.mobile_phone.hash(&mut hasher);
@@ -5626,6 +5628,9 @@ fn write_contact_fields(
     if let Some(first) = &contact.first_name {
         builder.leaf(c::FIRST_NAME, first.clone());
     }
+    if let Some(middle) = &contact.middle_name {
+        builder.leaf(c::MIDDLE_NAME, middle.clone());
+    }
     write_contact_address_fields(builder, contact.home_address.as_ref(), "home", is_change);
     if let Some(home) = &contact.home_phone {
         builder.leaf(c::HOME_PHONE_NUMBER, home.clone());
@@ -5635,6 +5640,9 @@ fn write_contact_fields(
     }
     if let Some(last) = &contact.last_name {
         builder.leaf(c::LAST_NAME, last.clone());
+    }
+    if let Some(suffix) = &contact.suffix {
+        builder.leaf(c::SUFFIX, suffix.clone());
     }
     if let Some(mobile) = &contact.mobile_phone {
         builder.leaf(c::MOBILE_PHONE_NUMBER, mobile.clone());
@@ -7781,6 +7789,8 @@ mod tests {
     fn contact_address_fields_are_emitted_and_included_in_change_hashes() {
         use crate::wbxml::eas::{self, contacts as c};
         let mut contact = crate::model::Contact {
+            middle_name: Some("Augusta".into()),
+            suffix: Some("Jr.".into()),
             business_address: Some(crate::model::ContactAddress {
                 city: Some("Toronto".into()),
                 country: Some("Canada".into()),
@@ -7828,6 +7838,8 @@ mod tests {
             eas::find_all_text_after(&doc, c::CATEGORY),
             vec!["Work", "Friends"]
         );
+        assert_eq!(eas::find_text_after(&doc, c::MIDDLE_NAME), Some("Augusta"));
+        assert_eq!(eas::find_text_after(&doc, c::SUFFIX), Some("Jr."));
         contact.business_address.as_mut().unwrap().city = Some("Hamilton".into());
         assert_ne!(super::contact_hash(&contact), before);
     }

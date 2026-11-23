@@ -1802,8 +1802,14 @@ impl JmapClient {
         if let Some(first) = &fields.first_name {
             components.push(serde_json::json!({"kind": "given", "value": first}));
         }
+        if let Some(middle) = &fields.middle_name {
+            components.push(serde_json::json!({"kind": "given2", "value": middle}));
+        }
         if let Some(last) = &fields.last_name {
             components.push(serde_json::json!({"kind": "surname", "value": last}));
+        }
+        if let Some(suffix) = &fields.suffix {
+            components.push(serde_json::json!({"kind": "generation", "value": suffix}));
         }
         let mut name = serde_json::Map::new();
         if let Some(file_as) = &fields.file_as {
@@ -1818,6 +1824,7 @@ impl JmapClient {
                 serde_json::Value::Array(components),
             );
         }
+        let has_name_update = !name.is_empty();
         if !name.is_empty() {
             card.insert("name".to_owned(), serde_json::Value::Object(name));
         }
@@ -1928,14 +1935,21 @@ impl JmapClient {
             }
         }
         let mut contact_state = None;
-        if let Some(existing_id) = id.filter(|_| !addresses.is_empty()) {
+        if let Some(existing_id) = id.filter(|_| has_name_update || !addresses.is_empty()) {
+            let mut properties = vec!["id"];
+            if has_name_update {
+                properties.push("name");
+            }
+            if !addresses.is_empty() {
+                properties.push("addresses");
+            }
             let response: JmapResponse<serde_json::Value> = self
                 .api_call(
                     auth,
                     &[capabilities::CORE.to_owned(), capabilities::CONTACTS.to_owned()],
                     vec![MethodCall::new(
                         "ContactCard/get",
-                        serde_json::json!({"accountId":account_id,"ids":[existing_id],"properties":["id","addresses"]}),
+                        serde_json::json!({"accountId":account_id,"ids":[existing_id],"properties":properties}),
                         "address-state",
                     )],
                 )
@@ -1955,6 +1969,49 @@ impl JmapClient {
                 .as_array()
                 .and_then(|list| list.iter().find(|item| item["id"] == existing_id))
                 .context("contact not found while updating address")?;
+            if has_name_update {
+                let mut merged_name = existing["name"].as_object().cloned().unwrap_or_default();
+                let mut components = merged_name
+                    .get("components")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                for (kind, requested) in [
+                    ("given", &fields.first_name),
+                    ("given2", &fields.middle_name),
+                    ("surname", &fields.last_name),
+                    ("generation", &fields.suffix),
+                ] {
+                    let Some(value) = requested else { continue };
+                    components.retain(|component| component["kind"] != kind);
+                    if !value.is_empty() {
+                        components.push(serde_json::json!({"kind":kind,"value":value}));
+                    }
+                }
+                if components.is_empty() {
+                    merged_name.remove("components");
+                } else {
+                    merged_name.insert(
+                        "components".to_owned(),
+                        serde_json::Value::Array(components),
+                    );
+                }
+                if let Some(file_as) = &fields.file_as {
+                    if file_as.is_empty() {
+                        merged_name.remove("full");
+                    } else {
+                        merged_name.insert("full".to_owned(), serde_json::json!(file_as));
+                    }
+                }
+                card.insert(
+                    "name".to_owned(),
+                    if merged_name.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::Object(merged_name)
+                    },
+                );
+            }
             let mut merged = existing["addresses"]
                 .as_object()
                 .cloned()
@@ -6066,12 +6123,16 @@ struct ContactCardAddressComponent {
 impl From<ContactCardObject> for Contact {
     fn from(value: ContactCardObject) -> Self {
         let mut first_name = None;
+        let mut middle_name = None;
         let mut last_name = None;
+        let mut suffix = None;
         if let Some(name) = &value.name {
             for component in &name.components {
                 match component.kind.as_str() {
                     "given" => first_name = Some(component.value.clone()),
+                    "given2" => middle_name = Some(component.value.clone()),
                     "surname" => last_name = Some(component.value.clone()),
+                    "generation" | "credential" => suffix = Some(component.value.clone()),
                     _ => {}
                 }
             }
@@ -6140,7 +6201,9 @@ impl From<ContactCardObject> for Contact {
                 .filter_map(|(id, present)| present.then_some(id))
                 .collect(),
             first_name,
+            middle_name,
             last_name,
+            suffix,
             file_as,
             emails,
             mobile_phone,
@@ -7220,6 +7283,15 @@ mod contact_address_tests {
                     call[1]["create"]["c1"]["keywords"],
                     serde_json::json!({"Work":true,"Friends":true})
                 );
+                assert_eq!(
+                    call[1]["create"]["c1"]["name"]["components"],
+                    serde_json::json!([
+                        {"kind":"given","value":"Ada"},
+                        {"kind":"given2","value":"Augusta"},
+                        {"kind":"surname","value":"Lovelace"},
+                        {"kind":"generation","value":"Jr."}
+                    ])
+                );
                 Json(serde_json::json!({"methodResponses":[
                     ["ContactCard/set",{"created":{"c1":{"id":"contact-1"}}},"0"]
                 ]}))
@@ -7247,6 +7319,10 @@ mod contact_address_tests {
         )
         .unwrap();
         let fields = crate::wbxml::eas::ContactFields {
+            first_name: Some("Ada".into()),
+            middle_name: Some("Augusta".into()),
+            last_name: Some("Lovelace".into()),
+            suffix: Some("Jr.".into()),
             business_address_city: Some("Toronto".into()),
             business_address_country: Some("Canada".into()),
             business_address_postal_code: Some("M5V 2T6".into()),
@@ -7281,7 +7357,12 @@ mod contact_address_tests {
                         0 => {
                             assert_eq!(call[0], "ContactCard/get");
                             Json(serde_json::json!({"methodResponses":[[
-                            "ContactCard/get", {"state":"before","list":[{"id":"c","addresses":{
+                            "ContactCard/get", {"state":"before","list":[{"id":"c","name":{"full":"Ada Lovelace Jr.","components":[
+                                {"kind":"given","value":"Ada"},
+                                {"kind":"given2","value":"Augusta"},
+                                {"kind":"surname","value":"Lovelace"},
+                                {"kind":"generation","value":"Jr."}
+                            ]},"addresses":{
                                 "home":{"contexts":{"private":true},"components":[
                                     {"kind":"locality","value":"Ottawa"},
                                     {"kind":"name","value":"1 Home St"}
@@ -7295,6 +7376,15 @@ mod contact_address_tests {
                         1 => {
                             assert_eq!(call[0], "ContactCard/set");
                             assert_eq!(call[1]["ifInState"], "before");
+                            assert_eq!(
+                                call[1]["update"]["c"]["name"]["components"],
+                                serde_json::json!([
+                                    {"kind":"given","value":"Ada"},
+                                    {"kind":"surname","value":"Lovelace"},
+                                    {"kind":"generation","value":"Jr."},
+                                    {"kind":"given2","value":"Byron"}
+                                ])
+                            );
                             let addresses = &call[1]["update"]["c"]["addresses"];
                             assert_eq!(
                                 addresses["home"]["components"],
@@ -7340,6 +7430,7 @@ mod contact_address_tests {
         )
         .unwrap();
         let fields = crate::wbxml::eas::ContactFields {
+            middle_name: Some("Byron".into()),
             home_address_city: Some("Vancouver".into()),
             business_address_street: Some(String::new()),
             ..Default::default()
@@ -7391,6 +7482,24 @@ mod contact_address_tests {
             Some("Ottawa")
         );
         assert_eq!(contact.categories, vec!["Work"]);
+    }
+
+    #[test]
+    fn contact_name_read_maps_middle_name_and_suffix() {
+        let card: ContactCardObject = serde_json::from_value(serde_json::json!({
+            "id":"c", "name":{"full":"Ada Lovelace Jr.","components":[
+                {"kind":"given","value":"Ada"},
+                {"kind":"given2","value":"Augusta"},
+                {"kind":"surname","value":"Lovelace"},
+                {"kind":"generation","value":"Jr."}
+            ]}
+        }))
+        .unwrap();
+        let contact = Contact::from(card);
+        assert_eq!(contact.first_name.as_deref(), Some("Ada"));
+        assert_eq!(contact.middle_name.as_deref(), Some("Augusta"));
+        assert_eq!(contact.last_name.as_deref(), Some("Lovelace"));
+        assert_eq!(contact.suffix.as_deref(), Some("Jr."));
     }
 }
 
