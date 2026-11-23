@@ -281,6 +281,7 @@ pub struct Contact {
     pub company_main_phone: Option<String>,
     pub mms: Option<String>,
     pub account_name: Option<String>,
+    pub picture: Option<Vec<u8>>,
     pub im_address1: Option<String>,
     pub im_address2: Option<String>,
     pub im_address3: Option<String>,

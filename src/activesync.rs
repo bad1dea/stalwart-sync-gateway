@@ -5555,6 +5555,7 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.company_main_phone.hash(&mut hasher);
     contact.mms.hash(&mut hasher);
     contact.account_name.hash(&mut hasher);
+    contact.picture.hash(&mut hasher);
     contact.im_address1.hash(&mut hasher);
     contact.im_address2.hash(&mut hasher);
     contact.im_address3.hash(&mut hasher);
@@ -5607,6 +5608,7 @@ fn write_contact_fields(
     contact: &crate::model::Contact,
     is_change: bool,
 ) {
+    use base64::Engine;
     use wbxml::eas::contacts as c;
     use wbxml::eas::contacts2 as c2;
 
@@ -5713,6 +5715,12 @@ fn write_contact_fields(
     }
     if let Some(account) = &contact.account_name {
         builder.leaf(c2::ACCOUNT_NAME, account.clone());
+    }
+    if let Some(picture) = &contact.picture {
+        builder.leaf(
+            c::PICTURE,
+            base64::engine::general_purpose::STANDARD.encode(picture),
+        );
     }
     if let Some(im) = &contact.im_address1 {
         builder.leaf(c2::IM_ADDRESS, im.clone());
@@ -7900,6 +7908,7 @@ mod tests {
             company_main_phone: Some("555-0199".into()),
             mms: Some("ada@mms.example".into()),
             account_name: Some("ada-eas-account".into()),
+            picture: Some(vec![1, 2, 3, 4]),
             im_address1: Some("ada@example.im".into()),
             im_address2: Some("ada@chat.example".into()),
             im_address3: Some("ada@xmpp.example".into()),
@@ -8043,6 +8052,8 @@ mod tests {
         contact.mms = Some("new@mms.example".into());
         assert_ne!(super::contact_hash(&contact), before);
         contact.account_name = Some("new-account".into());
+        assert_ne!(super::contact_hash(&contact), before);
+        contact.picture = Some(vec![4, 3, 2, 1]);
         assert_ne!(super::contact_hash(&contact), before);
         contact.im_address1 = Some("ada2@example.im".into());
         assert_ne!(super::contact_hash(&contact), before);

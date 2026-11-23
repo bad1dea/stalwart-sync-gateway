@@ -1616,6 +1616,7 @@ impl JmapClient {
             "anniversaries",
             "notes",
             "onlineServices",
+            "media",
             "links",
             "keywords",
         ];
@@ -1634,7 +1635,7 @@ impl JmapClient {
                 MethodCall::new("ContactCard/get", serde_json::json!({
                     "accountId":account, "#ids":{"resultOf":"q","name":"ContactCard/query","path":"/ids"},
                     "properties":["id","addressBookIds","name","emails","phones","organizations",
-                        "titles","nicknames","addresses","anniversaries","notes","onlineServices","links","keywords"]
+                        "titles","nicknames","addresses","anniversaries","notes","onlineServices","media","links","keywords"]
                 }), "g"),
             ]).await?;
             let query = response
@@ -1858,6 +1859,12 @@ impl JmapClient {
             card.insert("name".to_owned(), serde_json::Value::Object(name));
         }
         let has_nickname_update = fields.nickname.is_some();
+        let has_picture_update = fields.picture.is_some();
+        if id.is_none() {
+            if let Some(picture) = fields.picture.as_deref().filter(|value| !value.is_empty()) {
+                card.insert("media".to_owned(), serde_json::json!({"eas_picture":{"@type":"Media","kind":"photo","uri":eas_contact_picture_to_data_uri(picture)?}}));
+            }
+        }
         if let Some(nickname) = fields.nickname.as_ref().filter(|value| !value.is_empty()) {
             if id.is_none() {
                 card.insert(
@@ -2148,6 +2155,7 @@ impl JmapClient {
             has_name_update
                 || has_nickname_update
                 || has_im_update
+                || has_picture_update
                 || has_anniversary_update
                 || has_organizations_update
                 || has_phones_update
@@ -2164,6 +2172,9 @@ impl JmapClient {
             }
             if has_im_update {
                 properties.push("onlineServices");
+            }
+            if has_picture_update {
+                properties.push("media");
             }
             if !addresses.is_empty() || has_office_location_update {
                 properties.push("addresses");
@@ -2358,6 +2369,24 @@ impl JmapClient {
                         serde_json::Value::Null
                     } else {
                         serde_json::Value::Object(services)
+                    },
+                );
+            }
+            if has_picture_update {
+                let mut media = existing["media"].as_object().cloned().unwrap_or_default();
+                if let Some(picture) = &fields.picture {
+                    if picture.is_empty() {
+                        media.remove("eas_picture");
+                    } else {
+                        media.insert("eas_picture".to_owned(), serde_json::json!({"@type":"Media","kind":"photo","uri":eas_contact_picture_to_data_uri(picture)?}));
+                    }
+                }
+                card.insert(
+                    "media".to_owned(),
+                    if media.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::Object(media)
                     },
                 );
             }
@@ -6703,6 +6732,8 @@ struct ContactCardObject {
     #[serde(default)]
     online_services: BTreeMap<String, ContactCardOnlineService>,
     #[serde(default)]
+    media: BTreeMap<String, ContactCardMedia>,
+    #[serde(default)]
     emails: BTreeMap<String, ContactCardEmail>,
     #[serde(default)]
     phones: BTreeMap<String, ContactCardPhone>,
@@ -6748,6 +6779,12 @@ struct ContactCardNameComponent {
 #[derive(Debug, Default, Deserialize)]
 struct ContactCardNickname {
     name: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContactCardMedia {
+    kind: Option<String>,
+    uri: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -6808,6 +6845,44 @@ struct ContactCardAddressComponent {
     value: String,
 }
 
+fn eas_contact_picture_to_data_uri(value: &str) -> anyhow::Result<String> {
+    let compact: String = value
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect();
+    let bytes = STANDARD
+        .decode(compact)
+        .context("invalid EAS contact picture base64")?;
+    anyhow::ensure!(
+        !bytes.is_empty() && bytes.len() <= 5 * 1024 * 1024,
+        "EAS contact picture is empty or exceeds 5 MiB"
+    );
+    let media_type = if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        "image/png"
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        "image/webp"
+    } else {
+        anyhow::bail!("unsupported EAS contact picture format")
+    };
+    Ok(format!(
+        "data:{media_type};base64,{}",
+        STANDARD.encode(bytes)
+    ))
+}
+
+fn jscontact_photo_data_uri_to_bytes(uri: &str) -> Option<Vec<u8>> {
+    let (header, data) = uri.split_once(',')?;
+    if !header.starts_with("data:image/") || !header.ends_with(";base64") {
+        return None;
+    }
+    let bytes = STANDARD.decode(data).ok()?;
+    (bytes.len() <= 5 * 1024 * 1024).then_some(bytes)
+}
+
 fn eas_contact_date_to_partial(value: &str) -> anyhow::Result<serde_json::Value> {
     use chrono::Datelike;
     let date = chrono::NaiveDate::parse_from_str(value, "%Y%m%d")
@@ -6865,6 +6940,17 @@ impl From<ContactCardObject> for Contact {
             .or_else(|| value.nicknames.values().next())
             .and_then(|nickname| nickname.name.clone());
         let file_as = value.name.as_ref().and_then(|name| name.full.clone());
+        let picture = value
+            .media
+            .get("eas_picture")
+            .or_else(|| {
+                value
+                    .media
+                    .values()
+                    .find(|media| media.kind.as_deref() == Some("photo"))
+            })
+            .and_then(|media| media.uri.as_deref())
+            .and_then(jscontact_photo_data_uri_to_bytes);
         let online_service = |key: &str| {
             value
                 .online_services
@@ -7041,6 +7127,7 @@ impl From<ContactCardObject> for Contact {
             company_main_phone,
             mms,
             account_name,
+            picture,
             company_name,
             department,
             job_title,
@@ -8114,6 +8201,7 @@ mod contact_address_tests {
                     })
                 );
                 assert_eq!(call[1]["create"]["c1"]["nicknames"], serde_json::json!({"eas_nickname":{"name":"Enchantress of Numbers"}}));
+                assert_eq!(call[1]["create"]["c1"]["media"], serde_json::json!({"eas_picture":{"@type":"Media","kind":"photo","uri":"data:image/png;base64,iVBORw0KGgo="}}));
                 assert_eq!(call[1]["create"]["c1"]["onlineServices"], serde_json::json!({"eas_im1":{"@type":"OnlineService","user":"ada@example.im","label":"EAS IM Address 1"},"eas_im2":{"@type":"OnlineService","user":"ada@chat.example","label":"EAS IM Address 2"},"eas_im3":{"@type":"OnlineService","user":"ada@xmpp.example","label":"EAS IM Address 3"},"eas_mms":{"@type":"OnlineService","user":"ada@mms.example","label":"EAS MMS"},"eas_account_name":{"@type":"OnlineService","user":"ada-eas-account","label":"EAS account name"}}));
                 assert_eq!(
                     call[1]["create"]["c1"]["keywords"],
@@ -8222,6 +8310,7 @@ mod contact_address_tests {
             other_address_city: Some("Kingston".into()),
             office_location: Some("Building 4, Floor 2".into()),
             nickname: Some("Enchantress of Numbers".into()),
+            picture: Some("iVBORw0KGgo=".into()),
             company_main_phone: Some("555-0199".into()),
             im_address: Some("ada@example.im".into()),
             im_address_2: Some("ada@chat.example".into()),
@@ -8255,7 +8344,7 @@ mod contact_address_tests {
                         0 => {
                             assert_eq!(call[0], "ContactCard/get");
                             Json(serde_json::json!({"methodResponses":[[
-                            "ContactCard/get", {"state":"before","list":[{"id":"c","nicknames":{"eas_nickname":{"name":"Enchantress"},"other":{"name":"Lady Ada"}},"onlineServices":{"eas_im1":{"@type":"OnlineService","user":"old-im","label":"EAS IM Address 1"},"eas_mms":{"@type":"OnlineService","user":"old@mms.example","label":"EAS MMS"},"eas_account_name":{"@type":"OnlineService","user":"old-account","label":"EAS account name"},"other":{"user":"other-service","service":"Matrix"}},"name":{"full":"Ada Lovelace Jr.","phoneticScript":"Jpan","components":[
+                            "ContactCard/get", {"state":"before","list":[{"id":"c","nicknames":{"eas_nickname":{"name":"Enchantress"},"other":{"name":"Lady Ada"}},"media":{"eas_picture":{"@type":"Media","kind":"photo","uri":"data:image/png;base64,iVBORw0KGgo="},"other":{"kind":"logo","uri":"https://example.test/logo.png"}},"onlineServices":{"eas_im1":{"@type":"OnlineService","user":"old-im","label":"EAS IM Address 1"},"eas_mms":{"@type":"OnlineService","user":"old@mms.example","label":"EAS MMS"},"eas_account_name":{"@type":"OnlineService","user":"old-account","label":"EAS account name"},"other":{"user":"other-service","service":"Matrix"}},"name":{"full":"Ada Lovelace Jr.","phoneticScript":"Jpan","components":[
                                 {"kind":"given","value":"Ada","phonetic":"エイダ"},
                                 {"kind":"given2","value":"Augusta"},
                                 {"kind":"surname","value":"Lovelace","phonetic":"ラブレス"},
@@ -8297,6 +8386,7 @@ mod contact_address_tests {
                                 })
                             );
                             assert_eq!(call[1]["update"]["c"]["nicknames"], serde_json::json!({"eas_nickname":{"name":"Countess Ada"},"other":{"name":"Lady Ada"}}));
+                            assert_eq!(call[1]["update"]["c"]["media"], serde_json::json!({"eas_picture":{"@type":"Media","kind":"photo","uri":"data:image/jpeg;base64,/9j/AA=="},"other":{"kind":"logo","uri":"https://example.test/logo.png"}}));
                             assert_eq!(call[1]["update"]["c"]["onlineServices"], serde_json::json!({"eas_im1":{"@type":"OnlineService","user":"new-im","label":"EAS IM Address 1"},"other":{"user":"other-service","service":"Matrix"},"eas_im3":{"@type":"OnlineService","user":"new-im3","label":"EAS IM Address 3"},"eas_mms":{"@type":"OnlineService","user":"new@mms.example","label":"EAS MMS"},"eas_account_name":{"@type":"OnlineService","user":"new-account","label":"EAS account name"}}));
                             assert_eq!(
                                 call[1]["update"]["c"]["organizations"],
@@ -8383,6 +8473,7 @@ mod contact_address_tests {
             birthday: Some("18151211".into()),
             office_location: Some("Floor 7, Tower B".into()),
             nickname: Some("Countess Ada".into()),
+            picture: Some("/9j/AA==".into()),
             im_address: Some("new-im".into()),
             im_address_2: Some(String::new()),
             im_address_3: Some("new-im3".into()),
@@ -8448,7 +8539,7 @@ mod contact_address_tests {
     #[test]
     fn contact_name_read_maps_middle_name_and_suffix() {
         let card: ContactCardObject = serde_json::from_value(serde_json::json!({
-            "id":"c", "nicknames":{"eas_nickname":{"name":"Enchantress of Numbers"}}, "onlineServices":{"eas_im1":{"user":"ada@example.im"},"eas_im2":{"user":"ada@chat.example"},"eas_im3":{"user":"ada@xmpp.example"},"eas_mms":{"user":"ada@mms.example"},"eas_account_name":{"user":"ada-eas-account"}}, "name":{"full":"Ada Lovelace Jr.","phoneticScript":"Jpan","components":[
+            "id":"c", "media":{"eas_picture":{"kind":"photo","uri":"data:image/png;base64,iVBORw0KGgo="}}, "nicknames":{"eas_nickname":{"name":"Enchantress of Numbers"}}, "onlineServices":{"eas_im1":{"user":"ada@example.im"},"eas_im2":{"user":"ada@chat.example"},"eas_im3":{"user":"ada@xmpp.example"},"eas_mms":{"user":"ada@mms.example"},"eas_account_name":{"user":"ada-eas-account"}}, "name":{"full":"Ada Lovelace Jr.","phoneticScript":"Jpan","components":[
                 {"kind":"given","value":"Ada","phonetic":"エイダ"},
                 {"kind":"given2","value":"Augusta"},
                 {"kind":"surname","value":"Lovelace","phonetic":"ラブレス"},
@@ -8479,6 +8570,10 @@ mod contact_address_tests {
         assert_eq!(contact.suffix.as_deref(), Some("Jr."));
         assert_eq!(contact.name_prefix.as_deref(), Some("Countess"));
         assert_eq!(contact.nickname.as_deref(), Some("Enchantress of Numbers"));
+        assert_eq!(
+            contact.picture.as_deref(),
+            Some(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a][..])
+        );
         assert_eq!(contact.company_main_phone.as_deref(), Some("555-0199"));
         assert_eq!(contact.im_address1.as_deref(), Some("ada@example.im"));
         assert_eq!(contact.im_address2.as_deref(), Some("ada@chat.example"));

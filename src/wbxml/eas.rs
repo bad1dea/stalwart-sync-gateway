@@ -1341,6 +1341,7 @@ pub struct ContactFields {
     pub company_main_phone: Option<String>,
     pub mms: Option<String>,
     pub account_name: Option<String>,
+    pub picture: Option<String>,
     pub im_address: Option<String>,
     pub im_address_2: Option<String>,
     pub im_address_3: Option<String>,
@@ -2412,6 +2413,8 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                         fields.mms = empty;
                     } else if same_token(*token, contacts2::ACCOUNT_NAME) {
                         fields.account_name = empty;
+                    } else if same_token(*token, contacts::PICTURE) {
+                        fields.picture = empty;
                     } else if same_token(*token, contacts2::IM_ADDRESS) {
                         fields.im_address = empty;
                     } else if same_token(*token, contacts2::IM_ADDRESS_2) {
@@ -2474,6 +2477,8 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                     fields.mms = Some(text.clone());
                 } else if same_token(top, contacts2::ACCOUNT_NAME) {
                     fields.account_name = Some(text.clone());
+                } else if same_token(top, contacts::PICTURE) {
+                    fields.picture = Some(text.clone());
                 } else if same_token(top, contacts2::IM_ADDRESS) {
                     fields.im_address = Some(text.clone());
                 } else if same_token(top, contacts2::IM_ADDRESS_2) {
@@ -3274,6 +3279,7 @@ mod tests {
         builder.leaf(contacts2::COMPANY_MAIN_PHONE, "555-0199");
         builder.leaf(contacts2::MMS, "ada@mms.example");
         builder.leaf(contacts2::ACCOUNT_NAME, "ada-eas-account");
+        builder.leaf(contacts::PICTURE, "AQIDBA==");
         builder.leaf(contacts2::IM_ADDRESS, "ada@example.im");
         builder.leaf(contacts2::IM_ADDRESS_2, "ada@chat.example");
         builder.leaf(contacts2::IM_ADDRESS_3, "ada@xmpp.example");
