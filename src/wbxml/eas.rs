@@ -1332,6 +1332,8 @@ pub struct ContactFields {
     pub middle_name: Option<String>,
     pub last_name: Option<String>,
     pub suffix: Option<String>,
+    pub birthday: Option<String>,
+    pub anniversary: Option<String>,
     pub file_as: Option<String>,
     pub email1_address: Option<String>,
     pub email2_address: Option<String>,
@@ -2366,6 +2368,10 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                         fields.middle_name = empty;
                     } else if same_token(*token, contacts::SUFFIX) {
                         fields.suffix = empty;
+                    } else if same_token(*token, contacts::BIRTHDAY) {
+                        fields.birthday = empty;
+                    } else if same_token(*token, contacts::ANNIVERSARY) {
+                        fields.anniversary = empty;
                     }
                 }
                 path.push(*token);
@@ -2380,6 +2386,10 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                     fields.middle_name = Some(text.clone());
                 } else if same_token(top, contacts::SUFFIX) {
                     fields.suffix = Some(text.clone());
+                } else if same_token(top, contacts::BIRTHDAY) {
+                    fields.birthday = Some(text.clone());
+                } else if same_token(top, contacts::ANNIVERSARY) {
+                    fields.anniversary = Some(text.clone());
                 } else if same_token(top, contacts::FILE_AS) {
                     fields.file_as = Some(text.clone());
                 } else if same_token(top, contacts::EMAIL1_ADDRESS) {
@@ -3145,6 +3155,8 @@ mod tests {
         builder.leaf(contacts::MIDDLE_NAME, "Augusta");
         builder.leaf(contacts::LAST_NAME, "Lovelace");
         builder.leaf(contacts::SUFFIX, "Jr.");
+        builder.leaf(contacts::BIRTHDAY, "18151210");
+        builder.leaf(contacts::ANNIVERSARY, "18351108");
         builder.leaf(contacts::EMAIL1_ADDRESS, "ada@example.com");
         builder.leaf(contacts::MOBILE_PHONE_NUMBER, "555-0100");
         builder.leaf(contacts::COMPANY_NAME, "Analytical Engines Ltd");
@@ -3178,6 +3190,8 @@ mod tests {
         assert_eq!(command.contact.middle_name.as_deref(), Some("Augusta"));
         assert_eq!(command.contact.last_name.as_deref(), Some("Lovelace"));
         assert_eq!(command.contact.suffix.as_deref(), Some("Jr."));
+        assert_eq!(command.contact.birthday.as_deref(), Some("18151210"));
+        assert_eq!(command.contact.anniversary.as_deref(), Some("18351108"));
         assert_eq!(
             command.contact.email1_address.as_deref(),
             Some("ada@example.com")

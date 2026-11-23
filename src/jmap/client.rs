@@ -1613,6 +1613,7 @@ impl JmapClient {
             "titles",
             "nicknames",
             "addresses",
+            "anniversaries",
             "notes",
             "onlineServices",
             "keywords",
@@ -1632,7 +1633,7 @@ impl JmapClient {
                 MethodCall::new("ContactCard/get", serde_json::json!({
                     "accountId":account, "#ids":{"resultOf":"q","name":"ContactCard/query","path":"/ids"},
                     "properties":["id","addressBookIds","name","emails","phones","organizations",
-                        "titles","nicknames","addresses","notes","onlineServices","keywords"]
+                        "titles","nicknames","addresses","anniversaries","notes","onlineServices","keywords"]
                 }), "g"),
             ]).await?;
             let query = response
@@ -1736,7 +1737,7 @@ impl JmapClient {
                     "ContactCard/get",
                     serde_json::json!({
                         "accountId":account, "ids":[id],
-                        "properties":["id","addressBookIds","name","emails","phones","organizations","titles","keywords"]
+                        "properties":["id","addressBookIds","name","emails","phones","organizations","titles","keywords","anniversaries"]
                     }),
                     "g",
                 )],
@@ -1827,6 +1828,25 @@ impl JmapClient {
         let has_name_update = !name.is_empty();
         if !name.is_empty() {
             card.insert("name".to_owned(), serde_json::Value::Object(name));
+        }
+        let mut anniversaries = serde_json::Map::new();
+        for (key, kind, date) in [
+            ("eas_birthday", "birth", &fields.birthday),
+            ("eas_anniversary", "wedding", &fields.anniversary),
+        ] {
+            if let Some(date) = date.as_ref().filter(|date| !date.is_empty()) {
+                anniversaries.insert(
+                    key.to_owned(),
+                    serde_json::json!({"@type":"Anniversary","kind":kind,"date":eas_contact_date_to_partial(date)?}),
+                );
+            }
+        }
+        let has_anniversary_update = fields.birthday.is_some() || fields.anniversary.is_some();
+        if has_anniversary_update {
+            card.insert(
+                "anniversaries".to_owned(),
+                serde_json::Value::Object(anniversaries.clone()),
+            );
         }
 
         let mut emails = serde_json::Map::new();
@@ -1935,13 +1955,18 @@ impl JmapClient {
             }
         }
         let mut contact_state = None;
-        if let Some(existing_id) = id.filter(|_| has_name_update || !addresses.is_empty()) {
+        if let Some(existing_id) =
+            id.filter(|_| has_name_update || has_anniversary_update || !addresses.is_empty())
+        {
             let mut properties = vec!["id"];
             if has_name_update {
                 properties.push("name");
             }
             if !addresses.is_empty() {
                 properties.push("addresses");
+            }
+            if has_anniversary_update {
+                properties.push("anniversaries");
             }
             let response: JmapResponse<serde_json::Value> = self
                 .api_call(
@@ -2009,6 +2034,43 @@ impl JmapClient {
                         serde_json::Value::Null
                     } else {
                         serde_json::Value::Object(merged_name)
+                    },
+                );
+            }
+            if has_anniversary_update {
+                let mut merged_anniversaries = existing["anniversaries"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                for (key, kind, date) in [
+                    ("eas_birthday", "birth", &fields.birthday),
+                    ("eas_anniversary", "wedding", &fields.anniversary),
+                ] {
+                    if let Some(date) = date {
+                        let existing_key = merged_anniversaries
+                            .iter()
+                            .find(|(_, value)| value["kind"] == kind)
+                            .map(|(id, _)| id.clone());
+                        if date.is_empty() {
+                            if let Some(existing_key) = existing_key {
+                                merged_anniversaries.remove(&existing_key);
+                            } else {
+                                merged_anniversaries.remove(key);
+                            }
+                        } else if let Some(updated) = anniversaries.get(key) {
+                            merged_anniversaries.insert(
+                                existing_key.unwrap_or_else(|| key.to_owned()),
+                                updated.clone(),
+                            );
+                        }
+                    }
+                }
+                card.insert(
+                    "anniversaries".to_owned(),
+                    if merged_anniversaries.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::Object(merged_anniversaries)
                     },
                 );
             }
@@ -6068,6 +6130,14 @@ struct ContactCardObject {
     addresses: BTreeMap<String, ContactCardAddress>,
     #[serde(default)]
     keywords: BTreeMap<String, bool>,
+    #[serde(default)]
+    anniversaries: BTreeMap<String, ContactCardAnniversary>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContactCardAnniversary {
+    kind: String,
+    date: serde_json::Value,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -6120,6 +6190,31 @@ struct ContactCardAddressComponent {
     value: String,
 }
 
+fn eas_contact_date_to_partial(value: &str) -> anyhow::Result<serde_json::Value> {
+    use chrono::Datelike;
+    let date = chrono::NaiveDate::parse_from_str(value, "%Y%m%d")
+        .map_err(|_| anyhow::anyhow!("invalid EAS contact date"))?;
+    Ok(serde_json::json!({
+        "year": date.year(),
+        "month": date.month(),
+        "day": date.day()
+    }))
+}
+
+fn partial_date_to_eas_contact(value: &serde_json::Value) -> Option<String> {
+    use chrono::Datelike;
+    let year = i32::try_from(value.get("year")?.as_i64()?).ok()?;
+    let month = u32::try_from(value.get("month")?.as_u64()?).ok()?;
+    let day = u32::try_from(value.get("day")?.as_u64()?).ok()?;
+    let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+    Some(format!(
+        "{:04}{:02}{:02}",
+        date.year(),
+        date.month(),
+        date.day()
+    ))
+}
+
 impl From<ContactCardObject> for Contact {
     fn from(value: ContactCardObject) -> Self {
         let mut first_name = None;
@@ -6167,6 +6262,16 @@ impl From<ContactCardObject> for Contact {
             .into_values()
             .find(|title| title.kind.as_deref() == Some("title") || title.kind.is_none())
             .and_then(|title| title.name);
+        let birthday = value
+            .anniversaries
+            .values()
+            .find(|anniversary| anniversary.kind == "birth")
+            .and_then(|anniversary| partial_date_to_eas_contact(&anniversary.date));
+        let anniversary = value
+            .anniversaries
+            .values()
+            .find(|anniversary| anniversary.kind == "wedding")
+            .and_then(|anniversary| partial_date_to_eas_contact(&anniversary.date));
 
         let mut business_address = None;
         let mut home_address = None;
@@ -6204,6 +6309,8 @@ impl From<ContactCardObject> for Contact {
             middle_name,
             last_name,
             suffix,
+            birthday,
+            anniversary,
             file_as,
             emails,
             mobile_phone,
@@ -7292,6 +7399,13 @@ mod contact_address_tests {
                         {"kind":"generation","value":"Jr."}
                     ])
                 );
+                assert_eq!(
+                    call[1]["create"]["c1"]["anniversaries"],
+                    serde_json::json!({
+                        "eas_birthday":{"@type":"Anniversary","kind":"birth","date":{"year":1815,"month":12,"day":10}},
+                        "eas_anniversary":{"@type":"Anniversary","kind":"wedding","date":{"year":1835,"month":11,"day":8}}
+                    })
+                );
                 Json(serde_json::json!({"methodResponses":[
                     ["ContactCard/set",{"created":{"c1":{"id":"contact-1"}}},"0"]
                 ]}))
@@ -7323,6 +7437,8 @@ mod contact_address_tests {
             middle_name: Some("Augusta".into()),
             last_name: Some("Lovelace".into()),
             suffix: Some("Jr.".into()),
+            birthday: Some("18151210".into()),
+            anniversary: Some("18351108".into()),
             business_address_city: Some("Toronto".into()),
             business_address_country: Some("Canada".into()),
             business_address_postal_code: Some("M5V 2T6".into()),
@@ -7362,7 +7478,10 @@ mod contact_address_tests {
                                 {"kind":"given2","value":"Augusta"},
                                 {"kind":"surname","value":"Lovelace"},
                                 {"kind":"generation","value":"Jr."}
-                            ]},"addresses":{
+                            ]},"anniversaries":{
+                                "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
+                                "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
+                            },"addresses":{
                                 "home":{"contexts":{"private":true},"components":[
                                     {"kind":"locality","value":"Ottawa"},
                                     {"kind":"name","value":"1 Home St"}
@@ -7384,6 +7503,13 @@ mod contact_address_tests {
                                     {"kind":"generation","value":"Jr."},
                                     {"kind":"given2","value":"Byron"}
                                 ])
+                            );
+                            assert_eq!(
+                                call[1]["update"]["c"]["anniversaries"],
+                                serde_json::json!({
+                                    "b":{"@type":"Anniversary","kind":"birth","date":{"year":1815,"month":12,"day":11}},
+                                    "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
+                                })
                             );
                             let addresses = &call[1]["update"]["c"]["addresses"];
                             assert_eq!(
@@ -7431,6 +7557,7 @@ mod contact_address_tests {
         .unwrap();
         let fields = crate::wbxml::eas::ContactFields {
             middle_name: Some("Byron".into()),
+            birthday: Some("18151211".into()),
             home_address_city: Some("Vancouver".into()),
             business_address_street: Some(String::new()),
             ..Default::default()
@@ -7492,7 +7619,10 @@ mod contact_address_tests {
                 {"kind":"given2","value":"Augusta"},
                 {"kind":"surname","value":"Lovelace"},
                 {"kind":"generation","value":"Jr."}
-            ]}
+            ]}, "anniversaries":{
+                "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
+                "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
+            }
         }))
         .unwrap();
         let contact = Contact::from(card);
@@ -7500,6 +7630,19 @@ mod contact_address_tests {
         assert_eq!(contact.middle_name.as_deref(), Some("Augusta"));
         assert_eq!(contact.last_name.as_deref(), Some("Lovelace"));
         assert_eq!(contact.suffix.as_deref(), Some("Jr."));
+        assert_eq!(contact.birthday.as_deref(), Some("18151210"));
+        assert_eq!(contact.anniversary.as_deref(), Some("18351108"));
+    }
+
+    #[test]
+    fn eas_contact_dates_round_trip_as_jscontact_partial_dates() {
+        let partial = eas_contact_date_to_partial("20000229").unwrap();
+        assert_eq!(partial, serde_json::json!({"year":2000,"month":2,"day":29}));
+        assert_eq!(
+            partial_date_to_eas_contact(&partial).as_deref(),
+            Some("20000229")
+        );
+        assert!(eas_contact_date_to_partial("20010229").is_err());
     }
 }
 

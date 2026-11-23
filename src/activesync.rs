@@ -5546,6 +5546,8 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.middle_name.hash(&mut hasher);
     contact.last_name.hash(&mut hasher);
     contact.suffix.hash(&mut hasher);
+    contact.birthday.hash(&mut hasher);
+    contact.anniversary.hash(&mut hasher);
     contact.file_as.hash(&mut hasher);
     contact.emails.hash(&mut hasher);
     contact.mobile_phone.hash(&mut hasher);
@@ -5643,6 +5645,15 @@ fn write_contact_fields(
     }
     if let Some(suffix) = &contact.suffix {
         builder.leaf(c::SUFFIX, suffix.clone());
+    }
+    if let Some(birthday) = &contact.birthday {
+        builder.leaf(c::BIRTHDAY, birthday.clone());
+    }
+    if let Some(anniversary) = &contact.anniversary {
+        builder.leaf(c::ANNIVERSARY, anniversary.clone());
+    }
+    if let Some(birthday) = &contact.birthday {
+        builder.leaf(c::BIRTHDAY, birthday.clone());
     }
     if let Some(mobile) = &contact.mobile_phone {
         builder.leaf(c::MOBILE_PHONE_NUMBER, mobile.clone());
