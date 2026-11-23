@@ -79,7 +79,12 @@ idempotent replay markers, and omits the `$draft` keyword outside the Drafts
 folder. A new regression test checks the non-draft mailbox properties; the full
 suite passes (254 passed, 73 ignored), and clippy with warnings denied passes.
 Production still advertises 14.0, so the Sync Add path remains version-gated to
-16.0/16.1 until the planned client certification.
+16.0/16.1 until the planned client certification. Deployed as
+`deploy-2026-11-22-eas-syncadd-641d41f`; homelab commit `a84981d`. The forced
+Compose build produced image
+`sha256:d7f5254079a94a0eb2e5a35419ba73a12a73053098b4d25303af1d1422f79cf3`.
+The replacement started with restart count zero, and mesh/public health and
+readiness all returned successfully.
 
 This reconciliation supersedes older status claims in this document where
 they conflict with source `main` at the stated revision. Update this section
