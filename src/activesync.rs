@@ -5562,6 +5562,7 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.car_phone.hash(&mut hasher);
     contact.radio_phone.hash(&mut hasher);
     contact.web_page.hash(&mut hasher);
+    contact.assistant_phone.hash(&mut hasher);
     contact.company_name.hash(&mut hasher);
     contact.department.hash(&mut hasher);
     contact.job_title.hash(&mut hasher);
@@ -5697,6 +5698,9 @@ fn write_contact_fields(
     }
     if let Some(web_page) = &contact.web_page {
         builder.leaf(c::WEB_PAGE, web_page.clone());
+    }
+    if let Some(assistant_phone) = &contact.assistant_phone {
+        builder.leaf(c::ASSISTANT_PHONE_NUMBER, assistant_phone.clone());
     }
     write_contact_address_fields(builder, contact.other_address.as_ref(), "other", is_change);
 }
@@ -7851,6 +7855,7 @@ mod tests {
             pager: Some("555-0106".into()),
             car_phone: Some("555-0107".into()),
             radio_phone: Some("555-0108".into()),
+            assistant_phone: Some("555-0110".into()),
             web_page: Some("https://example.com/ada".into()),
             business_address: Some(crate::model::ContactAddress {
                 city: Some("Toronto".into()),
@@ -7932,9 +7937,15 @@ mod tests {
             Some("555-0108")
         );
         assert_eq!(
+            eas::find_text_after(&doc, c::ASSISTANT_PHONE_NUMBER),
+            Some("555-0110")
+        );
+        assert_eq!(
             eas::find_text_after(&doc, c::WEB_PAGE),
             Some("https://example.com/ada")
         );
+        contact.assistant_phone = Some("555-0111".into());
+        assert_ne!(super::contact_hash(&contact), before);
         contact.business_address.as_mut().unwrap().city = Some("Hamilton".into());
         assert_ne!(super::contact_hash(&contact), before);
     }
