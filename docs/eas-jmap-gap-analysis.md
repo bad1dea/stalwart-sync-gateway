@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `6708d25` (2026-11-22)
+## Reconciled status for source `main` at `60e5eca` (2026-11-22)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -246,6 +246,49 @@ checks WBXML parsing/output, create/read, and update preservation. Full suite:
 266 passed, 73 ignored; clippy with warnings denied, formatting, and diff
 checks pass. Deployed as
 `deploy-2026-11-22-eas-contact-department-6708d25`; runtime verification is in
+image `sha256:bf23b29f650629b02298c2ad23da259aa2ea9d52b6d3906095e0c88b80f3a60e`,
+started at `2026-11-23T01:54:23Z` with restart count zero. Mesh `/healthz`
+returned `ok` and `/readyz` returned `ready`. No live contact was modified
+during deployment.
+
+Also completed: **ActiveSync second business/home phone numbers**.
+`Business2PhoneNumber` and `Home2PhoneNumber` now map to separate JSContact
+phone entries with the same work/private contexts as their primary numbers.
+Reads and Sync output preserve both values. Partial updates fetch and merge the
+phone map under `ifInState`, selecting the matching contextual entry and
+preserving other phone entries. Regression coverage checks WBXML parsing,
+create/read/update, output, and hash changes. Full suite: 266 passed, 73
+ignored; clippy with warnings denied, formatting, and diff checks pass.
+Deployed as
+`deploy-2026-11-22-eas-contact-secondary-phones-6c3d00d`; runtime verification
+used the subsequent pinned build image
+`sha256:bf23b29f650629b02298c2ad23da259aa2ea9d52b6d3906095e0c88b80f3a60e`,
+started at `2026-11-23T01:54:23Z` with restart count zero. Mesh `/healthz`
+returned `ok` and `/readyz` returned `ready`. No live contact was modified
+during deployment.
+
+Also completed: **ActiveSync home fax and pager numbers**. EAS `HomeFaxNumber`
+and `PagerNumber` map to JSContact phone entries with `fax` and `pager`
+features; the home fax also carries the private context. Reads, creates,
+updates, and Sync output retain those field meanings while merging other phone
+entries under `ifInState`. Regression coverage includes WBXML and JMAP
+create/read/update plus output. Full suite: 266 passed, 73 ignored; clippy
+with warnings denied, formatting, and diff checks pass. Deployed as
+`deploy-2026-11-22-eas-contact-fax-pager-9e7ab32`; runtime verification is in
+image `sha256:7546a12741a5933eb365d905ff43f068bd72df70093cdee03c632a76a1b86465`,
+started at `2026-11-23T01:59:22Z` with restart count zero. Mesh `/healthz`
+returned `ok` and `/readyz` returned `ready`. No live contact was modified
+during deployment.
+
+Also completed: **ActiveSync car and radio phone numbers**. `CarPhoneNumber`
+and `RadioPhoneNumber` map to JSContact phone custom labels `car` and `radio`;
+partial updates preserve the phone object and all other entries under
+`ifInState`. The mapping uses JSContact's custom phone `label` property as
+defined in [RFC 9553](https://www.rfc-editor.org/rfc/rfc9553.html). Regression
+coverage checks WBXML parsing/output and JMAP create/read/update. Full suite:
+266 passed, 73 ignored; clippy with warnings denied, formatting, and diff
+checks pass. Deployed as
+`deploy-2026-11-22-eas-contact-car-radio-60e5eca`; runtime verification is in
 progress. No live contact was modified during deployment.
 
 Also completed: **ActiveSync Contact postal addresses**. Business, home, and
@@ -288,7 +331,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Sync: Mail (client Add) | **Done (`16.0`/`16.1`)** | `Email/set` / `Email/import` + blob | The mail Sync path creates drafts in Drafts and non-draft items in the requested Mailbox with stable replay markers, attachment handling, MIME import, response mapping, and recovery after a server write. Regression coverage includes draft replay/content changes/attachments/Bcc/retries plus non-draft property generation (`src/activesync/draft.rs`, `src/push_tests.rs`). |
 | Sync: Mail (server-side delete surfaced to client) | **Done** (`deploy-2026-08-25v`) | Targeted `Email/get` (id + mailboxIds) per previously-seen-but-absent-from-window candidate | `emails_still_in_mailbox()` in `src/jmap/client.rs` — deliberately NOT a naive "absent from this fetch = deleted" diff, since `emails_in_mailbox`'s query is sorted newest-first and capped at the window size, so an old message pushed out of the window by newer mail looks identical to a real deletion under a plain diff. Live-verified both directions: a real destroyed message correctly surfaced as a Delete on the next Sync, and a real non-deleted message correctly confirmed present (not flagged) via the same JMAP call shape. |
 | Sync: Contacts (read) | **Done** | `ContactCard/query`+`/get` (JSContact, RFC 9553) | Confirmed live against a real card. |
-| Sync: Contacts (write: add/edit/delete) | **Done** (`deploy-2026-08-25s`, addresses `deploy-2026-11-22-eas-contact-addresses-0e8a071`, categories `deploy-2026-11-22-eas-contact-categories-79585fc`, names `deploy-2026-11-22-eas-contact-name-parts-c3f4378` and `deploy-2026-11-22-eas-contact-name-prefix-c48ee61c`, dates `deploy-2026-11-22-eas-contact-dates-5f03d66`, department `deploy-2026-11-22-eas-contact-department-6708d25`) | `ContactCard/set` | `sync_contacts_collection` handles Add/Change/Delete and hash diff. Contact names, birthdays/anniversaries, emails, phone numbers, organization/title/department, business/home/other postal address components, and categories map to JSContact. Partial address, name, organization, and anniversary edits preserve untouched components under a JMAP state guard; empty fields clear components. |
+| Sync: Contacts (write: add/edit/delete) | **Done** (`deploy-2026-08-25s`, addresses `deploy-2026-11-22-eas-contact-addresses-0e8a071`, categories `deploy-2026-11-22-eas-contact-categories-79585fc`, names `deploy-2026-11-22-eas-contact-name-parts-c3f4378` and `deploy-2026-11-22-eas-contact-name-prefix-c48ee61c`, dates `deploy-2026-11-22-eas-contact-dates-5f03d66`, department `deploy-2026-11-22-eas-contact-department-6708d25`, secondary phones `deploy-2026-11-22-eas-contact-secondary-phones-6c3d00d`, fax/pager `deploy-2026-11-22-eas-contact-fax-pager-9e7ab32`, car/radio `deploy-2026-11-22-eas-contact-car-radio-60e5eca`) | `ContactCard/set` | `sync_contacts_collection` handles Add/Change/Delete and hash diff. Contact names, birthdays/anniversaries, emails, home/business primary and secondary lines, fax/pager/car/radio numbers, organization/title/department, business/home/other postal address components, and categories map to JSContact. Partial address, name, organization, phone, and anniversary edits preserve untouched components under a JMAP state guard; empty fields clear components. |
 | Sync: Calendar (read) | **Done** | `CalendarEvent/query`+`/get` (JSCalendar, draft-ietf-calext-jscalendarbis superseding RFC 8984) | Confirmed live against a real event. No recurrence handling confirmed — see below. |
 | Sync: Calendar (write: add/edit/delete, non-recurring only) | **Done** (`deploy-2026-08-25t`) | `CalendarEvent/set` | Same treatment as Contacts, via `save_calendar_event`/`destroy_calendar_event`. `start`/`duration` written without `timeZone`, mirroring `local_to_utc_eas`'s existing "absent timeZone == already UTC" convention. Recurrence/attendees/reminders explicitly out of scope. Full lifecycle live-verified with a throwaway event. |
 | Sync: Calendar recurrence (RRULE) | **Confirmed BLOCKED at the JMAP layer (2026-08-25)** | JSCalendar `recurrenceRules` — Stalwart rejects it outright | Live-tested directly, not just code-read: `CalendarEvent/set create` with `recurrenceRules` (multiple shapes tried — minimal `{"frequency":"weekly"}`, with `@type`, with `interval`) is rejected every time with `notCreated: {type: "invalidProperties", properties: ["recurrenceRules"]}` — the property itself is unrecognized, not just validated-and-rejected-for-content. `CalendarEvent/get` with `recurrenceRules`/`recurrenceOverrides` explicitly requested on an existing event silently omits both (no error, just absent) — same "silently drops the property" behavior already seen for `participants` (see MeetingResponse row). This is the same class of finding: blocked on Stalwart adding real recurrence support to `CalendarEvent`, not a gateway-side task. `write_calendar_command()` (renamed from `write_calendar_add` this session) still only emits the 6 non-recurring fields it always has; nothing to build here until Stalwart's JMAP support changes. |
