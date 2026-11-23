@@ -5555,6 +5555,7 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.home_phone.hash(&mut hasher);
     contact.business_phone.hash(&mut hasher);
     contact.company_name.hash(&mut hasher);
+    contact.department.hash(&mut hasher);
     contact.job_title.hash(&mut hasher);
     contact.business_address.hash(&mut hasher);
     contact.home_address.hash(&mut hasher);
@@ -5614,6 +5615,9 @@ fn write_contact_fields(
     }
     if let Some(company) = &contact.company_name {
         builder.leaf(c::COMPANY_NAME, company.clone());
+    }
+    if let Some(department) = &contact.department {
+        builder.leaf(c::DEPARTMENT, department.clone());
     }
     let mut emails = contact.emails.iter();
     if let Some(email1) = emails.next() {
@@ -7807,6 +7811,7 @@ mod tests {
             middle_name: Some("Augusta".into()),
             suffix: Some("Jr.".into()),
             name_prefix: Some("Countess".into()),
+            department: Some("Research".into()),
             business_address: Some(crate::model::ContactAddress {
                 city: Some("Toronto".into()),
                 country: Some("Canada".into()),
@@ -7857,6 +7862,7 @@ mod tests {
         assert_eq!(eas::find_text_after(&doc, c::MIDDLE_NAME), Some("Augusta"));
         assert_eq!(eas::find_text_after(&doc, c::SUFFIX), Some("Jr."));
         assert_eq!(eas::find_text_after(&doc, c::TITLE), Some("Countess"));
+        assert_eq!(eas::find_text_after(&doc, c::DEPARTMENT), Some("Research"));
         contact.business_address.as_mut().unwrap().city = Some("Hamilton".into());
         assert_ne!(super::contact_hash(&contact), before);
     }

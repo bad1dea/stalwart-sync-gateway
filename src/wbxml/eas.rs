@@ -1343,6 +1343,7 @@ pub struct ContactFields {
     pub home_phone_number: Option<String>,
     pub business_phone_number: Option<String>,
     pub company_name: Option<String>,
+    pub department: Option<String>,
     pub job_title: Option<String>,
     pub business_address_city: Option<String>,
     pub business_address_country: Option<String>,
@@ -2375,6 +2376,8 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                         fields.anniversary = empty;
                     } else if same_token(*token, contacts::TITLE) {
                         fields.name_prefix = empty;
+                    } else if same_token(*token, contacts::DEPARTMENT) {
+                        fields.department = empty;
                     }
                 }
                 path.push(*token);
@@ -2411,6 +2414,8 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                     fields.business_phone_number = Some(text.clone());
                 } else if same_token(top, contacts::COMPANY_NAME) {
                     fields.company_name = Some(text.clone());
+                } else if same_token(top, contacts::DEPARTMENT) {
+                    fields.department = Some(text.clone());
                 } else if same_token(top, contacts::JOB_TITLE) {
                     fields.job_title = Some(text.clone());
                 } else if same_token(top, contacts::BUSINESS_ADDRESS_CITY) {
@@ -3166,6 +3171,7 @@ mod tests {
         builder.leaf(contacts::EMAIL1_ADDRESS, "ada@example.com");
         builder.leaf(contacts::MOBILE_PHONE_NUMBER, "555-0100");
         builder.leaf(contacts::COMPANY_NAME, "Analytical Engines Ltd");
+        builder.leaf(contacts::DEPARTMENT, "Research");
         builder.leaf(contacts::BUSINESS_ADDRESS_CITY, "Toronto");
         builder.leaf(contacts::BUSINESS_ADDRESS_COUNTRY, "Canada");
         builder.leaf(contacts::BUSINESS_ADDRESS_POSTAL_CODE, "M5V 2T6");
@@ -3211,6 +3217,7 @@ mod tests {
             command.contact.company_name.as_deref(),
             Some("Analytical Engines Ltd")
         );
+        assert_eq!(command.contact.department.as_deref(), Some("Research"));
         assert_eq!(command.contact.email2_address, None);
         assert_eq!(
             command.contact.business_address_city.as_deref(),

@@ -1889,10 +1889,25 @@ impl JmapClient {
             card.insert("phones".to_owned(), serde_json::Value::Object(phones));
         }
 
+        let has_organizations_update = fields.company_name.is_some() || fields.department.is_some();
+        let mut eas_organization = serde_json::Map::new();
         if let Some(company) = &fields.company_name {
+            if !company.is_empty() {
+                eas_organization.insert("name".to_owned(), serde_json::json!(company));
+            }
+        }
+        if let Some(department) = &fields.department {
+            if !department.is_empty() {
+                eas_organization.insert(
+                    "units".to_owned(),
+                    serde_json::json!([{"@type":"OrgUnit","name":department}]),
+                );
+            }
+        }
+        if id.is_none() && !eas_organization.is_empty() {
             card.insert(
                 "organizations".to_owned(),
-                serde_json::json!({ "o1": { "name": company } }),
+                serde_json::json!({ "o1": eas_organization }),
             );
         }
         if let Some(title) = &fields.job_title {
@@ -1958,9 +1973,12 @@ impl JmapClient {
             }
         }
         let mut contact_state = None;
-        if let Some(existing_id) =
-            id.filter(|_| has_name_update || has_anniversary_update || !addresses.is_empty())
-        {
+        if let Some(existing_id) = id.filter(|_| {
+            has_name_update
+                || has_anniversary_update
+                || has_organizations_update
+                || !addresses.is_empty()
+        }) {
             let mut properties = vec!["id"];
             if has_name_update {
                 properties.push("name");
@@ -1970,6 +1988,9 @@ impl JmapClient {
             }
             if has_anniversary_update {
                 properties.push("anniversaries");
+            }
+            if has_organizations_update {
+                properties.push("organizations");
             }
             let response: JmapResponse<serde_json::Value> = self
                 .api_call(
@@ -2075,6 +2096,54 @@ impl JmapClient {
                         serde_json::Value::Null
                     } else {
                         serde_json::Value::Object(merged_anniversaries)
+                    },
+                );
+            }
+            if has_organizations_update {
+                let mut merged_organizations = existing["organizations"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                let organization_id = merged_organizations
+                    .iter()
+                    .find(|(_, value)| value.get("name").is_some())
+                    .map(|(id, _)| id.clone())
+                    .or_else(|| merged_organizations.keys().next().cloned())
+                    .unwrap_or_else(|| "o1".to_owned());
+                let mut organization = merged_organizations
+                    .get(&organization_id)
+                    .and_then(serde_json::Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(company) = &fields.company_name {
+                    if company.is_empty() {
+                        organization.remove("name");
+                    } else {
+                        organization.insert("name".to_owned(), serde_json::json!(company));
+                    }
+                }
+                if let Some(department) = &fields.department {
+                    if department.is_empty() {
+                        organization.remove("units");
+                    } else {
+                        organization.insert(
+                            "units".to_owned(),
+                            serde_json::json!([{"@type":"OrgUnit","name":department}]),
+                        );
+                    }
+                }
+                if organization.is_empty() {
+                    merged_organizations.remove(&organization_id);
+                } else {
+                    merged_organizations
+                        .insert(organization_id, serde_json::Value::Object(organization));
+                }
+                card.insert(
+                    "organizations".to_owned(),
+                    if merged_organizations.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::Object(merged_organizations)
                     },
                 );
             }
@@ -6172,6 +6241,13 @@ struct ContactCardPhone {
 #[derive(Debug, Default, Deserialize)]
 struct ContactCardOrganization {
     name: Option<String>,
+    #[serde(default)]
+    units: Vec<ContactCardOrgUnit>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContactCardOrgUnit {
+    name: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -6262,7 +6338,11 @@ impl From<ContactCardObject> for Contact {
             }
         }
 
-        let company_name = value.organizations.into_values().find_map(|org| org.name);
+        let organizations: Vec<_> = value.organizations.into_values().collect();
+        let company_name = organizations.iter().find_map(|org| org.name.clone());
+        let department = organizations
+            .iter()
+            .find_map(|org| org.units.last().and_then(|unit| unit.name.clone()));
         let job_title = value
             .titles
             .into_values()
@@ -6324,6 +6404,7 @@ impl From<ContactCardObject> for Contact {
             home_phone,
             business_phone,
             company_name,
+            department,
             job_title,
             business_address,
             home_address,
@@ -7414,6 +7495,10 @@ mod contact_address_tests {
                         "eas_anniversary":{"@type":"Anniversary","kind":"wedding","date":{"year":1835,"month":11,"day":8}}
                     })
                 );
+                assert_eq!(
+                    call[1]["create"]["c1"]["organizations"],
+                    serde_json::json!({"o1":{"name":"Analytical Engines Ltd","units":[{"@type":"OrgUnit","name":"Research"}]}})
+                );
                 Json(serde_json::json!({"methodResponses":[
                     ["ContactCard/set",{"created":{"c1":{"id":"contact-1"}}},"0"]
                 ]}))
@@ -7448,6 +7533,8 @@ mod contact_address_tests {
             name_prefix: Some("Countess".into()),
             birthday: Some("18151210".into()),
             anniversary: Some("18351108".into()),
+            company_name: Some("Analytical Engines Ltd".into()),
+            department: Some("Research".into()),
             business_address_city: Some("Toronto".into()),
             business_address_country: Some("Canada".into()),
             business_address_postal_code: Some("M5V 2T6".into()),
@@ -7488,7 +7575,7 @@ mod contact_address_tests {
                                 {"kind":"surname","value":"Lovelace"},
                                 {"kind":"generation","value":"Jr."},
                                 {"kind":"prefix","value":"Countess"}
-                            ]},"anniversaries":{
+                            ]},"organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Old Department"}]}},"anniversaries":{
                                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
                             },"addresses":{
@@ -7521,6 +7608,10 @@ mod contact_address_tests {
                                     "b":{"@type":"Anniversary","kind":"birth","date":{"year":1815,"month":12,"day":11}},
                                     "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
                                 })
+                            );
+                            assert_eq!(
+                                call[1]["update"]["c"]["organizations"],
+                                serde_json::json!({"org":{"name":"Analytical Engines Ltd","units":[{"@type":"OrgUnit","name":"New Department"}]}})
                             );
                             let addresses = &call[1]["update"]["c"]["addresses"];
                             assert_eq!(
@@ -7568,6 +7659,7 @@ mod contact_address_tests {
         .unwrap();
         let fields = crate::wbxml::eas::ContactFields {
             middle_name: Some("Byron".into()),
+            department: Some("New Department".into()),
             birthday: Some("18151211".into()),
             home_address_city: Some("Vancouver".into()),
             business_address_street: Some(String::new()),
@@ -7631,7 +7723,7 @@ mod contact_address_tests {
                 {"kind":"surname","value":"Lovelace"},
                 {"kind":"generation","value":"Jr."},
                 {"kind":"prefix","value":"Countess"}
-            ]}, "anniversaries":{
+            ]}, "organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Research"}]}}, "anniversaries":{
                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
             }
@@ -7645,6 +7737,11 @@ mod contact_address_tests {
         assert_eq!(contact.name_prefix.as_deref(), Some("Countess"));
         assert_eq!(contact.birthday.as_deref(), Some("18151210"));
         assert_eq!(contact.anniversary.as_deref(), Some("18351108"));
+        assert_eq!(
+            contact.company_name.as_deref(),
+            Some("Analytical Engines Ltd")
+        );
+        assert_eq!(contact.department.as_deref(), Some("Research"));
     }
 
     #[test]
