@@ -1346,6 +1346,8 @@ pub struct ContactFields {
     pub business_2_phone_number: Option<String>,
     pub home_fax_number: Option<String>,
     pub pager_number: Option<String>,
+    pub car_phone_number: Option<String>,
+    pub radio_phone_number: Option<String>,
     pub company_name: Option<String>,
     pub department: Option<String>,
     pub job_title: Option<String>,
@@ -2390,6 +2392,10 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                         fields.home_fax_number = empty;
                     } else if same_token(*token, contacts::PAGER_NUMBER) {
                         fields.pager_number = empty;
+                    } else if same_token(*token, contacts::CAR_PHONE_NUMBER) {
+                        fields.car_phone_number = empty;
+                    } else if same_token(*token, contacts::RADIO_PHONE_NUMBER) {
+                        fields.radio_phone_number = empty;
                     }
                 }
                 path.push(*token);
@@ -2432,6 +2438,10 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                     fields.home_fax_number = Some(text.clone());
                 } else if same_token(top, contacts::PAGER_NUMBER) {
                     fields.pager_number = Some(text.clone());
+                } else if same_token(top, contacts::CAR_PHONE_NUMBER) {
+                    fields.car_phone_number = Some(text.clone());
+                } else if same_token(top, contacts::RADIO_PHONE_NUMBER) {
+                    fields.radio_phone_number = Some(text.clone());
                 } else if same_token(top, contacts::COMPANY_NAME) {
                     fields.company_name = Some(text.clone());
                 } else if same_token(top, contacts::DEPARTMENT) {
@@ -3194,6 +3204,8 @@ mod tests {
         builder.leaf(contacts::BUSINESS_2_PHONE_NUMBER, "555-0103");
         builder.leaf(contacts::HOME_FAX_NUMBER, "555-0105");
         builder.leaf(contacts::PAGER_NUMBER, "555-0106");
+        builder.leaf(contacts::CAR_PHONE_NUMBER, "555-0107");
+        builder.leaf(contacts::RADIO_PHONE_NUMBER, "555-0108");
         builder.leaf(contacts::COMPANY_NAME, "Analytical Engines Ltd");
         builder.leaf(contacts::DEPARTMENT, "Research");
         builder.leaf(contacts::BUSINESS_ADDRESS_CITY, "Toronto");
@@ -3247,6 +3259,14 @@ mod tests {
         );
         assert_eq!(command.contact.home_fax_number.as_deref(), Some("555-0105"));
         assert_eq!(command.contact.pager_number.as_deref(), Some("555-0106"));
+        assert_eq!(
+            command.contact.car_phone_number.as_deref(),
+            Some("555-0107")
+        );
+        assert_eq!(
+            command.contact.radio_phone_number.as_deref(),
+            Some("555-0108")
+        );
         assert_eq!(
             command.contact.company_name.as_deref(),
             Some("Analytical Engines Ltd")

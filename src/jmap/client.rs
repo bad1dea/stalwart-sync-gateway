@@ -1909,13 +1909,27 @@ impl JmapClient {
                 serde_json::json!({ "number": pager, "features": { "pager": true } }),
             );
         }
+        if let Some(car) = &fields.car_phone_number {
+            phones.insert(
+                "p_car".to_owned(),
+                serde_json::json!({ "number": car, "label": "car" }),
+            );
+        }
+        if let Some(radio) = &fields.radio_phone_number {
+            phones.insert(
+                "p_radio".to_owned(),
+                serde_json::json!({ "number": radio, "label": "radio" }),
+            );
+        }
         let has_phones_update = fields.mobile_phone_number.is_some()
             || fields.home_phone_number.is_some()
             || fields.home_2_phone_number.is_some()
             || fields.business_phone_number.is_some()
             || fields.business_2_phone_number.is_some()
             || fields.home_fax_number.is_some()
-            || fields.pager_number.is_some();
+            || fields.pager_number.is_some()
+            || fields.car_phone_number.is_some()
+            || fields.radio_phone_number.is_some();
         if id.is_none() && !phones.is_empty() {
             card.insert("phones".to_owned(), serde_json::Value::Object(phones));
         }
@@ -2184,20 +2198,36 @@ impl JmapClient {
             }
             if has_phones_update {
                 let mut merged_phones = existing["phones"].as_object().cloned().unwrap_or_default();
-                for (key, context, feature, rank, requested) in [
+                for (key, context, feature, label, rank, requested) in [
                     (
                         "p_mobile",
                         "mobile",
                         "",
+                        "",
                         0usize,
                         &fields.mobile_phone_number,
                     ),
-                    ("p_home", "home", "", 0usize, &fields.home_phone_number),
-                    ("p_home2", "home", "", 1usize, &fields.home_2_phone_number),
-                    ("p_work", "work", "", 0usize, &fields.business_phone_number),
+                    ("p_home", "home", "", "", 0usize, &fields.home_phone_number),
+                    (
+                        "p_home2",
+                        "home",
+                        "",
+                        "",
+                        1usize,
+                        &fields.home_2_phone_number,
+                    ),
+                    (
+                        "p_work",
+                        "work",
+                        "",
+                        "",
+                        0usize,
+                        &fields.business_phone_number,
+                    ),
                     (
                         "p_work2",
                         "work",
+                        "",
                         "",
                         1usize,
                         &fields.business_2_phone_number,
@@ -2206,10 +2236,20 @@ impl JmapClient {
                         "p_home_fax",
                         "private",
                         "fax",
+                        "",
                         0usize,
                         &fields.home_fax_number,
                     ),
-                    ("p_pager", "", "pager", 0usize, &fields.pager_number),
+                    ("p_pager", "", "pager", "", 0usize, &fields.pager_number),
+                    ("p_car", "", "", "car", 0usize, &fields.car_phone_number),
+                    (
+                        "p_radio",
+                        "",
+                        "",
+                        "radio",
+                        0usize,
+                        &fields.radio_phone_number,
+                    ),
                 ] {
                     let Some(number) = requested else { continue };
                     let matches: Vec<_> = merged_phones
@@ -2217,6 +2257,7 @@ impl JmapClient {
                         .filter(|(_, phone)| {
                             (context.is_empty() || phone["contexts"][context] == true)
                                 && (feature.is_empty() || phone["features"][feature] == true)
+                                && (label.is_empty() || phone["label"] == label)
                         })
                         .map(|(id, _)| id.clone())
                         .collect();
@@ -2253,6 +2294,9 @@ impl JmapClient {
                             .unwrap_or_default();
                         features.insert(feature.to_owned(), serde_json::Value::Bool(true));
                         phone.insert("features".to_owned(), serde_json::Value::Object(features));
+                    }
+                    if !label.is_empty() {
+                        phone.insert("label".to_owned(), serde_json::json!(label));
                     }
                     merged_phones.insert(selected, serde_json::Value::Object(phone));
                 }
@@ -6356,6 +6400,7 @@ struct ContactCardPhone {
     contexts: BTreeMap<String, bool>,
     #[serde(default)]
     features: BTreeMap<String, bool>,
+    label: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -6446,13 +6491,29 @@ impl From<ContactCardObject> for Contact {
         let mut business_phones = Vec::new();
         let mut home_fax = None;
         let mut pager = None;
+        let mut car_phone = None;
+        let mut radio_phone = None;
         for phone in value.phones.into_values() {
             let Some(number) = phone.number else {
                 continue;
             };
             let is = |ctx: &str| phone.contexts.get(ctx).copied().unwrap_or(false);
             let feature = |name: &str| phone.features.get(name).copied().unwrap_or(false);
-            if feature("fax") && is("private") && home_fax.is_none() {
+            if phone
+                .label
+                .as_deref()
+                .is_some_and(|label| label.eq_ignore_ascii_case("car"))
+                && car_phone.is_none()
+            {
+                car_phone = Some(number);
+            } else if phone
+                .label
+                .as_deref()
+                .is_some_and(|label| label.eq_ignore_ascii_case("radio"))
+                && radio_phone.is_none()
+            {
+                radio_phone = Some(number);
+            } else if feature("fax") && is("private") && home_fax.is_none() {
                 home_fax = Some(number);
             } else if feature("pager") && pager.is_none() {
                 pager = Some(number);
@@ -6534,6 +6595,8 @@ impl From<ContactCardObject> for Contact {
             business_phone2: business_phones.get(1).cloned(),
             home_fax,
             pager,
+            car_phone,
+            radio_phone,
             company_name,
             department,
             job_title,
@@ -7639,7 +7702,9 @@ mod contact_address_tests {
                         "p_work":{"number":"555-0103","contexts":{"work":true}},
                         "p_work2":{"number":"555-0104","contexts":{"work":true}},
                         "p_home_fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},
-                        "p_pager":{"number":"555-0106","features":{"pager":true}}
+                        "p_pager":{"number":"555-0106","features":{"pager":true}},
+                        "p_car":{"number":"555-0107","label":"car"},
+                        "p_radio":{"number":"555-0108","label":"radio"}
                     })
                 );
                 Json(serde_json::json!({"methodResponses":[
@@ -7685,6 +7750,8 @@ mod contact_address_tests {
             business_2_phone_number: Some("555-0104".into()),
             home_fax_number: Some("555-0105".into()),
             pager_number: Some("555-0106".into()),
+            car_phone_number: Some("555-0107".into()),
+            radio_phone_number: Some("555-0108".into()),
             business_address_city: Some("Toronto".into()),
             business_address_country: Some("Canada".into()),
             business_address_postal_code: Some("M5V 2T6".into()),
@@ -7725,7 +7792,7 @@ mod contact_address_tests {
                                 {"kind":"surname","value":"Lovelace"},
                                 {"kind":"generation","value":"Jr."},
                                 {"kind":"prefix","value":"Countess"}
-                            ]},"phones":{"work1":{"number":"555-0101","contexts":{"work":true}},"work2":{"number":"555-0102","contexts":{"work":true}},"fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},"pager":{"number":"555-0106","features":{"pager":true}}},"organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Old Department"}]}},"anniversaries":{
+                            ]},"phones":{"work1":{"number":"555-0101","contexts":{"work":true}},"work2":{"number":"555-0102","contexts":{"work":true}},"fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},"pager":{"number":"555-0106","features":{"pager":true}},"car":{"number":"555-0107","label":"car"},"radio":{"number":"555-0108","label":"radio"}},"organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Old Department"}]}},"anniversaries":{
                                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
                             },"addresses":{
@@ -7769,7 +7836,9 @@ mod contact_address_tests {
                                     "work1":{"number":"555-0101","contexts":{"work":true}},
                                     "work2":{"number":"555-0104","contexts":{"work":true}},
                                     "fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},
-                                    "pager":{"number":"555-0107","features":{"pager":true}}
+                                    "pager":{"number":"555-0107","features":{"pager":true}},
+                                    "car":{"number":"555-0109","label":"car"},
+                                    "radio":{"number":"555-0108","label":"radio"}
                                 })
                             );
                             let addresses = &call[1]["update"]["c"]["addresses"];
@@ -7821,6 +7890,7 @@ mod contact_address_tests {
             department: Some("New Department".into()),
             business_2_phone_number: Some("555-0104".into()),
             pager_number: Some("555-0107".into()),
+            car_phone_number: Some("555-0109".into()),
             birthday: Some("18151211".into()),
             home_address_city: Some("Vancouver".into()),
             business_address_street: Some(String::new()),
@@ -7891,7 +7961,9 @@ mod contact_address_tests {
                 "work1":{"number":"555-0103","contexts":{"work":true}},
                 "work2":{"number":"555-0104","contexts":{"work":true}}
                 ,"fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},
-                "pager":{"number":"555-0106","features":{"pager":true}}
+                "pager":{"number":"555-0106","features":{"pager":true}},
+                "car":{"number":"555-0107","label":"car"},
+                "radio":{"number":"555-0108","label":"radio"}
             }, "organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Research"}]}}, "anniversaries":{
                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
@@ -7918,6 +7990,8 @@ mod contact_address_tests {
         assert_eq!(contact.business_phone2.as_deref(), Some("555-0104"));
         assert_eq!(contact.home_fax.as_deref(), Some("555-0105"));
         assert_eq!(contact.pager.as_deref(), Some("555-0106"));
+        assert_eq!(contact.car_phone.as_deref(), Some("555-0107"));
+        assert_eq!(contact.radio_phone.as_deref(), Some("555-0108"));
     }
 
     #[test]
