@@ -279,6 +279,7 @@ pub struct Contact {
     pub office_location: Option<String>,
     pub nickname: Option<String>,
     pub company_main_phone: Option<String>,
+    pub mms: Option<String>,
     pub im_address1: Option<String>,
     pub im_address2: Option<String>,
     pub im_address3: Option<String>,

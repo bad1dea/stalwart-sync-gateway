@@ -1868,7 +1868,8 @@ impl JmapClient {
         }
         let has_im_update = fields.im_address.is_some()
             || fields.im_address_2.is_some()
-            || fields.im_address_3.is_some();
+            || fields.im_address_3.is_some()
+            || fields.mms.is_some();
         let mut online_services = serde_json::Map::new();
         for (key, label, value) in [
             ("eas_im1", "EAS IM Address 1", &fields.im_address),
@@ -1881,6 +1882,12 @@ impl JmapClient {
                     serde_json::json!({"@type":"OnlineService","user":user,"label":label}),
                 );
             }
+        }
+        if let Some(mms) = fields.mms.as_ref().filter(|value| !value.is_empty()) {
+            online_services.insert(
+                "eas_mms".to_owned(),
+                serde_json::json!({"@type":"OnlineService","user":mms,"label":"EAS MMS"}),
+            );
         }
         if id.is_none() && !online_services.is_empty() {
             card.insert(
@@ -2318,6 +2325,7 @@ impl JmapClient {
                     ("eas_im1", "EAS IM Address 1", &fields.im_address),
                     ("eas_im2", "EAS IM Address 2", &fields.im_address_2),
                     ("eas_im3", "EAS IM Address 3", &fields.im_address_3),
+                    ("eas_mms", "EAS MMS", &fields.mms),
                 ] {
                     if let Some(user) = requested {
                         if user.is_empty() {
@@ -6856,6 +6864,7 @@ impl From<ContactCardObject> for Contact {
         let im_address1 = online_service("eas_im1");
         let im_address2 = online_service("eas_im2");
         let im_address3 = online_service("eas_im3");
+        let mms = online_service("eas_mms");
         let emails = value
             .emails
             .into_values()
@@ -7019,6 +7028,7 @@ impl From<ContactCardObject> for Contact {
             radio_phone,
             assistant_phone,
             company_main_phone,
+            mms,
             company_name,
             department,
             job_title,
@@ -8092,7 +8102,7 @@ mod contact_address_tests {
                     })
                 );
                 assert_eq!(call[1]["create"]["c1"]["nicknames"], serde_json::json!({"eas_nickname":{"name":"Enchantress of Numbers"}}));
-                assert_eq!(call[1]["create"]["c1"]["onlineServices"], serde_json::json!({"eas_im1":{"@type":"OnlineService","user":"ada@example.im","label":"EAS IM Address 1"},"eas_im2":{"@type":"OnlineService","user":"ada@chat.example","label":"EAS IM Address 2"},"eas_im3":{"@type":"OnlineService","user":"ada@xmpp.example","label":"EAS IM Address 3"}}));
+                assert_eq!(call[1]["create"]["c1"]["onlineServices"], serde_json::json!({"eas_im1":{"@type":"OnlineService","user":"ada@example.im","label":"EAS IM Address 1"},"eas_im2":{"@type":"OnlineService","user":"ada@chat.example","label":"EAS IM Address 2"},"eas_im3":{"@type":"OnlineService","user":"ada@xmpp.example","label":"EAS IM Address 3"},"eas_mms":{"@type":"OnlineService","user":"ada@mms.example","label":"EAS MMS"}}));
                 assert_eq!(
                     call[1]["create"]["c1"]["keywords"],
                     serde_json::json!({"Work":true,"Friends":true})
@@ -8204,6 +8214,7 @@ mod contact_address_tests {
             im_address: Some("ada@example.im".into()),
             im_address_2: Some("ada@chat.example".into()),
             im_address_3: Some("ada@xmpp.example".into()),
+            mms: Some("ada@mms.example".into()),
             categories: Some(vec!["Work".into(), "Friends".into()]),
             ..Default::default()
         };
@@ -8231,7 +8242,7 @@ mod contact_address_tests {
                         0 => {
                             assert_eq!(call[0], "ContactCard/get");
                             Json(serde_json::json!({"methodResponses":[[
-                            "ContactCard/get", {"state":"before","list":[{"id":"c","nicknames":{"eas_nickname":{"name":"Enchantress"},"other":{"name":"Lady Ada"}},"onlineServices":{"eas_im1":{"@type":"OnlineService","user":"old-im","label":"EAS IM Address 1"},"other":{"user":"other-service","service":"Matrix"}},"name":{"full":"Ada Lovelace Jr.","phoneticScript":"Jpan","components":[
+                            "ContactCard/get", {"state":"before","list":[{"id":"c","nicknames":{"eas_nickname":{"name":"Enchantress"},"other":{"name":"Lady Ada"}},"onlineServices":{"eas_im1":{"@type":"OnlineService","user":"old-im","label":"EAS IM Address 1"},"eas_mms":{"@type":"OnlineService","user":"old@mms.example","label":"EAS MMS"},"other":{"user":"other-service","service":"Matrix"}},"name":{"full":"Ada Lovelace Jr.","phoneticScript":"Jpan","components":[
                                 {"kind":"given","value":"Ada","phonetic":"エイダ"},
                                 {"kind":"given2","value":"Augusta"},
                                 {"kind":"surname","value":"Lovelace","phonetic":"ラブレス"},
@@ -8273,7 +8284,7 @@ mod contact_address_tests {
                                 })
                             );
                             assert_eq!(call[1]["update"]["c"]["nicknames"], serde_json::json!({"eas_nickname":{"name":"Countess Ada"},"other":{"name":"Lady Ada"}}));
-                            assert_eq!(call[1]["update"]["c"]["onlineServices"], serde_json::json!({"eas_im1":{"@type":"OnlineService","user":"new-im","label":"EAS IM Address 1"},"other":{"user":"other-service","service":"Matrix"},"eas_im3":{"@type":"OnlineService","user":"new-im3","label":"EAS IM Address 3"}}));
+                            assert_eq!(call[1]["update"]["c"]["onlineServices"], serde_json::json!({"eas_im1":{"@type":"OnlineService","user":"new-im","label":"EAS IM Address 1"},"other":{"user":"other-service","service":"Matrix"},"eas_im3":{"@type":"OnlineService","user":"new-im3","label":"EAS IM Address 3"},"eas_mms":{"@type":"OnlineService","user":"new@mms.example","label":"EAS MMS"}}));
                             assert_eq!(
                                 call[1]["update"]["c"]["organizations"],
                                 serde_json::json!({"org":{"name":"Analytical Engines Ltd","sortAs":"アナリティカル エンジンズ改","units":[{"@type":"OrgUnit","name":"New Department"}]}})
@@ -8362,6 +8373,7 @@ mod contact_address_tests {
             im_address: Some("new-im".into()),
             im_address_2: Some(String::new()),
             im_address_3: Some("new-im3".into()),
+            mms: Some("new@mms.example".into()),
             home_address_city: Some("Vancouver".into()),
             business_address_street: Some(String::new()),
             ..Default::default()
@@ -8422,7 +8434,7 @@ mod contact_address_tests {
     #[test]
     fn contact_name_read_maps_middle_name_and_suffix() {
         let card: ContactCardObject = serde_json::from_value(serde_json::json!({
-            "id":"c", "nicknames":{"eas_nickname":{"name":"Enchantress of Numbers"}}, "onlineServices":{"eas_im1":{"user":"ada@example.im"},"eas_im2":{"user":"ada@chat.example"},"eas_im3":{"user":"ada@xmpp.example"}}, "name":{"full":"Ada Lovelace Jr.","phoneticScript":"Jpan","components":[
+            "id":"c", "nicknames":{"eas_nickname":{"name":"Enchantress of Numbers"}}, "onlineServices":{"eas_im1":{"user":"ada@example.im"},"eas_im2":{"user":"ada@chat.example"},"eas_im3":{"user":"ada@xmpp.example"},"eas_mms":{"user":"ada@mms.example"}}, "name":{"full":"Ada Lovelace Jr.","phoneticScript":"Jpan","components":[
                 {"kind":"given","value":"Ada","phonetic":"エイダ"},
                 {"kind":"given2","value":"Augusta"},
                 {"kind":"surname","value":"Lovelace","phonetic":"ラブレス"},
@@ -8457,6 +8469,7 @@ mod contact_address_tests {
         assert_eq!(contact.im_address1.as_deref(), Some("ada@example.im"));
         assert_eq!(contact.im_address2.as_deref(), Some("ada@chat.example"));
         assert_eq!(contact.im_address3.as_deref(), Some("ada@xmpp.example"));
+        assert_eq!(contact.mms.as_deref(), Some("ada@mms.example"));
         assert_eq!(contact.yomi_first_name.as_deref(), Some("エイダ"));
         assert_eq!(contact.yomi_last_name.as_deref(), Some("ラブレス"));
         assert_eq!(contact.birthday.as_deref(), Some("18151210"));
