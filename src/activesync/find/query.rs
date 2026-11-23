@@ -8,6 +8,8 @@ enum Token {
     And,
     Or,
     Not,
+    Words,
+    Comma,
 }
 
 pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
@@ -38,6 +40,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>, &'static str> {
             tokens.push(Token::Right);
             continue;
         }
+        if c == ',' {
+            tokens.push(Token::Comma);
+            continue;
+        }
         let mut value = String::new();
         let mut quoted = false;
         let mut in_quote = false;
@@ -59,7 +65,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, &'static str> {
             if !in_quote
                 && chars
                     .peek()
-                    .is_none_or(|c| c.is_whitespace() || matches!(c, '(' | ')'))
+                    .is_none_or(|c| c.is_whitespace() || matches!(c, '(' | ')' | ','))
             {
                 break;
             }
@@ -72,9 +78,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, &'static str> {
             "AND" if !quoted => Token::And,
             "OR" if !quoted => Token::Or,
             "NOT" if !quoted => Token::Not,
-            "NEAR" | "ONEAR" | "XRANK" | "WORDS" if !quoted => {
-                return Err("unsupported search operator")
-            }
+            "WORDS" if !quoted => Token::Words,
+            "NEAR" | "ONEAR" | "XRANK" if !quoted => return Err("unsupported search operator"),
             _ => Token::Word(value),
         };
         tokens.push(token);
@@ -147,6 +152,7 @@ impl Parser {
         self.position += 1;
         match token {
             Token::Not => Ok(json!({"operator": "NOT", "conditions": [self.unary(depth + 1)?]})),
+            Token::Words => self.words_operator(),
             Token::Left => {
                 let value = self.implicit(depth + 1)?;
                 if self.tokens.get(self.position) != Some(&Token::Right) {
@@ -158,6 +164,40 @@ impl Parser {
             Token::Word(word) => word_condition(&word),
             _ => Err("unexpected search operator"),
         }
+    }
+
+    fn words_operator(&mut self) -> Result<Value, &'static str> {
+        if self.tokens.get(self.position) != Some(&Token::Left) {
+            return Err("WORDS requires parentheses");
+        }
+        self.position += 1;
+        let mut terms = Vec::new();
+        loop {
+            match self.tokens.get(self.position).cloned() {
+                Some(Token::Right) => break,
+                Some(Token::Comma) => self.position += 1,
+                Some(Token::Word(word)) => {
+                    self.position += 1;
+                    let term = word.trim_start_matches(['+', '-']);
+                    if term.is_empty()
+                        || (!term.starts_with('"')
+                            && (comparison_index(term).is_some() || term.contains(':')))
+                        || (term.starts_with('"') && term.chars().any(char::is_whitespace))
+                    {
+                        return Err("WORDS accepts only searchable text terms");
+                    }
+                    terms.push(condition("text", term)?);
+                }
+                _ => return Err("invalid WORDS term list"),
+            }
+        }
+        if terms.is_empty() {
+            return Err("WORDS requires at least one term");
+        }
+        self.position += 1;
+        let mut terms = terms.into_iter();
+        let first = terms.next().unwrap();
+        Ok(terms.fold(first, |left, right| combine("OR", left, right)))
     }
 }
 
@@ -608,6 +648,27 @@ mod tests {
         }
         assert!(to_filter("isread>1").is_err());
         assert!(to_filter("isread=maybe").is_err());
+    }
+
+    #[test]
+    fn words_operator_searches_for_any_listed_text_term() {
+        for query in ["WORDS(TV, Television)", "WORDS(TV Television)"] {
+            assert_eq!(
+                to_filter(query).unwrap(),
+                json!({"operator":"OR", "conditions":[
+                    {"text":"TV"}, {"text":"Television"}
+                ]})
+            );
+        }
+        assert_eq!(
+            to_filter("WORDS(+TV, -Television)").unwrap(),
+            json!({"operator":"OR", "conditions":[
+                {"text":"TV"}, {"text":"Television"}
+            ]})
+        );
+        assert!(to_filter("WORDS()").is_err());
+        assert!(to_filter("WORDS(subject:TV)").is_err());
+        assert!(to_filter("WORDS(\"two words\")").is_err());
     }
 
     #[test]
