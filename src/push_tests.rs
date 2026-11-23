@@ -6906,7 +6906,7 @@ mod e2e {
 
         for (answer, version, send, expected) in [
             ("1", "14.0", false, "2"),
-            ("1", "16.1", true, "4"),
+            ("1", "16.1", true, "1"),
             ("9", "16.1", false, "2"),
         ] {
             let mut b = eas::DocumentBuilder::new();
@@ -6929,7 +6929,10 @@ mod e2e {
                 )
                 .await;
             assert_eq!(eas::find_text_after(&doc, mr::STATUS), Some(expected));
-            assert!(eas::find_text_after(&doc, mr::CALENDAR_ID).is_none());
+            assert_eq!(
+                eas::find_text_after(&doc, mr::CALENDAR_ID).is_some(),
+                expected == "1"
+            );
         }
 
         let event = live.call_using(serde_json::json!([["CalendarEvent/get", {"accountId":live.account,"ids":[&id],"properties":["uid"]}, "0"]]), &using).await;

@@ -58,14 +58,16 @@ pub(super) async fn handle(
             };
             let item_id = long_id.unwrap_or(id);
             let response = eas::find_text_after(&request, mr::USER_RESPONSE).unwrap_or("");
+            let send_response = eas::contains_token(&request, mr::SEND_RESPONSE);
             let unsupported = [
                 mr::INSTANCE_ID,
-                mr::SEND_RESPONSE,
                 mr::PROPOSED_START_TIME,
                 mr::PROPOSED_END_TIME,
             ]
             .iter()
-            .any(|t| eas::contains_token(&request, *t));
+            .any(|t| eas::contains_token(&request, *t))
+                || (send_response
+                    && eas::contains_token(&request, crate::wbxml::eas::airsync_base::BODY));
             let fields = eas::child_elements(&request);
             let required = [mr::REQUEST_ID, mr::COLLECTION_ID, mr::USER_RESPONSE];
             let count = |token| fields.iter().filter(|field| is(field, token)).count();
@@ -80,6 +82,8 @@ pub(super) async fn handle(
             };
             let valid_fields = valid_target
                 && count(mr::USER_RESPONSE) == 1
+                && (!send_response
+                    || matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1))
                 && fields.iter().all(|field| {
                     required
                         .iter()
@@ -159,6 +163,7 @@ pub(super) async fn handle(
                                     &event,
                                     participation,
                                     organizer.as_deref(),
+                                    send_response,
                                 )
                                 .await
                             {

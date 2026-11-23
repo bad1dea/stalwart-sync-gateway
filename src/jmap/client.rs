@@ -3047,6 +3047,7 @@ impl JmapClient {
         event_id: &str,
         participation: &str,
         expected_organizer: Option<&str>,
+        send_response: bool,
     ) -> anyhow::Result<bool> {
         let account = auth
             .session
@@ -3136,13 +3137,13 @@ impl JmapClient {
                 .context("meeting calendar membership missing")?;
             let count = calendars.values().filter(|value| **value == true).count();
             let arguments = if count == 1 {
-                serde_json::json!({"accountId":account,"ifInState":state,"sendSchedulingMessages":false,"destroy":[event_id]})
+                serde_json::json!({"accountId":account,"ifInState":state,"sendSchedulingMessages":send_response,"destroy":[event_id]})
             } else {
                 let path = format!(
                     "calendarIds/{}",
                     calendar_id.replace('~', "~0").replace('/', "~1")
                 );
-                serde_json::json!({"accountId":account,"ifInState":state,"sendSchedulingMessages":false,"update":{event_id:{path:null}}})
+                serde_json::json!({"accountId":account,"ifInState":state,"sendSchedulingMessages":send_response,"update":{event_id:{path:null}}})
             };
             let response: JmapResponse<serde_json::Value> = self
                 .api_call(
@@ -3218,7 +3219,7 @@ impl JmapClient {
         let path = format!("participants/{key}/participationStatus");
         let response: JmapResponse<serde_json::Value> = self.api_call(auth, &using,
             vec![MethodCall::new("CalendarEvent/set", serde_json::json!({"accountId":account,
-                "ifInState":state,"sendSchedulingMessages":false,
+                "ifInState":state,"sendSchedulingMessages":send_response,
                 "update":{event_id:{path:participation, format!("participants/{key}/roles"):participant["roles"].clone()}}}), "set")]).await?;
         let result = response
             .method_responses
@@ -8676,6 +8677,81 @@ mod email_state_retry_tests {
             .unwrap();
         assert_eq!(state.flag, Some(merged));
         assert_eq!(calls.load(Ordering::SeqCst), 5);
+        server.abort();
+    }
+}
+
+#[cfg(test)]
+mod meeting_response_send_tests {
+    use super::*;
+    use axum::{routing::post, Json, Router};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn meeting_response_send_flag_controls_jmap_scheduling_messages() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let captured = calls.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(request): Json<serde_json::Value>| {
+                let calls = captured.clone();
+                async move {
+                    let call = &request["methodCalls"][0];
+                    match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                        0 => {
+                            assert_eq!(call[0], "CalendarEvent/get");
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/get", {"state":"s1","list":[{"id":"e","@type":"Event","calendarIds":{"cal":true},"participants":{
+                                    "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                                    "self":{"email":"user@example.test","roles":{"attendee":true},"participationStatus":"needs-action"}
+                                }}]}, "get"]]}))
+                        }
+                        1 => {
+                            assert_eq!(call[0], "CalendarEvent/set");
+                            assert_eq!(call[1]["sendSchedulingMessages"], true);
+                            assert_eq!(call[1]["ifInState"], "s1");
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/set", {"updated":{"e":null}}, "set"]]}))
+                        }
+                        2 => {
+                            assert_eq!(call[0], "CalendarEvent/get");
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/get", {"state":"s2","list":[{"id":"e","participants":{
+                                    "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                                    "self":{"email":"user@example.test","roles":{"attendee":true},"participationStatus":"accepted"}
+                                }}]}, "verify"]]}))
+                        }
+                        _ => panic!("unexpected JMAP request"),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CALENDARS:"a"}, "apiUrl":url,
+            "downloadUrl":url,"uploadUrl":url,"username":"user@example.test","state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user@example.test".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        assert!(client
+            .respond_calendar_event(&auth, "cal", "e", "accepted", None, true)
+            .await
+            .unwrap());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
         server.abort();
     }
 }
