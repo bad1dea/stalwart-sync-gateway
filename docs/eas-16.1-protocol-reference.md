@@ -49,18 +49,18 @@ not establish real-client 16.1 certification.
 Retrieves/syncs the account's folder hierarchy in one shot (not
 incremental per-folder like Sync — it's a single SyncKey covering the
 whole hierarchy). Server returns folder Adds/Updates/Deletes since the
-last key. This gateway's `folder_sync()` always sends the full set as
-Adds on key "0" and returns a fixed key of "1" thereafter (no real
-incremental diffing) — reasonable for a small, mostly-static folder set,
-but not spec-general.
+last key. This gateway's `folder_sync()` sends the full hierarchy on key "0",
+then diffs collection fingerprints against per-device saved state and returns
+only Adds, Updates, and Deletes. Unknown keys return Status 9; a device with
+no saved hierarchy is safely baselined without a mass reset.
 
 ### FolderCreate / FolderUpdate / FolderDelete (§2.2.1.3/.6/.4)
-Client-driven folder mutation (rename, move, delete, create). **Not
-implemented** in this gateway — every folder is discovered read-only from
-JMAP Mailbox/ContactCard-AddressBook/CalendarEvent-Calendar objects, never
-created by the EAS client. Low priority unless the daily-driver workflow
-needs on-device folder management (unlikely for the mail-heavy use case
-here).
+Client-driven folder mutation (rename, move, delete, create). The gateway
+supports mail folders through `Mailbox/set`, and user Contact/Calendar
+folders through `AddressBook/set` and `Calendar/set`. Those groupware
+collections are flat, so only root-level create/rename operations are valid.
+Notes and Tasks are derived EAS folders and have no independent collection
+lifecycle. FolderSync reports collection changes incrementally.
 
 ### Sync (§2.2.1.21)
 The core per-collection incremental sync command — one `<Collection>` per
@@ -117,16 +117,14 @@ Moves one or more items between folders server-side. Implemented
 
 ### Search (§2.2.1.16) / Find (§2.2.1.2)
 Search is the older mailbox-content + GAL search command; Find is its
-newer replacement, notably capable of GAL (directory) lookups the way
-Outlook's people-search UI expects. **Neither is implemented** in this
-gateway (both fall through to 501 despite `Find` being listed in
-`SUPPORTED_COMMANDS` — that's currently a lie the OPTIONS response tells
-the client). Directory/GAL search would need a JMAP-side equivalent this
-gateway doesn't have yet — Stalwart's `Principal` object family
-(`urn:ietf:params:jmap:principals`) is the closest JMAP primitive, but
-whether it supports free-text directory search the way GAL does is
-**[unverified this session]** — needs checking against Stalwart's actual
-Principal/get,query support before scoping this.
+newer replacement, notably capable of GAL (directory) lookups. Both are
+implemented. Mailbox and GAL Search use JMAP Email/Principal queries; Find
+uses KQL translation for mailbox searches and Principal text queries for
+directory results. The parser supports Boolean groups, size/received and
+boolean comparisons, property qualifiers, WORDS, ALL, ANY, and NONE. Exact
+multiword phrase order and proximity operators remain unavailable because
+Stalwart's native text index does not preserve them. Find is protocol-version
+gated to 16.1 and is not advertised while production negotiates only 14.0.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
 SendMail posts a full new outgoing message; SmartReply/SmartForward use

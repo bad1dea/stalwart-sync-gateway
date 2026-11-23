@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `562d391` (2026-11-23)
+## Reconciled status for source `main` at `094b478` (2026-11-22)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -167,6 +167,22 @@ Deployed as `deploy-2026-11-23-eas-kql-set-ops-562d391`; homelab commit
 The container started at `2026-11-23T00:44:03Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`.
 
+Also completed: **FolderCreate/Update/Delete for Contact and Calendar
+collections**. The existing mail-folder lifecycle remains hierarchical; new
+Contact (`Type=14`) and Calendar (`Type=13`) folders map to `AddressBook/set`
+and `Calendar/set` with synthetic `ab_`/`cal_` IDs. JMAP groupware folders
+are root-level, and derived Notes/Tasks folders do not gain independent
+CRUD. The mocked HTTP regression exercises create, rename, delete, invalid
+types, and incremental FolderSync visibility for both types. Full suite: 260
+passed, 73 ignored; clippy with warnings denied, formatting, and diff checks
+pass. Deployed as
+`deploy-2026-11-22-eas-groupware-folders-094b478`; homelab commit `b0c9a33`.
+Compose rebuilt the pinned tag to image
+`sha256:ce0a83b1553833ba027214488fae4a834aa820cdf7877fc0944c74c55d92dc18`,
+started at `2026-11-23T00:59:39Z` with restart count zero. Mesh `/healthz`
+returned `ok` and `/readyz` returned `ready`. The CRUD behavior is covered by
+mocked HTTP regression tests; no live collection was created during deployment.
+
 This reconciliation supersedes older status claims in this document where
 they conflict with source `main` at the stated revision. Update this section
 after each completed feature and retain historical observations below as
@@ -197,8 +213,8 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Sync: Calendar recurrence (RRULE) | **Confirmed BLOCKED at the JMAP layer (2026-08-25)** | JSCalendar `recurrenceRules` — Stalwart rejects it outright | Live-tested directly, not just code-read: `CalendarEvent/set create` with `recurrenceRules` (multiple shapes tried — minimal `{"frequency":"weekly"}`, with `@type`, with `interval`) is rejected every time with `notCreated: {type: "invalidProperties", properties: ["recurrenceRules"]}` — the property itself is unrecognized, not just validated-and-rejected-for-content. `CalendarEvent/get` with `recurrenceRules`/`recurrenceOverrides` explicitly requested on an existing event silently omits both (no error, just absent) — same "silently drops the property" behavior already seen for `participants` (see MeetingResponse row). This is the same class of finding: blocked on Stalwart adding real recurrence support to `CalendarEvent`, not a gateway-side task. `write_calendar_command()` (renamed from `write_calendar_add` this session) still only emits the 6 non-recurring fields it always has; nothing to build here until Stalwart's JMAP support changes. |
 | Sync: Tasks | **Done, two-way (`deploy-2026-08-26i`)** | `CalendarEvent` with `@type: "Task"` — confirmed live, NOT a separate JMAP object | Overturns the earlier "structurally unclear" verdict. Live-tested directly (2026-08-25): Stalwart accepts and round-trips `@type: "Task"` on `CalendarEvent` — `title`/`due`/`start`/`progress`/`percentComplete`/`priority`/`description` all confirmed by reading the object back, not just a clean create response. There's no separate Tasks-list capability or object; Tasks rides on the SAME Calendar storage as Events, distinguished only by `@type`, with no server-side query filter for it (`{"type"`/`"@type": "Task"}` both come back `unsupportedFilter`, checked live) — `tasks_in_calendar()` fetches the whole calendar and filters client-side. `GatewayCapabilities::tasks` was already `has(CALENDARS)` with a comment calling it "a placeholder, not a real signal" — that alias turns out to have been correct all along. Full Add/Change/Delete lifecycle live-verified over the REAL WBXML wire protocol (not just direct JMAP): FolderSync correctly advertises a "Tasks" folder (type 7); a throwaway task Add → Change (mark complete) → confirmed via direct JMAP read that `progress` actually became `"completed"` server-side → Delete over the wire → confirmed via direct JMAP that the id came back `notFound`. One real open gap: `write_task_command()`'s field order (Subject, Complete, DueDate, UtcDueDate) is NOT device-verified — unlike Calendar/Contacts/Email there's no reference implementation to check it against (this codebase's own `docs/PR187_ANALYSIS.md` says Tasks was never attempted in the z-push fork this project was ported from), and MS-ASCMD's `ItemProperties` group (fetched fresh from learn.microsoft.com) is an `xs:choice`, not an `xs:sequence`, so the wire spec itself doesn't mandate an order. Needs a live device Tasks sync (e.g. iOS Reminders via the EAS account) before trusting it, same standing caveat as the ConversationId redo. |
 | Sync: Notes | **Done, two-way** | Email-backed synthetic-message workaround (`src/jmap/notes.rs`) | The most structurally interesting piece of this whole gateway — see that file's module doc. Full Add/Change/Delete supported. |
-| FolderSync | **Done (simplified)** | `Mailbox/get`, `ContactCard`-AddressBook listing, `CalendarEvent`-Calendar listing | Always full-resync-as-Adds on key "0", fixed key "1" after — not a real incremental folder diff, but functionally fine for a folder set that rarely changes. |
-| FolderCreate/Update/Delete | **Done** (`deploy-2026-08-25u`, mail only) | `Mailbox/set` create/update/destroy | `folder_create`/`folder_update`/`folder_delete` in `src/activesync.rs`. Mail-only per the original scoping note — a `note_`/`ab_`/`cal_`-prefixed id is rejected before calling JMAP. Error mapping (`alreadyExists`/`invalidProperties`/`forbidden`/`notFound`) confirmed live against the real account, including an actual rejected destroy-Inbox attempt. Full create→rename/reparent→delete lifecycle live-verified, including duplicate-name and bad-parent rejection paths. |
+| FolderSync | **Done, incremental** | `Mailbox/get`, `AddressBook/get`, `Calendar/get` | Key 0 sends a full Adds snapshot; subsequent keys diff per-device collection fingerprints into Adds/Updates/Deletes. Unknown keys return Status 9. |
+| FolderCreate/Update/Delete | **Done** (`deploy-2026-11-22-eas-groupware-folders-094b478`) | `Mailbox/set`, `AddressBook/set`, and `Calendar/set` | Mail folders retain hierarchical parent support. User Contacts (`Type=14`) and Calendar (`Type=13`) folders create, rename, and delete JMAP collections with synthetic `ab_`/`cal_` EAS IDs; those collections remain root-level because JMAP has no parent hierarchy. Notes and Tasks remain derived collections without independent CRUD. Mocked HTTP regression covers create/rename/delete for both types and rejects invalid types. |
 | Ping | **Done** | N/A (gateway-local long-poll + JMAP poll underneath, implementation detail not deeply re-read this pass) | Empirically rock-solid over the entire multi-day A/B test; deliberately not touched further this session even where a codepage table read once looked mismatched. |
 | ItemOperations (Fetch) | **Done (legacy/secondary path)** | `Email/get` + `download_blob()` | Real device confirmed to use the *Sync-embedded* Fetch instead for opening messages; this command path exists for other-client compatibility. |
 | ItemOperations (attachment fetch via ItemOperations, not GetAttachment) | **Implemented** | `download_blob_with_type()` | `FileReference` fetch supports full and byte-range blob responses. ItemOperations Fetch also routes notes, tasks, calendar events, contacts, and mail. |
@@ -249,9 +265,7 @@ read/reply/send, plus calendar/contacts/notes sync.
    explicitly out of scope (see the type-matrix doc for the real
    field-by-field recurrence mapping when that becomes the target).
 
-2b. ✅ **DONE (`deploy-2026-08-25u`) — FolderCreate/FolderUpdate/FolderDelete,
-    mail only.** Also shipped and live-verified this session, backed by
-    `Mailbox/set`. See the status table row for the full story.
+2b. ✅ **DONE (`deploy-2026-11-22-eas-groupware-folders-094b478`) — FolderCreate/FolderUpdate/FolderDelete for mail, contacts and calendars.** Mail remains hierarchical; groupware collections use `AddressBook/set` and `Calendar/set` at the root. Regression tests cover both collection types. See the status table row for limitations and deployment details.
 2c. ✅ **DONE (`deploy-2026-08-25v`) — server-side mail deletions surfaced
     as ActiveSync deletes.** Also shipped and live-verified this session.
     See the status table row — this one had a real correctness trap
