@@ -315,7 +315,10 @@ entries under `ifInState`. Regression coverage checks WBXML parsing/output and
 JMAP create/read/update. Full suite: 266 passed, 73 ignored; clippy with
 warnings denied, formatting, and diff checks pass. Deployed as
 `deploy-2026-11-22-eas-contact-business-fax-78425f9`; runtime verification is
-in progress. No live contact was modified during deployment.
+image `sha256:f63012bd75de6deeaa15f5d32243124326933a0ea4434089cef9a2d773150161`,
+started at `2026-11-23T02:13:27Z` with restart count zero. Mesh `/healthz`
+returned `ok` and `/readyz` returned `ready`. No live contact was modified
+during deployment.
 
 Also completed: **ActiveSync Contact postal addresses**. Business, home, and
 other city/country/postal-code/state/street fields now round-trip through
