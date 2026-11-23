@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `c9dc4a2` (2026-11-22)
+## Reconciled status for source `main` at `1109860` (2026-11-22)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -331,6 +331,22 @@ diff checks pass. Deployed as
 `deploy-2026-11-22-eas-contact-yomi-company-4860c47`; Hermes Compose built
 image `sha256:257b69377ac1ee241448ff8d46844e71a0ab8a77c138a4bb5e1dbdcc26836c8c`.
 The container started at `2026-11-23T02:36:42Z` with restart count zero; mesh
+`/healthz` returned `ok` and `/readyz` returned `ready`.
+
+Also completed: **EAS 16.x MeetingResponse SendResponse**. For protocol
+16.0/16.1, an empty `SendResponse` now requests JMAP scheduling messages;
+omitting it continues to suppress them. A `SendResponse` with an embedded
+custom body remains unsupported, as do `InstanceId` and proposed meeting
+start/end times. The behavior follows the
+[MS-ASCMD MeetingResponse rules](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/42ececcd-37df-4340-aa50-783ba714facb)
+and [SendResponse definition](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/128fff4c-1b97-42d8-a30f-f023327add0b).
+Regression coverage asserts `sendSchedulingMessages` at the JMAP boundary and
+updates the deferred live MeetingResponse scenario. Full suite: 267 passed,
+73 ignored; clippy with warnings denied, formatting and diff checks pass.
+Deployed as `deploy-2026-11-22-eas-16-meeting-send-response-1109860`; Hermes
+Compose built image
+`sha256:3e60bf151cf5b386a50cb564f9f899e8f327f8bf3b84070c2dee11908045e9d8`.
+The container started at `2026-11-23T03:25:57Z` with restart count zero; mesh
 `/healthz` returned `ok` and `/readyz` returned `ready`.
 
 Also completed: **ActiveSync contact account name**. Contacts2 `AccountName`
