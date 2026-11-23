@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `81940f4` (2026-11-22)
+## Reconciled status for source `main` at `b836553` (2026-11-22)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -331,6 +331,21 @@ diff checks pass. Deployed as
 `deploy-2026-11-22-eas-contact-yomi-company-4860c47`; Hermes Compose built
 image `sha256:257b69377ac1ee241448ff8d46844e71a0ab8a77c138a4bb5e1dbdcc26836c8c`.
 The container started at `2026-11-23T02:36:42Z` with restart count zero; mesh
+`/healthz` returned `ok` and `/readyz` returned `ready`.
+
+Also completed: **ActiveSync contact MMS address**. Contacts2 `MMS` maps to
+a dedicated JSContact `onlineServices` user value (`eas_mms`) without
+conflating it with the three IM address fields. The field is defined as a
+string address by [MS-ASCNTC](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascntc/a006c688-6d5f-4aed-a9ac-d70019d3c67b)
+and JSContact permits a free-text `user` for online service data under
+[RFC 9553](https://www.rfc-editor.org/rfc/rfc9553.html#section-2.3.2).
+Regression coverage checks WBXML parsing/output, hash changes, JMAP
+create/read/update, and preservation of other online services. Full suite:
+266 passed, 73 ignored; clippy with warnings denied, formatting and diff
+checks pass. Deployed as `deploy-2026-11-22-eas-contact-mms-b836553`; Hermes
+Compose built image
+`sha256:9bb3c332de0eb7605fce96ea2b894475c7c2982cdedcfe0d5cf8c57388573695`.
+The container started at `2026-11-23T03:11:55Z` with restart count zero; mesh
 `/healthz` returned `ok` and `/readyz` returned `ready`.
 
 Also completed: **ActiveSync company main phone**. Contacts2 `CompanyMainPhone`
