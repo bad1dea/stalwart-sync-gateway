@@ -5556,6 +5556,8 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.home_phone2.hash(&mut hasher);
     contact.business_phone.hash(&mut hasher);
     contact.business_phone2.hash(&mut hasher);
+    contact.home_fax.hash(&mut hasher);
+    contact.pager.hash(&mut hasher);
     contact.company_name.hash(&mut hasher);
     contact.department.hash(&mut hasher);
     contact.job_title.hash(&mut hasher);
@@ -5650,6 +5652,9 @@ fn write_contact_fields(
     if let Some(home2) = &contact.home_phone2 {
         builder.leaf(c::HOME_2_PHONE_NUMBER, home2.clone());
     }
+    if let Some(home_fax) = &contact.home_fax {
+        builder.leaf(c::HOME_FAX_NUMBER, home_fax.clone());
+    }
     if let Some(title) = &contact.job_title {
         builder.leaf(c::JOB_TITLE, title.clone());
     }
@@ -5673,6 +5678,9 @@ fn write_contact_fields(
     }
     if let Some(mobile) = &contact.mobile_phone {
         builder.leaf(c::MOBILE_PHONE_NUMBER, mobile.clone());
+    }
+    if let Some(pager) = &contact.pager {
+        builder.leaf(c::PAGER_NUMBER, pager.clone());
     }
     write_contact_address_fields(builder, contact.other_address.as_ref(), "other", is_change);
 }
@@ -7822,6 +7830,8 @@ mod tests {
             department: Some("Research".into()),
             home_phone2: Some("555-0102".into()),
             business_phone2: Some("555-0104".into()),
+            home_fax: Some("555-0105".into()),
+            pager: Some("555-0106".into()),
             business_address: Some(crate::model::ContactAddress {
                 city: Some("Toronto".into()),
                 country: Some("Canada".into()),
@@ -7880,6 +7890,14 @@ mod tests {
         assert_eq!(
             eas::find_text_after(&doc, c::BUSINESS_2_PHONE_NUMBER),
             Some("555-0104")
+        );
+        assert_eq!(
+            eas::find_text_after(&doc, c::HOME_FAX_NUMBER),
+            Some("555-0105")
+        );
+        assert_eq!(
+            eas::find_text_after(&doc, c::PAGER_NUMBER),
+            Some("555-0106")
         );
         contact.business_address.as_mut().unwrap().city = Some("Hamilton".into());
         assert_ne!(super::contact_hash(&contact), before);

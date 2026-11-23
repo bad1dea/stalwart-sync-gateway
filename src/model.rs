@@ -282,6 +282,8 @@ pub struct Contact {
     pub home_phone2: Option<String>,
     pub business_phone: Option<String>,
     pub business_phone2: Option<String>,
+    pub home_fax: Option<String>,
+    pub pager: Option<String>,
     pub company_name: Option<String>,
     pub department: Option<String>,
     pub job_title: Option<String>,
