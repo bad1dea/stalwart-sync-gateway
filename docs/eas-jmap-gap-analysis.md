@@ -94,6 +94,14 @@ preserve. A direct 0.16.27 probe confirmed that native multiword text filters
 require all terms, matching KQL's implicit AND behavior. Regression tests cover
 unknown properties, comparisons, and phrase rejection. The full suite passes
 (255 passed, 73 ignored), and clippy with warnings denied passes.
+Deployed as `deploy-2026-11-22-eas-kql-7dd8863`; homelab commit `28cca02`.
+Komodo reported success but retained the prior source ref, so runtime
+verification caught the stale image. After fast-forwarding the Hermes checkout,
+the forced Compose build compiled the pinned source and produced image
+`sha256:cdb7435339fe776bdcf5242c56a24e1f2a678652c3817dbcbbc34aca6048d996`.
+The replacement started at `2026-11-23T00:12:29Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`. The gateway
+continues to advertise only EAS 14.0.
 
 This reconciliation supersedes older status claims in this document where
 they conflict with source `main` at the stated revision. Update this section
