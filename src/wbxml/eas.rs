@@ -1337,6 +1337,7 @@ pub struct ContactFields {
     pub yomi_last_name: Option<String>,
     pub yomi_company_name: Option<String>,
     pub office_location: Option<String>,
+    pub nickname: Option<String>,
     pub birthday: Option<String>,
     pub anniversary: Option<String>,
     pub file_as: Option<String>,
@@ -2397,6 +2398,8 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                         fields.yomi_company_name = empty;
                     } else if same_token(*token, contacts::OFFICE_LOCATION) {
                         fields.office_location = empty;
+                    } else if same_token(*token, contacts2::NICK_NAME) {
+                        fields.nickname = empty;
                     } else if same_token(*token, contacts::DEPARTMENT) {
                         fields.department = empty;
                     } else if same_token(*token, contacts::BUSINESS_2_PHONE_NUMBER) {
@@ -2445,6 +2448,8 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                     fields.yomi_company_name = Some(text.clone());
                 } else if same_token(top, contacts::OFFICE_LOCATION) {
                     fields.office_location = Some(text.clone());
+                } else if same_token(top, contacts2::NICK_NAME) {
+                    fields.nickname = Some(text.clone());
                 } else if same_token(top, contacts::FILE_AS) {
                     fields.file_as = Some(text.clone());
                 } else if same_token(top, contacts::EMAIL1_ADDRESS) {
@@ -3235,6 +3240,7 @@ mod tests {
         builder.leaf(contacts::YOMI_LAST_NAME, "ラブレス");
         builder.leaf(contacts::YOMI_COMPANY_NAME, "アナリティカル エンジンズ");
         builder.leaf(contacts::OFFICE_LOCATION, "Building 4, Floor 2");
+        builder.leaf(contacts2::NICK_NAME, "Enchantress of Numbers");
         builder.leaf(contacts::BIRTHDAY, "18151210");
         builder.leaf(contacts::ANNIVERSARY, "18351108");
         builder.leaf(contacts::EMAIL1_ADDRESS, "ada@example.com");
@@ -3290,6 +3296,10 @@ mod tests {
         assert_eq!(
             command.contact.office_location.as_deref(),
             Some("Building 4, Floor 2")
+        );
+        assert_eq!(
+            command.contact.nickname.as_deref(),
+            Some("Enchantress of Numbers")
         );
         assert_eq!(command.contact.birthday.as_deref(), Some("18151210"));
         assert_eq!(command.contact.anniversary.as_deref(), Some("18351108"));

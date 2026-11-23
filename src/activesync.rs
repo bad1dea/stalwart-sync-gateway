@@ -5551,6 +5551,7 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.yomi_last_name.hash(&mut hasher);
     contact.yomi_company_name.hash(&mut hasher);
     contact.office_location.hash(&mut hasher);
+    contact.nickname.hash(&mut hasher);
     contact.birthday.hash(&mut hasher);
     contact.anniversary.hash(&mut hasher);
     contact.file_as.hash(&mut hasher);
@@ -5601,6 +5602,7 @@ fn write_contact_fields(
     is_change: bool,
 ) {
     use wbxml::eas::contacts as c;
+    use wbxml::eas::contacts2 as c2;
 
     // Field order follows the real z-push-stalwart-jmap source (PR #187,
     // pinned in config/z-push/Dockerfile: synccontact.php's $mapping),
@@ -5693,6 +5695,9 @@ fn write_contact_fields(
     }
     if let Some(office_location) = &contact.office_location {
         builder.leaf(c::OFFICE_LOCATION, office_location.clone());
+    }
+    if let Some(nickname) = &contact.nickname {
+        builder.leaf(c2::NICK_NAME, nickname.clone());
     }
     if let Some(birthday) = &contact.birthday {
         builder.leaf(c::BIRTHDAY, birthday.clone());
@@ -7858,7 +7863,7 @@ mod tests {
 
     #[test]
     fn contact_address_fields_are_emitted_and_included_in_change_hashes() {
-        use crate::wbxml::eas::{self, contacts as c};
+        use crate::wbxml::eas::{self, contacts as c, contacts2 as c2};
         let mut contact = crate::model::Contact {
             middle_name: Some("Augusta".into()),
             suffix: Some("Jr.".into()),
@@ -7867,6 +7872,7 @@ mod tests {
             yomi_last_name: Some("ラブレス".into()),
             yomi_company_name: Some("アナリティカル エンジンズ".into()),
             office_location: Some("Building 4, Floor 2".into()),
+            nickname: Some("Enchantress of Numbers".into()),
             department: Some("Research".into()),
             home_phone2: Some("555-0102".into()),
             business_phone2: Some("555-0104".into()),
@@ -7985,6 +7991,10 @@ mod tests {
             Some("Building 4, Floor 2")
         );
         assert_eq!(
+            eas::find_text_after(&doc, c2::NICK_NAME),
+            Some("Enchantress of Numbers")
+        );
+        assert_eq!(
             eas::find_text_after(&doc, c::WEB_PAGE),
             Some("https://example.com/ada")
         );
@@ -7995,6 +8005,8 @@ mod tests {
         contact.yomi_company_name = Some("アナリティカル エンジンズ改".into());
         assert_ne!(super::contact_hash(&contact), before);
         contact.office_location = Some("Building 5".into());
+        assert_ne!(super::contact_hash(&contact), before);
+        contact.nickname = Some("Lady Ada".into());
         assert_ne!(super::contact_hash(&contact), before);
         contact.business_address.as_mut().unwrap().city = Some("Hamilton".into());
         assert_ne!(super::contact_hash(&contact), before);

@@ -277,6 +277,7 @@ pub struct Contact {
     pub yomi_last_name: Option<String>,
     pub yomi_company_name: Option<String>,
     pub office_location: Option<String>,
+    pub nickname: Option<String>,
     pub birthday: Option<String>,
     pub anniversary: Option<String>,
     pub file_as: Option<String>,
