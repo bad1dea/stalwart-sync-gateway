@@ -277,6 +277,18 @@ pub struct Contact {
     pub business_phone: Option<String>,
     pub company_name: Option<String>,
     pub job_title: Option<String>,
+    pub business_address: Option<ContactAddress>,
+    pub home_address: Option<ContactAddress>,
+    pub other_address: Option<ContactAddress>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct ContactAddress {
+    pub city: Option<String>,
+    pub country: Option<String>,
+    pub postal_code: Option<String>,
+    pub state: Option<String>,
+    pub street: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

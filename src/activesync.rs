@@ -1522,7 +1522,7 @@ async fn search_inner(
                             builder.leaf(srch::LONG_ID, format!("contact:{}", contact.id));
                             builder.leaf(air::COLLECTION_ID, format!("ab_{address_book}"));
                             builder.start(srch::PROPERTIES);
-                            write_contact_fields(&mut builder, &contact);
+                            write_contact_fields(&mut builder, &contact, false);
                             builder.end();
                             builder.end();
                         }
@@ -5551,6 +5551,9 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.business_phone.hash(&mut hasher);
     contact.company_name.hash(&mut hasher);
     contact.job_title.hash(&mut hasher);
+    contact.business_address.hash(&mut hasher);
+    contact.home_address.hash(&mut hasher);
+    contact.other_address.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -5563,7 +5566,11 @@ fn write_contact_command(
     builder.start(tag);
     builder.leaf(air::SERVER_ID, contact.id.clone());
     builder.start(air::APPLICATION_DATA);
-    write_contact_fields(builder, contact);
+    write_contact_fields(
+        builder,
+        contact,
+        tag.code_page == air::PAGE && tag.token == air::CHANGE.token,
+    );
     builder.end();
     builder.end();
 }
@@ -5571,6 +5578,7 @@ fn write_contact_command(
 fn write_contact_fields(
     builder: &mut wbxml::eas::DocumentBuilder,
     contact: &crate::model::Contact,
+    is_change: bool,
 ) {
     use wbxml::eas::contacts as c;
 
@@ -5579,7 +5587,15 @@ fn write_contact_fields(
     // synccontact.php's own $mapping, filtered down to the fields this
     // gateway actually sets): BusinessPhoneNumber, CompanyName,
     // Email1/2/3Address, FileAs, FirstName, HomePhoneNumber, JobTitle,
-    // LastName, MobilePhoneNumber. This gateway had FirstName/LastName
+    // LastName, MobilePhoneNumber. Address blocks are emitted at their
+    // positions in the Contacts codepage's token order.
+    write_contact_address_fields(
+        builder,
+        contact.business_address.as_ref(),
+        "business",
+        is_change,
+    );
+    // This gateway had FirstName/LastName
     // first and Business/Company/JobTitle last -- completely reversed
     // from the real schema, the same failure class already confirmed
     // for Email/Attachment/Preview/Notes.
@@ -5605,6 +5621,7 @@ fn write_contact_fields(
     if let Some(first) = &contact.first_name {
         builder.leaf(c::FIRST_NAME, first.clone());
     }
+    write_contact_address_fields(builder, contact.home_address.as_ref(), "home", is_change);
     if let Some(home) = &contact.home_phone {
         builder.leaf(c::HOME_PHONE_NUMBER, home.clone());
     }
@@ -5616,6 +5633,62 @@ fn write_contact_fields(
     }
     if let Some(mobile) = &contact.mobile_phone {
         builder.leaf(c::MOBILE_PHONE_NUMBER, mobile.clone());
+    }
+    write_contact_address_fields(builder, contact.other_address.as_ref(), "other", is_change);
+}
+
+fn write_contact_address_fields(
+    builder: &mut wbxml::eas::DocumentBuilder,
+    address: Option<&crate::model::ContactAddress>,
+    kind: &str,
+    is_change: bool,
+) {
+    use wbxml::eas::contacts as c;
+    let tokens = match kind {
+        "business" => [
+            c::BUSINESS_ADDRESS_CITY,
+            c::BUSINESS_ADDRESS_COUNTRY,
+            c::BUSINESS_ADDRESS_POSTAL_CODE,
+            c::BUSINESS_ADDRESS_STATE,
+            c::BUSINESS_ADDRESS_STREET,
+        ],
+        "home" => [
+            c::HOME_ADDRESS_CITY,
+            c::HOME_ADDRESS_COUNTRY,
+            c::HOME_ADDRESS_POSTAL_CODE,
+            c::HOME_ADDRESS_STATE,
+            c::HOME_ADDRESS_STREET,
+        ],
+        _ => [
+            c::OTHER_ADDRESS_CITY,
+            c::OTHER_ADDRESS_COUNTRY,
+            c::OTHER_ADDRESS_POSTAL_CODE,
+            c::OTHER_ADDRESS_STATE,
+            c::OTHER_ADDRESS_STREET,
+        ],
+    };
+    let values = address
+        .map(|address| {
+            [
+                address.city.as_ref(),
+                address.country.as_ref(),
+                address.postal_code.as_ref(),
+                address.state.as_ref(),
+                address.street.as_ref(),
+            ]
+        })
+        .unwrap_or([None, None, None, None, None]);
+    for (token, value) in tokens.into_iter().zip(values) {
+        match value {
+            Some(value) if value.is_empty() => {
+                builder.empty_tag(token);
+            }
+            Some(value) => {
+                builder.leaf(token, value.clone());
+            }
+            None if is_change => builder.empty_tag(token),
+            None => {}
+        }
     }
 }
 
@@ -7697,6 +7770,56 @@ mod tests {
                     if token.code_page==cal::PAGE && token.token==cal::REMINDER.token && !token.has_content)));
             }
         }
+    }
+
+    #[test]
+    fn contact_address_fields_are_emitted_and_included_in_change_hashes() {
+        use crate::wbxml::eas::{self, contacts as c};
+        let mut contact = crate::model::Contact {
+            business_address: Some(crate::model::ContactAddress {
+                city: Some("Toronto".into()),
+                country: Some("Canada".into()),
+                postal_code: Some("M5V 2T6".into()),
+                state: Some("Ontario".into()),
+                street: Some("100 King St W".into()),
+            }),
+            home_address: Some(crate::model::ContactAddress {
+                city: Some("Ottawa".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let before = super::contact_hash(&contact);
+        let mut builder = DocumentBuilder::new();
+        super::write_contact_fields(&mut builder, &contact, true);
+        let doc = builder.finish();
+        assert_eq!(
+            eas::find_text_after(&doc, c::BUSINESS_ADDRESS_CITY),
+            Some("Toronto")
+        );
+        assert_eq!(
+            eas::find_text_after(&doc, c::BUSINESS_ADDRESS_COUNTRY),
+            Some("Canada")
+        );
+        assert_eq!(
+            eas::find_text_after(&doc, c::BUSINESS_ADDRESS_POSTAL_CODE),
+            Some("M5V 2T6")
+        );
+        assert_eq!(
+            eas::find_text_after(&doc, c::BUSINESS_ADDRESS_STATE),
+            Some("Ontario")
+        );
+        assert_eq!(
+            eas::find_text_after(&doc, c::BUSINESS_ADDRESS_STREET),
+            Some("100 King St W")
+        );
+        assert_eq!(
+            eas::find_text_after(&doc, c::HOME_ADDRESS_CITY),
+            Some("Ottawa")
+        );
+        assert!(eas::contains_token(&doc, c::OTHER_ADDRESS_STREET));
+        contact.business_address.as_mut().unwrap().city = Some("Hamilton".into());
+        assert_ne!(super::contact_hash(&contact), before);
     }
 
     #[test]

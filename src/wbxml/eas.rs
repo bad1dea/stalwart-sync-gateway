@@ -1341,6 +1341,21 @@ pub struct ContactFields {
     pub business_phone_number: Option<String>,
     pub company_name: Option<String>,
     pub job_title: Option<String>,
+    pub business_address_city: Option<String>,
+    pub business_address_country: Option<String>,
+    pub business_address_postal_code: Option<String>,
+    pub business_address_state: Option<String>,
+    pub business_address_street: Option<String>,
+    pub home_address_city: Option<String>,
+    pub home_address_country: Option<String>,
+    pub home_address_postal_code: Option<String>,
+    pub home_address_state: Option<String>,
+    pub home_address_street: Option<String>,
+    pub other_address_city: Option<String>,
+    pub other_address_country: Option<String>,
+    pub other_address_postal_code: Option<String>,
+    pub other_address_state: Option<String>,
+    pub other_address_street: Option<String>,
 }
 
 /// ActiveSync Notes class fields decoded from one Add/Change command's
@@ -2306,7 +2321,43 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
 
     for node in nodes {
         match node {
-            Node::Start(token) => path.push(*token),
+            Node::Start(token) => {
+                if !token.has_content {
+                    let empty = Some(String::new());
+                    if same_token(*token, contacts::BUSINESS_ADDRESS_CITY) {
+                        fields.business_address_city = empty;
+                    } else if same_token(*token, contacts::BUSINESS_ADDRESS_COUNTRY) {
+                        fields.business_address_country = empty;
+                    } else if same_token(*token, contacts::BUSINESS_ADDRESS_POSTAL_CODE) {
+                        fields.business_address_postal_code = empty;
+                    } else if same_token(*token, contacts::BUSINESS_ADDRESS_STATE) {
+                        fields.business_address_state = empty;
+                    } else if same_token(*token, contacts::BUSINESS_ADDRESS_STREET) {
+                        fields.business_address_street = empty;
+                    } else if same_token(*token, contacts::HOME_ADDRESS_CITY) {
+                        fields.home_address_city = empty;
+                    } else if same_token(*token, contacts::HOME_ADDRESS_COUNTRY) {
+                        fields.home_address_country = empty;
+                    } else if same_token(*token, contacts::HOME_ADDRESS_POSTAL_CODE) {
+                        fields.home_address_postal_code = empty;
+                    } else if same_token(*token, contacts::HOME_ADDRESS_STATE) {
+                        fields.home_address_state = empty;
+                    } else if same_token(*token, contacts::HOME_ADDRESS_STREET) {
+                        fields.home_address_street = empty;
+                    } else if same_token(*token, contacts::OTHER_ADDRESS_CITY) {
+                        fields.other_address_city = empty;
+                    } else if same_token(*token, contacts::OTHER_ADDRESS_COUNTRY) {
+                        fields.other_address_country = empty;
+                    } else if same_token(*token, contacts::OTHER_ADDRESS_POSTAL_CODE) {
+                        fields.other_address_postal_code = empty;
+                    } else if same_token(*token, contacts::OTHER_ADDRESS_STATE) {
+                        fields.other_address_state = empty;
+                    } else if same_token(*token, contacts::OTHER_ADDRESS_STREET) {
+                        fields.other_address_street = empty;
+                    }
+                }
+                path.push(*token);
+            }
             Node::Text(text) => {
                 let Some(&top) = path.last() else { continue };
                 if same_token(top, contacts::FIRST_NAME) {
@@ -2331,6 +2382,36 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                     fields.company_name = Some(text.clone());
                 } else if same_token(top, contacts::JOB_TITLE) {
                     fields.job_title = Some(text.clone());
+                } else if same_token(top, contacts::BUSINESS_ADDRESS_CITY) {
+                    fields.business_address_city = Some(text.clone());
+                } else if same_token(top, contacts::BUSINESS_ADDRESS_COUNTRY) {
+                    fields.business_address_country = Some(text.clone());
+                } else if same_token(top, contacts::BUSINESS_ADDRESS_POSTAL_CODE) {
+                    fields.business_address_postal_code = Some(text.clone());
+                } else if same_token(top, contacts::BUSINESS_ADDRESS_STATE) {
+                    fields.business_address_state = Some(text.clone());
+                } else if same_token(top, contacts::BUSINESS_ADDRESS_STREET) {
+                    fields.business_address_street = Some(text.clone());
+                } else if same_token(top, contacts::HOME_ADDRESS_CITY) {
+                    fields.home_address_city = Some(text.clone());
+                } else if same_token(top, contacts::HOME_ADDRESS_COUNTRY) {
+                    fields.home_address_country = Some(text.clone());
+                } else if same_token(top, contacts::HOME_ADDRESS_POSTAL_CODE) {
+                    fields.home_address_postal_code = Some(text.clone());
+                } else if same_token(top, contacts::HOME_ADDRESS_STATE) {
+                    fields.home_address_state = Some(text.clone());
+                } else if same_token(top, contacts::HOME_ADDRESS_STREET) {
+                    fields.home_address_street = Some(text.clone());
+                } else if same_token(top, contacts::OTHER_ADDRESS_CITY) {
+                    fields.other_address_city = Some(text.clone());
+                } else if same_token(top, contacts::OTHER_ADDRESS_COUNTRY) {
+                    fields.other_address_country = Some(text.clone());
+                } else if same_token(top, contacts::OTHER_ADDRESS_POSTAL_CODE) {
+                    fields.other_address_postal_code = Some(text.clone());
+                } else if same_token(top, contacts::OTHER_ADDRESS_STATE) {
+                    fields.other_address_state = Some(text.clone());
+                } else if same_token(top, contacts::OTHER_ADDRESS_STREET) {
+                    fields.other_address_street = Some(text.clone());
                 }
             }
             Node::End => {
@@ -3036,6 +3117,13 @@ mod tests {
         builder.leaf(contacts::EMAIL1_ADDRESS, "ada@example.com");
         builder.leaf(contacts::MOBILE_PHONE_NUMBER, "555-0100");
         builder.leaf(contacts::COMPANY_NAME, "Analytical Engines Ltd");
+        builder.leaf(contacts::BUSINESS_ADDRESS_CITY, "Toronto");
+        builder.leaf(contacts::BUSINESS_ADDRESS_COUNTRY, "Canada");
+        builder.leaf(contacts::BUSINESS_ADDRESS_POSTAL_CODE, "M5V 2T6");
+        builder.leaf(contacts::BUSINESS_ADDRESS_STATE, "Ontario");
+        builder.leaf(contacts::BUSINESS_ADDRESS_STREET, "100 King St W");
+        builder.leaf(contacts::HOME_ADDRESS_CITY, "Ottawa");
+        builder.empty_tag(contacts::OTHER_ADDRESS_CITY);
         builder.end();
         builder.end();
         builder.end();
@@ -3066,6 +3154,28 @@ mod tests {
             Some("Analytical Engines Ltd")
         );
         assert_eq!(command.contact.email2_address, None);
+        assert_eq!(
+            command.contact.business_address_city.as_deref(),
+            Some("Toronto")
+        );
+        assert_eq!(
+            command.contact.business_address_country.as_deref(),
+            Some("Canada")
+        );
+        assert_eq!(
+            command.contact.business_address_postal_code.as_deref(),
+            Some("M5V 2T6")
+        );
+        assert_eq!(
+            command.contact.business_address_state.as_deref(),
+            Some("Ontario")
+        );
+        assert_eq!(
+            command.contact.business_address_street.as_deref(),
+            Some("100 King St W")
+        );
+        assert_eq!(command.contact.home_address_city.as_deref(), Some("Ottawa"));
+        assert_eq!(command.contact.other_address_city.as_deref(), Some(""));
     }
 
     #[test]

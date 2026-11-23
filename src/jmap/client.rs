@@ -1871,6 +1871,163 @@ impl JmapClient {
             );
         }
 
+        let mut addresses = serde_json::Map::new();
+        for (address_key, context, components) in [
+            (
+                "work",
+                "work",
+                [
+                    ("locality", &fields.business_address_city),
+                    ("country", &fields.business_address_country),
+                    ("postcode", &fields.business_address_postal_code),
+                    ("region", &fields.business_address_state),
+                    ("name", &fields.business_address_street),
+                ],
+            ),
+            (
+                "home",
+                "private",
+                [
+                    ("locality", &fields.home_address_city),
+                    ("country", &fields.home_address_country),
+                    ("postcode", &fields.home_address_postal_code),
+                    ("region", &fields.home_address_state),
+                    ("name", &fields.home_address_street),
+                ],
+            ),
+            (
+                "other",
+                "other",
+                [
+                    ("locality", &fields.other_address_city),
+                    ("country", &fields.other_address_country),
+                    ("postcode", &fields.other_address_postal_code),
+                    ("region", &fields.other_address_state),
+                    ("name", &fields.other_address_street),
+                ],
+            ),
+        ] {
+            let values: Vec<_> = components
+                .into_iter()
+                .filter_map(|(kind, value)| {
+                    value
+                        .as_ref()
+                        .filter(|value| id.is_some() || !value.is_empty())
+                        .map(|value| serde_json::json!({"kind":kind,"value":value}))
+                })
+                .collect();
+            if !values.is_empty() {
+                addresses.insert(
+                    address_key.to_owned(),
+                    serde_json::json!({
+                        "@type":"Address", "contexts":{context:true},
+                        "components":values, "isOrdered":false
+                    }),
+                );
+            }
+        }
+        let mut contact_state = None;
+        if let Some(existing_id) = id.filter(|_| !addresses.is_empty()) {
+            let response: JmapResponse<serde_json::Value> = self
+                .api_call(
+                    auth,
+                    &[capabilities::CORE.to_owned(), capabilities::CONTACTS.to_owned()],
+                    vec![MethodCall::new(
+                        "ContactCard/get",
+                        serde_json::json!({"accountId":account_id,"ids":[existing_id],"properties":["id","addresses"]}),
+                        "address-state",
+                    )],
+                )
+                .await?;
+            let result = response
+                .method_responses
+                .iter()
+                .find(|method| method.0 == "ContactCard/get")
+                .context("contact address lookup failed")?;
+            contact_state = Some(
+                result.1["state"]
+                    .as_str()
+                    .context("contact address state missing")?
+                    .to_owned(),
+            );
+            let existing = result.1["list"]
+                .as_array()
+                .and_then(|list| list.iter().find(|item| item["id"] == existing_id))
+                .context("contact not found while updating address")?;
+            let mut merged = existing["addresses"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            for (_, requested) in &addresses {
+                let context = requested["contexts"]
+                    .as_object()
+                    .and_then(|contexts| contexts.keys().next())
+                    .context("contact address context missing")?;
+                let address_id = merged
+                    .iter()
+                    .find(|(_, address)| address["contexts"][context] == true)
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_else(|| format!("eas_{context}"));
+                let mut address = merged
+                    .get(&address_id)
+                    .and_then(serde_json::Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut components: BTreeMap<String, serde_json::Value> = address
+                    .get("components")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|component| {
+                        Some((
+                            component.get("kind")?.as_str()?.to_owned(),
+                            component.clone(),
+                        ))
+                    })
+                    .filter(|(kind, _)| kind != "separator")
+                    .collect();
+                for component in requested["components"]
+                    .as_array()
+                    .context("contact address components missing")?
+                {
+                    let kind = component["kind"]
+                        .as_str()
+                        .context("contact address component kind missing")?;
+                    if component["value"].as_str() == Some("") {
+                        components.remove(kind);
+                    } else {
+                        components.insert(kind.to_owned(), component.clone());
+                    }
+                }
+                address.insert("@type".to_owned(), serde_json::json!("Address"));
+                let mut contexts = address
+                    .get("contexts")
+                    .and_then(serde_json::Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                contexts.insert(context.to_owned(), serde_json::Value::Bool(true));
+                address.insert("contexts".to_owned(), serde_json::Value::Object(contexts));
+                if components.is_empty() {
+                    merged.remove(&address_id);
+                } else {
+                    address.insert(
+                        "components".to_owned(),
+                        serde_json::Value::Array(components.into_values().collect()),
+                    );
+                    address.insert("isOrdered".to_owned(), serde_json::Value::Bool(false));
+                    address.remove("defaultSeparator");
+                    address.remove("full");
+                    merged.insert(address_id, serde_json::Value::Object(address));
+                }
+            }
+            addresses = merged;
+        }
+        if !addresses.is_empty() {
+            card.insert("addresses".to_owned(), serde_json::Value::Object(addresses));
+        } else if contact_state.is_some() {
+            card.insert("addresses".to_owned(), serde_json::Value::Null);
+        }
+
         let call = match id {
             Some(existing_id) => {
                 card.insert(
@@ -1881,14 +2038,14 @@ impl JmapClient {
                     "version".to_owned(),
                     serde_json::Value::String("1.0".to_owned()),
                 );
-                MethodCall::new(
-                    "ContactCard/set",
-                    serde_json::json!({
-                        "accountId": account_id,
-                        "update": { existing_id: card }
-                    }),
-                    "0",
-                )
+                let mut arguments = serde_json::json!({
+                    "accountId": account_id,
+                    "update": { existing_id: card }
+                });
+                if let Some(state) = contact_state {
+                    arguments["ifInState"] = serde_json::json!(state);
+                }
+                MethodCall::new("ContactCard/set", arguments, "0")
             }
             None => {
                 card.insert(
@@ -5837,6 +5994,8 @@ struct ContactCardObject {
     organizations: BTreeMap<String, ContactCardOrganization>,
     #[serde(default)]
     titles: BTreeMap<String, ContactCardTitle>,
+    #[serde(default)]
+    addresses: BTreeMap<String, ContactCardAddress>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -5873,6 +6032,20 @@ struct ContactCardOrganization {
 struct ContactCardTitle {
     name: Option<String>,
     kind: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContactCardAddress {
+    #[serde(default)]
+    contexts: BTreeMap<String, bool>,
+    #[serde(default)]
+    components: Vec<ContactCardAddressComponent>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContactCardAddressComponent {
+    kind: String,
+    value: String,
 }
 
 impl From<ContactCardObject> for Contact {
@@ -5919,6 +6092,31 @@ impl From<ContactCardObject> for Contact {
             .find(|title| title.kind.as_deref() == Some("title") || title.kind.is_none())
             .and_then(|title| title.name);
 
+        let mut business_address = None;
+        let mut home_address = None;
+        let mut other_address = None;
+        for address in value.addresses.into_values() {
+            let mut mapped = crate::model::ContactAddress::default();
+            for component in address.components {
+                match component.kind.as_str() {
+                    "locality" => mapped.city = Some(component.value),
+                    "country" => mapped.country = Some(component.value),
+                    "postcode" => mapped.postal_code = Some(component.value),
+                    "region" => mapped.state = Some(component.value),
+                    "name" => mapped.street = Some(component.value),
+                    _ => {}
+                }
+            }
+            let is = |context: &str| address.contexts.get(context).copied().unwrap_or(false);
+            if is("work") && business_address.is_none() {
+                business_address = Some(mapped);
+            } else if is("private") && home_address.is_none() {
+                home_address = Some(mapped);
+            } else if is("other") && other_address.is_none() {
+                other_address = Some(mapped);
+            }
+        }
+
         Self {
             id: value.id,
             address_book_ids: value
@@ -5935,6 +6133,9 @@ impl From<ContactCardObject> for Contact {
             business_phone,
             company_name,
             job_title,
+            business_address,
+            home_address,
+            other_address,
         }
     }
 }
@@ -6961,6 +7162,209 @@ mod calendar_update_state_tests {
             .is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod contact_address_tests {
+    use super::*;
+    use axum::{routing::post, Json, Router};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn contact_address_sync_maps_eas_contexts_to_jscontact() {
+        let app = Router::new().route(
+            "/",
+            post(|Json(request): Json<serde_json::Value>| async move {
+                let call = &request["methodCalls"][0];
+                assert_eq!(call[0], "ContactCard/set");
+                assert_eq!(
+                    call[1]["create"]["c1"]["addresses"],
+                    serde_json::json!({
+                        "work":{"@type":"Address","contexts":{"work":true},"components":[
+                            {"kind":"locality","value":"Toronto"},
+                            {"kind":"country","value":"Canada"},
+                            {"kind":"postcode","value":"M5V 2T6"},
+                            {"kind":"region","value":"Ontario"},
+                            {"kind":"name","value":"100 King St W"}
+                        ],"isOrdered":false},
+                        "home":{"@type":"Address","contexts":{"private":true},"components":[
+                            {"kind":"locality","value":"Ottawa"}
+                        ],"isOrdered":false},
+                        "other":{"@type":"Address","contexts":{"other":true},"components":[
+                            {"kind":"locality","value":"Kingston"}
+                        ],"isOrdered":false}
+                    })
+                );
+                Json(serde_json::json!({"methodResponses":[
+                    ["ContactCard/set",{"created":{"c1":{"id":"contact-1"}}},"0"]
+                ]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CONTACTS:"a"}, "apiUrl":url,
+            "downloadUrl":url,"uploadUrl":url,"username":"user","state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let fields = crate::wbxml::eas::ContactFields {
+            business_address_city: Some("Toronto".into()),
+            business_address_country: Some("Canada".into()),
+            business_address_postal_code: Some("M5V 2T6".into()),
+            business_address_state: Some("Ontario".into()),
+            business_address_street: Some("100 King St W".into()),
+            home_address_city: Some("Ottawa".into()),
+            other_address_city: Some("Kingston".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            client
+                .save_contact(&auth, "book", None, &fields)
+                .await
+                .unwrap(),
+            "contact-1"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn contact_address_change_preserves_unmodified_components_and_uses_state_guard() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let captured = calls.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(request): Json<serde_json::Value>| {
+                let calls = captured.clone();
+                async move {
+                    let call = &request["methodCalls"][0];
+                    match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                        0 => {
+                            assert_eq!(call[0], "ContactCard/get");
+                            Json(serde_json::json!({"methodResponses":[[
+                            "ContactCard/get", {"state":"before","list":[{"id":"c","addresses":{
+                                "home":{"contexts":{"private":true},"components":[
+                                    {"kind":"locality","value":"Ottawa"},
+                                    {"kind":"name","value":"1 Home St"}
+                                ]},
+                                "work":{"contexts":{"work":true},"components":[
+                                    {"kind":"locality","value":"Toronto"},
+                                    {"kind":"name","value":"Old Office Rd"}
+                                ]}
+                            }}]},"address-state"]]}))
+                        }
+                        1 => {
+                            assert_eq!(call[0], "ContactCard/set");
+                            assert_eq!(call[1]["ifInState"], "before");
+                            let addresses = &call[1]["update"]["c"]["addresses"];
+                            assert_eq!(
+                                addresses["home"]["components"],
+                                serde_json::json!([
+                                    {"kind":"locality","value":"Vancouver"},
+                                    {"kind":"name","value":"1 Home St"}
+                                ])
+                            );
+                            assert_eq!(
+                                addresses["work"]["components"],
+                                serde_json::json!([
+                                    {"kind":"locality","value":"Toronto"}
+                                ])
+                            );
+                            Json(serde_json::json!({"methodResponses":[[
+                                "ContactCard/set", {"updated":{"c":null}}, "0"
+                            ]]}))
+                        }
+                        _ => panic!("unexpected JMAP request"),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CONTACTS:"a"}, "apiUrl":url,
+            "downloadUrl":url,"uploadUrl":url,"username":"user","state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let fields = crate::wbxml::eas::ContactFields {
+            home_address_city: Some("Vancouver".into()),
+            business_address_street: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(
+            client
+                .save_contact(&auth, "book", Some("c"), &fields)
+                .await
+                .unwrap(),
+            "c"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[test]
+    fn contact_address_read_maps_jscontact_context_and_components() {
+        let card: ContactCardObject = serde_json::from_value(serde_json::json!({
+            "id":"c", "addresses":{
+                "work":{"contexts":{"work":true},"components":[
+                    {"kind":"locality","value":"Toronto"},
+                    {"kind":"country","value":"Canada"},
+                    {"kind":"postcode","value":"M5V 2T6"},
+                    {"kind":"region","value":"Ontario"},
+                    {"kind":"name","value":"100 King St W"}
+                ]},
+                "home":{"contexts":{"private":true},"components":[
+                    {"kind":"locality","value":"Ottawa"}
+                ]}
+            }
+        }))
+        .unwrap();
+        let contact = Contact::from(card);
+        assert_eq!(
+            contact.business_address,
+            Some(crate::model::ContactAddress {
+                city: Some("Toronto".into()),
+                country: Some("Canada".into()),
+                postal_code: Some("M5V 2T6".into()),
+                state: Some("Ontario".into()),
+                street: Some("100 King St W".into()),
+            })
+        );
+        assert_eq!(
+            contact
+                .home_address
+                .as_ref()
+                .and_then(|a| a.city.as_deref()),
+            Some("Ottawa")
+        );
     }
 }
 
