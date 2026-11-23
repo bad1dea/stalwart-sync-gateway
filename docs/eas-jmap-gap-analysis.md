@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `b836553` (2026-11-22)
+## Reconciled status for source `main` at `c9dc4a2` (2026-11-22)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -331,6 +331,19 @@ diff checks pass. Deployed as
 `deploy-2026-11-22-eas-contact-yomi-company-4860c47`; Hermes Compose built
 image `sha256:257b69377ac1ee241448ff8d46844e71a0ab8a77c138a4bb5e1dbdcc26836c8c`.
 The container started at `2026-11-23T02:36:42Z` with restart count zero; mesh
+`/healthz` returned `ok` and `/readyz` returned `ready`.
+
+Also completed: **ActiveSync contact account name**. Contacts2 `AccountName`
+round-trips as a separately labeled JSContact `onlineServices` user entry
+(`eas_account_name`), preserving its distinct meaning from MMS and IM
+addresses. Updates are state guarded and retain unrelated service entries.
+Regression coverage checks WBXML parsing/output, change hashing, JMAP
+create/read/update and preservation of unrelated services. Full suite: 266
+passed, 73 ignored; clippy with warnings denied, formatting and diff checks
+pass. Deployed as `deploy-2026-11-22-eas-contact-account-name-c9dc4a2`; Hermes
+Compose built image
+`sha256:5793ea78d050b5a84a36107f74f85264991beea946896b8d89a8c2fa2f453adf`.
+The container started at `2026-11-23T03:18:46Z` with restart count zero; mesh
 `/healthz` returned `ok` and `/readyz` returned `ready`.
 
 Also completed: **ActiveSync contact MMS address**. Contacts2 `MMS` maps to
