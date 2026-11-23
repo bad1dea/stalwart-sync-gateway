@@ -1338,6 +1338,9 @@ pub struct ContactFields {
     pub yomi_company_name: Option<String>,
     pub office_location: Option<String>,
     pub nickname: Option<String>,
+    pub im_address: Option<String>,
+    pub im_address_2: Option<String>,
+    pub im_address_3: Option<String>,
     pub birthday: Option<String>,
     pub anniversary: Option<String>,
     pub file_as: Option<String>,
@@ -2400,6 +2403,12 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                         fields.office_location = empty;
                     } else if same_token(*token, contacts2::NICK_NAME) {
                         fields.nickname = empty;
+                    } else if same_token(*token, contacts2::IM_ADDRESS) {
+                        fields.im_address = empty;
+                    } else if same_token(*token, contacts2::IM_ADDRESS_2) {
+                        fields.im_address_2 = empty;
+                    } else if same_token(*token, contacts2::IM_ADDRESS_3) {
+                        fields.im_address_3 = empty;
                     } else if same_token(*token, contacts::DEPARTMENT) {
                         fields.department = empty;
                     } else if same_token(*token, contacts::BUSINESS_2_PHONE_NUMBER) {
@@ -2450,6 +2459,12 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                     fields.office_location = Some(text.clone());
                 } else if same_token(top, contacts2::NICK_NAME) {
                     fields.nickname = Some(text.clone());
+                } else if same_token(top, contacts2::IM_ADDRESS) {
+                    fields.im_address = Some(text.clone());
+                } else if same_token(top, contacts2::IM_ADDRESS_2) {
+                    fields.im_address_2 = Some(text.clone());
+                } else if same_token(top, contacts2::IM_ADDRESS_3) {
+                    fields.im_address_3 = Some(text.clone());
                 } else if same_token(top, contacts::FILE_AS) {
                     fields.file_as = Some(text.clone());
                 } else if same_token(top, contacts::EMAIL1_ADDRESS) {
@@ -3241,6 +3256,9 @@ mod tests {
         builder.leaf(contacts::YOMI_COMPANY_NAME, "アナリティカル エンジンズ");
         builder.leaf(contacts::OFFICE_LOCATION, "Building 4, Floor 2");
         builder.leaf(contacts2::NICK_NAME, "Enchantress of Numbers");
+        builder.leaf(contacts2::IM_ADDRESS, "ada@example.im");
+        builder.leaf(contacts2::IM_ADDRESS_2, "ada@chat.example");
+        builder.leaf(contacts2::IM_ADDRESS_3, "ada@xmpp.example");
         builder.leaf(contacts::BIRTHDAY, "18151210");
         builder.leaf(contacts::ANNIVERSARY, "18351108");
         builder.leaf(contacts::EMAIL1_ADDRESS, "ada@example.com");

@@ -1866,6 +1866,28 @@ impl JmapClient {
                 );
             }
         }
+        let has_im_update = fields.im_address.is_some()
+            || fields.im_address_2.is_some()
+            || fields.im_address_3.is_some();
+        let mut online_services = serde_json::Map::new();
+        for (key, label, value) in [
+            ("eas_im1", "EAS IM Address 1", &fields.im_address),
+            ("eas_im2", "EAS IM Address 2", &fields.im_address_2),
+            ("eas_im3", "EAS IM Address 3", &fields.im_address_3),
+        ] {
+            if let Some(user) = value.as_ref().filter(|value| !value.is_empty()) {
+                online_services.insert(
+                    key.to_owned(),
+                    serde_json::json!({"@type":"OnlineService","user":user,"label":label}),
+                );
+            }
+        }
+        if id.is_none() && !online_services.is_empty() {
+            card.insert(
+                "onlineServices".to_owned(),
+                serde_json::Value::Object(online_services.clone()),
+            );
+        }
         let mut anniversaries = serde_json::Map::new();
         for (key, kind, date) in [
             ("eas_birthday", "birth", &fields.birthday),
@@ -2103,6 +2125,7 @@ impl JmapClient {
         if let Some(existing_id) = id.filter(|_| {
             has_name_update
                 || has_nickname_update
+                || has_im_update
                 || has_anniversary_update
                 || has_organizations_update
                 || has_phones_update
@@ -2116,6 +2139,9 @@ impl JmapClient {
             }
             if has_nickname_update {
                 properties.push("nicknames");
+            }
+            if has_im_update {
+                properties.push("onlineServices");
             }
             if !addresses.is_empty() || has_office_location_update {
                 properties.push("addresses");
@@ -2273,6 +2299,41 @@ impl JmapClient {
                         serde_json::Value::Null
                     } else {
                         serde_json::Value::Object(nicknames)
+                    },
+                );
+            }
+            if has_im_update {
+                let mut services = existing["onlineServices"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                for (key, label, requested) in [
+                    ("eas_im1", "EAS IM Address 1", &fields.im_address),
+                    ("eas_im2", "EAS IM Address 2", &fields.im_address_2),
+                    ("eas_im3", "EAS IM Address 3", &fields.im_address_3),
+                ] {
+                    if let Some(user) = requested {
+                        if user.is_empty() {
+                            services.remove(key);
+                        } else {
+                            let mut service = services
+                                .get(key)
+                                .and_then(serde_json::Value::as_object)
+                                .cloned()
+                                .unwrap_or_default();
+                            service.insert("@type".to_owned(), serde_json::json!("OnlineService"));
+                            service.insert("user".to_owned(), serde_json::json!(user));
+                            service.insert("label".to_owned(), serde_json::json!(label));
+                            services.insert(key.to_owned(), serde_json::Value::Object(service));
+                        }
+                    }
+                }
+                card.insert(
+                    "onlineServices".to_owned(),
+                    if services.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::Object(services)
                     },
                 );
             }
@@ -6607,6 +6668,8 @@ struct ContactCardObject {
     #[serde(default)]
     nicknames: BTreeMap<String, ContactCardNickname>,
     #[serde(default)]
+    online_services: BTreeMap<String, ContactCardOnlineService>,
+    #[serde(default)]
     emails: BTreeMap<String, ContactCardEmail>,
     #[serde(default)]
     phones: BTreeMap<String, ContactCardPhone>,
@@ -6652,6 +6715,13 @@ struct ContactCardNameComponent {
 #[derive(Debug, Default, Deserialize)]
 struct ContactCardNickname {
     name: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContactCardOnlineService {
+    user: Option<String>,
+    uri: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -6762,6 +6832,15 @@ impl From<ContactCardObject> for Contact {
             .or_else(|| value.nicknames.values().next())
             .and_then(|nickname| nickname.name.clone());
         let file_as = value.name.as_ref().and_then(|name| name.full.clone());
+        let online_service = |key: &str| {
+            value
+                .online_services
+                .get(key)
+                .and_then(|service| service.user.clone().or_else(|| service.uri.clone()))
+        };
+        let im_address1 = online_service("eas_im1");
+        let im_address2 = online_service("eas_im2");
+        let im_address3 = online_service("eas_im3");
         let emails = value
             .emails
             .into_values()
@@ -6889,6 +6968,9 @@ impl From<ContactCardObject> for Contact {
                 .collect(),
             first_name,
             nickname,
+            im_address1,
+            im_address2,
+            im_address3,
             middle_name,
             last_name,
             suffix,
@@ -7986,6 +8068,7 @@ mod contact_address_tests {
                     })
                 );
                 assert_eq!(call[1]["create"]["c1"]["nicknames"], serde_json::json!({"eas_nickname":{"name":"Enchantress of Numbers"}}));
+                assert_eq!(call[1]["create"]["c1"]["onlineServices"], serde_json::json!({"eas_im1":{"@type":"OnlineService","user":"ada@example.im","label":"EAS IM Address 1"},"eas_im2":{"@type":"OnlineService","user":"ada@chat.example","label":"EAS IM Address 2"},"eas_im3":{"@type":"OnlineService","user":"ada@xmpp.example","label":"EAS IM Address 3"}}));
                 assert_eq!(
                     call[1]["create"]["c1"]["keywords"],
                     serde_json::json!({"Work":true,"Friends":true})
@@ -8092,6 +8175,9 @@ mod contact_address_tests {
             other_address_city: Some("Kingston".into()),
             office_location: Some("Building 4, Floor 2".into()),
             nickname: Some("Enchantress of Numbers".into()),
+            im_address: Some("ada@example.im".into()),
+            im_address_2: Some("ada@chat.example".into()),
+            im_address_3: Some("ada@xmpp.example".into()),
             categories: Some(vec!["Work".into(), "Friends".into()]),
             ..Default::default()
         };
@@ -8119,7 +8205,7 @@ mod contact_address_tests {
                         0 => {
                             assert_eq!(call[0], "ContactCard/get");
                             Json(serde_json::json!({"methodResponses":[[
-                            "ContactCard/get", {"state":"before","list":[{"id":"c","nicknames":{"eas_nickname":{"name":"Enchantress"},"other":{"name":"Lady Ada"}},"name":{"full":"Ada Lovelace Jr.","phoneticScript":"Jpan","components":[
+                            "ContactCard/get", {"state":"before","list":[{"id":"c","nicknames":{"eas_nickname":{"name":"Enchantress"},"other":{"name":"Lady Ada"}},"onlineServices":{"eas_im1":{"@type":"OnlineService","user":"old-im","label":"EAS IM Address 1"},"other":{"user":"other-service","service":"Matrix"}},"name":{"full":"Ada Lovelace Jr.","phoneticScript":"Jpan","components":[
                                 {"kind":"given","value":"Ada","phonetic":"エイダ"},
                                 {"kind":"given2","value":"Augusta"},
                                 {"kind":"surname","value":"Lovelace","phonetic":"ラブレス"},
@@ -8161,6 +8247,7 @@ mod contact_address_tests {
                                 })
                             );
                             assert_eq!(call[1]["update"]["c"]["nicknames"], serde_json::json!({"eas_nickname":{"name":"Countess Ada"},"other":{"name":"Lady Ada"}}));
+                            assert_eq!(call[1]["update"]["c"]["onlineServices"], serde_json::json!({"eas_im1":{"@type":"OnlineService","user":"new-im","label":"EAS IM Address 1"},"other":{"user":"other-service","service":"Matrix"},"eas_im3":{"@type":"OnlineService","user":"new-im3","label":"EAS IM Address 3"}}));
                             assert_eq!(
                                 call[1]["update"]["c"]["organizations"],
                                 serde_json::json!({"org":{"name":"Analytical Engines Ltd","sortAs":"アナリティカル エンジンズ改","units":[{"@type":"OrgUnit","name":"New Department"}]}})
@@ -8244,6 +8331,9 @@ mod contact_address_tests {
             birthday: Some("18151211".into()),
             office_location: Some("Floor 7, Tower B".into()),
             nickname: Some("Countess Ada".into()),
+            im_address: Some("new-im".into()),
+            im_address_2: Some(String::new()),
+            im_address_3: Some("new-im3".into()),
             home_address_city: Some("Vancouver".into()),
             business_address_street: Some(String::new()),
             ..Default::default()
@@ -8304,7 +8394,7 @@ mod contact_address_tests {
     #[test]
     fn contact_name_read_maps_middle_name_and_suffix() {
         let card: ContactCardObject = serde_json::from_value(serde_json::json!({
-            "id":"c", "nicknames":{"eas_nickname":{"name":"Enchantress of Numbers"}}, "name":{"full":"Ada Lovelace Jr.","phoneticScript":"Jpan","components":[
+            "id":"c", "nicknames":{"eas_nickname":{"name":"Enchantress of Numbers"}}, "onlineServices":{"eas_im1":{"user":"ada@example.im"},"eas_im2":{"user":"ada@chat.example"},"eas_im3":{"user":"ada@xmpp.example"}}, "name":{"full":"Ada Lovelace Jr.","phoneticScript":"Jpan","components":[
                 {"kind":"given","value":"Ada","phonetic":"エイダ"},
                 {"kind":"given2","value":"Augusta"},
                 {"kind":"surname","value":"Lovelace","phonetic":"ラブレス"},
@@ -8335,6 +8425,9 @@ mod contact_address_tests {
         assert_eq!(contact.suffix.as_deref(), Some("Jr."));
         assert_eq!(contact.name_prefix.as_deref(), Some("Countess"));
         assert_eq!(contact.nickname.as_deref(), Some("Enchantress of Numbers"));
+        assert_eq!(contact.im_address1.as_deref(), Some("ada@example.im"));
+        assert_eq!(contact.im_address2.as_deref(), Some("ada@chat.example"));
+        assert_eq!(contact.im_address3.as_deref(), Some("ada@xmpp.example"));
         assert_eq!(contact.yomi_first_name.as_deref(), Some("エイダ"));
         assert_eq!(contact.yomi_last_name.as_deref(), Some("ラブレス"));
         assert_eq!(contact.birthday.as_deref(), Some("18151210"));
