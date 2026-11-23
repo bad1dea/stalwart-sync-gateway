@@ -42,13 +42,11 @@ pub mod folder_hierarchy {
 /// actually maps from JSContact are included, not the full ~50-field
 /// spec table -- numbering still per spec so adding more later is a
 /// drop-in, not a renumbering.
-/// MS-ASWBXML codepage 1 (Contacts). The 12 tokens this gateway actually
-/// uses (COMPANY_NAME through BUSINESS_PHONE_NUMBER) were all
-/// cross-checked against [MS-ASWBXML] v20250520 while adding the rest of
-/// this codepage's tokens below and are confirmed correct byte-for-byte.
-/// Everything from ANNIVERSARY down is newly scaffolded (unused by
-/// `write_contact_add()` today) -- see docs/eas-jmap-type-matrix.md for
-/// which of these JSContact (RFC 9553) can actually back.
+/// MS-ASWBXML codepage 1 (Contacts). Tokens used by this gateway for names,
+/// emails, phones, addresses, categories, organization and title were
+/// cross-checked against [MS-ASWBXML] v20250520 and are byte-for-byte correct.
+/// The remaining tokens are scaffolded; see docs/eas-jmap-type-matrix.md for
+/// current coverage and their possible JSContact (RFC 9553) mappings.
 pub mod contacts {
     use super::Token;
 
@@ -1356,6 +1354,7 @@ pub struct ContactFields {
     pub other_address_postal_code: Option<String>,
     pub other_address_state: Option<String>,
     pub other_address_street: Option<String>,
+    pub categories: Option<Vec<String>>,
 }
 
 /// ActiveSync Notes class fields decoded from one Add/Change command's
@@ -2318,10 +2317,17 @@ fn extract_note_fields(nodes: &[Node]) -> NoteFields {
 fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
     let mut fields = ContactFields::default();
     let mut path: Vec<Token> = Vec::new();
+    let mut category_buf: Option<String> = None;
 
     for node in nodes {
         match node {
             Node::Start(token) => {
+                if same_token(*token, contacts::CATEGORIES) {
+                    fields.categories.get_or_insert_with(Vec::new);
+                }
+                if same_token(*token, contacts::CATEGORY) {
+                    category_buf = None;
+                }
                 if !token.has_content {
                     let empty = Some(String::new());
                     if same_token(*token, contacts::BUSINESS_ADDRESS_CITY) {
@@ -2412,10 +2418,23 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                     fields.other_address_state = Some(text.clone());
                 } else if same_token(top, contacts::OTHER_ADDRESS_STREET) {
                     fields.other_address_street = Some(text.clone());
+                } else if same_token(top, contacts::CATEGORY)
+                    && path.len() >= 2
+                    && same_token(path[path.len() - 2], contacts::CATEGORIES)
+                {
+                    category_buf = Some(text.clone());
                 }
             }
             Node::End => {
-                path.pop();
+                if let Some(top) = path.pop() {
+                    if same_token(top, contacts::CATEGORY) {
+                        if let (Some(categories), Some(category)) =
+                            (&mut fields.categories, category_buf.take())
+                        {
+                            categories.push(category);
+                        }
+                    }
+                }
             }
             Node::Opaque(_) => {}
         }
@@ -3124,6 +3143,10 @@ mod tests {
         builder.leaf(contacts::BUSINESS_ADDRESS_STREET, "100 King St W");
         builder.leaf(contacts::HOME_ADDRESS_CITY, "Ottawa");
         builder.empty_tag(contacts::OTHER_ADDRESS_CITY);
+        builder.start(contacts::CATEGORIES);
+        builder.leaf(contacts::CATEGORY, "Work");
+        builder.leaf(contacts::CATEGORY, "Friends");
+        builder.end();
         builder.end();
         builder.end();
         builder.end();
@@ -3176,6 +3199,10 @@ mod tests {
         );
         assert_eq!(command.contact.home_address_city.as_deref(), Some("Ottawa"));
         assert_eq!(command.contact.other_address_city.as_deref(), Some(""));
+        assert_eq!(
+            command.contact.categories.as_deref(),
+            Some(&["Work".to_owned(), "Friends".to_owned()][..])
+        );
     }
 
     #[test]

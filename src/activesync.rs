@@ -5554,6 +5554,7 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.business_address.hash(&mut hasher);
     contact.home_address.hash(&mut hasher);
     contact.other_address.hash(&mut hasher);
+    contact.categories.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -5582,25 +5583,29 @@ fn write_contact_fields(
 ) {
     use wbxml::eas::contacts as c;
 
-    // Field order matches the real z-push-stalwart-jmap source (PR #187,
-    // pinned in config/z-push/Dockerfile: src/lib/syncobjects/
-    // synccontact.php's own $mapping, filtered down to the fields this
-    // gateway actually sets): BusinessPhoneNumber, CompanyName,
-    // Email1/2/3Address, FileAs, FirstName, HomePhoneNumber, JobTitle,
-    // LastName, MobilePhoneNumber. Address blocks are emitted at their
-    // positions in the Contacts codepage's token order.
+    // Field order follows the real z-push-stalwart-jmap source (PR #187,
+    // pinned in config/z-push/Dockerfile: synccontact.php's $mapping),
+    // extending that sequence with Contacts-codepage address and Categories
+    // fields. The prior FirstName/LastName-first sequence was reversed from
+    // the reference order, the same failure class confirmed for Email,
+    // Attachment, Preview, and Notes.
     write_contact_address_fields(
         builder,
         contact.business_address.as_ref(),
         "business",
         is_change,
     );
-    // This gateway had FirstName/LastName
-    // first and Business/Company/JobTitle last -- completely reversed
-    // from the real schema, the same failure class already confirmed
-    // for Email/Attachment/Preview/Notes.
     if let Some(business) = &contact.business_phone {
         builder.leaf(c::BUSINESS_PHONE_NUMBER, business.clone());
+    }
+    if !contact.categories.is_empty() {
+        builder.start(c::CATEGORIES);
+        for category in &contact.categories {
+            builder.leaf(c::CATEGORY, category.clone());
+        }
+        builder.end();
+    } else if is_change {
+        builder.empty_tag(c::CATEGORIES);
     }
     if let Some(company) = &contact.company_name {
         builder.leaf(c::COMPANY_NAME, company.clone());
@@ -7787,6 +7792,7 @@ mod tests {
                 city: Some("Ottawa".into()),
                 ..Default::default()
             }),
+            categories: vec!["Work".into(), "Friends".into()],
             ..Default::default()
         };
         let before = super::contact_hash(&contact);
@@ -7818,6 +7824,10 @@ mod tests {
             Some("Ottawa")
         );
         assert!(eas::contains_token(&doc, c::OTHER_ADDRESS_STREET));
+        assert_eq!(
+            eas::find_all_text_after(&doc, c::CATEGORY),
+            vec!["Work", "Friends"]
+        );
         contact.business_address.as_mut().unwrap().city = Some("Hamilton".into());
         assert_ne!(super::contact_hash(&contact), before);
     }

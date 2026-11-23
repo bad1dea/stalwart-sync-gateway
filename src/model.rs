@@ -280,6 +280,7 @@ pub struct Contact {
     pub business_address: Option<ContactAddress>,
     pub home_address: Option<ContactAddress>,
     pub other_address: Option<ContactAddress>,
+    pub categories: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]

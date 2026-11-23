@@ -1615,6 +1615,7 @@ impl JmapClient {
             "addresses",
             "notes",
             "onlineServices",
+            "keywords",
         ];
         let mut offset = 0u64;
         let mut query_state: Option<String> = None;
@@ -1631,7 +1632,7 @@ impl JmapClient {
                 MethodCall::new("ContactCard/get", serde_json::json!({
                     "accountId":account, "#ids":{"resultOf":"q","name":"ContactCard/query","path":"/ids"},
                     "properties":["id","addressBookIds","name","emails","phones","organizations",
-                        "titles","nicknames","addresses","notes","onlineServices"]
+                        "titles","nicknames","addresses","notes","onlineServices","keywords"]
                 }), "g"),
             ]).await?;
             let query = response
@@ -1735,7 +1736,7 @@ impl JmapClient {
                     "ContactCard/get",
                     serde_json::json!({
                         "accountId":account, "ids":[id],
-                        "properties":["id","addressBookIds","name","emails","phones","organizations","titles"]
+                        "properties":["id","addressBookIds","name","emails","phones","organizations","titles","keywords"]
                     }),
                     "g",
                 )],
@@ -2026,6 +2027,18 @@ impl JmapClient {
             card.insert("addresses".to_owned(), serde_json::Value::Object(addresses));
         } else if contact_state.is_some() {
             card.insert("addresses".to_owned(), serde_json::Value::Null);
+        }
+        if let Some(categories) = &fields.categories {
+            let keywords: BTreeMap<_, _> =
+                categories.iter().map(|category| (category, true)).collect();
+            card.insert(
+                "keywords".to_owned(),
+                if keywords.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(keywords)
+                },
+            );
         }
 
         let call = match id {
@@ -5996,6 +6009,8 @@ struct ContactCardObject {
     titles: BTreeMap<String, ContactCardTitle>,
     #[serde(default)]
     addresses: BTreeMap<String, ContactCardAddress>,
+    #[serde(default)]
+    keywords: BTreeMap<String, bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -6136,6 +6151,11 @@ impl From<ContactCardObject> for Contact {
             business_address,
             home_address,
             other_address,
+            categories: value
+                .keywords
+                .into_iter()
+                .filter_map(|(category, present)| present.then_some(category))
+                .collect(),
         }
     }
 }
@@ -7196,6 +7216,10 @@ mod contact_address_tests {
                         ],"isOrdered":false}
                     })
                 );
+                assert_eq!(
+                    call[1]["create"]["c1"]["keywords"],
+                    serde_json::json!({"Work":true,"Friends":true})
+                );
                 Json(serde_json::json!({"methodResponses":[
                     ["ContactCard/set",{"created":{"c1":{"id":"contact-1"}}},"0"]
                 ]}))
@@ -7230,6 +7254,7 @@ mod contact_address_tests {
             business_address_street: Some("100 King St W".into()),
             home_address_city: Some("Ottawa".into()),
             other_address_city: Some("Kingston".into()),
+            categories: Some(vec!["Work".into(), "Friends".into()]),
             ..Default::default()
         };
         assert_eq!(
@@ -7333,7 +7358,7 @@ mod contact_address_tests {
     #[test]
     fn contact_address_read_maps_jscontact_context_and_components() {
         let card: ContactCardObject = serde_json::from_value(serde_json::json!({
-            "id":"c", "addresses":{
+            "id":"c", "keywords":{"Work":true,"inactive":false}, "addresses":{
                 "work":{"contexts":{"work":true},"components":[
                     {"kind":"locality","value":"Toronto"},
                     {"kind":"country","value":"Canada"},
@@ -7365,6 +7390,7 @@ mod contact_address_tests {
                 .and_then(|a| a.city.as_deref()),
             Some("Ottawa")
         );
+        assert_eq!(contact.categories, vec!["Work"]);
     }
 }
 
