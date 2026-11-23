@@ -5553,7 +5553,9 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.emails.hash(&mut hasher);
     contact.mobile_phone.hash(&mut hasher);
     contact.home_phone.hash(&mut hasher);
+    contact.home_phone2.hash(&mut hasher);
     contact.business_phone.hash(&mut hasher);
+    contact.business_phone2.hash(&mut hasher);
     contact.company_name.hash(&mut hasher);
     contact.department.hash(&mut hasher);
     contact.job_title.hash(&mut hasher);
@@ -5604,6 +5606,9 @@ fn write_contact_fields(
     if let Some(business) = &contact.business_phone {
         builder.leaf(c::BUSINESS_PHONE_NUMBER, business.clone());
     }
+    if let Some(business2) = &contact.business_phone2 {
+        builder.leaf(c::BUSINESS_2_PHONE_NUMBER, business2.clone());
+    }
     if !contact.categories.is_empty() {
         builder.start(c::CATEGORIES);
         for category in &contact.categories {
@@ -5641,6 +5646,9 @@ fn write_contact_fields(
     write_contact_address_fields(builder, contact.home_address.as_ref(), "home", is_change);
     if let Some(home) = &contact.home_phone {
         builder.leaf(c::HOME_PHONE_NUMBER, home.clone());
+    }
+    if let Some(home2) = &contact.home_phone2 {
+        builder.leaf(c::HOME_2_PHONE_NUMBER, home2.clone());
     }
     if let Some(title) = &contact.job_title {
         builder.leaf(c::JOB_TITLE, title.clone());
@@ -7812,6 +7820,8 @@ mod tests {
             suffix: Some("Jr.".into()),
             name_prefix: Some("Countess".into()),
             department: Some("Research".into()),
+            home_phone2: Some("555-0102".into()),
+            business_phone2: Some("555-0104".into()),
             business_address: Some(crate::model::ContactAddress {
                 city: Some("Toronto".into()),
                 country: Some("Canada".into()),
@@ -7863,6 +7873,14 @@ mod tests {
         assert_eq!(eas::find_text_after(&doc, c::SUFFIX), Some("Jr."));
         assert_eq!(eas::find_text_after(&doc, c::TITLE), Some("Countess"));
         assert_eq!(eas::find_text_after(&doc, c::DEPARTMENT), Some("Research"));
+        assert_eq!(
+            eas::find_text_after(&doc, c::HOME_2_PHONE_NUMBER),
+            Some("555-0102")
+        );
+        assert_eq!(
+            eas::find_text_after(&doc, c::BUSINESS_2_PHONE_NUMBER),
+            Some("555-0104")
+        );
         contact.business_address.as_mut().unwrap().city = Some("Hamilton".into());
         assert_ne!(super::contact_hash(&contact), before);
     }

@@ -1879,13 +1879,30 @@ impl JmapClient {
                 serde_json::json!({ "number": home, "contexts": { "home": true } }),
             );
         }
+        if let Some(home2) = &fields.home_2_phone_number {
+            phones.insert(
+                "p_home2".to_owned(),
+                serde_json::json!({ "number": home2, "contexts": { "home": true } }),
+            );
+        }
         if let Some(business) = &fields.business_phone_number {
             phones.insert(
                 "p_work".to_owned(),
                 serde_json::json!({ "number": business, "contexts": { "work": true } }),
             );
         }
-        if !phones.is_empty() {
+        if let Some(business2) = &fields.business_2_phone_number {
+            phones.insert(
+                "p_work2".to_owned(),
+                serde_json::json!({ "number": business2, "contexts": { "work": true } }),
+            );
+        }
+        let has_phones_update = fields.mobile_phone_number.is_some()
+            || fields.home_phone_number.is_some()
+            || fields.home_2_phone_number.is_some()
+            || fields.business_phone_number.is_some()
+            || fields.business_2_phone_number.is_some();
+        if id.is_none() && !phones.is_empty() {
             card.insert("phones".to_owned(), serde_json::Value::Object(phones));
         }
 
@@ -1977,6 +1994,7 @@ impl JmapClient {
             has_name_update
                 || has_anniversary_update
                 || has_organizations_update
+                || has_phones_update
                 || !addresses.is_empty()
         }) {
             let mut properties = vec!["id"];
@@ -1991,6 +2009,9 @@ impl JmapClient {
             }
             if has_organizations_update {
                 properties.push("organizations");
+            }
+            if has_phones_update {
+                properties.push("phones");
             }
             let response: JmapResponse<serde_json::Value> = self
                 .api_call(
@@ -2144,6 +2165,55 @@ impl JmapClient {
                         serde_json::Value::Null
                     } else {
                         serde_json::Value::Object(merged_organizations)
+                    },
+                );
+            }
+            if has_phones_update {
+                let mut merged_phones = existing["phones"].as_object().cloned().unwrap_or_default();
+                for (key, context, rank, requested) in [
+                    ("p_mobile", "mobile", 0usize, &fields.mobile_phone_number),
+                    ("p_home", "home", 0usize, &fields.home_phone_number),
+                    ("p_home2", "home", 1usize, &fields.home_2_phone_number),
+                    ("p_work", "work", 0usize, &fields.business_phone_number),
+                    ("p_work2", "work", 1usize, &fields.business_2_phone_number),
+                ] {
+                    let Some(number) = requested else { continue };
+                    let matches: Vec<_> = merged_phones
+                        .iter()
+                        .filter(|(_, phone)| phone["contexts"][context] == true)
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    let selected = matches.get(rank).cloned();
+                    if number.is_empty() {
+                        if let Some(selected) = selected {
+                            merged_phones.remove(&selected);
+                        } else {
+                            merged_phones.remove(key);
+                        }
+                        continue;
+                    }
+                    let selected = selected.unwrap_or_else(|| key.to_owned());
+                    let mut phone = merged_phones
+                        .get(&selected)
+                        .and_then(serde_json::Value::as_object)
+                        .cloned()
+                        .unwrap_or_default();
+                    phone.insert("number".to_owned(), serde_json::json!(number));
+                    let mut contexts = phone
+                        .get("contexts")
+                        .and_then(serde_json::Value::as_object)
+                        .cloned()
+                        .unwrap_or_default();
+                    contexts.insert(context.to_owned(), serde_json::Value::Bool(true));
+                    phone.insert("contexts".to_owned(), serde_json::Value::Object(contexts));
+                    merged_phones.insert(selected, serde_json::Value::Object(phone));
+                }
+                card.insert(
+                    "phones".to_owned(),
+                    if merged_phones.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::Object(merged_phones)
                     },
                 );
             }
@@ -6322,8 +6392,8 @@ impl From<ContactCardObject> for Contact {
             .collect();
 
         let mut mobile_phone = None;
-        let mut home_phone = None;
-        let mut business_phone = None;
+        let mut home_phones = Vec::new();
+        let mut business_phones = Vec::new();
         for phone in value.phones.into_values() {
             let Some(number) = phone.number else {
                 continue;
@@ -6331,10 +6401,10 @@ impl From<ContactCardObject> for Contact {
             let is = |ctx: &str| phone.contexts.get(ctx).copied().unwrap_or(false);
             if is("mobile") && mobile_phone.is_none() {
                 mobile_phone = Some(number);
-            } else if is("home") && home_phone.is_none() {
-                home_phone = Some(number);
-            } else if (is("work") || phone.contexts.is_empty()) && business_phone.is_none() {
-                business_phone = Some(number);
+            } else if is("home") {
+                home_phones.push(number);
+            } else if is("work") || phone.contexts.is_empty() {
+                business_phones.push(number);
             }
         }
 
@@ -6401,8 +6471,10 @@ impl From<ContactCardObject> for Contact {
             file_as,
             emails,
             mobile_phone,
-            home_phone,
-            business_phone,
+            home_phone: home_phones.first().cloned(),
+            home_phone2: home_phones.get(1).cloned(),
+            business_phone: business_phones.first().cloned(),
+            business_phone2: business_phones.get(1).cloned(),
             company_name,
             department,
             job_title,
@@ -7499,6 +7571,16 @@ mod contact_address_tests {
                     call[1]["create"]["c1"]["organizations"],
                     serde_json::json!({"o1":{"name":"Analytical Engines Ltd","units":[{"@type":"OrgUnit","name":"Research"}]}})
                 );
+                assert_eq!(
+                    call[1]["create"]["c1"]["phones"],
+                    serde_json::json!({
+                        "p_mobile":{"number":"555-0100","contexts":{"mobile":true}},
+                        "p_home":{"number":"555-0101","contexts":{"home":true}},
+                        "p_home2":{"number":"555-0102","contexts":{"home":true}},
+                        "p_work":{"number":"555-0103","contexts":{"work":true}},
+                        "p_work2":{"number":"555-0104","contexts":{"work":true}}
+                    })
+                );
                 Json(serde_json::json!({"methodResponses":[
                     ["ContactCard/set",{"created":{"c1":{"id":"contact-1"}}},"0"]
                 ]}))
@@ -7535,6 +7617,11 @@ mod contact_address_tests {
             anniversary: Some("18351108".into()),
             company_name: Some("Analytical Engines Ltd".into()),
             department: Some("Research".into()),
+            mobile_phone_number: Some("555-0100".into()),
+            home_phone_number: Some("555-0101".into()),
+            home_2_phone_number: Some("555-0102".into()),
+            business_phone_number: Some("555-0103".into()),
+            business_2_phone_number: Some("555-0104".into()),
             business_address_city: Some("Toronto".into()),
             business_address_country: Some("Canada".into()),
             business_address_postal_code: Some("M5V 2T6".into()),
@@ -7575,7 +7662,7 @@ mod contact_address_tests {
                                 {"kind":"surname","value":"Lovelace"},
                                 {"kind":"generation","value":"Jr."},
                                 {"kind":"prefix","value":"Countess"}
-                            ]},"organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Old Department"}]}},"anniversaries":{
+                            ]},"phones":{"work1":{"number":"555-0101","contexts":{"work":true}},"work2":{"number":"555-0102","contexts":{"work":true}}},"organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Old Department"}]}},"anniversaries":{
                                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
                             },"addresses":{
@@ -7612,6 +7699,13 @@ mod contact_address_tests {
                             assert_eq!(
                                 call[1]["update"]["c"]["organizations"],
                                 serde_json::json!({"org":{"name":"Analytical Engines Ltd","units":[{"@type":"OrgUnit","name":"New Department"}]}})
+                            );
+                            assert_eq!(
+                                call[1]["update"]["c"]["phones"],
+                                serde_json::json!({
+                                    "work1":{"number":"555-0101","contexts":{"work":true}},
+                                    "work2":{"number":"555-0104","contexts":{"work":true}}
+                                })
                             );
                             let addresses = &call[1]["update"]["c"]["addresses"];
                             assert_eq!(
@@ -7660,6 +7754,7 @@ mod contact_address_tests {
         let fields = crate::wbxml::eas::ContactFields {
             middle_name: Some("Byron".into()),
             department: Some("New Department".into()),
+            business_2_phone_number: Some("555-0104".into()),
             birthday: Some("18151211".into()),
             home_address_city: Some("Vancouver".into()),
             business_address_street: Some(String::new()),
@@ -7723,7 +7818,13 @@ mod contact_address_tests {
                 {"kind":"surname","value":"Lovelace"},
                 {"kind":"generation","value":"Jr."},
                 {"kind":"prefix","value":"Countess"}
-            ]}, "organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Research"}]}}, "anniversaries":{
+            ]}, "phones":{
+                "mobile":{"number":"555-0100","contexts":{"mobile":true}},
+                "home1":{"number":"555-0101","contexts":{"home":true}},
+                "home2":{"number":"555-0102","contexts":{"home":true}},
+                "work1":{"number":"555-0103","contexts":{"work":true}},
+                "work2":{"number":"555-0104","contexts":{"work":true}}
+            }, "organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Research"}]}}, "anniversaries":{
                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
             }
@@ -7742,6 +7843,11 @@ mod contact_address_tests {
             Some("Analytical Engines Ltd")
         );
         assert_eq!(contact.department.as_deref(), Some("Research"));
+        assert_eq!(contact.mobile_phone.as_deref(), Some("555-0100"));
+        assert_eq!(contact.home_phone.as_deref(), Some("555-0101"));
+        assert_eq!(contact.home_phone2.as_deref(), Some("555-0102"));
+        assert_eq!(contact.business_phone.as_deref(), Some("555-0103"));
+        assert_eq!(contact.business_phone2.as_deref(), Some("555-0104"));
     }
 
     #[test]
