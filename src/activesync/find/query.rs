@@ -183,7 +183,10 @@ impl Parser {
                     if property.eq_ignore_ascii_case("received") {
                         return received_condition(operator, value);
                     }
-                    return Err("unsupported search comparison");
+                    if known_property(property) {
+                        return Err("unsupported search comparison");
+                    }
+                    return free_text_property(property, value);
                 }
                 if let Some((property, value)) = word.split_once(':') {
                     let value = if value.is_empty() {
@@ -396,8 +399,51 @@ fn condition(property: &str, value: &str) -> Result<Value, &'static str> {
             "false" | "no" | "0" => Ok(json!({"hasAttachment": false})),
             _ => Err("invalid attachment search value"),
         },
-        _ => Err("unsupported search property"),
+        _ if known_property(property) => Err("unsupported search property"),
+        _ => free_text_property(property, value),
     }
+}
+
+fn known_property(property: &str) -> bool {
+    [
+        "text",
+        "subject",
+        "body",
+        "from",
+        "to",
+        "cc",
+        "bcc",
+        "participants",
+        "size",
+        "received",
+        "sent",
+        "importance",
+        "kind",
+        "isread",
+        "isflagged",
+        "hasattachment",
+        "hasattachments",
+    ]
+    .iter()
+    .any(|known| property.eq_ignore_ascii_case(known))
+}
+
+fn free_text_property(property: &str, value: &str) -> Result<Value, &'static str> {
+    let value = if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+        let inner = &value[1..value.len() - 1];
+        if inner.chars().any(char::is_whitespace) || inner.contains('"') {
+            return Err("unsupported property phrase");
+        }
+        inner
+    } else if value.contains('"') {
+        return Err("unsupported property value");
+    } else {
+        value
+    };
+    if property.is_empty() || value.is_empty() {
+        return Err("unsupported property value");
+    }
+    Ok(json!({"text": format!("{property} {value}")}))
 }
 
 #[cfg(test)]
@@ -476,6 +522,23 @@ mod tests {
             to_filter(r#"subject:"a\"b""#).unwrap(),
             json!({"subject": r#""a\"b""#})
         );
+    }
+
+    #[test]
+    fn unknown_properties_fall_back_to_text_tokens() {
+        assert_eq!(
+            to_filter("unknownproperty:word").unwrap(),
+            json!({"text":"unknownproperty word"})
+        );
+        assert_eq!(
+            to_filter("unknownproperty>7").unwrap(),
+            json!({"text":"unknownproperty 7"})
+        );
+        assert_eq!(
+            to_filter("unknownproperty:\"word\"").unwrap(),
+            json!({"text":"unknownproperty word"})
+        );
+        assert!(to_filter("unknownproperty:\"two words\"").is_err());
     }
 
     #[test]
