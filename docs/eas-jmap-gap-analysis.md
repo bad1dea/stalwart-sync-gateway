@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `641d41f` (2026-11-22)
+## Reconciled status for source `main` at `7dd8863` (2026-11-22)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -85,6 +85,15 @@ Compose build produced image
 `sha256:d7f5254079a94a0eb2e5a35419ba73a12a73053098b4d25303af1d1422f79cf3`.
 The replacement started with restart count zero, and mesh/public health and
 readiness all returned successfully.
+
+Also completed (`7dd8863`): **KQL unknown-property fallback**. MS-KQL treats an
+unrecognized property restriction as ordinary text tokens; the Find parser
+now maps a simple `unknownproperty:word` restriction to text terms while
+continuing to reject multiword quoted phrases whose order Stalwart does not
+preserve. A direct 0.16.27 probe confirmed that native multiword text filters
+require all terms, matching KQL's implicit AND behavior. Regression tests cover
+unknown properties, comparisons, and phrase rejection. The full suite passes
+(255 passed, 73 ignored), and clippy with warnings denied passes.
 
 This reconciliation supersedes older status claims in this document where
 they conflict with source `main` at the stated revision. Update this section
