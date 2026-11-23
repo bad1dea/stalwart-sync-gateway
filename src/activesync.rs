@@ -5549,6 +5549,7 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.name_prefix.hash(&mut hasher);
     contact.yomi_first_name.hash(&mut hasher);
     contact.yomi_last_name.hash(&mut hasher);
+    contact.yomi_company_name.hash(&mut hasher);
     contact.birthday.hash(&mut hasher);
     contact.anniversary.hash(&mut hasher);
     contact.file_as.hash(&mut hasher);
@@ -5685,6 +5686,9 @@ fn write_contact_fields(
     }
     if let Some(yomi_last_name) = &contact.yomi_last_name {
         builder.leaf(c::YOMI_LAST_NAME, yomi_last_name.clone());
+    }
+    if let Some(yomi_company_name) = &contact.yomi_company_name {
+        builder.leaf(c::YOMI_COMPANY_NAME, yomi_company_name.clone());
     }
     if let Some(birthday) = &contact.birthday {
         builder.leaf(c::BIRTHDAY, birthday.clone());
@@ -7857,6 +7861,7 @@ mod tests {
             name_prefix: Some("Countess".into()),
             yomi_first_name: Some("エイダ".into()),
             yomi_last_name: Some("ラブレス".into()),
+            yomi_company_name: Some("アナリティカル エンジンズ".into()),
             department: Some("Research".into()),
             home_phone2: Some("555-0102".into()),
             business_phone2: Some("555-0104".into()),
@@ -7959,12 +7964,26 @@ mod tests {
             Some("555-0110")
         );
         assert_eq!(
+            eas::find_text_after(&doc, c::YOMI_FIRST_NAME),
+            Some("エイダ")
+        );
+        assert_eq!(
+            eas::find_text_after(&doc, c::YOMI_LAST_NAME),
+            Some("ラブレス")
+        );
+        assert_eq!(
+            eas::find_text_after(&doc, c::YOMI_COMPANY_NAME),
+            Some("アナリティカル エンジンズ")
+        );
+        assert_eq!(
             eas::find_text_after(&doc, c::WEB_PAGE),
             Some("https://example.com/ada")
         );
         contact.assistant_phone = Some("555-0111".into());
         assert_ne!(super::contact_hash(&contact), before);
         contact.yomi_first_name = Some("エイダ改".into());
+        assert_ne!(super::contact_hash(&contact), before);
+        contact.yomi_company_name = Some("アナリティカル エンジンズ改".into());
         assert_ne!(super::contact_hash(&contact), before);
         contact.business_address.as_mut().unwrap().city = Some("Hamilton".into());
         assert_ne!(super::contact_hash(&contact), before);

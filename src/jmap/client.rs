@@ -1982,12 +1982,24 @@ impl JmapClient {
             }
         }
 
-        let has_organizations_update = fields.company_name.is_some() || fields.department.is_some();
+        let has_organizations_update = fields.company_name.is_some()
+            || fields.department.is_some()
+            || fields.yomi_company_name.is_some();
         let mut eas_organization = serde_json::Map::new();
         if let Some(company) = &fields.company_name {
             if !company.is_empty() {
                 eas_organization.insert("name".to_owned(), serde_json::json!(company));
             }
+        }
+        if let Some(yomi_company) = fields
+            .yomi_company_name
+            .as_ref()
+            .filter(|value| !value.is_empty())
+        {
+            eas_organization.insert("sortAs".to_owned(), serde_json::json!(yomi_company));
+            eas_organization
+                .entry("name".to_owned())
+                .or_insert_with(|| serde_json::json!(""));
         }
         if let Some(department) = &fields.department {
             if !department.is_empty() {
@@ -2269,8 +2281,23 @@ impl JmapClient {
                 if let Some(company) = &fields.company_name {
                     if company.is_empty() {
                         organization.remove("name");
+                        if fields.yomi_company_name.is_none()
+                            || fields.yomi_company_name.as_deref() == Some("")
+                        {
+                            organization.remove("sortAs");
+                        }
                     } else {
                         organization.insert("name".to_owned(), serde_json::json!(company));
+                    }
+                }
+                if let Some(yomi_company) = &fields.yomi_company_name {
+                    if yomi_company.is_empty() {
+                        organization.remove("sortAs");
+                    } else {
+                        organization.insert("sortAs".to_owned(), serde_json::json!(yomi_company));
+                        organization
+                            .entry("name".to_owned())
+                            .or_insert_with(|| serde_json::json!(""));
                     }
                 }
                 if let Some(department) = &fields.department {
@@ -6563,8 +6590,10 @@ struct ContactCardPhone {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ContactCardOrganization {
     name: Option<String>,
+    sort_as: Option<String>,
     #[serde(default)]
     units: Vec<ContactCardOrgUnit>,
 }
@@ -6704,7 +6733,9 @@ impl From<ContactCardObject> for Contact {
         }
 
         let organizations: Vec<_> = value.organizations.into_values().collect();
-        let company_name = organizations.iter().find_map(|org| org.name.clone());
+        let company_organization = organizations.iter().find(|org| org.name.is_some());
+        let company_name = company_organization.and_then(|org| org.name.clone());
+        let yomi_company_name = company_organization.and_then(|org| org.sort_as.clone());
         let department = organizations
             .iter()
             .find_map(|org| org.units.last().and_then(|unit| unit.name.clone()));
@@ -6767,6 +6798,7 @@ impl From<ContactCardObject> for Contact {
             name_prefix,
             yomi_first_name,
             yomi_last_name,
+            yomi_company_name,
             birthday,
             anniversary,
             web_page,
@@ -7878,7 +7910,7 @@ mod contact_address_tests {
                 );
                 assert_eq!(
                     call[1]["create"]["c1"]["organizations"],
-                    serde_json::json!({"o1":{"name":"Analytical Engines Ltd","units":[{"@type":"OrgUnit","name":"Research"}]}})
+                    serde_json::json!({"o1":{"name":"Analytical Engines Ltd","sortAs":"アナリティカル エンジンズ","units":[{"@type":"OrgUnit","name":"Research"}]}})
                 );
                 assert_eq!(
                     call[1]["create"]["c1"]["phones"],
@@ -7937,6 +7969,7 @@ mod contact_address_tests {
             birthday: Some("18151210".into()),
             anniversary: Some("18351108".into()),
             company_name: Some("Analytical Engines Ltd".into()),
+            yomi_company_name: Some("アナリティカル エンジンズ".into()),
             department: Some("Research".into()),
             mobile_phone_number: Some("555-0100".into()),
             home_phone_number: Some("555-0101".into()),
@@ -7990,7 +8023,7 @@ mod contact_address_tests {
                                 {"kind":"surname","value":"Lovelace","phonetic":"ラブレス"},
                                 {"kind":"generation","value":"Jr."},
                                 {"kind":"prefix","value":"Countess"}
-                            ]},"links":{"site":{"uri":"https://old.example/"},"mail":{"uri":"mailto:ada@example.com"}},"phones":{"work1":{"number":"555-0101","contexts":{"work":true}},"work2":{"number":"555-0102","contexts":{"work":true}},"fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},"workfax":{"number":"555-0109","contexts":{"work":true},"features":{"fax":true}},"pager":{"number":"555-0106","features":{"pager":true}},"car":{"number":"555-0107","label":"car"},"radio":{"number":"555-0108","label":"radio"},"assistant":{"number":"555-0110","label":"assistant"}},"organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Old Department"}]}},"anniversaries":{
+                            ]},"links":{"site":{"uri":"https://old.example/"},"mail":{"uri":"mailto:ada@example.com"}},"phones":{"work1":{"number":"555-0101","contexts":{"work":true}},"work2":{"number":"555-0102","contexts":{"work":true}},"fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},"workfax":{"number":"555-0109","contexts":{"work":true},"features":{"fax":true}},"pager":{"number":"555-0106","features":{"pager":true}},"car":{"number":"555-0107","label":"car"},"radio":{"number":"555-0108","label":"radio"},"assistant":{"number":"555-0110","label":"assistant"}},"organizations":{"org":{"name":"Analytical Engines Ltd","sortAs":"アナリティカル エンジンズ","units":[{"name":"Old Department"}]}},"anniversaries":{
                                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
                             },"addresses":{
@@ -8026,7 +8059,7 @@ mod contact_address_tests {
                             );
                             assert_eq!(
                                 call[1]["update"]["c"]["organizations"],
-                                serde_json::json!({"org":{"name":"Analytical Engines Ltd","units":[{"@type":"OrgUnit","name":"New Department"}]}})
+                                serde_json::json!({"org":{"name":"Analytical Engines Ltd","sortAs":"アナリティカル エンジンズ改","units":[{"@type":"OrgUnit","name":"New Department"}]}})
                             );
                             assert_eq!(
                                 call[1]["update"]["c"]["phones"],
@@ -8096,6 +8129,7 @@ mod contact_address_tests {
             middle_name: Some("Byron".into()),
             first_name: Some("Ada Byron".into()),
             yomi_last_name: Some("ラブレス改".into()),
+            yomi_company_name: Some("アナリティカル エンジンズ改".into()),
             department: Some("New Department".into()),
             business_2_phone_number: Some("555-0104".into()),
             pager_number: Some("555-0107".into()),
@@ -8177,7 +8211,7 @@ mod contact_address_tests {
                 "car":{"number":"555-0107","label":"car"},
                 "radio":{"number":"555-0108","label":"radio"},
                 "assistant":{"number":"555-0110","label":"assistant"}
-            }, "organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Research"}]}}, "anniversaries":{
+            }, "organizations":{"org":{"name":"Analytical Engines Ltd","sortAs":"アナリティカル エンジンズ","units":[{"name":"Research"}]}}, "anniversaries":{
                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
             }
@@ -8198,6 +8232,10 @@ mod contact_address_tests {
             Some("Analytical Engines Ltd")
         );
         assert_eq!(contact.department.as_deref(), Some("Research"));
+        assert_eq!(
+            contact.yomi_company_name.as_deref(),
+            Some("アナリティカル エンジンズ")
+        );
         assert_eq!(contact.mobile_phone.as_deref(), Some("555-0100"));
         assert_eq!(contact.home_phone.as_deref(), Some("555-0101"));
         assert_eq!(contact.home_phone2.as_deref(), Some("555-0102"));
