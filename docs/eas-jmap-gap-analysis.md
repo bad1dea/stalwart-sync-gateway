@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `3a5d8d7` (2026-11-23)
+## Reconciled status for source `main` at `562d391` (2026-11-23)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -161,6 +161,11 @@ The implementation accepts text terms and rejects comma separators or
 property/phrase operands the backend cannot preserve. Regression tests cover
 each operator and rejected forms. Full suite: 259 passed, 73 ignored; clippy,
 formatting, and diff checks pass. See the [MS-KQL operator specification](https://officeprotocoldoc.z19.web.core.windows.net/files/MS-KQL/%5BMS-KQL%5D-210720.pdf).
+Deployed as `deploy-2026-11-23-eas-kql-set-ops-562d391`; homelab commit
+`62b3f5a`. Compose produced image
+`sha256:df88bc8a9bbca1a36467791b2bcfaf40a240b7d801872d18de14cc2a81fb1c53`.
+The container started at `2026-11-23T00:44:03Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`.
 
 This reconciliation supersedes older status claims in this document where
 they conflict with source `main` at the stated revision. Update this section
