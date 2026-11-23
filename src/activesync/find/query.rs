@@ -194,6 +194,17 @@ fn word_condition(word: &str) -> Result<Value, &'static str> {
         if property.eq_ignore_ascii_case("received") {
             return received_condition(operator, value);
         }
+        if is_boolean_property(property) {
+            if !matches!(operator, "=" | "<>") {
+                return Err("invalid boolean comparison");
+            }
+            let filter = condition(&property.to_ascii_lowercase(), value)?;
+            return Ok(if operator == "<>" {
+                json!({"operator":"NOT", "conditions":[filter]})
+            } else {
+                filter
+            });
+        }
         if known_property(property) {
             return Err("unsupported search comparison");
         }
@@ -432,6 +443,12 @@ fn known_property(property: &str) -> bool {
     .any(|known| property.eq_ignore_ascii_case(known))
 }
 
+fn is_boolean_property(property: &str) -> bool {
+    ["isread", "isflagged", "hasattachment", "hasattachments"]
+        .iter()
+        .any(|known| property.eq_ignore_ascii_case(known))
+}
+
 fn free_text_property(property: &str, value: &str) -> Result<Value, &'static str> {
     let value = if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
         let inner = &value[1..value.len() - 1];
@@ -568,6 +585,29 @@ mod tests {
         );
         assert!(to_filter("-").is_err());
         assert!(to_filter("++term").is_err());
+    }
+
+    #[test]
+    fn boolean_property_comparisons_preserve_equality_and_inequality() {
+        for (query, expected) in [
+            ("isread=true", json!({"hasKeyword":"$seen"})),
+            ("isread=false", json!({"notKeyword":"$seen"})),
+            ("isflagged=1", json!({"hasKeyword":"$flagged"})),
+            ("hasattachment=yes", json!({"hasAttachment":true})),
+            ("hasattachments=no", json!({"hasAttachment":false})),
+            (
+                "hasattachment<>true",
+                json!({"operator":"NOT", "conditions":[{"hasAttachment":true}]}),
+            ),
+            (
+                "isread<>false",
+                json!({"operator":"NOT", "conditions":[{"notKeyword":"$seen"}]}),
+            ),
+        ] {
+            assert_eq!(to_filter(query).unwrap(), expected, "{query}");
+        }
+        assert!(to_filter("isread>1").is_err());
+        assert!(to_filter("isread=maybe").is_err());
     }
 
     #[test]
