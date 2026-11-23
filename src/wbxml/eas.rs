@@ -1348,6 +1348,7 @@ pub struct ContactFields {
     pub pager_number: Option<String>,
     pub car_phone_number: Option<String>,
     pub radio_phone_number: Option<String>,
+    pub web_page: Option<String>,
     pub company_name: Option<String>,
     pub department: Option<String>,
     pub job_title: Option<String>,
@@ -2396,6 +2397,8 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                         fields.car_phone_number = empty;
                     } else if same_token(*token, contacts::RADIO_PHONE_NUMBER) {
                         fields.radio_phone_number = empty;
+                    } else if same_token(*token, contacts::WEB_PAGE) {
+                        fields.web_page = empty;
                     }
                 }
                 path.push(*token);
@@ -2442,6 +2445,8 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                     fields.car_phone_number = Some(text.clone());
                 } else if same_token(top, contacts::RADIO_PHONE_NUMBER) {
                     fields.radio_phone_number = Some(text.clone());
+                } else if same_token(top, contacts::WEB_PAGE) {
+                    fields.web_page = Some(text.clone());
                 } else if same_token(top, contacts::COMPANY_NAME) {
                     fields.company_name = Some(text.clone());
                 } else if same_token(top, contacts::DEPARTMENT) {
@@ -3206,6 +3211,7 @@ mod tests {
         builder.leaf(contacts::PAGER_NUMBER, "555-0106");
         builder.leaf(contacts::CAR_PHONE_NUMBER, "555-0107");
         builder.leaf(contacts::RADIO_PHONE_NUMBER, "555-0108");
+        builder.leaf(contacts::WEB_PAGE, "https://example.com/ada");
         builder.leaf(contacts::COMPANY_NAME, "Analytical Engines Ltd");
         builder.leaf(contacts::DEPARTMENT, "Research");
         builder.leaf(contacts::BUSINESS_ADDRESS_CITY, "Toronto");
@@ -3266,6 +3272,10 @@ mod tests {
         assert_eq!(
             command.contact.radio_phone_number.as_deref(),
             Some("555-0108")
+        );
+        assert_eq!(
+            command.contact.web_page.as_deref(),
+            Some("https://example.com/ada")
         );
         assert_eq!(
             command.contact.company_name.as_deref(),

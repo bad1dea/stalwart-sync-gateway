@@ -286,6 +286,7 @@ pub struct Contact {
     pub pager: Option<String>,
     pub car_phone: Option<String>,
     pub radio_phone: Option<String>,
+    pub web_page: Option<String>,
     pub company_name: Option<String>,
     pub department: Option<String>,
     pub job_title: Option<String>,

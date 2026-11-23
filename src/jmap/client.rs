@@ -1616,6 +1616,7 @@ impl JmapClient {
             "anniversaries",
             "notes",
             "onlineServices",
+            "links",
             "keywords",
         ];
         let mut offset = 0u64;
@@ -1633,7 +1634,7 @@ impl JmapClient {
                 MethodCall::new("ContactCard/get", serde_json::json!({
                     "accountId":account, "#ids":{"resultOf":"q","name":"ContactCard/query","path":"/ids"},
                     "properties":["id","addressBookIds","name","emails","phones","organizations",
-                        "titles","nicknames","addresses","anniversaries","notes","onlineServices","keywords"]
+                        "titles","nicknames","addresses","anniversaries","notes","onlineServices","links","keywords"]
                 }), "g"),
             ]).await?;
             let query = response
@@ -1737,7 +1738,7 @@ impl JmapClient {
                     "ContactCard/get",
                     serde_json::json!({
                         "accountId":account, "ids":[id],
-                        "properties":["id","addressBookIds","name","emails","phones","organizations","titles","keywords","anniversaries"]
+                        "properties":["id","addressBookIds","name","emails","phones","organizations","titles","keywords","anniversaries","links"]
                     }),
                     "g",
                 )],
@@ -1933,6 +1934,15 @@ impl JmapClient {
         if id.is_none() && !phones.is_empty() {
             card.insert("phones".to_owned(), serde_json::Value::Object(phones));
         }
+        let has_links_update = fields.web_page.is_some();
+        if let Some(web_page) = fields.web_page.as_ref().filter(|value| !value.is_empty()) {
+            if id.is_none() {
+                card.insert(
+                    "links".to_owned(),
+                    serde_json::json!({"eas_web":{"uri":web_page}}),
+                );
+            }
+        }
 
         let has_organizations_update = fields.company_name.is_some() || fields.department.is_some();
         let mut eas_organization = serde_json::Map::new();
@@ -2023,6 +2033,7 @@ impl JmapClient {
                 || has_anniversary_update
                 || has_organizations_update
                 || has_phones_update
+                || has_links_update
                 || !addresses.is_empty()
         }) {
             let mut properties = vec!["id"];
@@ -2040,6 +2051,9 @@ impl JmapClient {
             }
             if has_phones_update {
                 properties.push("phones");
+            }
+            if has_links_update {
+                properties.push("links");
             }
             let response: JmapResponse<serde_json::Value> = self
                 .api_call(
@@ -2306,6 +2320,39 @@ impl JmapClient {
                         serde_json::Value::Null
                     } else {
                         serde_json::Value::Object(merged_phones)
+                    },
+                );
+            }
+            if has_links_update {
+                let mut merged_links = existing["links"].as_object().cloned().unwrap_or_default();
+                let website_key = merged_links
+                    .iter()
+                    .find(|(_, link)| {
+                        link["uri"].as_str().is_some_and(|uri| {
+                            uri.starts_with("http://") || uri.starts_with("https://")
+                        })
+                    })
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_else(|| "eas_web".to_owned());
+                if let Some(web_page) = &fields.web_page {
+                    if web_page.is_empty() {
+                        merged_links.remove(&website_key);
+                    } else {
+                        let mut link = merged_links
+                            .get(&website_key)
+                            .and_then(serde_json::Value::as_object)
+                            .cloned()
+                            .unwrap_or_default();
+                        link.insert("uri".to_owned(), serde_json::json!(web_page));
+                        merged_links.insert(website_key, serde_json::Value::Object(link));
+                    }
+                }
+                card.insert(
+                    "links".to_owned(),
+                    if merged_links.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::Object(merged_links)
                     },
                 );
             }
@@ -6367,12 +6414,19 @@ struct ContactCardObject {
     keywords: BTreeMap<String, bool>,
     #[serde(default)]
     anniversaries: BTreeMap<String, ContactCardAnniversary>,
+    #[serde(default)]
+    links: BTreeMap<String, ContactCardLink>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct ContactCardAnniversary {
     kind: String,
     date: serde_json::Value,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContactCardLink {
+    uri: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -6546,6 +6600,10 @@ impl From<ContactCardObject> for Contact {
             .values()
             .find(|anniversary| anniversary.kind == "wedding")
             .and_then(|anniversary| partial_date_to_eas_contact(&anniversary.date));
+        let web_page = value.links.into_values().find_map(|link| {
+            link.uri
+                .filter(|uri| uri.starts_with("http://") || uri.starts_with("https://"))
+        });
 
         let mut business_address = None;
         let mut home_address = None;
@@ -6586,6 +6644,7 @@ impl From<ContactCardObject> for Contact {
             name_prefix,
             birthday,
             anniversary,
+            web_page,
             file_as,
             emails,
             mobile_phone,
@@ -7707,6 +7766,10 @@ mod contact_address_tests {
                         "p_radio":{"number":"555-0108","label":"radio"}
                     })
                 );
+                assert_eq!(
+                    call[1]["create"]["c1"]["links"],
+                    serde_json::json!({"eas_web":{"uri":"https://example.com/ada"}})
+                );
                 Json(serde_json::json!({"methodResponses":[
                     ["ContactCard/set",{"created":{"c1":{"id":"contact-1"}}},"0"]
                 ]}))
@@ -7752,6 +7815,7 @@ mod contact_address_tests {
             pager_number: Some("555-0106".into()),
             car_phone_number: Some("555-0107".into()),
             radio_phone_number: Some("555-0108".into()),
+            web_page: Some("https://example.com/ada".into()),
             business_address_city: Some("Toronto".into()),
             business_address_country: Some("Canada".into()),
             business_address_postal_code: Some("M5V 2T6".into()),
@@ -7792,7 +7856,7 @@ mod contact_address_tests {
                                 {"kind":"surname","value":"Lovelace"},
                                 {"kind":"generation","value":"Jr."},
                                 {"kind":"prefix","value":"Countess"}
-                            ]},"phones":{"work1":{"number":"555-0101","contexts":{"work":true}},"work2":{"number":"555-0102","contexts":{"work":true}},"fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},"pager":{"number":"555-0106","features":{"pager":true}},"car":{"number":"555-0107","label":"car"},"radio":{"number":"555-0108","label":"radio"}},"organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Old Department"}]}},"anniversaries":{
+                            ]},"links":{"site":{"uri":"https://old.example/"},"mail":{"uri":"mailto:ada@example.com"}},"phones":{"work1":{"number":"555-0101","contexts":{"work":true}},"work2":{"number":"555-0102","contexts":{"work":true}},"fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},"pager":{"number":"555-0106","features":{"pager":true}},"car":{"number":"555-0107","label":"car"},"radio":{"number":"555-0108","label":"radio"}},"organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Old Department"}]}},"anniversaries":{
                                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
                             },"addresses":{
@@ -7839,6 +7903,13 @@ mod contact_address_tests {
                                     "pager":{"number":"555-0107","features":{"pager":true}},
                                     "car":{"number":"555-0109","label":"car"},
                                     "radio":{"number":"555-0108","label":"radio"}
+                                })
+                            );
+                            assert_eq!(
+                                call[1]["update"]["c"]["links"],
+                                serde_json::json!({
+                                    "site":{"uri":"https://new.example/ada"},
+                                    "mail":{"uri":"mailto:ada@example.com"}
                                 })
                             );
                             let addresses = &call[1]["update"]["c"]["addresses"];
@@ -7891,6 +7962,7 @@ mod contact_address_tests {
             business_2_phone_number: Some("555-0104".into()),
             pager_number: Some("555-0107".into()),
             car_phone_number: Some("555-0109".into()),
+            web_page: Some("https://new.example/ada".into()),
             birthday: Some("18151211".into()),
             home_address_city: Some("Vancouver".into()),
             business_address_street: Some(String::new()),
@@ -7954,7 +8026,7 @@ mod contact_address_tests {
                 {"kind":"surname","value":"Lovelace"},
                 {"kind":"generation","value":"Jr."},
                 {"kind":"prefix","value":"Countess"}
-            ]}, "phones":{
+            ]}, "links":{"website":{"uri":"https://example.com/ada"},"mail":{"uri":"mailto:ada@example.com"}}, "phones":{
                 "mobile":{"number":"555-0100","contexts":{"mobile":true}},
                 "home1":{"number":"555-0101","contexts":{"home":true}},
                 "home2":{"number":"555-0102","contexts":{"home":true}},
@@ -7992,6 +8064,7 @@ mod contact_address_tests {
         assert_eq!(contact.pager.as_deref(), Some("555-0106"));
         assert_eq!(contact.car_phone.as_deref(), Some("555-0107"));
         assert_eq!(contact.radio_phone.as_deref(), Some("555-0108"));
+        assert_eq!(contact.web_page.as_deref(), Some("https://example.com/ada"));
     }
 
     #[test]
