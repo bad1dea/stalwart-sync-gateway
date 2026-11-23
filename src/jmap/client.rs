@@ -2077,6 +2077,19 @@ impl JmapClient {
                 );
             }
         }
+        let has_office_location_update = fields.office_location.is_some();
+        if let Some(office_location) = fields
+            .office_location
+            .as_ref()
+            .filter(|value| id.is_some() || !value.is_empty())
+        {
+            if id.is_none() {
+                addresses.insert(
+                    "eas_office_location".to_owned(),
+                    serde_json::json!({"@type":"Address","label":"office location","full":office_location}),
+                );
+            }
+        }
         let mut contact_state = None;
         if let Some(existing_id) = id.filter(|_| {
             has_name_update
@@ -2085,12 +2098,13 @@ impl JmapClient {
                 || has_phones_update
                 || has_links_update
                 || !addresses.is_empty()
+                || has_office_location_update
         }) {
             let mut properties = vec!["id"];
             if has_name_update {
                 properties.push("name");
             }
-            if !addresses.is_empty() {
+            if !addresses.is_empty() || has_office_location_update {
                 properties.push("addresses");
             }
             if has_anniversary_update {
@@ -2492,6 +2506,9 @@ impl JmapClient {
                 .cloned()
                 .unwrap_or_default();
             for (_, requested) in &addresses {
+                if requested.get("label").is_some() {
+                    continue;
+                }
                 let context = requested["contexts"]
                     .as_object()
                     .and_then(|contexts| contexts.keys().next())
@@ -2551,6 +2568,25 @@ impl JmapClient {
                     address.remove("defaultSeparator");
                     address.remove("full");
                     merged.insert(address_id, serde_json::Value::Object(address));
+                }
+            }
+            if let Some(office_location) = &fields.office_location {
+                let office_id = merged
+                    .iter()
+                    .find(|(_, address)| {
+                        address["label"]
+                            .as_str()
+                            .is_some_and(|label| label.eq_ignore_ascii_case("office location"))
+                    })
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_else(|| "eas_office_location".to_owned());
+                if office_location.is_empty() {
+                    merged.remove(&office_id);
+                } else {
+                    merged.insert(
+                        office_id,
+                        serde_json::json!({"@type":"Address","label":"office location","full":office_location}),
+                    );
                 }
             }
             addresses = merged;
@@ -6611,6 +6647,8 @@ struct ContactCardTitle {
 
 #[derive(Debug, Default, Deserialize)]
 struct ContactCardAddress {
+    label: Option<String>,
+    full: Option<String>,
     #[serde(default)]
     contexts: BTreeMap<String, bool>,
     #[serde(default)]
@@ -6762,7 +6800,16 @@ impl From<ContactCardObject> for Contact {
         let mut business_address = None;
         let mut home_address = None;
         let mut other_address = None;
+        let mut office_location = None;
         for address in value.addresses.into_values() {
+            if address
+                .label
+                .as_deref()
+                .is_some_and(|label| label.eq_ignore_ascii_case("office location"))
+            {
+                office_location = address.full;
+                continue;
+            }
             let mut mapped = crate::model::ContactAddress::default();
             for component in address.components {
                 match component.kind.as_str() {
@@ -6799,6 +6846,7 @@ impl From<ContactCardObject> for Contact {
             yomi_first_name,
             yomi_last_name,
             yomi_company_name,
+            office_location,
             birthday,
             anniversary,
             web_page,
@@ -7883,7 +7931,8 @@ mod contact_address_tests {
                         ],"isOrdered":false},
                         "other":{"@type":"Address","contexts":{"other":true},"components":[
                             {"kind":"locality","value":"Kingston"}
-                        ],"isOrdered":false}
+                        ],"isOrdered":false},
+                        "eas_office_location":{"@type":"Address","label":"office location","full":"Building 4, Floor 2"}
                     })
                 );
                 assert_eq!(
@@ -7990,6 +8039,7 @@ mod contact_address_tests {
             business_address_street: Some("100 King St W".into()),
             home_address_city: Some("Ottawa".into()),
             other_address_city: Some("Kingston".into()),
+            office_location: Some("Building 4, Floor 2".into()),
             categories: Some(vec!["Work".into(), "Friends".into()]),
             ..Default::default()
         };
@@ -8027,6 +8077,7 @@ mod contact_address_tests {
                                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
                             },"addresses":{
+                                "office":{"label":"office location","full":"Building 1"},
                                 "home":{"contexts":{"private":true},"components":[
                                     {"kind":"locality","value":"Ottawa"},
                                     {"kind":"name","value":"1 Home St"}
@@ -8095,6 +8146,7 @@ mod contact_address_tests {
                                     {"kind":"locality","value":"Toronto"}
                                 ])
                             );
+                            assert_eq!(addresses["office"]["full"], "Floor 7, Tower B");
                             Json(serde_json::json!({"methodResponses":[[
                                 "ContactCard/set", {"updated":{"c":null}}, "0"
                             ]]}))
@@ -8137,6 +8189,7 @@ mod contact_address_tests {
             assistant_phone_number: Some("555-0111".into()),
             web_page: Some("https://new.example/ada".into()),
             birthday: Some("18151211".into()),
+            office_location: Some("Floor 7, Tower B".into()),
             home_address_city: Some("Vancouver".into()),
             business_address_street: Some(String::new()),
             ..Default::default()
@@ -8155,7 +8208,7 @@ mod contact_address_tests {
     #[test]
     fn contact_address_read_maps_jscontact_context_and_components() {
         let card: ContactCardObject = serde_json::from_value(serde_json::json!({
-            "id":"c", "keywords":{"Work":true,"inactive":false}, "addresses":{
+            "id":"c", "keywords":{"Work":true,"inactive":false}, "addresses":{"office":{"label":"office location","full":"Building 4, Floor 2"},
                 "work":{"contexts":{"work":true},"components":[
                     {"kind":"locality","value":"Toronto"},
                     {"kind":"country","value":"Canada"},
@@ -8188,6 +8241,10 @@ mod contact_address_tests {
             Some("Ottawa")
         );
         assert_eq!(contact.categories, vec!["Work"]);
+        assert_eq!(
+            contact.office_location.as_deref(),
+            Some("Building 4, Floor 2")
+        );
     }
 
     #[test]

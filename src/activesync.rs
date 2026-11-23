@@ -5550,6 +5550,7 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.yomi_first_name.hash(&mut hasher);
     contact.yomi_last_name.hash(&mut hasher);
     contact.yomi_company_name.hash(&mut hasher);
+    contact.office_location.hash(&mut hasher);
     contact.birthday.hash(&mut hasher);
     contact.anniversary.hash(&mut hasher);
     contact.file_as.hash(&mut hasher);
@@ -5689,6 +5690,9 @@ fn write_contact_fields(
     }
     if let Some(yomi_company_name) = &contact.yomi_company_name {
         builder.leaf(c::YOMI_COMPANY_NAME, yomi_company_name.clone());
+    }
+    if let Some(office_location) = &contact.office_location {
+        builder.leaf(c::OFFICE_LOCATION, office_location.clone());
     }
     if let Some(birthday) = &contact.birthday {
         builder.leaf(c::BIRTHDAY, birthday.clone());
@@ -7862,6 +7866,7 @@ mod tests {
             yomi_first_name: Some("エイダ".into()),
             yomi_last_name: Some("ラブレス".into()),
             yomi_company_name: Some("アナリティカル エンジンズ".into()),
+            office_location: Some("Building 4, Floor 2".into()),
             department: Some("Research".into()),
             home_phone2: Some("555-0102".into()),
             business_phone2: Some("555-0104".into()),
@@ -7976,6 +7981,10 @@ mod tests {
             Some("アナリティカル エンジンズ")
         );
         assert_eq!(
+            eas::find_text_after(&doc, c::OFFICE_LOCATION),
+            Some("Building 4, Floor 2")
+        );
+        assert_eq!(
             eas::find_text_after(&doc, c::WEB_PAGE),
             Some("https://example.com/ada")
         );
@@ -7984,6 +7993,8 @@ mod tests {
         contact.yomi_first_name = Some("エイダ改".into());
         assert_ne!(super::contact_hash(&contact), before);
         contact.yomi_company_name = Some("アナリティカル エンジンズ改".into());
+        assert_ne!(super::contact_hash(&contact), before);
+        contact.office_location = Some("Building 5".into());
         assert_ne!(super::contact_hash(&contact), before);
         contact.business_address.as_mut().unwrap().city = Some("Hamilton".into());
         assert_ne!(super::contact_hash(&contact), before);
