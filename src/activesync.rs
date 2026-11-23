@@ -5554,6 +5554,7 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.nickname.hash(&mut hasher);
     contact.company_main_phone.hash(&mut hasher);
     contact.mms.hash(&mut hasher);
+    contact.account_name.hash(&mut hasher);
     contact.im_address1.hash(&mut hasher);
     contact.im_address2.hash(&mut hasher);
     contact.im_address3.hash(&mut hasher);
@@ -5709,6 +5710,9 @@ fn write_contact_fields(
     }
     if let Some(mms) = &contact.mms {
         builder.leaf(c2::MMS, mms.clone());
+    }
+    if let Some(account) = &contact.account_name {
+        builder.leaf(c2::ACCOUNT_NAME, account.clone());
     }
     if let Some(im) = &contact.im_address1 {
         builder.leaf(c2::IM_ADDRESS, im.clone());
@@ -7895,6 +7899,7 @@ mod tests {
             nickname: Some("Enchantress of Numbers".into()),
             company_main_phone: Some("555-0199".into()),
             mms: Some("ada@mms.example".into()),
+            account_name: Some("ada-eas-account".into()),
             im_address1: Some("ada@example.im".into()),
             im_address2: Some("ada@chat.example".into()),
             im_address3: Some("ada@xmpp.example".into()),
@@ -8036,6 +8041,8 @@ mod tests {
         contact.company_main_phone = Some("555-0188".into());
         assert_ne!(super::contact_hash(&contact), before);
         contact.mms = Some("new@mms.example".into());
+        assert_ne!(super::contact_hash(&contact), before);
+        contact.account_name = Some("new-account".into());
         assert_ne!(super::contact_hash(&contact), before);
         contact.im_address1 = Some("ada2@example.im".into());
         assert_ne!(super::contact_hash(&contact), before);
