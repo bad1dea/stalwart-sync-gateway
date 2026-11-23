@@ -1812,6 +1812,9 @@ impl JmapClient {
         if let Some(suffix) = &fields.suffix {
             components.push(serde_json::json!({"kind": "generation", "value": suffix}));
         }
+        if let Some(prefix) = &fields.name_prefix {
+            components.push(serde_json::json!({"kind": "prefix", "value": prefix}));
+        }
         let mut name = serde_json::Map::new();
         if let Some(file_as) = &fields.file_as {
             name.insert(
@@ -2006,6 +2009,7 @@ impl JmapClient {
                     ("given2", &fields.middle_name),
                     ("surname", &fields.last_name),
                     ("generation", &fields.suffix),
+                    ("prefix", &fields.name_prefix),
                 ] {
                     let Some(value) = requested else { continue };
                     components.retain(|component| component["kind"] != kind);
@@ -6221,6 +6225,7 @@ impl From<ContactCardObject> for Contact {
         let mut middle_name = None;
         let mut last_name = None;
         let mut suffix = None;
+        let mut name_prefix = None;
         if let Some(name) = &value.name {
             for component in &name.components {
                 match component.kind.as_str() {
@@ -6228,6 +6233,7 @@ impl From<ContactCardObject> for Contact {
                     "given2" => middle_name = Some(component.value.clone()),
                     "surname" => last_name = Some(component.value.clone()),
                     "generation" | "credential" => suffix = Some(component.value.clone()),
+                    "prefix" => name_prefix = Some(component.value.clone()),
                     _ => {}
                 }
             }
@@ -6309,6 +6315,7 @@ impl From<ContactCardObject> for Contact {
             middle_name,
             last_name,
             suffix,
+            name_prefix,
             birthday,
             anniversary,
             file_as,
@@ -7396,7 +7403,8 @@ mod contact_address_tests {
                         {"kind":"given","value":"Ada"},
                         {"kind":"given2","value":"Augusta"},
                         {"kind":"surname","value":"Lovelace"},
-                        {"kind":"generation","value":"Jr."}
+                        {"kind":"generation","value":"Jr."},
+                        {"kind":"prefix","value":"Countess"}
                     ])
                 );
                 assert_eq!(
@@ -7437,6 +7445,7 @@ mod contact_address_tests {
             middle_name: Some("Augusta".into()),
             last_name: Some("Lovelace".into()),
             suffix: Some("Jr.".into()),
+            name_prefix: Some("Countess".into()),
             birthday: Some("18151210".into()),
             anniversary: Some("18351108".into()),
             business_address_city: Some("Toronto".into()),
@@ -7477,7 +7486,8 @@ mod contact_address_tests {
                                 {"kind":"given","value":"Ada"},
                                 {"kind":"given2","value":"Augusta"},
                                 {"kind":"surname","value":"Lovelace"},
-                                {"kind":"generation","value":"Jr."}
+                                {"kind":"generation","value":"Jr."},
+                                {"kind":"prefix","value":"Countess"}
                             ]},"anniversaries":{
                                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
@@ -7501,6 +7511,7 @@ mod contact_address_tests {
                                     {"kind":"given","value":"Ada"},
                                     {"kind":"surname","value":"Lovelace"},
                                     {"kind":"generation","value":"Jr."},
+                                    {"kind":"prefix","value":"Countess"},
                                     {"kind":"given2","value":"Byron"}
                                 ])
                             );
@@ -7618,7 +7629,8 @@ mod contact_address_tests {
                 {"kind":"given","value":"Ada"},
                 {"kind":"given2","value":"Augusta"},
                 {"kind":"surname","value":"Lovelace"},
-                {"kind":"generation","value":"Jr."}
+                {"kind":"generation","value":"Jr."},
+                {"kind":"prefix","value":"Countess"}
             ]}, "anniversaries":{
                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
@@ -7630,6 +7642,7 @@ mod contact_address_tests {
         assert_eq!(contact.middle_name.as_deref(), Some("Augusta"));
         assert_eq!(contact.last_name.as_deref(), Some("Lovelace"));
         assert_eq!(contact.suffix.as_deref(), Some("Jr."));
+        assert_eq!(contact.name_prefix.as_deref(), Some("Countess"));
         assert_eq!(contact.birthday.as_deref(), Some("18151210"));
         assert_eq!(contact.anniversary.as_deref(), Some("18351108"));
     }

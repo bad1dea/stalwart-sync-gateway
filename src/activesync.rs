@@ -5546,6 +5546,7 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.middle_name.hash(&mut hasher);
     contact.last_name.hash(&mut hasher);
     contact.suffix.hash(&mut hasher);
+    contact.name_prefix.hash(&mut hasher);
     contact.birthday.hash(&mut hasher);
     contact.anniversary.hash(&mut hasher);
     contact.file_as.hash(&mut hasher);
@@ -5645,6 +5646,9 @@ fn write_contact_fields(
     }
     if let Some(suffix) = &contact.suffix {
         builder.leaf(c::SUFFIX, suffix.clone());
+    }
+    if let Some(prefix) = &contact.name_prefix {
+        builder.leaf(c::TITLE, prefix.clone());
     }
     if let Some(birthday) = &contact.birthday {
         builder.leaf(c::BIRTHDAY, birthday.clone());
@@ -7802,6 +7806,7 @@ mod tests {
         let mut contact = crate::model::Contact {
             middle_name: Some("Augusta".into()),
             suffix: Some("Jr.".into()),
+            name_prefix: Some("Countess".into()),
             business_address: Some(crate::model::ContactAddress {
                 city: Some("Toronto".into()),
                 country: Some("Canada".into()),
@@ -7851,6 +7856,7 @@ mod tests {
         );
         assert_eq!(eas::find_text_after(&doc, c::MIDDLE_NAME), Some("Augusta"));
         assert_eq!(eas::find_text_after(&doc, c::SUFFIX), Some("Jr."));
+        assert_eq!(eas::find_text_after(&doc, c::TITLE), Some("Countess"));
         contact.business_address.as_mut().unwrap().city = Some("Hamilton".into());
         assert_ne!(super::contact_hash(&contact), before);
     }

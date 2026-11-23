@@ -272,6 +272,7 @@ pub struct Contact {
     pub middle_name: Option<String>,
     pub last_name: Option<String>,
     pub suffix: Option<String>,
+    pub name_prefix: Option<String>,
     pub birthday: Option<String>,
     pub anniversary: Option<String>,
     pub file_as: Option<String>,
