@@ -2014,7 +2014,7 @@ impl JmapClient {
         if let Some(company_main) = &fields.company_main_phone {
             phones.insert(
                 "eas_company_main".to_owned(),
-                serde_json::json!({"number":company_main,"label":"company main phone"}),
+                serde_json::json!({"number":company_main,"features":{"main-number":true}}),
             );
         }
         let has_phones_update = fields.company_main_phone.is_some()
@@ -2563,8 +2563,8 @@ impl JmapClient {
                     (
                         "eas_company_main",
                         "",
+                        "main-number",
                         "",
-                        "company main phone",
                         0usize,
                         &fields.company_main_phone,
                     ),
@@ -6984,10 +6984,11 @@ impl From<ContactCardObject> for Contact {
             };
             let is = |ctx: &str| phone.contexts.get(ctx).copied().unwrap_or(false);
             let feature = |name: &str| phone.features.get(name).copied().unwrap_or(false);
-            if phone
-                .label
-                .as_deref()
-                .is_some_and(|label| label.eq_ignore_ascii_case("company main phone"))
+            if (feature("main-number")
+                || phone
+                    .label
+                    .as_deref()
+                    .is_some_and(|label| label.eq_ignore_ascii_case("company main phone")))
                 && company_main_phone.is_none()
             {
                 company_main_phone = Some(number);
@@ -8243,7 +8244,7 @@ mod contact_address_tests {
                         "p_car":{"number":"555-0107","label":"car"},
                         "p_radio":{"number":"555-0108","label":"radio"},
                         "p_assistant":{"number":"555-0110","label":"assistant"},
-                        "eas_company_main":{"number":"555-0199","label":"company main phone"}
+                        "eas_company_main":{"number":"555-0199","features":{"main-number":true}}
                     })
                 );
                 assert_eq!(
@@ -8350,7 +8351,7 @@ mod contact_address_tests {
                                 {"kind":"surname","value":"Lovelace","phonetic":"ラブレス"},
                                 {"kind":"generation","value":"Jr."},
                                 {"kind":"prefix","value":"Countess"}
-                            ]},"links":{"site":{"uri":"https://old.example/"},"mail":{"uri":"mailto:ada@example.com"}},"phones":{"work1":{"number":"555-0101","contexts":{"work":true}},"work2":{"number":"555-0102","contexts":{"work":true}},"fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},"workfax":{"number":"555-0109","contexts":{"work":true},"features":{"fax":true}},"pager":{"number":"555-0106","features":{"pager":true}},"car":{"number":"555-0107","label":"car"},"radio":{"number":"555-0108","label":"radio"},"assistant":{"number":"555-0110","label":"assistant"},"eas_company_main":{"number":"555-0199","label":"company main phone"}},"organizations":{"org":{"name":"Analytical Engines Ltd","sortAs":"アナリティカル エンジンズ","units":[{"name":"Old Department"}]}},"anniversaries":{
+                            ]},"links":{"site":{"uri":"https://old.example/"},"mail":{"uri":"mailto:ada@example.com"}},"phones":{"work1":{"number":"555-0101","contexts":{"work":true}},"work2":{"number":"555-0102","contexts":{"work":true}},"fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},"workfax":{"number":"555-0109","contexts":{"work":true},"features":{"fax":true}},"pager":{"number":"555-0106","features":{"pager":true}},"car":{"number":"555-0107","label":"car"},"radio":{"number":"555-0108","label":"radio"},"assistant":{"number":"555-0110","label":"assistant"},"eas_company_main":{"number":"555-0199","features":{"main-number":true}}},"organizations":{"org":{"name":"Analytical Engines Ltd","sortAs":"アナリティカル エンジンズ","units":[{"name":"Old Department"}]}},"anniversaries":{
                                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
                             },"addresses":{
@@ -8403,7 +8404,7 @@ mod contact_address_tests {
                                     "car":{"number":"555-0109","label":"car"},
                                     "radio":{"number":"555-0108","label":"radio"},
                                     "assistant":{"number":"555-0111","label":"assistant"},
-                                    "eas_company_main":{"number":"555-0198","label":"company main phone"}
+                                    "eas_company_main":{"number":"555-0198","features":{"main-number":true}}
                                 })
                             );
                             assert_eq!(
@@ -8556,7 +8557,7 @@ mod contact_address_tests {
                 "pager":{"number":"555-0106","features":{"pager":true}},
                 "car":{"number":"555-0107","label":"car"},
                 "radio":{"number":"555-0108","label":"radio"},
-                "assistant":{"number":"555-0110","label":"assistant"},"eas_company_main":{"number":"555-0199","label":"company main phone"}
+                "assistant":{"number":"555-0110","label":"assistant"},"eas_company_main":{"number":"555-0199","features":{"main-number":true}}
             }, "organizations":{"org":{"name":"Analytical Engines Ltd","sortAs":"アナリティカル エンジンズ","units":[{"name":"Research"}]}}, "anniversaries":{
                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
