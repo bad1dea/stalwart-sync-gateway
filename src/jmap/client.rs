@@ -215,6 +215,49 @@ pub enum DestroyMailboxOutcome {
     Forbidden,
 }
 
+#[derive(Clone, Copy)]
+pub enum GroupwareCollectionKind {
+    AddressBook,
+    Calendar,
+}
+
+impl GroupwareCollectionKind {
+    fn object(self) -> &'static str {
+        match self {
+            Self::AddressBook => "AddressBook",
+            Self::Calendar => "Calendar",
+        }
+    }
+
+    fn capability(self) -> &'static str {
+        match self {
+            Self::AddressBook => capabilities::CONTACTS,
+            Self::Calendar => capabilities::CALENDARS,
+        }
+    }
+}
+
+pub enum CreateGroupwareCollectionOutcome {
+    Created(String),
+    NameExists,
+    Unsupported,
+}
+
+pub enum UpdateGroupwareCollectionOutcome {
+    Updated,
+    NotFound,
+    Forbidden,
+    NameExists,
+    Unsupported,
+}
+
+pub enum DestroyGroupwareCollectionOutcome {
+    Destroyed,
+    NotFound,
+    Forbidden,
+    Unsupported,
+}
+
 impl JmapClient {
     pub fn new(config: Config, state: crate::state::SharedStateStore) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder()
@@ -4564,6 +4607,181 @@ impl JmapClient {
             }
         }
         anyhow::bail!("JMAP Mailbox/set destroy response was missing")
+    }
+
+    pub async fn create_groupware_collection(
+        &self,
+        auth: &AuthenticatedSession,
+        kind: GroupwareCollectionKind,
+        name: &str,
+    ) -> anyhow::Result<CreateGroupwareCollectionOutcome> {
+        let Some(account_id) = auth.session.primary_account_for(kind.capability()) else {
+            return Ok(CreateGroupwareCollectionOutcome::Unsupported);
+        };
+        let method_name = format!("{}/set", kind.object());
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), kind.capability().to_owned()],
+                vec![MethodCall::new(
+                    &method_name,
+                    serde_json::json!({
+                        "accountId": account_id,
+                        "create": {"newCollection": {"name": name}}
+                    }),
+                    "0",
+                )],
+            )
+            .await?;
+        for method in response.method_responses {
+            if method.0 == method_name {
+                if let Some(id) = method
+                    .1
+                    .get("created")
+                    .and_then(|created| created.get("newCollection"))
+                    .and_then(|object| object.get("id"))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    return Ok(CreateGroupwareCollectionOutcome::Created(id.to_owned()));
+                }
+                let error_type = method
+                    .1
+                    .get("notCreated")
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|errors| errors.values().next())
+                    .and_then(|error| error.get("type"))
+                    .and_then(serde_json::Value::as_str);
+                return match error_type {
+                    Some("alreadyExists") => Ok(CreateGroupwareCollectionOutcome::NameExists),
+                    Some("forbidden") | Some("accountReadOnly") => {
+                        Ok(CreateGroupwareCollectionOutcome::Unsupported)
+                    }
+                    other => anyhow::bail!(
+                        "{method_name} create failed with error type {other:?}: {:?}",
+                        method.1
+                    ),
+                };
+            }
+            if method.0 == "error" {
+                anyhow::bail!("JMAP method error in {method_name} create: {:?}", method.1);
+            }
+        }
+        anyhow::bail!("JMAP {method_name} create response was missing")
+    }
+
+    pub async fn update_groupware_collection(
+        &self,
+        auth: &AuthenticatedSession,
+        kind: GroupwareCollectionKind,
+        id: &str,
+        name: &str,
+    ) -> anyhow::Result<UpdateGroupwareCollectionOutcome> {
+        let Some(account_id) = auth.session.primary_account_for(kind.capability()) else {
+            return Ok(UpdateGroupwareCollectionOutcome::Unsupported);
+        };
+        let method_name = format!("{}/set", kind.object());
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), kind.capability().to_owned()],
+                vec![MethodCall::new(
+                    &method_name,
+                    serde_json::json!({
+                        "accountId": account_id,
+                        "update": {(id): {"name": name}}
+                    }),
+                    "0",
+                )],
+            )
+            .await?;
+        for method in response.method_responses {
+            if method.0 == method_name {
+                if method
+                    .1
+                    .get("updated")
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(|updated| !updated.is_empty())
+                {
+                    return Ok(UpdateGroupwareCollectionOutcome::Updated);
+                }
+                let error_type = method
+                    .1
+                    .get("notUpdated")
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|errors| errors.values().next())
+                    .and_then(|error| error.get("type"))
+                    .and_then(serde_json::Value::as_str);
+                return match error_type {
+                    Some("notFound") => Ok(UpdateGroupwareCollectionOutcome::NotFound),
+                    Some("forbidden") => Ok(UpdateGroupwareCollectionOutcome::Forbidden),
+                    Some("alreadyExists") => Ok(UpdateGroupwareCollectionOutcome::NameExists),
+                    other => anyhow::bail!(
+                        "{method_name} update failed with error type {other:?}: {:?}",
+                        method.1
+                    ),
+                };
+            }
+            if method.0 == "error" {
+                anyhow::bail!("JMAP method error in {method_name} update: {:?}", method.1);
+            }
+        }
+        anyhow::bail!("JMAP {method_name} update response was missing")
+    }
+
+    pub async fn destroy_groupware_collection(
+        &self,
+        auth: &AuthenticatedSession,
+        kind: GroupwareCollectionKind,
+        id: &str,
+    ) -> anyhow::Result<DestroyGroupwareCollectionOutcome> {
+        let Some(account_id) = auth.session.primary_account_for(kind.capability()) else {
+            return Ok(DestroyGroupwareCollectionOutcome::Unsupported);
+        };
+        let method_name = format!("{}/set", kind.object());
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), kind.capability().to_owned()],
+                vec![MethodCall::new(
+                    &method_name,
+                    serde_json::json!({ "accountId": account_id, "destroy": [id] }),
+                    "0",
+                )],
+            )
+            .await?;
+        for method in response.method_responses {
+            if method.0 == method_name {
+                if method
+                    .1
+                    .get("destroyed")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|destroyed| {
+                        destroyed.iter().any(|destroyed_id| destroyed_id == id)
+                    })
+                {
+                    return Ok(DestroyGroupwareCollectionOutcome::Destroyed);
+                }
+                let error_type = method
+                    .1
+                    .get("notDestroyed")
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|errors| errors.values().next())
+                    .and_then(|error| error.get("type"))
+                    .and_then(serde_json::Value::as_str);
+                return match error_type {
+                    Some("notFound") => Ok(DestroyGroupwareCollectionOutcome::NotFound),
+                    Some("forbidden") => Ok(DestroyGroupwareCollectionOutcome::Forbidden),
+                    other => anyhow::bail!(
+                        "{method_name} destroy failed with error type {other:?}: {:?}",
+                        method.1
+                    ),
+                };
+            }
+            if method.0 == "error" {
+                anyhow::bail!("JMAP method error in {method_name} destroy: {:?}", method.1);
+            }
+        }
+        anyhow::bail!("JMAP {method_name} destroy response was missing")
     }
 
     pub async fn move_email(

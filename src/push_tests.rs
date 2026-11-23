@@ -328,11 +328,34 @@ async fn mock_api(
                 serde_json::json!({ "ids": ids, "total": total, "queryState": m.change_log.lock().unwrap().len().to_string() })
             }
             "AddressBook/get" => {
-                serde_json::json!({"list": [{"id": "book", "name": "Contacts", "isDefault": true}]})
+                let mut list =
+                    vec![serde_json::json!({"id": "book", "name": "Contacts", "isDefault": true})];
+                list.extend(
+                    m.groupware
+                        .lock()
+                        .unwrap()
+                        .get("addressBooks")
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                serde_json::json!({"list": list})
             }
             "Calendar/get" => {
-                serde_json::json!({"state":"stable", "list": [{"id": "calendar", "name": "Calendar", "isDefault": true}]})
+                let mut list = vec![
+                    serde_json::json!({"id": "calendar", "name": "Calendar", "isDefault": true}),
+                ];
+                list.extend(
+                    m.groupware
+                        .lock()
+                        .unwrap()
+                        .get("calendars")
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                serde_json::json!({"state":"stable", "list": list})
             }
+            "AddressBook/set" => mock_groupware_collection_set(&m, args, "addressBooks", "book"),
+            "Calendar/set" => mock_groupware_collection_set(&m, args, "calendars", "calendar"),
             "ContactCard/query" | "CalendarEvent/query" => {
                 let kind = if name == "ContactCard/query" {
                     "contacts"
@@ -597,6 +620,54 @@ async fn mock_download(
         MIME_BYTES
     };
     ([("Content-Type", "application/octet-stream")], data).into_response()
+}
+
+fn mock_groupware_collection_set(
+    mock: &Mock,
+    args: &serde_json::Value,
+    collection_key: &str,
+    id_prefix: &str,
+) -> serde_json::Value {
+    let mut all = mock.groupware.lock().unwrap();
+    let list = all.entry(collection_key.to_owned()).or_default();
+    if let Some(create) = args["create"].as_object() {
+        let Some((client_id, values)) = create.iter().next() else {
+            return serde_json::json!({"notCreated": {"missing": {"type":"invalidProperties"}}});
+        };
+        let name = values["name"].as_str().unwrap_or_default();
+        if list.iter().any(|item| item["name"] == name) {
+            return serde_json::json!({"notCreated": {(client_id): {"type":"alreadyExists"}}});
+        }
+        let id = format!(
+            "{id_prefix}-{}",
+            mock.counter.fetch_add(1, Ordering::SeqCst)
+        );
+        let object = serde_json::json!({"id": id, "name": name, "isDefault": false});
+        list.push(object.clone());
+        return serde_json::json!({"created": {(client_id): object}});
+    }
+    if let Some(update) = args["update"].as_object() {
+        let Some((id, patch)) = update.iter().next() else {
+            return serde_json::json!({"notUpdated": {"missing": {"type":"invalidProperties"}}});
+        };
+        if let Some(object) = list.iter_mut().find(|item| item["id"] == id.as_str()) {
+            object["name"] = patch["name"].clone();
+            return serde_json::json!({"updated": {(id): null}});
+        }
+        return serde_json::json!({"notUpdated": {(id): {"type":"notFound"}}});
+    }
+    if let Some(destroy) = args["destroy"].as_array() {
+        let Some(id) = destroy.first().and_then(serde_json::Value::as_str) else {
+            return serde_json::json!({"notDestroyed": {"missing": {"type":"invalidProperties"}}});
+        };
+        let before = list.len();
+        list.retain(|item| item["id"] != id);
+        if list.len() != before {
+            return serde_json::json!({"destroyed": [id]});
+        }
+        return serde_json::json!({"notDestroyed": {(id): {"type":"notFound"}}});
+    }
+    serde_json::json!({"type":"invalidArguments"})
 }
 
 async fn start_mock() -> Arc<Mock> {
@@ -2096,6 +2167,126 @@ async fn folder_sync_for_a_device_partnered_earlier_does_not_force_a_reset() {
         ("1", Some("5"), Some("0"))
     );
     assert!(ids.is_empty());
+}
+
+#[tokio::test]
+async fn folder_create_update_delete_supports_address_books_and_calendars() {
+    use eas::folder_hierarchy as fh;
+    let env = Arc::new(start_env(Opts::default()).await);
+    env.mock
+        .groupware
+        .lock()
+        .unwrap()
+        .insert("capabilities".into(), Vec::new());
+    let (_, _, _, _) = folder_sync(&env, "groupware-folders", "0").await;
+
+    let create = |name: &'static str, kind: u8| {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(fh::FOLDER_CREATE);
+        b.leaf(fh::SYNC_KEY, "1");
+        b.leaf(fh::PARENT_ID, "0");
+        b.leaf(fh::DISPLAY_NAME, name);
+        b.leaf(fh::TYPE, kind.to_string());
+        b.end();
+        wbxml::encode_document(&b.finish())
+    };
+    let contact = env
+        .req("FolderCreate", "contacts")
+        .body(create(
+            "Family",
+            crate::model::eas_folder_type::USER_CONTACT,
+        ))
+        .send()
+        .await
+        .unwrap();
+    let contact = wbxml::decode_document(&contact.bytes().await.unwrap()).unwrap();
+    let contact_id = eas::find_text_after(&contact, fh::SERVER_ID)
+        .unwrap()
+        .to_owned();
+    assert!(contact_id.starts_with("ab_book-"));
+    assert_eq!(eas::find_text_after(&contact, fh::STATUS), Some("1"));
+
+    let calendar = env
+        .req("FolderCreate", "calendar")
+        .body(create(
+            "Family Events",
+            crate::model::eas_folder_type::USER_APPOINTMENT,
+        ))
+        .send()
+        .await
+        .unwrap();
+    let calendar = wbxml::decode_document(&calendar.bytes().await.unwrap()).unwrap();
+    let calendar_id = eas::find_text_after(&calendar, fh::SERVER_ID)
+        .unwrap()
+        .to_owned();
+    assert!(calendar_id.starts_with("cal_calendar-"));
+    assert_eq!(eas::find_text_after(&calendar, fh::STATUS), Some("1"));
+
+    let invalid_type = env
+        .req("FolderCreate", "invalid-folder-type")
+        .body(create("Invalid", 255))
+        .send()
+        .await
+        .unwrap();
+    let invalid_type = wbxml::decode_document(&invalid_type.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&invalid_type, fh::STATUS), Some("8"));
+
+    let (status, key, _, added) = folder_sync(&env, "groupware-folders", "1").await;
+    assert_eq!(status, "1");
+    assert_eq!(key.as_deref(), Some("2"));
+    assert!(added.contains(&contact_id));
+    assert!(added.contains(&calendar_id));
+
+    let update = |id: &str, name: &str| {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(fh::FOLDER_UPDATE);
+        b.leaf(fh::SYNC_KEY, "2");
+        b.leaf(fh::SERVER_ID, id);
+        b.leaf(fh::PARENT_ID, "0");
+        b.leaf(fh::DISPLAY_NAME, name);
+        b.end();
+        wbxml::encode_document(&b.finish())
+    };
+    for (device, id, name) in [
+        ("contacts", contact_id.as_str(), "Family Renamed"),
+        ("calendar", calendar_id.as_str(), "Family Events Renamed"),
+    ] {
+        let response = env
+            .req("FolderUpdate", device)
+            .body(update(id, name))
+            .send()
+            .await
+            .unwrap();
+        let response = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&response, fh::STATUS), Some("1"));
+    }
+    assert!(env.mock.groupware.lock().unwrap()["addressBooks"]
+        .iter()
+        .any(|item| item["name"] == "Family Renamed"));
+    assert!(env.mock.groupware.lock().unwrap()["calendars"]
+        .iter()
+        .any(|item| item["name"] == "Family Events Renamed"));
+
+    for (device, id) in [
+        ("contacts", contact_id.as_str()),
+        ("calendar", calendar_id.as_str()),
+    ] {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(fh::FOLDER_DELETE);
+        b.leaf(fh::SYNC_KEY, "2");
+        b.leaf(fh::SERVER_ID, id);
+        b.end();
+        let response = env
+            .req("FolderDelete", device)
+            .body(wbxml::encode_document(&b.finish()))
+            .send()
+            .await
+            .unwrap();
+        let response = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&response, fh::STATUS), Some("1"));
+    }
+    assert!(env.mock.groupware.lock().unwrap()["addressBooks"].is_empty());
+    assert!(env.mock.groupware.lock().unwrap()["calendars"].is_empty());
 }
 
 #[tokio::test]

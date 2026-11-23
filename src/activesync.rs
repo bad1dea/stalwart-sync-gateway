@@ -7173,14 +7173,9 @@ async fn folder_sync(
         .into_response()
 }
 
-/// A `note_`/`ab_`/`cal_`/`task_`-prefixed collection id is a synthetic id
-/// this gateway itself invents for Notes/Contacts/Calendar/Tasks (see
-/// `jmap::client::collections()`) -- never a real JMAP `Mailbox` id.
-/// FolderCreate/FolderUpdate/FolderDelete are mail-only (per the command
-/// matrix: no create/rename/delete primitive exists for the
-/// heuristically-derived address-book/calendar listings), so any of
-/// these prefixes on a ParentId/ServerId is rejected before ever calling
-/// JMAP, rather than relying on it to fail incidentally.
+/// Contact/calendar folders use synthetic ids around their JMAP ids;
+/// Notes and Tasks are derived collections with no independent lifecycle.
+/// Only the former can be passed through to AddressBook/set or Calendar/set.
 fn is_non_mail_collection_id(id: &str) -> bool {
     id.starts_with("note_")
         || id.starts_with("ab_")
@@ -7188,13 +7183,27 @@ fn is_non_mail_collection_id(id: &str) -> bool {
         || id.starts_with("task_")
 }
 
+fn groupware_collection_from_server_id(
+    id: &str,
+) -> Option<(crate::jmap::client::GroupwareCollectionKind, &str)> {
+    if let Some(id) = id.strip_prefix("ab_") {
+        Some((
+            crate::jmap::client::GroupwareCollectionKind::AddressBook,
+            id,
+        ))
+    } else {
+        id.strip_prefix("cal_")
+            .map(|id| (crate::jmap::client::GroupwareCollectionKind::Calendar, id))
+    }
+}
+
 /// [MS-ASCMD] section 2.2.1.3. Request: SyncKey, ParentId, DisplayName,
 /// Type (in that order, verified against section 6.9's XML schema).
 /// Response: Status, SyncKey, ServerId -- SyncKey/ServerId are
 /// `minOccurs="0"` in the schema; this always includes SyncKey (echoed
 /// back unchanged -- this gateway doesn't maintain incremental
-/// folder-hierarchy sync state beyond FolderSync's own always-full-relist
-/// scheme, so there's nothing to advance here) and ServerId only on
+/// folder-hierarchy sync state for FolderSync's incremental set-diff
+/// scheme, so there is nothing to advance here) and ServerId only on
 /// success. Status codes verified against section 2.2.3.177.3.
 async fn folder_create(
     state: &AppState,
@@ -7211,6 +7220,57 @@ async fn folder_create(
     let Some(display_name) = wbxml::eas::find_text_after(document, fh::DISPLAY_NAME) else {
         return folder_create_status_response(state, command, "10", sync_key, None);
     };
+    let folder_type = match wbxml::eas::find_text_after(document, fh::TYPE) {
+        None => crate::model::eas_folder_type::USER_MAIL,
+        Some(value) => match value.parse::<u8>() {
+            Ok(value) => value,
+            Err(_) => return folder_create_status_response(state, command, "8", sync_key, None),
+        },
+    };
+
+    let groupware_kind = match folder_type {
+        crate::model::eas_folder_type::USER_CONTACT => {
+            Some(crate::jmap::client::GroupwareCollectionKind::AddressBook)
+        }
+        crate::model::eas_folder_type::USER_APPOINTMENT => {
+            Some(crate::jmap::client::GroupwareCollectionKind::Calendar)
+        }
+        crate::model::eas_folder_type::USER_MAIL => None,
+        _ => return folder_create_status_response(state, command, "8", sync_key, None),
+    };
+
+    if let Some(kind) = groupware_kind {
+        if parent_id != "0" {
+            return folder_create_status_response(state, command, "5", sync_key, None);
+        }
+        return match state
+            .jmap
+            .create_groupware_collection(auth, kind, display_name)
+            .await
+        {
+            Ok(crate::jmap::client::CreateGroupwareCollectionOutcome::Created(id)) => {
+                let server_id = match kind {
+                    crate::jmap::client::GroupwareCollectionKind::AddressBook => {
+                        format!("ab_{id}")
+                    }
+                    crate::jmap::client::GroupwareCollectionKind::Calendar => {
+                        format!("cal_{id}")
+                    }
+                };
+                folder_create_status_response(state, command, "1", sync_key, Some(server_id))
+            }
+            Ok(crate::jmap::client::CreateGroupwareCollectionOutcome::NameExists) => {
+                folder_create_status_response(state, command, "2", sync_key, None)
+            }
+            Ok(crate::jmap::client::CreateGroupwareCollectionOutcome::Unsupported) => {
+                folder_create_status_response(state, command, "6", sync_key, None)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "FolderCreate groupware collection failed");
+                folder_create_status_response(state, command, "6", sync_key, None)
+            }
+        };
+    }
 
     if parent_id != "0" && is_non_mail_collection_id(parent_id) {
         return folder_create_status_response(state, command, "5", sync_key, None);
@@ -7287,6 +7347,30 @@ async fn folder_delete(
         return folder_status_response(state, command, fh::FOLDER_DELETE, "10", sync_key);
     };
 
+    if let Some((kind, id)) = groupware_collection_from_server_id(server_id) {
+        return match state
+            .jmap
+            .destroy_groupware_collection(auth, kind, id)
+            .await
+        {
+            Ok(crate::jmap::client::DestroyGroupwareCollectionOutcome::Destroyed) => {
+                folder_status_response(state, command, fh::FOLDER_DELETE, "1", sync_key)
+            }
+            Ok(crate::jmap::client::DestroyGroupwareCollectionOutcome::NotFound) => {
+                folder_status_response(state, command, fh::FOLDER_DELETE, "4", sync_key)
+            }
+            Ok(crate::jmap::client::DestroyGroupwareCollectionOutcome::Forbidden) => {
+                folder_status_response(state, command, fh::FOLDER_DELETE, "3", sync_key)
+            }
+            Ok(crate::jmap::client::DestroyGroupwareCollectionOutcome::Unsupported) => {
+                folder_status_response(state, command, fh::FOLDER_DELETE, "6", sync_key)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "FolderDelete groupware collection failed");
+                folder_status_response(state, command, fh::FOLDER_DELETE, "6", sync_key)
+            }
+        };
+    }
     if is_non_mail_collection_id(server_id) {
         return folder_status_response(state, command, fh::FOLDER_DELETE, "4", sync_key);
     }
@@ -7331,6 +7415,34 @@ async fn folder_update(
         return folder_status_response(state, command, fh::FOLDER_UPDATE, "10", sync_key);
     };
 
+    if let Some((kind, id)) = groupware_collection_from_server_id(server_id) {
+        if parent_id != "0" {
+            return folder_status_response(state, command, fh::FOLDER_UPDATE, "4", sync_key);
+        }
+        return match state
+            .jmap
+            .update_groupware_collection(auth, kind, id, display_name)
+            .await
+        {
+            Ok(crate::jmap::client::UpdateGroupwareCollectionOutcome::Updated) => {
+                folder_status_response(state, command, fh::FOLDER_UPDATE, "1", sync_key)
+            }
+            Ok(crate::jmap::client::UpdateGroupwareCollectionOutcome::NotFound) => {
+                folder_status_response(state, command, fh::FOLDER_UPDATE, "4", sync_key)
+            }
+            Ok(crate::jmap::client::UpdateGroupwareCollectionOutcome::Forbidden)
+            | Ok(crate::jmap::client::UpdateGroupwareCollectionOutcome::NameExists) => {
+                folder_status_response(state, command, fh::FOLDER_UPDATE, "2", sync_key)
+            }
+            Ok(crate::jmap::client::UpdateGroupwareCollectionOutcome::Unsupported) => {
+                folder_status_response(state, command, fh::FOLDER_UPDATE, "6", sync_key)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "FolderUpdate groupware collection failed");
+                folder_status_response(state, command, fh::FOLDER_UPDATE, "6", sync_key)
+            }
+        };
+    }
     if is_non_mail_collection_id(server_id)
         || (parent_id != "0" && is_non_mail_collection_id(parent_id))
     {
