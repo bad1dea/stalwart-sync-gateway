@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `7dd8863` (2026-11-22)
+## Reconciled status for source `main` at `dc0f3ce` (2026-11-23)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -102,6 +102,23 @@ the forced Compose build compiled the pinned source and produced image
 The replacement started at `2026-11-23T00:12:29Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`. The gateway
 continues to advertise only EAS 14.0.
+
+Also completed: **KQL property-spacing compliance**. MS-KQL only recognizes a
+property restriction when the property, operator, and value are contiguous;
+`subject: mobile` is text search while `subject:mobile` is a property filter.
+The parser now preserves this distinction, and the Find integration fixture
+uses the contiguous form for its property-search scenario. Regression coverage
+checks the parsed text and property forms. Full suite: 255 passed, 73 ignored;
+clippy with warnings denied, formatting, and diff checks pass. Exact phrase
+semantics and recurrence remain blocked by the observed Stalwart backend
+behavior; real-client 16.1 certification still requires device verification.
+Deployed as `deploy-2026-11-23-eas-kql-spacing-dc0f3ce`; homelab commit
+`6946218`. Komodo remained locked, so the Hermes checkout was fast-forwarded
+and the pinned source was built through Compose. Image
+`sha256:17faa133d0942f4ca59299d9f0060b662d9c490359291f45da58022eccd58247`
+started at `2026-11-23T00:19:29Z` with restart count zero; mesh `/healthz`
+returned `ok` and `/readyz` returned `ready`. Production continues to advertise
+EAS 14.0.
 
 This reconciliation supersedes older status claims in this document where
 they conflict with source `main` at the stated revision. Update this section
