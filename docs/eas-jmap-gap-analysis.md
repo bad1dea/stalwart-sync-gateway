@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `dc0f3ce` (2026-11-23)
+## Reconciled status for source `main` at `54731df` (2026-11-23)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -123,6 +123,11 @@ and the pinned source was built through Compose. Image
 started at `2026-11-23T00:19:29Z` with restart count zero; mesh `/healthz`
 returned `ok` and `/readyz` returned `ready`. Production continues to advertise
 EAS 14.0.
+Deployed as `deploy-2026-11-23-eas-kql-qualifiers-54731df`; homelab commit
+`2256a11`. The Compose build compiled the pinned source and produced image
+`sha256:1b17d36cc7a7c0d6958221280cbdfeb33536fa225d5033f44e8fb74b05dec009`.
+The replacement started at `2026-11-23T00:25:18Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`.
 
 This reconciliation supersedes older status claims in this document where
 they conflict with source `main` at the stated revision. Update this section
