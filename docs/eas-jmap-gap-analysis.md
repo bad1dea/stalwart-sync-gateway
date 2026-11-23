@@ -130,6 +130,11 @@ filters; invalid values and ordered comparisons are rejected. Regression
 tests cover true/false, yes/no, inequality inversion, and invalid inputs. Full
 suite: 257 passed, 73 ignored; clippy with warnings denied, formatting, and
 diff checks pass.
+Deployed as `deploy-2026-11-23-eas-kql-bool-7e2b732`; homelab commit
+`5b3232e`. Compose compiled the pinned source to image
+`sha256:abc548e5a5d4132301200b390d745358b3e1e143d9b5e0aed55c1cb944e5caa6`.
+The container started at `2026-11-23T00:30:45Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`.
 Deployed as `deploy-2026-11-23-eas-kql-qualifiers-54731df`; homelab commit
 `2256a11`. The Compose build compiled the pinned source and produced image
 `sha256:1b17d36cc7a7c0d6958221280cbdfeb33536fa225d5033f44e8fb74b05dec009`.
