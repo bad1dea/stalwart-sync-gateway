@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `1109860` (2026-11-22)
+## Reconciled status for source `main` at `fe0962d` (2026-11-22)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -331,6 +331,21 @@ diff checks pass. Deployed as
 `deploy-2026-11-22-eas-contact-yomi-company-4860c47`; Hermes Compose built
 image `sha256:257b69377ac1ee241448ff8d46844e71a0ab8a77c138a4bb5e1dbdcc26836c8c`.
 The container started at `2026-11-23T02:36:42Z` with restart count zero; mesh
+`/healthz` returned `ok` and `/readyz` returned `ready`.
+
+Also completed: **ActiveSync contact photos**. The Contacts `Picture` value is
+base64-decoded, validated against JPEG, PNG, GIF or WebP signatures, and stored
+as a JSContact `media` photo using a data URI; reads convert supported data
+URIs back to EAS base64. Updates replace or clear only the gateway-owned
+`eas_picture` entry and retain other media. Inputs are limited to 5 MiB. This
+uses the media resource shape in
+[RFC 9553 section 2.6.4](https://www.rfc-editor.org/rfc/rfc9553.html#section-2.6.4).
+Regression coverage checks WBXML parsing/output/hash changes, create/read/update,
+format preservation and unrelated media retention. Full suite: 267 passed,
+73 ignored; clippy with warnings denied, formatting and diff checks pass.
+Deployed as `deploy-2026-11-22-eas-contact-photo-fe0962d`; Hermes Compose built
+image `sha256:6ddde2c84b1a6ab45a78a9b3bd1c8a53f01db78b3368fa5cf9bc583568ce6230`.
+The container started at `2026-11-23T03:34:12Z` with restart count zero; mesh
 `/healthz` returned `ok` and `/readyz` returned `ready`.
 
 Also completed: **EAS 16.x MeetingResponse SendResponse**. For protocol
