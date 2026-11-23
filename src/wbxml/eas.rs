@@ -1345,6 +1345,7 @@ pub struct ContactFields {
     pub business_phone_number: Option<String>,
     pub business_2_phone_number: Option<String>,
     pub home_fax_number: Option<String>,
+    pub business_fax_number: Option<String>,
     pub pager_number: Option<String>,
     pub car_phone_number: Option<String>,
     pub radio_phone_number: Option<String>,
@@ -2391,6 +2392,8 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                         fields.home_2_phone_number = empty;
                     } else if same_token(*token, contacts::HOME_FAX_NUMBER) {
                         fields.home_fax_number = empty;
+                    } else if same_token(*token, contacts::BUSINESS_FAX_NUMBER) {
+                        fields.business_fax_number = empty;
                     } else if same_token(*token, contacts::PAGER_NUMBER) {
                         fields.pager_number = empty;
                     } else if same_token(*token, contacts::CAR_PHONE_NUMBER) {
@@ -2439,6 +2442,8 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                     fields.home_2_phone_number = Some(text.clone());
                 } else if same_token(top, contacts::HOME_FAX_NUMBER) {
                     fields.home_fax_number = Some(text.clone());
+                } else if same_token(top, contacts::BUSINESS_FAX_NUMBER) {
+                    fields.business_fax_number = Some(text.clone());
                 } else if same_token(top, contacts::PAGER_NUMBER) {
                     fields.pager_number = Some(text.clone());
                 } else if same_token(top, contacts::CAR_PHONE_NUMBER) {
@@ -3208,6 +3213,7 @@ mod tests {
         builder.leaf(contacts::HOME_2_PHONE_NUMBER, "555-0102");
         builder.leaf(contacts::BUSINESS_2_PHONE_NUMBER, "555-0103");
         builder.leaf(contacts::HOME_FAX_NUMBER, "555-0105");
+        builder.leaf(contacts::BUSINESS_FAX_NUMBER, "555-0109");
         builder.leaf(contacts::PAGER_NUMBER, "555-0106");
         builder.leaf(contacts::CAR_PHONE_NUMBER, "555-0107");
         builder.leaf(contacts::RADIO_PHONE_NUMBER, "555-0108");
@@ -3264,6 +3270,10 @@ mod tests {
             Some("555-0103")
         );
         assert_eq!(command.contact.home_fax_number.as_deref(), Some("555-0105"));
+        assert_eq!(
+            command.contact.business_fax_number.as_deref(),
+            Some("555-0109")
+        );
         assert_eq!(command.contact.pager_number.as_deref(), Some("555-0106"));
         assert_eq!(
             command.contact.car_phone_number.as_deref(),

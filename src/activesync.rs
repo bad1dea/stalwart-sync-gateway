@@ -5557,6 +5557,7 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.business_phone.hash(&mut hasher);
     contact.business_phone2.hash(&mut hasher);
     contact.home_fax.hash(&mut hasher);
+    contact.business_fax.hash(&mut hasher);
     contact.pager.hash(&mut hasher);
     contact.car_phone.hash(&mut hasher);
     contact.radio_phone.hash(&mut hasher);
@@ -5657,6 +5658,9 @@ fn write_contact_fields(
     }
     if let Some(home_fax) = &contact.home_fax {
         builder.leaf(c::HOME_FAX_NUMBER, home_fax.clone());
+    }
+    if let Some(business_fax) = &contact.business_fax {
+        builder.leaf(c::BUSINESS_FAX_NUMBER, business_fax.clone());
     }
     if let Some(car) = &contact.car_phone {
         builder.leaf(c::CAR_PHONE_NUMBER, car.clone());
@@ -7843,6 +7847,7 @@ mod tests {
             home_phone2: Some("555-0102".into()),
             business_phone2: Some("555-0104".into()),
             home_fax: Some("555-0105".into()),
+            business_fax: Some("555-0109".into()),
             pager: Some("555-0106".into()),
             car_phone: Some("555-0107".into()),
             radio_phone: Some("555-0108".into()),
@@ -7909,6 +7914,10 @@ mod tests {
         assert_eq!(
             eas::find_text_after(&doc, c::HOME_FAX_NUMBER),
             Some("555-0105")
+        );
+        assert_eq!(
+            eas::find_text_after(&doc, c::BUSINESS_FAX_NUMBER),
+            Some("555-0109")
         );
         assert_eq!(
             eas::find_text_after(&doc, c::PAGER_NUMBER),

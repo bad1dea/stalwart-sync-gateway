@@ -1904,6 +1904,12 @@ impl JmapClient {
                 serde_json::json!({ "number": home_fax, "contexts": { "private": true }, "features": { "fax": true } }),
             );
         }
+        if let Some(business_fax) = &fields.business_fax_number {
+            phones.insert(
+                "p_work_fax".to_owned(),
+                serde_json::json!({ "number": business_fax, "contexts": { "work": true }, "features": { "fax": true } }),
+            );
+        }
         if let Some(pager) = &fields.pager_number {
             phones.insert(
                 "p_pager".to_owned(),
@@ -1928,6 +1934,7 @@ impl JmapClient {
             || fields.business_phone_number.is_some()
             || fields.business_2_phone_number.is_some()
             || fields.home_fax_number.is_some()
+            || fields.business_fax_number.is_some()
             || fields.pager_number.is_some()
             || fields.car_phone_number.is_some()
             || fields.radio_phone_number.is_some();
@@ -2253,6 +2260,14 @@ impl JmapClient {
                         "",
                         0usize,
                         &fields.home_fax_number,
+                    ),
+                    (
+                        "p_work_fax",
+                        "work",
+                        "fax",
+                        "",
+                        0usize,
+                        &fields.business_fax_number,
                     ),
                     ("p_pager", "", "pager", "", 0usize, &fields.pager_number),
                     ("p_car", "", "", "car", 0usize, &fields.car_phone_number),
@@ -6544,6 +6559,7 @@ impl From<ContactCardObject> for Contact {
         let mut home_phones = Vec::new();
         let mut business_phones = Vec::new();
         let mut home_fax = None;
+        let mut business_fax = None;
         let mut pager = None;
         let mut car_phone = None;
         let mut radio_phone = None;
@@ -6569,6 +6585,8 @@ impl From<ContactCardObject> for Contact {
                 radio_phone = Some(number);
             } else if feature("fax") && is("private") && home_fax.is_none() {
                 home_fax = Some(number);
+            } else if feature("fax") && is("work") && business_fax.is_none() {
+                business_fax = Some(number);
             } else if feature("pager") && pager.is_none() {
                 pager = Some(number);
             } else if (is("mobile") || feature("mobile")) && mobile_phone.is_none() {
@@ -6653,6 +6671,7 @@ impl From<ContactCardObject> for Contact {
             business_phone: business_phones.first().cloned(),
             business_phone2: business_phones.get(1).cloned(),
             home_fax,
+            business_fax,
             pager,
             car_phone,
             radio_phone,
@@ -7761,6 +7780,7 @@ mod contact_address_tests {
                         "p_work":{"number":"555-0103","contexts":{"work":true}},
                         "p_work2":{"number":"555-0104","contexts":{"work":true}},
                         "p_home_fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},
+                        "p_work_fax":{"number":"555-0109","contexts":{"work":true},"features":{"fax":true}},
                         "p_pager":{"number":"555-0106","features":{"pager":true}},
                         "p_car":{"number":"555-0107","label":"car"},
                         "p_radio":{"number":"555-0108","label":"radio"}
@@ -7812,6 +7832,7 @@ mod contact_address_tests {
             business_phone_number: Some("555-0103".into()),
             business_2_phone_number: Some("555-0104".into()),
             home_fax_number: Some("555-0105".into()),
+            business_fax_number: Some("555-0109".into()),
             pager_number: Some("555-0106".into()),
             car_phone_number: Some("555-0107".into()),
             radio_phone_number: Some("555-0108".into()),
@@ -7856,7 +7877,7 @@ mod contact_address_tests {
                                 {"kind":"surname","value":"Lovelace"},
                                 {"kind":"generation","value":"Jr."},
                                 {"kind":"prefix","value":"Countess"}
-                            ]},"links":{"site":{"uri":"https://old.example/"},"mail":{"uri":"mailto:ada@example.com"}},"phones":{"work1":{"number":"555-0101","contexts":{"work":true}},"work2":{"number":"555-0102","contexts":{"work":true}},"fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},"pager":{"number":"555-0106","features":{"pager":true}},"car":{"number":"555-0107","label":"car"},"radio":{"number":"555-0108","label":"radio"}},"organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Old Department"}]}},"anniversaries":{
+                            ]},"links":{"site":{"uri":"https://old.example/"},"mail":{"uri":"mailto:ada@example.com"}},"phones":{"work1":{"number":"555-0101","contexts":{"work":true}},"work2":{"number":"555-0102","contexts":{"work":true}},"fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},"workfax":{"number":"555-0109","contexts":{"work":true},"features":{"fax":true}},"pager":{"number":"555-0106","features":{"pager":true}},"car":{"number":"555-0107","label":"car"},"radio":{"number":"555-0108","label":"radio"}},"organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Old Department"}]}},"anniversaries":{
                                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
                             },"addresses":{
@@ -7900,6 +7921,7 @@ mod contact_address_tests {
                                     "work1":{"number":"555-0101","contexts":{"work":true}},
                                     "work2":{"number":"555-0104","contexts":{"work":true}},
                                     "fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},
+                                    "workfax":{"number":"555-0109","contexts":{"work":true},"features":{"fax":true}},
                                     "pager":{"number":"555-0107","features":{"pager":true}},
                                     "car":{"number":"555-0109","label":"car"},
                                     "radio":{"number":"555-0108","label":"radio"}
@@ -8032,6 +8054,7 @@ mod contact_address_tests {
                 "home2":{"number":"555-0102","contexts":{"home":true}},
                 "work1":{"number":"555-0103","contexts":{"work":true}},
                 "work2":{"number":"555-0104","contexts":{"work":true}}
+                ,"workfax":{"number":"555-0109","contexts":{"work":true},"features":{"fax":true}}
                 ,"fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},
                 "pager":{"number":"555-0106","features":{"pager":true}},
                 "car":{"number":"555-0107","label":"car"},
@@ -8061,6 +8084,7 @@ mod contact_address_tests {
         assert_eq!(contact.business_phone.as_deref(), Some("555-0103"));
         assert_eq!(contact.business_phone2.as_deref(), Some("555-0104"));
         assert_eq!(contact.home_fax.as_deref(), Some("555-0105"));
+        assert_eq!(contact.business_fax.as_deref(), Some("555-0109"));
         assert_eq!(contact.pager.as_deref(), Some("555-0106"));
         assert_eq!(contact.car_phone.as_deref(), Some("555-0107"));
         assert_eq!(contact.radio_phone.as_deref(), Some("555-0108"));
