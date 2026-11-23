@@ -278,6 +278,7 @@ pub struct Contact {
     pub yomi_company_name: Option<String>,
     pub office_location: Option<String>,
     pub nickname: Option<String>,
+    pub company_main_phone: Option<String>,
     pub im_address1: Option<String>,
     pub im_address2: Option<String>,
     pub im_address3: Option<String>,

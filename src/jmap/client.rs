@@ -1989,7 +1989,14 @@ impl JmapClient {
                 serde_json::json!({ "number": assistant_phone, "label": "assistant" }),
             );
         }
-        let has_phones_update = fields.mobile_phone_number.is_some()
+        if let Some(company_main) = &fields.company_main_phone {
+            phones.insert(
+                "eas_company_main".to_owned(),
+                serde_json::json!({"number":company_main,"label":"company main phone"}),
+            );
+        }
+        let has_phones_update = fields.company_main_phone.is_some()
+            || fields.mobile_phone_number.is_some()
             || fields.home_phone_number.is_some()
             || fields.home_2_phone_number.is_some()
             || fields.business_phone_number.is_some()
@@ -2506,6 +2513,14 @@ impl JmapClient {
                         "assistant",
                         0usize,
                         &fields.assistant_phone_number,
+                    ),
+                    (
+                        "eas_company_main",
+                        "",
+                        "",
+                        "company main phone",
+                        0usize,
+                        &fields.company_main_phone,
                     ),
                 ] {
                     let Some(number) = requested else { continue };
@@ -6856,6 +6871,7 @@ impl From<ContactCardObject> for Contact {
         let mut car_phone = None;
         let mut radio_phone = None;
         let mut assistant_phone = None;
+        let mut company_main_phone = None;
         for phone in value.phones.into_values() {
             let Some(number) = phone.number else {
                 continue;
@@ -6863,6 +6879,13 @@ impl From<ContactCardObject> for Contact {
             let is = |ctx: &str| phone.contexts.get(ctx).copied().unwrap_or(false);
             let feature = |name: &str| phone.features.get(name).copied().unwrap_or(false);
             if phone
+                .label
+                .as_deref()
+                .is_some_and(|label| label.eq_ignore_ascii_case("company main phone"))
+                && company_main_phone.is_none()
+            {
+                company_main_phone = Some(number);
+            } else if phone
                 .label
                 .as_deref()
                 .is_some_and(|label| label.eq_ignore_ascii_case("car"))
@@ -6995,6 +7018,7 @@ impl From<ContactCardObject> for Contact {
             car_phone,
             radio_phone,
             assistant_phone,
+            company_main_phone,
             company_name,
             department,
             job_title,
@@ -8108,7 +8132,8 @@ mod contact_address_tests {
                         "p_pager":{"number":"555-0106","features":{"pager":true}},
                         "p_car":{"number":"555-0107","label":"car"},
                         "p_radio":{"number":"555-0108","label":"radio"},
-                        "p_assistant":{"number":"555-0110","label":"assistant"}
+                        "p_assistant":{"number":"555-0110","label":"assistant"},
+                        "eas_company_main":{"number":"555-0199","label":"company main phone"}
                     })
                 );
                 assert_eq!(
@@ -8175,6 +8200,7 @@ mod contact_address_tests {
             other_address_city: Some("Kingston".into()),
             office_location: Some("Building 4, Floor 2".into()),
             nickname: Some("Enchantress of Numbers".into()),
+            company_main_phone: Some("555-0199".into()),
             im_address: Some("ada@example.im".into()),
             im_address_2: Some("ada@chat.example".into()),
             im_address_3: Some("ada@xmpp.example".into()),
@@ -8211,7 +8237,7 @@ mod contact_address_tests {
                                 {"kind":"surname","value":"Lovelace","phonetic":"ラブレス"},
                                 {"kind":"generation","value":"Jr."},
                                 {"kind":"prefix","value":"Countess"}
-                            ]},"links":{"site":{"uri":"https://old.example/"},"mail":{"uri":"mailto:ada@example.com"}},"phones":{"work1":{"number":"555-0101","contexts":{"work":true}},"work2":{"number":"555-0102","contexts":{"work":true}},"fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},"workfax":{"number":"555-0109","contexts":{"work":true},"features":{"fax":true}},"pager":{"number":"555-0106","features":{"pager":true}},"car":{"number":"555-0107","label":"car"},"radio":{"number":"555-0108","label":"radio"},"assistant":{"number":"555-0110","label":"assistant"}},"organizations":{"org":{"name":"Analytical Engines Ltd","sortAs":"アナリティカル エンジンズ","units":[{"name":"Old Department"}]}},"anniversaries":{
+                            ]},"links":{"site":{"uri":"https://old.example/"},"mail":{"uri":"mailto:ada@example.com"}},"phones":{"work1":{"number":"555-0101","contexts":{"work":true}},"work2":{"number":"555-0102","contexts":{"work":true}},"fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},"workfax":{"number":"555-0109","contexts":{"work":true},"features":{"fax":true}},"pager":{"number":"555-0106","features":{"pager":true}},"car":{"number":"555-0107","label":"car"},"radio":{"number":"555-0108","label":"radio"},"assistant":{"number":"555-0110","label":"assistant"},"eas_company_main":{"number":"555-0199","label":"company main phone"}},"organizations":{"org":{"name":"Analytical Engines Ltd","sortAs":"アナリティカル エンジンズ","units":[{"name":"Old Department"}]}},"anniversaries":{
                                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
                             },"addresses":{
@@ -8262,7 +8288,8 @@ mod contact_address_tests {
                                     "pager":{"number":"555-0107","features":{"pager":true}},
                                     "car":{"number":"555-0109","label":"car"},
                                     "radio":{"number":"555-0108","label":"radio"},
-                                    "assistant":{"number":"555-0111","label":"assistant"}
+                                    "assistant":{"number":"555-0111","label":"assistant"},
+                                    "eas_company_main":{"number":"555-0198","label":"company main phone"}
                                 })
                             );
                             assert_eq!(
@@ -8327,6 +8354,7 @@ mod contact_address_tests {
             pager_number: Some("555-0107".into()),
             car_phone_number: Some("555-0109".into()),
             assistant_phone_number: Some("555-0111".into()),
+            company_main_phone: Some("555-0198".into()),
             web_page: Some("https://new.example/ada".into()),
             birthday: Some("18151211".into()),
             office_location: Some("Floor 7, Tower B".into()),
@@ -8411,7 +8439,7 @@ mod contact_address_tests {
                 "pager":{"number":"555-0106","features":{"pager":true}},
                 "car":{"number":"555-0107","label":"car"},
                 "radio":{"number":"555-0108","label":"radio"},
-                "assistant":{"number":"555-0110","label":"assistant"}
+                "assistant":{"number":"555-0110","label":"assistant"},"eas_company_main":{"number":"555-0199","label":"company main phone"}
             }, "organizations":{"org":{"name":"Analytical Engines Ltd","sortAs":"アナリティカル エンジンズ","units":[{"name":"Research"}]}}, "anniversaries":{
                 "b":{"kind":"birth","date":{"year":1815,"month":12,"day":10}},
                 "w":{"kind":"wedding","date":{"year":1835,"month":11,"day":8}}
@@ -8425,6 +8453,7 @@ mod contact_address_tests {
         assert_eq!(contact.suffix.as_deref(), Some("Jr."));
         assert_eq!(contact.name_prefix.as_deref(), Some("Countess"));
         assert_eq!(contact.nickname.as_deref(), Some("Enchantress of Numbers"));
+        assert_eq!(contact.company_main_phone.as_deref(), Some("555-0199"));
         assert_eq!(contact.im_address1.as_deref(), Some("ada@example.im"));
         assert_eq!(contact.im_address2.as_deref(), Some("ada@chat.example"));
         assert_eq!(contact.im_address3.as_deref(), Some("ada@xmpp.example"));
