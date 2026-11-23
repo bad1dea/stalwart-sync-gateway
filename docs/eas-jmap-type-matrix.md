@@ -81,9 +81,9 @@ cleanly by how well JSContact (RFC 9553) covers them:
 | Children/Child | ⛔ *(today)* / 🟡 | No direct JSContact property — closest is a `relatedTo` entry per child, if named at all | ❓ unsurveyed. |
 | Department | ✅ (`deploy-2026-11-22-eas-contact-department-6708d25`) | JSContact `organizations[].units[]` | Maps to the last unit in the organization hierarchy; partial edits preserve company and other organization fields. |
 | OfficeLocation | ⛔ *(today)* / 🟡 | No dedicated JSContact property surveyed | Still needs a semantics-preserving mapping. |
-| MiddleName, Suffix, Title | ✅ (`deploy-2026-11-22-eas-contact-name-parts-c3f4378`, prefix `deploy-2026-11-22-eas-contact-name-prefix-c48ee61c`) | JSContact `name.components` (`given2`, `generation`, `prefix`) | Partial edits merge the existing components under a JMAP state guard; empty fields clear the selected component. |
+| MiddleName, Suffix | ✅ (`deploy-2026-11-22-eas-contact-name-parts-c3f4378`) | JSContact `name.components` (`given2`, `generation`) | Partial edits merge the existing components under a JMAP state guard; empty fields clear the selected component. |
 | Spouse | ⛔ *(today)* / 🟡 | `relatedTo` entry with relation type `"spouse"` | |
-| Title | ⛔ *(today)* / 🟡 | JSContact `titles` (distinct from `JobTitle`, which is already synced) | |
+| Title | ✅ (`deploy-2026-11-22-eas-contact-name-prefix-c48ee61c`) | JSContact `name.components` (`prefix`) | Partial edits preserve other name components under `ifInState`. `JobTitle` continues to map separately to JSContact `titles`. |
 | WebPage | ✅ (`deploy-2026-11-22-eas-contact-web-page-d97a2d2`) | JSContact `links[].uri` | HTTP(S) website links are emitted as EAS `WebPage`; updates preserve unrelated links. |
 | YomiCompanyName, YomiFirstName, YomiLastName | ⛔ | JSContact has phonetic-name support (`name.components` with `phonetic` variants) in some draft versions — ❓ unverified whether Stalwart's implementation includes it | Japanese phonetic-reading fields; low priority for this account regardless of JMAP support. |
 | Picture (14.0+... actually "All" per the table, `0x3c`) | ⛔ *(today)* / 🟡 | JSContact `media` (kind `"photo"`) + a blob reference | Same blob-download mechanism already used for Email/Notes attachments — infrastructure exists, just not wired to Contacts. |
