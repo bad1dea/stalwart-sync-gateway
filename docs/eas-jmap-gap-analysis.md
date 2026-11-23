@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `54731df` (2026-11-23)
+## Reconciled status for source `main` at `3a5d8d7` (2026-11-23)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -134,6 +134,20 @@ Deployed as `deploy-2026-11-23-eas-kql-bool-7e2b732`; homelab commit
 `5b3232e`. Compose compiled the pinned source to image
 `sha256:abc548e5a5d4132301200b390d745358b3e1e143d9b5e0aed55c1cb944e5caa6`.
 The container started at `2026-11-23T00:30:45Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`.
+
+Also completed: **KQL WORDS synonym queries**. `WORDS(a, b)` and its
+whitespace-separated form now map to an OR of text filters, matching MS-SEARCH's
+rule that an item matches when it contains one or more listed terms. Qualifiers
+inside WORDS are ignored as specified. Property restrictions and multiword
+phrases remain rejected inside WORDS because JMAP's text index cannot preserve
+those semantics. Regression tests cover comma and whitespace forms, qualifiers,
+and rejected inputs. Full suite: 258 passed, 73 ignored; clippy, formatting, and
+diff checks pass. See [MS-SEARCH Synonyms](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-search/3e8338e0-d5fe-4a9f-ada9-85bc292d4c1a).
+Deployed as `deploy-2026-11-23-eas-kql-words-3a5d8d7`; homelab commit
+`e747269`. Compose produced image
+`sha256:5817ae369361a17b9082a72f1db8ca1ae955768c584420beada3299117593308`.
+The container started at `2026-11-23T00:36:57Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`.
 Deployed as `deploy-2026-11-23-eas-kql-qualifiers-54731df`; homelab commit
 `2256a11`. The Compose build compiled the pinned source and produced image
