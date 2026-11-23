@@ -155,6 +155,13 @@ Deployed as `deploy-2026-11-23-eas-kql-qualifiers-54731df`; homelab commit
 The replacement started at `2026-11-23T00:25:18Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`.
 
+Also completed: **KQL ALL, ANY, and NONE term operators**. These operators
+map to AND, OR, and NOT(OR) filters, matching their set-membership behavior.
+The implementation accepts text terms and rejects comma separators or
+property/phrase operands the backend cannot preserve. Regression tests cover
+each operator and rejected forms. Full suite: 259 passed, 73 ignored; clippy,
+formatting, and diff checks pass. See the [MS-KQL operator specification](https://officeprotocoldoc.z19.web.core.windows.net/files/MS-KQL/%5BMS-KQL%5D-210720.pdf).
+
 This reconciliation supersedes older status claims in this document where
 they conflict with source `main` at the stated revision. Update this section
 after each completed feature and retain historical observations below as

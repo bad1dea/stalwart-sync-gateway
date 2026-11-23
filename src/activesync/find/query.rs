@@ -9,6 +9,9 @@ enum Token {
     Or,
     Not,
     Words,
+    All,
+    Any,
+    None,
     Comma,
 }
 
@@ -79,7 +82,12 @@ fn tokenize(input: &str) -> Result<Vec<Token>, &'static str> {
             "OR" if !quoted => Token::Or,
             "NOT" if !quoted => Token::Not,
             "WORDS" if !quoted => Token::Words,
-            "NEAR" | "ONEAR" | "XRANK" if !quoted => return Err("unsupported search operator"),
+            "ALL" if !quoted => Token::All,
+            "ANY" if !quoted => Token::Any,
+            "NONE" if !quoted => Token::None,
+            "NEAR" | "ONEAR" | "XRANK" if !quoted => {
+                return Err("unsupported search operator");
+            }
             _ => Token::Word(value),
         };
         tokens.push(token);
@@ -153,6 +161,12 @@ impl Parser {
         match token {
             Token::Not => Ok(json!({"operator": "NOT", "conditions": [self.unary(depth + 1)?]})),
             Token::Words => self.words_operator(),
+            Token::All => self.operator_terms("AND", false, false),
+            Token::Any => self.operator_terms("OR", false, false),
+            Token::None => Ok(json!({
+                "operator":"NOT",
+                "conditions":[self.operator_terms("OR", false, false)?]
+            })),
             Token::Left => {
                 let value = self.implicit(depth + 1)?;
                 if self.tokens.get(self.position) != Some(&Token::Right) {
@@ -167,24 +181,39 @@ impl Parser {
     }
 
     fn words_operator(&mut self) -> Result<Value, &'static str> {
+        self.operator_terms("OR", true, true)
+    }
+
+    fn operator_terms(
+        &mut self,
+        operator: &str,
+        ignore_qualifiers: bool,
+        allow_commas: bool,
+    ) -> Result<Value, &'static str> {
         if self.tokens.get(self.position) != Some(&Token::Left) {
-            return Err("WORDS requires parentheses");
+            return Err("operator requires parentheses");
         }
         self.position += 1;
         let mut terms = Vec::new();
         loop {
             match self.tokens.get(self.position).cloned() {
                 Some(Token::Right) => break,
-                Some(Token::Comma) => self.position += 1,
+                Some(Token::Comma) if allow_commas => self.position += 1,
+                Some(Token::Comma) => return Err("unexpected operator-list separator"),
                 Some(Token::Word(word)) => {
                     self.position += 1;
-                    let term = word.trim_start_matches(['+', '-']);
+                    let term = if ignore_qualifiers {
+                        word.trim_start_matches(['+', '-'])
+                    } else {
+                        word.as_str()
+                    };
                     if term.is_empty()
+                        || (!ignore_qualifiers && term.starts_with(['+', '-']))
                         || (!term.starts_with('"')
                             && (comparison_index(term).is_some() || term.contains(':')))
                         || (term.starts_with('"') && term.chars().any(char::is_whitespace))
                     {
-                        return Err("WORDS accepts only searchable text terms");
+                        return Err("operator accepts only searchable text terms");
                     }
                     terms.push(condition("text", term)?);
                 }
@@ -192,12 +221,12 @@ impl Parser {
             }
         }
         if terms.is_empty() {
-            return Err("WORDS requires at least one term");
+            return Err("operator requires at least one term");
         }
         self.position += 1;
         let mut terms = terms.into_iter();
         let first = terms.next().unwrap();
-        Ok(terms.fold(first, |left, right| combine("OR", left, right)))
+        Ok(terms.fold(first, |left, right| combine(operator, left, right)))
     }
 }
 
@@ -669,6 +698,31 @@ mod tests {
         assert!(to_filter("WORDS()").is_err());
         assert!(to_filter("WORDS(subject:TV)").is_err());
         assert!(to_filter("WORDS(\"two words\")").is_err());
+    }
+
+    #[test]
+    fn all_any_and_none_operators_map_to_boolean_text_filters() {
+        assert_eq!(
+            to_filter("ALL(cat dog fox)").unwrap(),
+            json!({"operator":"AND", "conditions":[
+                {"text":"cat"}, {"text":"dog"}, {"text":"fox"}
+            ]})
+        );
+        assert_eq!(
+            to_filter("ANY(cat dog)").unwrap(),
+            json!({"operator":"OR", "conditions":[
+                {"text":"cat"}, {"text":"dog"}
+            ]})
+        );
+        assert_eq!(
+            to_filter("NONE(cat dog)").unwrap(),
+            json!({"operator":"NOT", "conditions":[{"operator":"OR", "conditions":[
+                {"text":"cat"}, {"text":"dog"}
+            ]}]})
+        );
+        assert!(to_filter("ALL(cat, dog)").is_err());
+        assert!(to_filter("ANY(subject:cat)").is_err());
+        assert!(to_filter("NONE()").is_err());
     }
 
     #[test]
