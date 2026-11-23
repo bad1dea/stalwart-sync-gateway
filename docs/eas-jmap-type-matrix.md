@@ -78,7 +78,7 @@ cleanly by how well JSContact (RFC 9553) covers them:
 | Categories/Category | ✅ (`deploy-2026-11-22-eas-contact-categories-79585fc`) | JSContact `keywords` | Values round-trip; absent field leaves existing keywords untouched and an empty field clears them. |
 | Children/Child | ⛔ *(today)* / 🟡 | No direct JSContact property — closest is a `relatedTo` entry per child, if named at all | ❓ unsurveyed. |
 | Department, OfficeLocation | ⛔ *(today)* / 🟡 | JSContact `organizations[].units`, and no dedicated office-location property surveyed | ❓ partially unsurveyed. |
-| MiddleName, Suffix | ✅ (`deploy-2026-11-22-eas-contact-name-parts-c3f4378`) | JSContact `name.components` (`given2`, `generation`) | Partial edits merge the existing components under a JMAP state guard; empty fields clear the selected component. |
+| MiddleName, Suffix, Title | ✅ (`deploy-2026-11-22-eas-contact-name-parts-c3f4378`, prefix `deploy-2026-11-22-eas-contact-name-prefix-c48ee61c`) | JSContact `name.components` (`given2`, `generation`, `prefix`) | Partial edits merge the existing components under a JMAP state guard; empty fields clear the selected component. |
 | Spouse | ⛔ *(today)* / 🟡 | `relatedTo` entry with relation type `"spouse"` | |
 | Title | ⛔ *(today)* / 🟡 | JSContact `titles` (distinct from `JobTitle`, which is already synced) | |
 | WebPage | ⛔ *(today)* / 🟡 | JSContact `links` | |
