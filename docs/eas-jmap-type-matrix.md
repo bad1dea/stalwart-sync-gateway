@@ -77,7 +77,8 @@ cleanly by how well JSContact (RFC 9553) covers them:
 | Business/Home/Other Address{City,Country,PostalCode,State,Street} (15 fields total) | ✅ (`deploy-2026-11-22-eas-contact-addresses-0e8a071`) | JSContact `addresses` with `components` and work/private/other contexts | All three EAS address groups map to JSContact components; partial updates merge existing components under `ifInState`, and empty tags remove individual components. |
 | Categories/Category | ✅ (`deploy-2026-11-22-eas-contact-categories-79585fc`) | JSContact `keywords` | Values round-trip; absent field leaves existing keywords untouched and an empty field clears them. |
 | Children/Child | ⛔ *(today)* / 🟡 | No direct JSContact property — closest is a `relatedTo` entry per child, if named at all | ❓ unsurveyed. |
-| Department, OfficeLocation | ⛔ *(today)* / 🟡 | JSContact `organizations[].units`, and no dedicated office-location property surveyed | ❓ partially unsurveyed. |
+| Department | ✅ (`deploy-2026-11-22-eas-contact-department-6708d25`) | JSContact `organizations[].units[]` | Maps to the last unit in the organization hierarchy; partial edits preserve company and other organization fields. |
+| OfficeLocation | ⛔ *(today)* / 🟡 | No dedicated JSContact property surveyed | Still needs a semantics-preserving mapping. |
 | MiddleName, Suffix, Title | ✅ (`deploy-2026-11-22-eas-contact-name-parts-c3f4378`, prefix `deploy-2026-11-22-eas-contact-name-prefix-c48ee61c`) | JSContact `name.components` (`given2`, `generation`, `prefix`) | Partial edits merge the existing components under a JMAP state guard; empty fields clear the selected component. |
 | Spouse | ⛔ *(today)* / 🟡 | `relatedTo` entry with relation type `"spouse"` | |
 | Title | ⛔ *(today)* / 🟡 | JSContact `titles` (distinct from `JobTitle`, which is already synced) | |
