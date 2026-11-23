@@ -1333,6 +1333,8 @@ pub struct ContactFields {
     pub last_name: Option<String>,
     pub suffix: Option<String>,
     pub name_prefix: Option<String>,
+    pub yomi_first_name: Option<String>,
+    pub yomi_last_name: Option<String>,
     pub birthday: Option<String>,
     pub anniversary: Option<String>,
     pub file_as: Option<String>,
@@ -2385,6 +2387,10 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                         fields.anniversary = empty;
                     } else if same_token(*token, contacts::TITLE) {
                         fields.name_prefix = empty;
+                    } else if same_token(*token, contacts::YOMI_FIRST_NAME) {
+                        fields.yomi_first_name = empty;
+                    } else if same_token(*token, contacts::YOMI_LAST_NAME) {
+                        fields.yomi_last_name = empty;
                     } else if same_token(*token, contacts::DEPARTMENT) {
                         fields.department = empty;
                     } else if same_token(*token, contacts::BUSINESS_2_PHONE_NUMBER) {
@@ -2425,6 +2431,10 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                     fields.anniversary = Some(text.clone());
                 } else if same_token(top, contacts::TITLE) {
                     fields.name_prefix = Some(text.clone());
+                } else if same_token(top, contacts::YOMI_FIRST_NAME) {
+                    fields.yomi_first_name = Some(text.clone());
+                } else if same_token(top, contacts::YOMI_LAST_NAME) {
+                    fields.yomi_last_name = Some(text.clone());
                 } else if same_token(top, contacts::FILE_AS) {
                     fields.file_as = Some(text.clone());
                 } else if same_token(top, contacts::EMAIL1_ADDRESS) {
@@ -3211,6 +3221,8 @@ mod tests {
         builder.leaf(contacts::LAST_NAME, "Lovelace");
         builder.leaf(contacts::SUFFIX, "Jr.");
         builder.leaf(contacts::TITLE, "Countess");
+        builder.leaf(contacts::YOMI_FIRST_NAME, "エイダ");
+        builder.leaf(contacts::YOMI_LAST_NAME, "ラブレス");
         builder.leaf(contacts::BIRTHDAY, "18151210");
         builder.leaf(contacts::ANNIVERSARY, "18351108");
         builder.leaf(contacts::EMAIL1_ADDRESS, "ada@example.com");
@@ -3257,6 +3269,8 @@ mod tests {
         assert_eq!(command.contact.last_name.as_deref(), Some("Lovelace"));
         assert_eq!(command.contact.suffix.as_deref(), Some("Jr."));
         assert_eq!(command.contact.name_prefix.as_deref(), Some("Countess"));
+        assert_eq!(command.contact.yomi_first_name.as_deref(), Some("エイダ"));
+        assert_eq!(command.contact.yomi_last_name.as_deref(), Some("ラブレス"));
         assert_eq!(command.contact.birthday.as_deref(), Some("18151210"));
         assert_eq!(command.contact.anniversary.as_deref(), Some("18351108"));
         assert_eq!(

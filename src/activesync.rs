@@ -5547,6 +5547,8 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.last_name.hash(&mut hasher);
     contact.suffix.hash(&mut hasher);
     contact.name_prefix.hash(&mut hasher);
+    contact.yomi_first_name.hash(&mut hasher);
+    contact.yomi_last_name.hash(&mut hasher);
     contact.birthday.hash(&mut hasher);
     contact.anniversary.hash(&mut hasher);
     contact.file_as.hash(&mut hasher);
@@ -5677,6 +5679,12 @@ fn write_contact_fields(
     }
     if let Some(prefix) = &contact.name_prefix {
         builder.leaf(c::TITLE, prefix.clone());
+    }
+    if let Some(yomi_first_name) = &contact.yomi_first_name {
+        builder.leaf(c::YOMI_FIRST_NAME, yomi_first_name.clone());
+    }
+    if let Some(yomi_last_name) = &contact.yomi_last_name {
+        builder.leaf(c::YOMI_LAST_NAME, yomi_last_name.clone());
     }
     if let Some(birthday) = &contact.birthday {
         builder.leaf(c::BIRTHDAY, birthday.clone());
@@ -7847,6 +7855,8 @@ mod tests {
             middle_name: Some("Augusta".into()),
             suffix: Some("Jr.".into()),
             name_prefix: Some("Countess".into()),
+            yomi_first_name: Some("エイダ".into()),
+            yomi_last_name: Some("ラブレス".into()),
             department: Some("Research".into()),
             home_phone2: Some("555-0102".into()),
             business_phone2: Some("555-0104".into()),
@@ -7907,6 +7917,14 @@ mod tests {
         assert_eq!(eas::find_text_after(&doc, c::MIDDLE_NAME), Some("Augusta"));
         assert_eq!(eas::find_text_after(&doc, c::SUFFIX), Some("Jr."));
         assert_eq!(eas::find_text_after(&doc, c::TITLE), Some("Countess"));
+        assert_eq!(
+            eas::find_text_after(&doc, c::YOMI_FIRST_NAME),
+            Some("エイダ")
+        );
+        assert_eq!(
+            eas::find_text_after(&doc, c::YOMI_LAST_NAME),
+            Some("ラブレス")
+        );
         assert_eq!(eas::find_text_after(&doc, c::DEPARTMENT), Some("Research"));
         assert_eq!(
             eas::find_text_after(&doc, c::HOME_2_PHONE_NUMBER),
@@ -7945,6 +7963,8 @@ mod tests {
             Some("https://example.com/ada")
         );
         contact.assistant_phone = Some("555-0111".into());
+        assert_ne!(super::contact_hash(&contact), before);
+        contact.yomi_first_name = Some("エイダ改".into());
         assert_ne!(super::contact_hash(&contact), before);
         contact.business_address.as_mut().unwrap().city = Some("Hamilton".into());
         assert_ne!(super::contact_hash(&contact), before);

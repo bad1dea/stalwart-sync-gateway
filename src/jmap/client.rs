@@ -1801,14 +1801,34 @@ impl JmapClient {
         let mut card = serde_json::Map::new();
 
         let mut components = Vec::new();
+        let yomi_first = fields
+            .yomi_first_name
+            .as_deref()
+            .filter(|value| !value.is_empty());
+        let yomi_last = fields
+            .yomi_last_name
+            .as_deref()
+            .filter(|value| !value.is_empty());
         if let Some(first) = &fields.first_name {
-            components.push(serde_json::json!({"kind": "given", "value": first}));
+            let mut component = serde_json::json!({"kind": "given", "value": first});
+            if let Some(phonetic) = yomi_first {
+                component["phonetic"] = serde_json::json!(phonetic);
+            }
+            components.push(component);
+        } else if let Some(phonetic) = yomi_first {
+            components.push(serde_json::json!({"kind":"given","value":"","phonetic":phonetic}));
         }
         if let Some(middle) = &fields.middle_name {
             components.push(serde_json::json!({"kind": "given2", "value": middle}));
         }
         if let Some(last) = &fields.last_name {
-            components.push(serde_json::json!({"kind": "surname", "value": last}));
+            let mut component = serde_json::json!({"kind": "surname", "value": last});
+            if let Some(phonetic) = yomi_last {
+                component["phonetic"] = serde_json::json!(phonetic);
+            }
+            components.push(component);
+        } else if let Some(phonetic) = yomi_last {
+            components.push(serde_json::json!({"kind":"surname","value":"","phonetic":phonetic}));
         }
         if let Some(suffix) = &fields.suffix {
             components.push(serde_json::json!({"kind": "generation", "value": suffix}));
@@ -1823,13 +1843,17 @@ impl JmapClient {
                 serde_json::Value::String(file_as.clone()),
             );
         }
+        if yomi_first.is_some() || yomi_last.is_some() {
+            name.insert("phoneticScript".to_owned(), serde_json::json!("Jpan"));
+        }
         if !components.is_empty() {
             name.insert(
                 "components".to_owned(),
                 serde_json::Value::Array(components),
             );
         }
-        let has_name_update = !name.is_empty();
+        let has_name_update =
+            !name.is_empty() || fields.yomi_first_name.is_some() || fields.yomi_last_name.is_some();
         if !name.is_empty() {
             card.insert("name".to_owned(), serde_json::Value::Object(name));
         }
@@ -2110,10 +2134,60 @@ impl JmapClient {
                     ("prefix", &fields.name_prefix),
                 ] {
                     let Some(value) = requested else { continue };
+                    let yomi_requested = match kind {
+                        "given" => fields.yomi_first_name.is_some(),
+                        "surname" => fields.yomi_last_name.is_some(),
+                        _ => true,
+                    };
+                    let preserved_phonetic = (!yomi_requested)
+                        .then(|| {
+                            components
+                                .iter()
+                                .find(|component| component["kind"] == kind)
+                                .and_then(|component| component["phonetic"].as_str())
+                                .map(str::to_owned)
+                        })
+                        .flatten();
                     components.retain(|component| component["kind"] != kind);
                     if !value.is_empty() {
-                        components.push(serde_json::json!({"kind":kind,"value":value}));
+                        let mut component = serde_json::json!({"kind":kind,"value":value});
+                        if let Some(phonetic) = preserved_phonetic {
+                            component["phonetic"] = serde_json::json!(phonetic);
+                        }
+                        components.push(component);
                     }
+                }
+                for (kind, requested) in [
+                    ("given", &fields.yomi_first_name),
+                    ("surname", &fields.yomi_last_name),
+                ] {
+                    let Some(phonetic) = requested else { continue };
+                    let selected = components
+                        .iter_mut()
+                        .find(|component| component["kind"] == kind);
+                    if let Some(component) = selected {
+                        if phonetic.is_empty() {
+                            if component["value"].as_str().unwrap_or_default().is_empty() {
+                                components.retain(|candidate| candidate["kind"] != kind);
+                            } else if let Some(object) = component.as_object_mut() {
+                                object.remove("phonetic");
+                            }
+                        } else if let Some(object) = component.as_object_mut() {
+                            object.insert("phonetic".to_owned(), serde_json::json!(phonetic));
+                        }
+                    } else if !phonetic.is_empty() {
+                        components
+                            .push(serde_json::json!({"kind":kind,"value":"","phonetic":phonetic}));
+                    }
+                }
+                if (fields.yomi_first_name.is_some() || fields.yomi_last_name.is_some())
+                    && components
+                        .iter()
+                        .any(|component| component.get("phonetic").is_some())
+                    && !merged_name.contains_key("phoneticScript")
+                    && !merged_name.contains_key("phoneticSystem")
+                {
+                    merged_name.insert("phoneticScript".to_owned(), serde_json::json!("Jpan"));
                 }
                 if components.is_empty() {
                     merged_name.remove("components");
@@ -6470,6 +6544,7 @@ struct ContactCardName {
 struct ContactCardNameComponent {
     kind: String,
     value: String,
+    phonetic: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -6551,6 +6626,8 @@ impl From<ContactCardObject> for Contact {
         let mut last_name = None;
         let mut suffix = None;
         let mut name_prefix = None;
+        let mut yomi_first_name = None;
+        let mut yomi_last_name = None;
         if let Some(name) = &value.name {
             for component in &name.components {
                 match component.kind.as_str() {
@@ -6559,6 +6636,11 @@ impl From<ContactCardObject> for Contact {
                     "surname" => last_name = Some(component.value.clone()),
                     "generation" | "credential" => suffix = Some(component.value.clone()),
                     "prefix" => name_prefix = Some(component.value.clone()),
+                    _ => {}
+                }
+                match component.kind.as_str() {
+                    "given" => yomi_first_name = component.phonetic.clone(),
+                    "surname" => yomi_last_name = component.phonetic.clone(),
                     _ => {}
                 }
             }
@@ -6683,6 +6765,8 @@ impl From<ContactCardObject> for Contact {
             last_name,
             suffix,
             name_prefix,
+            yomi_first_name,
+            yomi_last_name,
             birthday,
             anniversary,
             web_page,
@@ -7777,13 +7861,14 @@ mod contact_address_tests {
                 assert_eq!(
                     call[1]["create"]["c1"]["name"]["components"],
                     serde_json::json!([
-                        {"kind":"given","value":"Ada"},
+                        {"kind":"given","value":"Ada","phonetic":"エイダ"},
                         {"kind":"given2","value":"Augusta"},
-                        {"kind":"surname","value":"Lovelace"},
+                        {"kind":"surname","value":"Lovelace","phonetic":"ラブレス"},
                         {"kind":"generation","value":"Jr."},
                         {"kind":"prefix","value":"Countess"}
                     ])
                 );
+                assert_eq!(call[1]["create"]["c1"]["name"]["phoneticScript"], "Jpan");
                 assert_eq!(
                     call[1]["create"]["c1"]["anniversaries"],
                     serde_json::json!({
@@ -7847,6 +7932,8 @@ mod contact_address_tests {
             last_name: Some("Lovelace".into()),
             suffix: Some("Jr.".into()),
             name_prefix: Some("Countess".into()),
+            yomi_first_name: Some("エイダ".into()),
+            yomi_last_name: Some("ラブレス".into()),
             birthday: Some("18151210".into()),
             anniversary: Some("18351108".into()),
             company_name: Some("Analytical Engines Ltd".into()),
@@ -7897,10 +7984,10 @@ mod contact_address_tests {
                         0 => {
                             assert_eq!(call[0], "ContactCard/get");
                             Json(serde_json::json!({"methodResponses":[[
-                            "ContactCard/get", {"state":"before","list":[{"id":"c","name":{"full":"Ada Lovelace Jr.","components":[
-                                {"kind":"given","value":"Ada"},
+                            "ContactCard/get", {"state":"before","list":[{"id":"c","name":{"full":"Ada Lovelace Jr.","phoneticScript":"Jpan","components":[
+                                {"kind":"given","value":"Ada","phonetic":"エイダ"},
                                 {"kind":"given2","value":"Augusta"},
-                                {"kind":"surname","value":"Lovelace"},
+                                {"kind":"surname","value":"Lovelace","phonetic":"ラブレス"},
                                 {"kind":"generation","value":"Jr."},
                                 {"kind":"prefix","value":"Countess"}
                             ]},"links":{"site":{"uri":"https://old.example/"},"mail":{"uri":"mailto:ada@example.com"}},"phones":{"work1":{"number":"555-0101","contexts":{"work":true}},"work2":{"number":"555-0102","contexts":{"work":true}},"fax":{"number":"555-0105","contexts":{"private":true},"features":{"fax":true}},"workfax":{"number":"555-0109","contexts":{"work":true},"features":{"fax":true}},"pager":{"number":"555-0106","features":{"pager":true}},"car":{"number":"555-0107","label":"car"},"radio":{"number":"555-0108","label":"radio"},"assistant":{"number":"555-0110","label":"assistant"}},"organizations":{"org":{"name":"Analytical Engines Ltd","units":[{"name":"Old Department"}]}},"anniversaries":{
@@ -7923,10 +8010,10 @@ mod contact_address_tests {
                             assert_eq!(
                                 call[1]["update"]["c"]["name"]["components"],
                                 serde_json::json!([
-                                    {"kind":"given","value":"Ada"},
-                                    {"kind":"surname","value":"Lovelace"},
+                                    {"kind":"surname","value":"Lovelace","phonetic":"ラブレス改"},
                                     {"kind":"generation","value":"Jr."},
                                     {"kind":"prefix","value":"Countess"},
+                                    {"kind":"given","value":"Ada Byron","phonetic":"エイダ"},
                                     {"kind":"given2","value":"Byron"}
                                 ])
                             );
@@ -8007,6 +8094,8 @@ mod contact_address_tests {
         .unwrap();
         let fields = crate::wbxml::eas::ContactFields {
             middle_name: Some("Byron".into()),
+            first_name: Some("Ada Byron".into()),
+            yomi_last_name: Some("ラブレス改".into()),
             department: Some("New Department".into()),
             business_2_phone_number: Some("555-0104".into()),
             pager_number: Some("555-0107".into()),
@@ -8070,10 +8159,10 @@ mod contact_address_tests {
     #[test]
     fn contact_name_read_maps_middle_name_and_suffix() {
         let card: ContactCardObject = serde_json::from_value(serde_json::json!({
-            "id":"c", "name":{"full":"Ada Lovelace Jr.","components":[
-                {"kind":"given","value":"Ada"},
+            "id":"c", "name":{"full":"Ada Lovelace Jr.","phoneticScript":"Jpan","components":[
+                {"kind":"given","value":"Ada","phonetic":"エイダ"},
                 {"kind":"given2","value":"Augusta"},
-                {"kind":"surname","value":"Lovelace"},
+                {"kind":"surname","value":"Lovelace","phonetic":"ラブレス"},
                 {"kind":"generation","value":"Jr."},
                 {"kind":"prefix","value":"Countess"}
             ]}, "links":{"website":{"uri":"https://example.com/ada"},"mail":{"uri":"mailto:ada@example.com"}}, "phones":{
@@ -8100,6 +8189,8 @@ mod contact_address_tests {
         assert_eq!(contact.last_name.as_deref(), Some("Lovelace"));
         assert_eq!(contact.suffix.as_deref(), Some("Jr."));
         assert_eq!(contact.name_prefix.as_deref(), Some("Countess"));
+        assert_eq!(contact.yomi_first_name.as_deref(), Some("エイダ"));
+        assert_eq!(contact.yomi_last_name.as_deref(), Some("ラブレス"));
         assert_eq!(contact.birthday.as_deref(), Some("18151210"));
         assert_eq!(contact.anniversary.as_deref(), Some("18351108"));
         assert_eq!(
