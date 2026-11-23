@@ -70,7 +70,7 @@ cleanly by how well JSContact (RFC 9553) covers them:
 
 | Field group | Status | JSContact mechanism | Notes |
 |---|---|---|---|
-| Anniversary, Birthday | ⛔ *(today)* / 🟡 | JSContact `anniversaries` (map, kind `"wedding"`/`"birthday"`) | Straightforward — one property per field. |
+| Anniversary, Birthday | ✅ (`deploy-2026-11-22-eas-contact-dates-5f03d66`) | JSContact `anniversaries` (`wedding`/`birth`) | Strict `YYYYMMDD` values map to full PartialDates; partial updates preserve the other kind under `ifInState`. |
 | AssistantName, AssistantPhoneNumber | ⛔ *(today)* / 🟡 | JSContact has no dedicated "assistant" property; would go in a `relatedTo` entry or a custom extension | ❓ — needs checking whether Stalwart's JSContact implementation exposes anything assistant-shaped at all. |
 | Body/BodySize/BodyTruncated (2.5-only — 12.0+ uses AirSyncBase:Body) | ⛔ | JSContact `notes` | Free-text notes field — not currently synced. |
 | Business2PhoneNumber, CarPhoneNumber, HomeFaxNumber, HomeaPhoneNumber, PagerNumber, RadioPhoneNumber | ⛔ *(today)* / 🟡 | JSContact `phones` (array with `contexts`/`features` tags — e.g. `features: ["fax"]`, `contexts: ["private"]`) | This gateway already does phone-context mapping for the 3 phone types it supports (Mobile/Home/Business, per the gap-analysis doc) — extending to the rest is the same pattern repeated, not new design. |
