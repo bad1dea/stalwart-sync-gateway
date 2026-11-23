@@ -12810,7 +12810,7 @@ async fn find_maps_kql_to_jmap_pages_metadata_and_restarts_changed_searches() {
     env.mock.add_mail("other", "archived-old");
     env.mock.set_date("archived-old", "2020-01-01T00:00:00Z");
     let sid = "7dc6ffa0-2aa5-43f6-b441-bdda13785428";
-    let request = find_body(sid, "subject: subject", None, "0-0");
+    let request = find_body(sid, "subject:subject", None, "0-0");
     let send = |body| {
         env.req("Find", "client")
             .header("MS-ASProtocolVersion", "16.1")
@@ -12825,7 +12825,7 @@ async fn find_maps_kql_to_jmap_pages_metadata_and_restarts_changed_searches() {
     assert_eq!(eas::find_text_after(&doc, f::RANGE), Some("0-0"));
     assert_eq!(eas::find_all_text_after(&doc, air::SERVER_ID).len(), 1);
     assert!(!eas::contains_token(&doc, base::BODY));
-    let response = send(find_body(sid, "subject: subject", None, "1-2"))
+    let response = send(find_body(sid, "subject:subject", None, "1-2"))
         .await
         .unwrap();
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
@@ -12836,7 +12836,7 @@ async fn find_maps_kql_to_jmap_pages_metadata_and_restarts_changed_searches() {
     let response = env
         .req("Find", "client")
         .header("MS-ASProtocolVersion", "16.1")
-        .body(find_body(sid, "subject: subject", None, "1-2"))
+        .body(find_body(sid, "subject:subject", None, "1-2"))
         .send()
         .await
         .unwrap();
@@ -12846,7 +12846,7 @@ async fn find_maps_kql_to_jmap_pages_metadata_and_restarts_changed_searches() {
     let response = env
         .req("Find", "client")
         .header("MS-ASProtocolVersion", "16.1")
-        .body(find_body(sid, "subject: subject", None, "1-2"))
+        .body(find_body(sid, "subject:subject", None, "1-2"))
         .send()
         .await
         .unwrap();

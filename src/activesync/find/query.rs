@@ -104,9 +104,6 @@ impl Parser {
                 [Token::Word(word)] if !word.starts_with('"') => word
                     .split_once(':')
                     .map(|(key, _)| key.to_ascii_lowercase()),
-                [Token::Word(word), Token::Word(_)] if word.ends_with(':') => {
-                    Some(word[..word.len() - 1].to_ascii_lowercase())
-                }
                 _ => None,
             };
             if let Some((_, previous)) = groups
@@ -190,11 +187,11 @@ impl Parser {
                 }
                 if let Some((property, value)) = word.split_once(':') {
                     let value = if value.is_empty() {
-                        let Some(Token::Word(value)) = self.tokens.get(self.position) else {
-                            return Err("missing property value");
-                        };
-                        self.position += 1;
-                        value.as_str()
+                        // MS-KQL only recognizes a property restriction when
+                        // name, operator, and value are contiguous. A space
+                        // after the operator makes `name:` an ordinary text
+                        // token and the following word a separate term.
+                        return condition("text", &word);
                     } else {
                         value
                     };
@@ -453,7 +450,9 @@ mod tests {
     fn translates_property_restrictions_and_boolean_precedence() {
         assert_eq!(
             to_filter("subject: mobile").unwrap(),
-            json!({"subject": "mobile"})
+            json!({"operator":"AND", "conditions":[
+                {"text":"subject:"}, {"text":"mobile"}
+            ]})
         );
         assert_eq!(
             to_filter("from:a OR from:b AND NOT isread:true").unwrap(),
@@ -515,7 +514,9 @@ mod tests {
         );
         assert_eq!(
             to_filter("subject: \"mobile\"").unwrap(),
-            json!({"subject": "\"mobile\""})
+            json!({"operator":"AND", "conditions":[
+                {"text":"subject:"}, {"text":"\"mobile\""}
+            ]})
         );
         assert_eq!(to_filter("\"AND\"").unwrap(), json!({"text": "\"AND\""}));
         assert_eq!(
@@ -610,7 +611,6 @@ mod tests {
             "a OR",
             "(a",
             "a)",
-            "from:",
             "sent:2026-01-01",
             "foo*",
             "subject:\"hello world\"",
@@ -622,6 +622,7 @@ mod tests {
         ] {
             assert!(to_filter(query).is_err(), "{query}");
         }
+        assert_eq!(to_filter("from:").unwrap(), json!({"text":"from:"}));
         assert!(to_filter(&format!("{}a{}", "(".repeat(40), ")".repeat(40))).is_err());
     }
 }
