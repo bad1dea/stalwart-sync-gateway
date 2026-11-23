@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `64d7a8e` (2026-11-22)
+## Reconciled status for source `main` at `c2dfd63` (2026-11-22)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -331,6 +331,19 @@ diff checks pass. Deployed as
 `deploy-2026-11-22-eas-contact-yomi-company-4860c47`; Hermes Compose built
 image `sha256:257b69377ac1ee241448ff8d46844e71a0ab8a77c138a4bb5e1dbdcc26836c8c`.
 The container started at `2026-11-23T02:36:42Z` with restart count zero; mesh
+`/healthz` returned `ok` and `/readyz` returned `ready`.
+
+Also completed: **ActiveSync contact nickname**. Contacts2 `NickName` maps to
+JSContact `nicknames`, using a stable `eas_nickname` entry. Reads prefer that
+entry and fall back to another nickname; partial updates replace or clear only
+the EAS-owned entry and retain unrelated nicknames under the JMAP state guard.
+Regression coverage checks WBXML parsing/output, change hashing, JMAP create,
+read and a partial update that preserves another nickname. Full suite: 266
+passed, 73 ignored; clippy with warnings denied, formatting and diff checks
+pass. Deployed as `deploy-2026-11-22-eas-contact-nickname-c2dfd63`; Hermes
+Compose built image
+`sha256:e4e9135f3c360d49213a4c736a57c349f587531f4d04d90a4f772e2efb4b9b38`.
+The container started at `2026-11-23T02:53:52Z` with restart count zero; mesh
 `/healthz` returned `ok` and `/readyz` returned `ready`.
 
 Also completed: **ActiveSync contact office location**. `OfficeLocation` maps
