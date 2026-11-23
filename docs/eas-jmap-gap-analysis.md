@@ -103,15 +103,19 @@ The replacement started at `2026-11-23T00:12:29Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`. The gateway
 continues to advertise only EAS 14.0.
 
-Also completed: **KQL property-spacing compliance**. MS-KQL only recognizes a
+Also completed: **KQL property and qualifier compliance**. MS-KQL only recognizes a
 property restriction when the property, operator, and value are contiguous;
 `subject: mobile` is text search while `subject:mobile` is a property filter.
-The parser now preserves this distinction, and the Find integration fixture
-uses the contiguous form for its property-search scenario. Regression coverage
-checks the parsed text and property forms. Full suite: 255 passed, 73 ignored;
-clippy with warnings denied, formatting, and diff checks pass. Exact phrase
-semantics and recurrence remain blocked by the observed Stalwart backend
-behavior; real-client 16.1 certification still requires device verification.
+The parser now preserves this distinction. It also honors KQL's `+` property
+qualifier (ignored) and `-` qualifier (NOT) for restrictions and terms. These
+rules follow Microsoft's [property restriction](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-kql/1b4eb34a-0e20-4aca-b38e-41f531a747ff)
+and [property qualification](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-kql/bc88a1fc-92ba-483a-98ec-5b6019cbf416)
+specifications. Regression coverage checks spacing and qualified terms; the
+Find integration fixture uses contiguous syntax for its property-search case.
+Full suite: 256 passed, 73 ignored; clippy with warnings denied, formatting,
+and diff checks pass. Exact phrase semantics and recurrence remain blocked by
+the observed Stalwart backend behavior; real-client 16.1 certification still
+requires device verification.
 Deployed as `deploy-2026-11-23-eas-kql-spacing-dc0f3ce`; homelab commit
 `6946218`. Komodo remained locked, so the Hermes checkout was fast-forwarded
 and the pinned source was built through Compose. Image

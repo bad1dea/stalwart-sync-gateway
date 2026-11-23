@@ -38,9 +38,6 @@ fn tokenize(input: &str) -> Result<Vec<Token>, &'static str> {
             tokens.push(Token::Right);
             continue;
         }
-        if matches!(c, '+' | '-') {
-            return Err("unsupported search operator");
-        }
         let mut value = String::new();
         let mut quoted = false;
         let mut in_quote = false;
@@ -158,50 +155,60 @@ impl Parser {
                 self.position += 1;
                 Ok(value)
             }
-            Token::Word(word) => {
-                if word.starts_with('"') {
-                    return condition("text", &word);
-                }
-                if let Some(index) = comparison_index(&word) {
-                    let property = &word[..index];
-                    let rest = &word[index..];
-                    let width = if rest.starts_with(">=")
-                        || rest.starts_with("<=")
-                        || rest.starts_with("<>")
-                    {
-                        2
-                    } else {
-                        1
-                    };
-                    let (operator, value) = rest.split_at(width);
-                    if property.eq_ignore_ascii_case("size") {
-                        return size_condition(operator, value);
-                    }
-                    if property.eq_ignore_ascii_case("received") {
-                        return received_condition(operator, value);
-                    }
-                    if known_property(property) {
-                        return Err("unsupported search comparison");
-                    }
-                    return free_text_property(property, value);
-                }
-                if let Some((property, value)) = word.split_once(':') {
-                    let value = if value.is_empty() {
-                        // MS-KQL only recognizes a property restriction when
-                        // name, operator, and value are contiguous. A space
-                        // after the operator makes `name:` an ordinary text
-                        // token and the following word a separate term.
-                        return condition("text", &word);
-                    } else {
-                        value
-                    };
-                    condition(&property.to_ascii_lowercase(), value)
-                } else {
-                    condition("text", &word)
-                }
-            }
+            Token::Word(word) => word_condition(&word),
             _ => Err("unexpected search operator"),
         }
+    }
+}
+
+fn word_condition(word: &str) -> Result<Value, &'static str> {
+    if let Some(term) = word.strip_prefix('+') {
+        if term.is_empty() || term.starts_with(['+', '-']) {
+            return Err("invalid search qualifier");
+        }
+        // MS-KQL ignores '+' when it qualifies a property restriction; under
+        // this parser's AND default it does not change a positive text term.
+        return word_condition(term);
+    }
+    if let Some(term) = word.strip_prefix('-') {
+        if term.is_empty() || term.starts_with(['+', '-']) {
+            return Err("invalid search qualifier");
+        }
+        return Ok(json!({"operator":"NOT", "conditions":[word_condition(term)?]}));
+    }
+    if word.starts_with('"') {
+        return condition("text", word);
+    }
+    if let Some(index) = comparison_index(word) {
+        let property = &word[..index];
+        let rest = &word[index..];
+        let width = if rest.starts_with(">=") || rest.starts_with("<=") || rest.starts_with("<>") {
+            2
+        } else {
+            1
+        };
+        let (operator, value) = rest.split_at(width);
+        if property.eq_ignore_ascii_case("size") {
+            return size_condition(operator, value);
+        }
+        if property.eq_ignore_ascii_case("received") {
+            return received_condition(operator, value);
+        }
+        if known_property(property) {
+            return Err("unsupported search comparison");
+        }
+        return free_text_property(property, value);
+    }
+    if let Some((property, value)) = word.split_once(':') {
+        if value.is_empty() {
+            // MS-KQL only recognizes a property restriction when name,
+            // operator, and value are contiguous. A space after the operator
+            // makes `name:` an ordinary text token.
+            return condition("text", word);
+        }
+        condition(&property.to_ascii_lowercase(), value)
+    } else {
+        condition("text", word)
     }
 }
 
@@ -543,6 +550,27 @@ mod tests {
     }
 
     #[test]
+    fn kql_qualifiers_map_to_required_and_excluded_terms() {
+        assert_eq!(
+            to_filter("+subject:mobile").unwrap(),
+            json!({"subject":"mobile"})
+        );
+        assert_eq!(
+            to_filter("-from:alice@example.com").unwrap(),
+            json!({"operator":"NOT", "conditions":[{"from":"alice@example.com"}]})
+        );
+        assert_eq!(
+            to_filter("urgent -subject:spam").unwrap(),
+            json!({"operator":"AND", "conditions":[
+                {"text":"urgent"},
+                {"operator":"NOT", "conditions":[{"subject":"spam"}]}
+            ]})
+        );
+        assert!(to_filter("-").is_err());
+        assert!(to_filter("++term").is_err());
+    }
+
+    #[test]
     fn translates_size_boundaries_without_off_by_one_errors() {
         for (query, filter) in [
             ("size:7", json!({"minSize":7,"maxSize":8})),
@@ -615,8 +643,6 @@ mod tests {
             "foo*",
             "subject:\"hello world\"",
             "\"hello world\"",
-            "-from:a",
-            "+subject:a",
             "a NEAR b",
             "subject:\"unfinished",
         ] {
