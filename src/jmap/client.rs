@@ -4461,6 +4461,7 @@ impl JmapClient {
                     "progressUpdated",
                     "start",
                     "priority",
+                    "keywords",
                 ]),
                 limit,
             )
@@ -4514,6 +4515,10 @@ impl JmapClient {
         };
 
         anyhow::ensure!(!fields.unsupported_body, "unsupported task body");
+        anyhow::ensure!(
+            !fields.unsupported_categories,
+            "unsupported task categories"
+        );
         let mut task = serde_json::Map::new();
         if let Some(body) = &fields.body {
             task.insert("description".to_owned(), serde_json::json!(body));
@@ -4539,6 +4544,11 @@ impl JmapClient {
         if let Some(importance) = fields.importance.as_deref() {
             let priority = eas_importance_to_jmap(importance).context("invalid task importance")?;
             task.insert("priority".to_owned(), serde_json::json!(priority));
+        }
+        if let Some(categories) = &fields.categories {
+            let keywords: std::collections::BTreeMap<_, _> =
+                categories.iter().map(|category| (category, true)).collect();
+            task.insert("keywords".to_owned(), serde_json::json!(keywords));
         }
         let mut update_state = None;
         if fields.due_date.is_some()
@@ -7519,6 +7529,8 @@ struct TaskObject {
     progress_updated: Option<String>,
     #[serde(default)]
     priority: Option<u8>,
+    #[serde(default)]
+    keywords: std::collections::BTreeMap<String, bool>,
     #[serde(rename = "@type", default)]
     kind: String,
 }
@@ -7547,6 +7559,11 @@ impl From<TaskObject> for Task {
                 })
                 .flatten(),
             importance: jmap_task_priority_to_eas(value.priority),
+            categories: value
+                .keywords
+                .into_iter()
+                .filter_map(|(category, enabled)| enabled.then_some(category))
+                .collect(),
             start: value.start.as_deref().and_then(|start| {
                 if value
                     .time_zone
@@ -7823,7 +7840,8 @@ mod tests {
             "id": "t", "@type": "Task", "progress": "completed",
             "progressUpdated": "2026-11-20T11:45:00-05:00",
             "start": "2026-11-20T11:30:00",
-            "priority": 1
+            "priority": 1,
+            "keywords": {"Work": true, "Hidden": false}
         }))
         .unwrap();
         let task = crate::model::Task::from(task);
@@ -7833,6 +7851,7 @@ mod tests {
         );
         assert_eq!(task.start.as_deref(), Some("20261120T113000Z"));
         assert_eq!(task.importance, Some(2));
+        assert_eq!(task.categories, vec!["Work"]);
 
         let task: super::TaskObject = serde_json::from_value(serde_json::json!({
             "id": "t", "@type": "Task", "progress": "needs-action",

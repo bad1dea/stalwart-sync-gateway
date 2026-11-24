@@ -1323,6 +1323,8 @@ pub struct TaskFields {
     pub complete: Option<bool>,
     pub date_completed: Option<String>,
     pub importance: Option<String>,
+    pub categories: Option<Vec<String>>,
+    pub unsupported_categories: bool,
 }
 
 /// ActiveSync Contacts class fields decoded from one Add/Change command's
@@ -2111,6 +2113,10 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             Err(()) => command.calendar.unsupported_categories = true,
                         }
                         command.task = extract_task_fields(&document.nodes[start + 1..idx]);
+                        match task_categories(&command.document) {
+                            Ok(categories) => command.task.categories = categories,
+                            Err(()) => command.task.unsupported_categories = true,
+                        }
                         let has_identity =
                             !command.server_id.is_empty() || !command.client_id.is_empty();
                         if has_identity {
@@ -2583,11 +2589,23 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
 }
 
 fn calendar_categories(command: &Document) -> Result<Option<Vec<String>>, ()> {
+    extract_categories(command, calendar::CATEGORIES, calendar::CATEGORY)
+}
+
+fn task_categories(command: &Document) -> Result<Option<Vec<String>>, ()> {
+    extract_categories(command, tasks::CATEGORIES, tasks::CATEGORY)
+}
+
+fn extract_categories(
+    command: &Document,
+    categories_token: Token,
+    category_token: Token,
+) -> Result<Option<Vec<String>>, ()> {
     let applications: Vec<_> = child_elements(command).into_iter()
         .filter(|child| matches!(child.nodes.first(), Some(Node::Start(token)) if same_token(*token, airsync::APPLICATION_DATA)))
         .collect();
     let categories: Vec<_> = applications.iter().flat_map(child_elements)
-        .filter(|child| matches!(child.nodes.first(), Some(Node::Start(token)) if same_token(*token, calendar::CATEGORIES)))
+        .filter(|child| matches!(child.nodes.first(), Some(Node::Start(token)) if same_token(*token, categories_token)))
         .collect();
     if categories.len() > 1 {
         return Err(());
@@ -2606,7 +2624,7 @@ fn calendar_categories(command: &Document) -> Result<Option<Vec<String>>, ()> {
     }
     let mut values = std::collections::BTreeSet::new();
     for child in child_elements(container) {
-        if !matches!(child.nodes.first(), Some(Node::Start(token)) if same_token(*token, calendar::CATEGORY) && token.has_content)
+        if !matches!(child.nodes.first(), Some(Node::Start(token)) if same_token(*token, category_token) && token.has_content)
         {
             return Err(());
         }
@@ -3447,6 +3465,10 @@ mod tests {
         builder.leaf(tasks::SUBJECT, "Renew passport");
         builder.leaf(tasks::COMPLETE, "0");
         builder.leaf(tasks::IMPORTANCE, "2");
+        builder.start(tasks::CATEGORIES);
+        builder.leaf(tasks::CATEGORY, "Work");
+        builder.leaf(tasks::CATEGORY, "Friends");
+        builder.end();
         builder.leaf(tasks::DUE_DATE, "20260905T090000Z");
         builder.leaf(tasks::START_DATE, "20260904T090000Z");
         builder.leaf(tasks::UTC_START_DATE, "20260904T090000Z");
@@ -3469,6 +3491,10 @@ mod tests {
         assert_eq!(command.task.subject.as_deref(), Some("Renew passport"));
         assert_eq!(command.task.complete, Some(false));
         assert_eq!(command.task.importance.as_deref(), Some("2"));
+        assert_eq!(
+            command.task.categories.as_deref(),
+            Some(&["Friends".to_owned(), "Work".to_owned()][..])
+        );
         assert_eq!(command.task.due_date.as_deref(), Some("20260905T090000Z"));
         assert_eq!(command.task.start_date.as_deref(), Some("20260904T090000Z"));
         assert_eq!(

@@ -375,6 +375,7 @@ pub struct Task {
     pub completed: bool,
     pub date_completed: Option<String>,
     pub importance: Option<u8>,
+    pub categories: Vec<String>,
     pub start: Option<String>,
     pub start_local: Option<String>,
     pub due: Option<String>,
