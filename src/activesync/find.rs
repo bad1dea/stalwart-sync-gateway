@@ -275,6 +275,26 @@ async fn execute(
         let mut selected = Vec::new();
         let mut query_state = None;
         let mut candidate_total = None;
+        let matches_exactly = |email: &crate::model::Email| {
+            email_matches_phrases_with_addresses_and_attachments(
+                &email.subject,
+                email.body.as_ref(),
+                &email.from,
+                &email.to,
+                &email.cc,
+                &email.bcc,
+                email.received_at.as_deref(),
+                email.sent_at.as_deref(),
+                email.size,
+                email.importance,
+                Some(email.read),
+                Some(email.keywords.iter().any(|keyword| keyword == "$flagged")),
+                Some(!email.attachments.is_empty()),
+                &email.attachments,
+                phrase_match,
+                &phrases,
+            )
+        };
         loop {
             let candidate = state
                 .jmap
@@ -298,7 +318,8 @@ async fn execute(
             }
             let count = candidate.emails.len();
             for mut email in candidate.emails {
-                if search_attachment_text {
+                let mut is_match = matches_exactly(&email)?;
+                if !is_match && search_attachment_text {
                     for attachment in &mut email.attachments {
                         if attachment.extracted_text.is_some()
                             || attachment.size > MAX_FIND_ATTACHMENT_TEXT_BYTES
@@ -318,25 +339,9 @@ async fn execute(
                         attachment.extracted_text =
                             extract_find_attachment_text(content_type, &bytes);
                     }
+                    is_match = matches_exactly(&email)?;
                 }
-                if email_matches_phrases_with_addresses_and_attachments(
-                    &email.subject,
-                    email.body.as_ref(),
-                    &email.from,
-                    &email.to,
-                    &email.cc,
-                    &email.bcc,
-                    email.received_at.as_deref(),
-                    email.sent_at.as_deref(),
-                    email.size,
-                    email.importance,
-                    Some(email.read),
-                    Some(email.keywords.iter().any(|keyword| keyword == "$flagged")),
-                    Some(!email.attachments.is_empty()),
-                    &email.attachments,
-                    phrase_match,
-                    &phrases,
-                )? {
+                if is_match {
                     if (request.start..=request.end).contains(&matched) {
                         selected.push(email);
                     }
