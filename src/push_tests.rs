@@ -13523,7 +13523,7 @@ async fn find_phrase_or_boolean_state_uses_both_exact_branches() {
         .header("MS-ASProtocolVersion", "16.1")
         .body(find_body(
             "55afbc37-ed3e-4234-9752-ae3ea33e7bc9",
-            r#"subject:"alpha beta" OR isread:true AND isflagged:true"#,
+            r#"subject:"alpha beta" OR (isread:true AND isflagged:true)"#,
             None,
             "0-9",
         ))

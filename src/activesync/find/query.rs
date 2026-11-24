@@ -233,10 +233,12 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
 }
 
 fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, String)>> {
-    if tokens
-        .iter()
-        .any(|token| !matches!(token, Token::Word(_) | Token::And | Token::Or | Token::Not))
-    {
+    if tokens.iter().any(|token| {
+        !matches!(
+            token,
+            Token::Word(_) | Token::And | Token::Or | Token::Not | Token::Left | Token::Right
+        )
+    }) {
         return None;
     }
     let mut output = Vec::new();
@@ -247,6 +249,11 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
     let mut operator_count = 0;
     while position < tokens.len() {
         if expect_operand {
+            if tokens.get(position) == Some(&Token::Left) {
+                operators.push(Token::Left);
+                position += 1;
+                continue;
+            }
             let explicit_not = tokens.get(position) == Some(&Token::Not);
             if explicit_not {
                 position += 1;
@@ -281,6 +288,28 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
             expect_operand = false;
         } else {
             let operator = tokens.get(position)?;
+            if *operator == Token::Right {
+                while operators
+                    .last()
+                    .is_some_and(|previous| *previous != Token::Left)
+                {
+                    let previous = operators.pop().unwrap();
+                    output.push((
+                        if previous == Token::And {
+                            "$op$and"
+                        } else {
+                            "$op$or"
+                        }
+                        .to_owned(),
+                        String::new(),
+                    ));
+                }
+                if operators.pop() != Some(Token::Left) {
+                    return None;
+                }
+                position += 1;
+                continue;
+            }
             if !matches!(operator, Token::And | Token::Or) {
                 return None;
             }
@@ -309,6 +338,9 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
         return None;
     }
     while let Some(operator) = operators.pop() {
+        if operator == Token::Left {
+            return None;
+        }
         output.push((
             if operator == Token::And {
                 "$op$and"
@@ -1144,7 +1176,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            phrases_for_postfilter(r#"subject:"alpha beta" OR isread:true AND isflagged:true"#),
+            phrases_for_postfilter(r#"subject:"alpha beta" OR (isread:true AND isflagged:true)"#),
             Some((
                 PhraseMatch::Expression,
                 vec![
