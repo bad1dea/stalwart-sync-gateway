@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `f260a09` (2026-11-23)
+## Reconciled status for source `main` at `4d00728` (2026-11-23)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -250,6 +250,20 @@ warnings denied, formatting, and diff checks pass. Deployed as
 Compose produced image
 `sha256:bee5f6682599dff81913383e2bf3b21981d05742af656e42b3ae87e39559d369`.
 The replacement started at `2026-11-24T04:17:59Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
+continues to advertise EAS 14.0.
+
+Also completed (`4d00728`): **EAS Task start dates**. Tasks `StartDate` and
+`UtcStartDate` now map to JSCalendar `start`, using the task's existing time
+zone when present. Reads emit both local and UTC EAS fields; edits preserve
+the existing start when the fields are omitted. Regression coverage checks
+WBXML decoding/output and a client Change saved through `CalendarEvent/set`.
+Full suite: 269 passed, 73 ignored; clippy with warnings denied, formatting,
+and diff checks pass. Deployed as
+`deploy-2026-11-23-eas-task-start-date-4d00728`; homelab commit `e9aef08`.
+Compose produced image
+`sha256:f3820a9c81b7777ece8f688ff00a7f4361c76a24156b04293849e7bd146d1873`.
+The replacement started at `2026-11-24T04:26:06Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
 continues to advertise EAS 14.0.
 
