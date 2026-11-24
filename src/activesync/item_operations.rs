@@ -426,7 +426,7 @@ async fn fetch_item(
                 }
                 builder.leaf(air::CLASS, "Contacts");
                 builder.start(ops::PROPERTIES);
-                write_contact_fields(builder, &contact, false);
+                write_contact_fields(builder, &contact, false, &[]);
                 builder.end();
             }
             Ok(_) => builder.leaf(ops::STATUS, "6"),

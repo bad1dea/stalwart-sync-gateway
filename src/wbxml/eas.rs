@@ -1386,6 +1386,8 @@ pub struct ContactFields {
     pub mms: Option<String>,
     pub account_name: Option<String>,
     pub picture: Option<String>,
+    pub notes: Option<String>,
+    pub unsupported_body: bool,
     pub im_address: Option<String>,
     pub im_address_2: Option<String>,
     pub im_address_3: Option<String>,
@@ -2395,6 +2397,9 @@ fn extract_note_fields(nodes: &[Node]) -> NoteFields {
 /// nesting/repetition (unlike Notes:Categories) to track.
 fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
     let mut fields = ContactFields::default();
+    let body = extract_calendar_fields(nodes);
+    fields.notes = body.body;
+    fields.unsupported_body = body.unsupported_body || body.body_type.is_some_and(|kind| kind != 1);
     let mut path: Vec<Token> = Vec::new();
     let mut category_buf: Option<String> = None;
 
@@ -3739,6 +3744,21 @@ mod tests {
     }
 
     #[test]
+    fn contact_notes_reject_html_body_until_a_lossless_mapping_exists() {
+        let mut builder = DocumentBuilder::new();
+        builder.start(airsync::APPLICATION_DATA);
+        builder.start(airsync_base::BODY);
+        builder.leaf(airsync_base::TYPE, "2");
+        builder.leaf(airsync_base::DATA, "<p>Contact notes</p>");
+        builder.end();
+        builder.end();
+
+        let fields = super::extract_contact_fields(&builder.finish().nodes);
+        assert_eq!(fields.notes.as_deref(), Some("<p>Contact notes</p>"));
+        assert!(fields.unsupported_body);
+    }
+
+    #[test]
     fn parses_sync_instance_id_on_the_occurrence_command() {
         let mut builder = DocumentBuilder::new();
         builder.start(airsync::SYNC);
@@ -3784,6 +3804,10 @@ mod tests {
         builder.start(airsync::CHANGE);
         builder.leaf(airsync::SERVER_ID, "contact-1");
         builder.start(airsync::APPLICATION_DATA);
+        builder.start(airsync_base::BODY);
+        builder.leaf(airsync_base::TYPE, "1");
+        builder.leaf(airsync_base::DATA, "Contact notes text");
+        builder.end();
         builder.leaf(contacts::FIRST_NAME, "Ada");
         builder.leaf(contacts::MIDDLE_NAME, "Augusta");
         builder.leaf(contacts::LAST_NAME, "Lovelace");
@@ -3842,6 +3866,8 @@ mod tests {
         let command = &collections[0].commands[0];
         assert_eq!(command.kind, SyncClientCommandKind::Change);
         assert_eq!(command.server_id, "contact-1");
+        assert_eq!(command.contact.notes.as_deref(), Some("Contact notes text"));
+        assert!(!command.contact.unsupported_body);
         assert_eq!(command.contact.first_name.as_deref(), Some("Ada"));
         assert_eq!(command.contact.middle_name.as_deref(), Some("Augusta"));
         assert_eq!(command.contact.last_name.as_deref(), Some("Lovelace"));

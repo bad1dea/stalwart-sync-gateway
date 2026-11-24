@@ -1739,7 +1739,7 @@ impl JmapClient {
                     "ContactCard/get",
                     serde_json::json!({
                         "accountId":account, "ids":[id],
-                        "properties":["id","addressBookIds","name","emails","phones","organizations","titles","keywords","anniversaries","links"]
+                        "properties":["id","addressBookIds","name","emails","phones","organizations","titles","keywords","anniversaries","links","notes"]
                     }),
                     "g",
                 )],
@@ -1795,6 +1795,7 @@ impl JmapClient {
         id: Option<&str>,
         fields: &crate::wbxml::eas::ContactFields,
     ) -> anyhow::Result<String> {
+        anyhow::ensure!(!fields.unsupported_body, "unsupported contact notes body");
         let Some(account_id) = auth.session.primary_account_for(capabilities::CONTACTS) else {
             anyhow::bail!("JMAP Contacts capability is not available");
         };
@@ -1860,9 +1861,16 @@ impl JmapClient {
         }
         let has_nickname_update = fields.nickname.is_some();
         let has_picture_update = fields.picture.is_some();
+        let has_notes_update = fields.notes.is_some();
         if id.is_none() {
             if let Some(picture) = fields.picture.as_deref().filter(|value| !value.is_empty()) {
                 card.insert("media".to_owned(), serde_json::json!({"eas_picture":{"@type":"Media","kind":"photo","uri":eas_contact_picture_to_data_uri(picture)?}}));
+            }
+            if let Some(notes) = &fields.notes {
+                card.insert(
+                    "notes".to_owned(),
+                    serde_json::json!({"eas_notes":{"@type":"Note","note":notes}}),
+                );
             }
         }
         if let Some(nickname) = fields.nickname.as_ref().filter(|value| !value.is_empty()) {
@@ -2156,6 +2164,7 @@ impl JmapClient {
                 || has_nickname_update
                 || has_im_update
                 || has_picture_update
+                || has_notes_update
                 || has_anniversary_update
                 || has_organizations_update
                 || has_phones_update
@@ -2175,6 +2184,9 @@ impl JmapClient {
             }
             if has_picture_update {
                 properties.push("media");
+            }
+            if has_notes_update {
+                properties.push("notes");
             }
             if !addresses.is_empty() || has_office_location_update {
                 properties.push("addresses");
@@ -2389,6 +2401,19 @@ impl JmapClient {
                         serde_json::Value::Object(media)
                     },
                 );
+            }
+            if has_notes_update {
+                let mut notes = existing["notes"].as_object().cloned().unwrap_or_default();
+                let key = notes
+                    .contains_key("eas_notes")
+                    .then(|| "eas_notes".to_owned())
+                    .or_else(|| notes.keys().next().cloned())
+                    .unwrap_or_else(|| "eas_notes".to_owned());
+                notes.insert(
+                    key,
+                    serde_json::json!({"@type":"Note","note":fields.notes.as_deref().unwrap_or_default()}),
+                );
+                card.insert("notes".to_owned(), serde_json::Value::Object(notes));
             }
             if has_anniversary_update {
                 let mut merged_anniversaries = existing["anniversaries"]
@@ -7432,6 +7457,13 @@ struct ContactCardObject {
     anniversaries: BTreeMap<String, ContactCardAnniversary>,
     #[serde(default)]
     links: BTreeMap<String, ContactCardLink>,
+    #[serde(default)]
+    notes: BTreeMap<String, ContactCardNote>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContactCardNote {
+    note: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -7634,6 +7666,15 @@ impl From<ContactCardObject> for Contact {
             })
             .and_then(|media| media.uri.as_deref())
             .and_then(jscontact_photo_data_uri_to_bytes);
+        let notes = value
+            .notes
+            .get("eas_notes")
+            .or_else(|| value.notes.values().next())
+            .map(|note| crate::model::EmailBody {
+                body_type: EmailBodyType::Plain,
+                value: note.note.clone(),
+                is_truncated: false,
+            });
         let online_service = |key: &str| {
             value
                 .online_services
@@ -7812,6 +7853,7 @@ impl From<ContactCardObject> for Contact {
             mms,
             account_name,
             picture,
+            notes,
             company_name,
             department,
             job_title,
@@ -10486,6 +10528,10 @@ mod contact_address_tests {
                     call[1]["create"]["c1"]["links"],
                     serde_json::json!({"eas_web":{"uri":"https://example.com/ada"}})
                 );
+                assert_eq!(
+                    call[1]["create"]["c1"]["notes"],
+                    serde_json::json!({"eas_notes":{"@type":"Note","note":"Contact notes"}})
+                );
                 Json(serde_json::json!({"methodResponses":[
                     ["ContactCard/set",{"created":{"c1":{"id":"contact-1"}}},"0"]
                 ]}))
@@ -10554,6 +10600,7 @@ mod contact_address_tests {
             mms: Some("ada@mms.example".into()),
             account_name: Some("ada-eas-account".into()),
             categories: Some(vec!["Work".into(), "Friends".into()]),
+            notes: Some("Contact notes".into()),
             ..Default::default()
         };
         assert_eq!(
@@ -10563,6 +10610,83 @@ mod contact_address_tests {
                 .unwrap(),
             "contact-1"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn contact_notes_update_preserves_other_jscontact_notes() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let captured = calls.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(request): Json<serde_json::Value>| {
+                let calls = captured.clone();
+                async move {
+                    let call = &request["methodCalls"][0];
+                    let response = match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                        0 => {
+                            assert_eq!(call[0], "ContactCard/get");
+                            assert!(call[1]["properties"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .any(|property| property == "notes"));
+                            serde_json::json!(["ContactCard/get", {
+                                "state":"before",
+                                "list":[{"id":"contact-1","notes":{
+                                    "other_note":{"@type":"Note","note":"Keep this text"},
+                                    "eas_notes":{"@type":"Note","note":"Old contact note"}
+                                }}]
+                            }, "address-state"])
+                        }
+                        1 => {
+                            assert_eq!(call[0], "ContactCard/set");
+                            assert_eq!(call[1]["ifInState"], "before");
+                            assert_eq!(call[1]["update"]["contact-1"]["notes"], serde_json::json!({
+                                "other_note":{"@type":"Note","note":"Keep this text"},
+                                "eas_notes":{"@type":"Note","note":"Updated contact note"}
+                            }));
+                            serde_json::json!(["ContactCard/set", {"updated":{"contact-1":null}}, "0"])
+                        }
+                        _ => panic!("unexpected JMAP request"),
+                    };
+                    Json(serde_json::json!({"methodResponses":[response]}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CONTACTS:"a"}, "apiUrl":url,
+            "downloadUrl":url,"uploadUrl":url,"username":"user","state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let fields = crate::wbxml::eas::ContactFields {
+            notes: Some("Updated contact note".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            client
+                .save_contact(&auth, "book", Some("contact-1"), &fields)
+                .await
+                .unwrap(),
+            "contact-1"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         server.abort();
     }
 
@@ -10733,7 +10857,7 @@ mod contact_address_tests {
     #[test]
     fn contact_address_read_maps_jscontact_context_and_components() {
         let card: ContactCardObject = serde_json::from_value(serde_json::json!({
-            "id":"c", "keywords":{"Work":true,"inactive":false}, "addresses":{"office":{"label":"office location","full":"Building 4, Floor 2"},
+            "id":"c", "keywords":{"Work":true,"inactive":false}, "notes":{"eas_notes":{"@type":"Note","note":"Contact notes text"},"other":{"note":"Unrelated note"}}, "addresses":{"office":{"label":"office location","full":"Building 4, Floor 2"},
                 "work":{"contexts":{"work":true},"components":[
                     {"kind":"locality","value":"Toronto"},
                     {"kind":"country","value":"Canada"},
@@ -10766,6 +10890,10 @@ mod contact_address_tests {
             Some("Ottawa")
         );
         assert_eq!(contact.categories, vec!["Work"]);
+        assert_eq!(
+            contact.notes.as_ref().map(|body| body.value.as_str()),
+            Some("Contact notes text")
+        );
         assert_eq!(
             contact.office_location.as_deref(),
             Some("Building 4, Floor 2")

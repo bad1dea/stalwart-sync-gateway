@@ -1524,7 +1524,7 @@ async fn search_inner(
                             builder.leaf(srch::LONG_ID, format!("contact:{}", contact.id));
                             builder.leaf(air::COLLECTION_ID, format!("ab_{address_book}"));
                             builder.start(srch::PROPERTIES);
-                            write_contact_fields(&mut builder, &contact, false);
+                            write_contact_fields(&mut builder, &contact, false, &[]);
                             builder.end();
                             builder.end();
                         }
@@ -5342,6 +5342,10 @@ async fn sync_contacts_collection(
     for command in &collection.commands {
         match command.kind {
             wbxml::eas::SyncClientCommandKind::Add => {
+                if command.contact.unsupported_body {
+                    add_responses.push((command.client_id.clone(), None, "6"));
+                    continue;
+                }
                 match state
                     .jmap
                     .save_contact(auth, &address_book_id, None, &command.contact)
@@ -5361,6 +5365,10 @@ async fn sync_contacts_collection(
                 }
             }
             wbxml::eas::SyncClientCommandKind::Change => {
+                if command.contact.unsupported_body {
+                    change_responses.push((command.server_id.clone(), "6"));
+                    continue;
+                }
                 match state
                     .jmap
                     .save_contact(
@@ -5520,7 +5528,7 @@ async fn sync_contacts_collection(
             if let Some((_, contact)) = current_by_id.get(&server_id) {
                 builder.leaf(air::STATUS, "1");
                 builder.start(air::APPLICATION_DATA);
-                write_contact_fields(builder, contact, false);
+                write_contact_fields(builder, contact, false, &collection.body_preferences);
                 builder.end();
             } else {
                 builder.leaf(air::STATUS, "8");
@@ -5537,12 +5545,12 @@ async fn sync_contacts_collection(
         builder.start(air::COMMANDS);
         for id in &to_add {
             if let Some((_, contact)) = current_by_id.get(id) {
-                write_contact_command(builder, air::ADD, contact);
+                write_contact_command(builder, air::ADD, contact, &collection.body_preferences);
             }
         }
         for id in &to_change {
             if let Some((_, contact)) = current_by_id.get(id) {
-                write_contact_command(builder, air::CHANGE, contact);
+                write_contact_command(builder, air::CHANGE, contact, &collection.body_preferences);
             }
         }
         for id in &to_remove {
@@ -5577,6 +5585,10 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.mms.hash(&mut hasher);
     contact.account_name.hash(&mut hasher);
     contact.picture.hash(&mut hasher);
+    if let Some(notes) = &contact.notes {
+        notes.body_type.eas_value().hash(&mut hasher);
+        notes.value.hash(&mut hasher);
+    }
     contact.im_address1.hash(&mut hasher);
     contact.im_address2.hash(&mut hasher);
     contact.im_address3.hash(&mut hasher);
@@ -5610,6 +5622,7 @@ fn write_contact_command(
     builder: &mut wbxml::eas::DocumentBuilder,
     tag: wbxml::token::Token,
     contact: &crate::model::Contact,
+    requests: &[RequestedBodyPreference],
 ) {
     use wbxml::eas::airsync as air;
     builder.start(tag);
@@ -5619,6 +5632,7 @@ fn write_contact_command(
         builder,
         contact,
         tag.code_page == air::PAGE && tag.token == air::CHANGE.token,
+        requests,
     );
     builder.end();
     builder.end();
@@ -5628,10 +5642,27 @@ fn write_contact_fields(
     builder: &mut wbxml::eas::DocumentBuilder,
     contact: &crate::model::Contact,
     is_change: bool,
+    requests: &[RequestedBodyPreference],
 ) {
     use base64::Engine;
+    use wbxml::eas::airsync_base as base;
     use wbxml::eas::contacts as c;
     use wbxml::eas::contacts2 as c2;
+
+    if let Some(body) = &contact.notes {
+        let preference = select_body_preference(Some(body), None, requests);
+        if requests.is_empty() || preference.is_some() {
+            let (kind, data, size, truncated) = apply_body_preference(body.clone(), preference);
+            builder.start(base::BODY);
+            builder.leaf(base::TYPE, kind.eas_value());
+            builder.leaf(base::ESTIMATED_DATA_SIZE, size.to_string());
+            builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
+            if !truncated || !preference.is_some_and(|pref| pref.all_or_none) {
+                builder.leaf(base::DATA, data);
+            }
+            builder.end();
+        }
+    }
 
     // Field order follows the real z-push-stalwart-jmap source (PR #187,
     // pinned in config/z-push/Dockerfile: synccontact.php's $mapping),
@@ -9059,9 +9090,14 @@ mod tests {
             categories: vec!["Work".into(), "Friends".into()],
             ..Default::default()
         };
+        contact.notes = Some(crate::model::EmailBody {
+            body_type: EmailBodyType::Plain,
+            value: "Contact notes text".into(),
+            is_truncated: false,
+        });
         let before = super::contact_hash(&contact);
         let mut builder = DocumentBuilder::new();
-        super::write_contact_fields(&mut builder, &contact, true);
+        super::write_contact_fields(&mut builder, &contact, true, &[]);
         let doc = builder.finish();
         assert_eq!(
             eas::find_text_after(&doc, c::BUSINESS_ADDRESS_CITY),
@@ -9091,6 +9127,11 @@ mod tests {
         assert_eq!(
             eas::find_all_text_after(&doc, c::CATEGORY),
             vec!["Work", "Friends"]
+        );
+        assert_eq!(eas::find_text_after(&doc, base::TYPE), Some("1"));
+        assert_eq!(
+            eas::find_text_after(&doc, base::DATA),
+            Some("Contact notes text")
         );
         assert_eq!(eas::find_text_after(&doc, c::MIDDLE_NAME), Some("Augusta"));
         assert_eq!(eas::find_text_after(&doc, c::SUFFIX), Some("Jr."));
@@ -9159,6 +9200,25 @@ mod tests {
         assert_eq!(
             eas::find_text_after(&doc, c::WEB_PAGE),
             Some("https://example.com/ada")
+        );
+        let mut truncated = DocumentBuilder::new();
+        super::write_contact_fields(
+            &mut truncated,
+            &contact,
+            false,
+            &[BodyPreference {
+                body_type: 1,
+                truncation_size: Some(5),
+                all_or_none: false,
+                preview: None,
+            }],
+        );
+        let truncated = truncated.finish();
+        assert_eq!(eas::find_text_after(&truncated, base::DATA), Some("Conta"));
+        assert_eq!(eas::find_text_after(&truncated, base::TRUNCATED), Some("1"));
+        assert_eq!(
+            eas::find_text_after(&truncated, base::ESTIMATED_DATA_SIZE),
+            Some("18")
         );
         contact.assistant_phone = Some("555-0111".into());
         assert_ne!(super::contact_hash(&contact), before);

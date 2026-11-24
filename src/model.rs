@@ -282,6 +282,8 @@ pub struct Contact {
     pub mms: Option<String>,
     pub account_name: Option<String>,
     pub picture: Option<Vec<u8>>,
+    /// Plain-text JSContact notes, synchronized through AirSyncBase:Body.
+    pub notes: Option<EmailBody>,
     pub im_address1: Option<String>,
     pub im_address2: Option<String>,
     pub im_address3: Option<String>,

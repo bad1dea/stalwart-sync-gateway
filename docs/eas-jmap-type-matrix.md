@@ -58,12 +58,9 @@ inferred.
 
 ## Contacts (MS-ASCNTC, WBXML codepage 1)
 
-The 12 tokens this gateway uses (`COMPANY_NAME` through `BUSINESS_PHONE_NUMBER`)
-were all cross-checked the same way as Calendar's — **also confirmed correct
-byte-for-byte**, no low-confidence flag existed for these to begin with.
-`write_contact_add()` (`activesync.rs:1809`) emits exactly those 12 fields in order.
-Verified fresh: zero `SyncClientCommandKind` matches in `sync_contacts_collection()`
-— read-only, same as Calendar.
+Contact fields are now handled in both directions. Reads are returned by
+`sync_contacts_collection()` and ItemOperations; Sync Add/Change updates are
+state-guarded `ContactCard/set` calls, and unsupported bodies fail closed.
 
 The remaining ~40 fields in this codepage (now fully scaffolded in `eas.rs`) split
 cleanly by how well JSContact (RFC 9553) covers them:
@@ -71,8 +68,9 @@ cleanly by how well JSContact (RFC 9553) covers them:
 | Field group | Status | JSContact mechanism | Notes |
 |---|---|---|---|
 | Anniversary, Birthday | ✅ (`deploy-2026-11-22-eas-contact-dates-5f03d66`) | JSContact `anniversaries` (`wedding`/`birth`) | Strict `YYYYMMDD` values map to full PartialDates; partial updates preserve the other kind under `ifInState`. |
-| AssistantName, AssistantPhoneNumber | ⛔ *(today)* / 🟡 | JSContact has no dedicated "assistant" property; would go in a `relatedTo` entry or a custom extension | ❓ — needs checking whether Stalwart's JSContact implementation exposes anything assistant-shaped at all. |
-| Body/BodySize/BodyTruncated (2.5-only — 12.0+ uses AirSyncBase:Body) | ⛔ | JSContact `notes` | Free-text notes field — not currently synced. |
+| AssistantName | ⛔ | No semantics-preserving standard JSContact property | The EAS assistant name cannot be retained without inventing a relationship or extension. |
+| AssistantPhoneNumber | ✅ | JSContact `phones` with the `assistant` label | Labeled assistant phone entries round-trip independently of other phone kinds. |
+| Body/BodySize/BodyTruncated | ✅ (AirSyncBase:Body) | JSContact `notes` | Plain-text notes map through the `eas_notes` note key. Body preferences control output and truncation metadata; unsupported HTML input is rejected to avoid lossy conversion. Legacy Contacts:Body in EAS 2.5 is not used because this gateway advertises 14.0. |
 | Business2PhoneNumber, BusinessFaxNumber, Home2PhoneNumber | ✅ (`deploy-2026-11-22-eas-contact-secondary-phones-6c3d00d`, business fax `deploy-2026-11-22-eas-contact-business-fax-78425f9`) | JSContact `phones` with work/private contexts and `fax` feature | Secondary numbers and business fax remain separate entries; partial updates merge the existing phone map under `ifInState`. |
 | HomeFaxNumber, PagerNumber | ✅ (`deploy-2026-11-22-eas-contact-fax-pager-9e7ab32`) | JSContact `phones` with `fax`/`pager` features and private context for home fax | Partial updates preserve other phone entries under `ifInState`. |
 | CarPhoneNumber, RadioPhoneNumber | ✅ (`deploy-2026-11-22-eas-contact-car-radio-60e5eca`) | JSContact `phones[].label` (`car`, `radio`) | Custom phone labels retain the EAS-specific phone kind across reads and writes. |
@@ -80,12 +78,12 @@ cleanly by how well JSContact (RFC 9553) covers them:
 | Categories/Category | ✅ (`deploy-2026-11-22-eas-contact-categories-79585fc`) | JSContact `keywords` | Values round-trip; absent field leaves existing keywords untouched and an empty field clears them. |
 | Children/Child | ⛔ *(today)* / 🟡 | No direct JSContact property — closest is a `relatedTo` entry per child, if named at all | ❓ unsurveyed. |
 | Department | ✅ (`deploy-2026-11-22-eas-contact-department-6708d25`) | JSContact `organizations[].units[]` | Maps to the last unit in the organization hierarchy; partial edits preserve company and other organization fields. |
-| OfficeLocation | ⛔ *(today)* / 🟡 | No dedicated JSContact property surveyed | Still needs a semantics-preserving mapping. |
+| OfficeLocation | ✅ | JSContact `addresses` entry labeled `office location` | The full office-location string is retained separately from structured postal addresses. |
 | MiddleName, Suffix | ✅ (`deploy-2026-11-22-eas-contact-name-parts-c3f4378`) | JSContact `name.components` (`given2`, `generation`) | Partial edits merge the existing components under a JMAP state guard; empty fields clear the selected component. |
 | Spouse | ⛔ *(today)* / 🟡 | `relatedTo` entry with relation type `"spouse"` | |
 | Title | ✅ (`deploy-2026-11-22-eas-contact-name-prefix-c48ee61c`) | JSContact `name.components` (`prefix`) | Partial edits preserve other name components under `ifInState`. `JobTitle` continues to map separately to JSContact `titles`. |
 | WebPage | ✅ (`deploy-2026-11-22-eas-contact-web-page-d97a2d2`) | JSContact `links[].uri` | HTTP(S) website links are emitted as EAS `WebPage`; updates preserve unrelated links. |
-| YomiCompanyName, YomiFirstName, YomiLastName | ⛔ | JSContact has phonetic-name support (`name.components` with `phonetic` variants) in some draft versions — ❓ unverified whether Stalwart's implementation includes it | Japanese phonetic-reading fields; low priority for this account regardless of JMAP support. |
+| YomiCompanyName, YomiFirstName, YomiLastName | ✅ | JSContact phonetic `name.components` and organization `sortAs` | Phonetic name parts and company reading round-trip through the backend's JSContact fields. |
 | Picture (`0x3c`) | ✅ two-way | JSContact `media` (kind `photo`) as a bounded data URI | Reads and writes photo bytes up to 5 MiB; media entries unrelated to the EAS picture key are preserved on updates. |
 | Alias, WeightedRank | ⛔ | 14.0+ only fields — ❓ unsurveyed JMAP equivalents | Low priority; `WeightedRank` is Outlook's own contact-frequency scoring, unlikely to have a JMAP analogue at all. |
 
