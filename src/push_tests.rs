@@ -13671,6 +13671,41 @@ async fn find_proximity_queries_filter_complete_message_text_and_page_exactly() 
 }
 
 #[tokio::test]
+async fn find_property_wildcards_match_nonempty_fields_and_negate_exactly() {
+    use eas::{airsync as air, find as f};
+    let env = start_env(Opts::default()).await;
+    env.mock.add_mail("inbox", "with-subject");
+    for (index, query, expected) in [
+        (0, "subject:*", vec!["m1", "m2", "with-subject"]),
+        (1, "NOT subject:*", vec![]),
+    ] {
+        let response = env
+            .req("Find", "client")
+            .header("MS-ASProtocolVersion", "16.1")
+            .body(find_body(
+                &format!("a0000000-0000-4000-8000-{index:012}"),
+                query,
+                None,
+                "0-9",
+            ))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(
+            eas::find_text_after(&doc, f::TOTAL),
+            Some(expected.len().to_string()).as_deref(),
+            "{query}"
+        );
+        let mut actual = eas::find_all_text_after(&doc, air::SERVER_ID);
+        let mut expected = expected;
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected, "{query}");
+    }
+}
+
+#[tokio::test]
 async fn find_attachment_phrase_matches_filename_and_scopes_to_mailbox() {
     use eas::{airsync as air, find as f};
     let env = start_env(Opts::default()).await;

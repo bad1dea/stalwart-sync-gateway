@@ -1624,6 +1624,40 @@ fn email_matches_phrase_with_attachments(
     property: &str,
     phrase: &str,
 ) -> anyhow::Result<bool> {
+    if phrase == "*" {
+        if matches!(property, "body" | "text")
+            && body.is_some_and(|body| body.is_truncated && body.value.trim().is_empty())
+        {
+            anyhow::bail!("Find cannot determine whether a truncated body is non-empty");
+        }
+        return Ok(match property {
+            "subject" => !subject.trim().is_empty(),
+            "body" => body.is_some_and(|body| !body.value.trim().is_empty()),
+            "from" => !from.trim().is_empty(),
+            "to" => !to.trim().is_empty(),
+            "cc" => !cc.trim().is_empty(),
+            "bcc" => !bcc.trim().is_empty(),
+            "participants" => [from, to, cc, bcc]
+                .into_iter()
+                .any(|value| !value.trim().is_empty()),
+            "attachment" => !attachments.is_empty(),
+            "text" => {
+                !subject.trim().is_empty()
+                    || body.is_some_and(|body| !body.value.trim().is_empty())
+                    || [from, to, cc, bcc]
+                        .into_iter()
+                        .any(|value| !value.trim().is_empty())
+                    || attachments.iter().any(|attachment| {
+                        !attachment.name.trim().is_empty()
+                            || attachment
+                                .extracted_text
+                                .as_deref()
+                                .is_some_and(|value| !value.trim().is_empty())
+                    })
+            }
+            _ => false,
+        });
+    }
     if matches!(property, "from" | "to" | "cc" | "bcc") {
         let value = match property {
             "from" => from,
@@ -2275,6 +2309,58 @@ mod tests {
             !email_matches_phrases("Observe request", None, None, None, None, kind, &terms,)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn property_wildcard_matches_nonempty_values_and_fails_closed_when_unknown() {
+        let body = EmailBody {
+            body_type: EmailBodyType::Plain,
+            value: "Body text".to_owned(),
+            is_truncated: false,
+        };
+        for (property, subject, body, from, to, attachments, expected) in [
+            ("subject", "Subject", None, "", "", &[][..], true),
+            ("subject", "", None, "", "", &[][..], false),
+            ("body", "", Some(&body), "", "", &[][..], true),
+            ("from", "", None, "Sender", "", &[][..], true),
+            ("to", "", None, "", "Recipient", &[][..], true),
+            ("text", "Subject", None, "", "", &[][..], true),
+            ("attachment", "", None, "", "", &[][..], false),
+        ] {
+            assert_eq!(
+                email_matches_phrase_with_attachments(
+                    subject,
+                    body,
+                    from,
+                    to,
+                    "",
+                    "",
+                    attachments,
+                    property,
+                    "*",
+                )
+                .unwrap(),
+                expected,
+                "{property}"
+            );
+        }
+        let truncated = EmailBody {
+            is_truncated: true,
+            value: String::new(),
+            ..body
+        };
+        assert!(email_matches_phrase_with_attachments(
+            "",
+            Some(&truncated),
+            "",
+            "",
+            "",
+            "",
+            &[],
+            "body",
+            "*"
+        )
+        .is_err());
     }
 
     #[test]

@@ -129,7 +129,9 @@ index does not preserve it. Direct `NEAR` and `ONEAR` operators now use exact
 local token-distance matching over complete message text and common address
 fields, including Boolean expressions with supported predicates. Trailing `*`
 prefixes on proximity terms are matched against token starts. `attachment:`
-name searches are matched locally against attachment metadata. Text, JSON, XML,
+name searches are matched locally against attachment metadata. String-property
+`*` tests and negated property-presence restrictions are evaluated locally.
+Text, JSON, XML,
 text-bearing PDF, EPUB XHTML, OOXML Word/Excel/PowerPoint (including
 macro-enabled variants), and OpenDocument Text/Spreadsheet/Presentation
 attachments are extracted for exact text/proximity matching up to

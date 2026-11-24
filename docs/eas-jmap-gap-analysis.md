@@ -418,7 +418,12 @@ Current prioritized work:
    `374fb9b`, image
    `sha256:498c8fca0dc611fdec6c58da0c8bbf6c053cd396f29a6f6491d6763bd9b8337a`,
    started `2026-11-24T19:47:27Z`, restart count zero, `/healthz` `ok`, and
-   `/readyz` `ready`.
+   `/readyz` `ready`. String-property `*` restrictions now test whether the
+   selected value exists, and `NOT property:*` inverts that exact test. Empty
+   truncated bodies fail closed when the result cannot be known. Unit and HTTP
+   Find regressions cover the positive and negated forms. The full suite passes
+   386 tests (73 ignored); strict Clippy, formatting, and diff checks pass.
+   Deployment verification follows.
    These queries use a scoped mailbox scan and exact local token-prefix
    comparison because JMAP text filters cannot preserve prefix semantics. A
    property-qualified prefix can also be negated with `NOT` or unary minus and

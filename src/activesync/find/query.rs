@@ -1441,9 +1441,10 @@ fn search_phrase_word(word: &str) -> Option<(String, String)> {
         && !value[1..value.len() - 1].contains(['"', '\\'])
     {
         &value[1..value.len() - 1]
-    } else if property.eq_ignore_ascii_case("attachment")
-        && !value.contains(['"', '\\'])
-        && !value.trim().is_empty()
+    } else if value == "*"
+        || (property.eq_ignore_ascii_case("attachment")
+            && !value.contains(['"', '\\'])
+            && !value.trim().is_empty())
     {
         value
     } else {
@@ -1456,8 +1457,10 @@ fn search_phrase_word(word: &str) -> Option<(String, String)> {
     {
         return None;
     }
-    (phrase.split_whitespace().count() > 1 || property.eq_ignore_ascii_case("attachment"))
-        .then(|| (property.to_ascii_lowercase(), phrase.to_owned()))
+    (phrase.split_whitespace().count() > 1
+        || phrase == "*"
+        || property.eq_ignore_ascii_case("attachment"))
+    .then(|| (property.to_ascii_lowercase(), phrase.to_owned()))
 }
 
 fn simple_search_property_word(word: &str) -> Option<(String, String)> {
@@ -3619,5 +3622,21 @@ mod tests {
             ))
         );
         assert_eq!(to_filter("attachment:annualreport.pdf").unwrap(), json!({}));
+    }
+
+    #[test]
+    fn property_wildcard_uses_local_presence_filtering() {
+        assert_eq!(to_filter("subject:*").unwrap(), json!({}));
+        assert_eq!(
+            phrases_for_postfilter("subject:*").unwrap(),
+            (
+                PhraseMatch::All,
+                vec![("subject".to_owned(), "*".to_owned())]
+            )
+        );
+        assert_eq!(
+            phrases_for_postfilter("NOT body:*").unwrap(),
+            (PhraseMatch::None, vec![("body".to_owned(), "*".to_owned())])
+        );
     }
 }
