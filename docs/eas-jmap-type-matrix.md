@@ -6,7 +6,7 @@ cited below is transcribed directly from [MS-ASWBXML] v20250520 (fetched as a PD
 from `officeprotocoldoc.z19.web.core.windows.net`), section 2.1.2.1's per-codepage
 tables — the same primary source used to scaffold the corresponding `pub mod`
 blocks in `src/wbxml/eas.rs`. Current implementation status is read fresh from that
-file and `src/activesync.rs` at commit `360bf8a`, not carried over from memory.
+file and `src/activesync.rs` at commit `2febaa0`, not carried over from memory.
 
 **Verdict key:** ✅ Implemented · 🟡 Possible via JMAP, not built · ⛔ No JMAP
 equivalent · ❓ Needs live verification.
@@ -48,13 +48,13 @@ inferred.
 | Sensitivity | 0x25 | All | ✅ | JSCalendar `privacy` (`public`/`private`/`secret`) | |
 | Subject | 0x26 | All | ✅ | JSCalendar `title` | |
 | StartTime | 0x27 | All | ✅ | JSCalendar `start` (+ `timeZone`) | |
-| UID | 0x28 | All | ✅ *(assumed — not independently re-verified this pass)* | JSCalendar `uid` | |
+| UID | 0x28 | Client requests only through 14.1; successful Sync Add response includes UID | ✅ response | JSCalendar `uid` | EAS 16.0/16.1 clients MUST NOT send this legacy field in a command request; the server returns UID in the successful Add response. |
 | AttendeeStatus / AttendeeType | 0x29-0x2A | 12.0+ | ✅ | JSCalendar participant `participationStatus` / `roles` | Accepted, declined, tentative, needs-action, and optional attendee status/type map to EAS values. |
 | DisallowNewTimeProposal / ResponseRequested / AppointmentReplyTime / ResponseType | 0x33-0x36 | 14.0+ | ⛔ | ❓ unsurveyed | Meeting-negotiation metadata (whether the organizer allows counter-proposals, whether a response was requested/given and when). No obvious single JSCalendar property surveyed this pass. |
 | CalendarType / IsLeapMonth | 0x37-0x38 | 14.0+ | ⛔ | N/A — non-Gregorian calendar systems | Out of scope; JSCalendar is Gregorian-only in its core spec. |
 | FirstDayOfWeek | 0x39 | 14.1+ | ✅ Implemented when negotiated version supports it | JSCalendar `recurrenceRule.firstDayOfWeek` | Parsed/written for 14.1, 16.0, and 16.1; omitted from 14.0. A server-side non-Monday value that cannot be represented to an older client is rejected rather than silently changed. |
 | OnlineMeetingConfLink / OnlineMeetingExternalLink | 0x3A-0x3B | 14.1+ | ⛔ *(today, and version-gated above this gateway's cap)* | ❓ — possibly JSCalendar `links` or a `virtualLocations` property in some drafts | Video-call links. Same version-cap caveat as FirstDayOfWeek. |
-| ClientUid | 0x3C | 16.0+ | ⛔ *(today, and version-gated above this gateway's cap)* | Client-generated dedup id, likely maps to nothing JMAP-side (client-local concern) | Same version-cap caveat. |
+| ClientUid | 0x3C | 16.0+ | ✅ Calendar Sync Add input | Durable replay identity, scoped to device and collection | Optional, max 300 characters; used instead of transport ClientId to preserve retry idempotency when ClientId changes. Rejected on pre-16 versions and non-Add commands. Production advertises 14.0, so this path is prepared but not advertised to clients. |
 
 ## Contacts (MS-ASCNTC, WBXML codepage 1)
 

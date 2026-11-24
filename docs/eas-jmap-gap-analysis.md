@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `a28032b` (2026-11-24)
+## Reconciled status for source `main` at `2febaa0` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -224,6 +224,27 @@ started at `2026-11-24T06:30:36Z`, restart count zero; mesh `/healthz` returned
 Task` and the same `recurrenceRule` property, but Task-specific backend create/
 get and real-client recurrence paths have not been verified. Production
 continues to advertise EAS 14.0.
+
+Also completed (`2febaa0`): **EAS 16 Calendar ClientUid deduplication**.
+Calendar Sync Add accepts the optional `ClientUid` for 16.0 and 16.1, validates
+uniqueness and the 300-character limit, rejects it on older versions or
+non-Add commands, and rejects the legacy request `UID` field for 16.0+. The
+stable replay identity uses `ClientUid` when supplied, scoped to device and
+collection, so retries remain idempotent if transport `ClientId` changes.
+Without `ClientUid`, existing `ClientId` replay behavior is preserved.
+Regression coverage checks parsing, legacy UID handling, and device-scoped
+replay identity. Full suite: 292 passed, 73 ignored; clippy with warnings
+denied, formatting, and diff checks pass. Deployed as
+`deploy-2026-11-24-eas-calendar-client-uid-2febaa0`; homelab commit `7547f51`.
+The forced Compose build produced image
+`sha256:e599f552ada956f8b2fa2a282dd9555961de3203b7e5c91a95e91184efe76df9`.
+The replacement started at `2026-11-24T06:44:02Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
+continues to advertise EAS 14.0.
+The protocol requirements are documented in Microsoft's [ClientUid]
+(https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascal/d22282da-0cc5-4fba-b4b4-5aef341a6c8e)
+and [UID](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascal/8f1fb00c-a156-49e8-9f54-478ecb0ce743)
+specifications.
 
 Also completed: **KQL property and qualifier compliance**. MS-KQL only recognizes a
 property restriction when the property, operator, and value are contiguous;
