@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `fe0962d` (2026-11-22)
+## Reconciled status for source `main` at `d5244e3` (2026-11-22)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -393,15 +393,15 @@ The container started at `2026-11-23T03:11:55Z` with restart count zero; mesh
 `/healthz` returned `ok` and `/readyz` returned `ready`.
 
 Also completed: **ActiveSync company main phone**. Contacts2 `CompanyMainPhone`
-round-trips through a dedicated JSContact phone entry with the label
-`company main phone`. Partial updates can replace or clear this entry without
-changing ordinary work numbers or other labeled phones. Regression coverage
-checks parsing, output, hash changes, JMAP create/read/update and state guarded
-phone merging. Full suite: 266 passed, 73 ignored; clippy with warnings
-denied, formatting and diff checks pass. Deployed as
-`deploy-2026-11-22-eas-company-main-phone-81940f4`; Hermes Compose built image
-`sha256:c6777f537215229874e06c756cb3c300da8bd8ea9d34b6d7e08bd6dc3ad42f93`.
-The container started at `2026-11-23T03:06:06Z` with restart count zero; mesh
+uses the standardized JSContact `phones[].features["main-number"]` value with
+a stable `eas_company_main` ID; reads still accept the earlier label-based
+representation. Partial updates replace or clear only this entry, preserving
+other numbers. Regression coverage checks parsing, output, hash changes, JMAP
+create/read/update and guarded merging. Full suite: 267 passed, 73 ignored;
+clippy with warnings denied, formatting and diff checks pass. Deployed as
+`deploy-2026-11-22-eas-contact-main-number-d5244e3`; Hermes Compose built image
+`sha256:2c5f0587c046811b8ee42114159d181e46d1e6850deb032f29fe5a7c6dd99f53`.
+The container started at `2026-11-23T03:39:25Z` with restart count zero; mesh
 `/healthz` returned `ok` and `/readyz` returned `ready`.
 
 Also completed: **ActiveSync contact IM addresses**. Contacts2 `IMAddress`,
