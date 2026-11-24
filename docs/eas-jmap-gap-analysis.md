@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `d338991` (2026-11-24)
+## Reconciled status for source `main` at `1d43ee4` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -32,15 +32,23 @@ Current prioritized work:
    may accompany positive phrase terms in a flat OR expression, including
    unary-minus and explicit `NOT` boolean alternatives. Flat explicit
    AND/OR expressions over phrases and supported boolean restrictions honor
-   AND precedence through exact local evaluation; parentheses and implicit
-   mixed operators remain rejected. Regression coverage checks read,
+   AND precedence through exact local evaluation, including explicitly
+   parenthesized groups. Implicit mixed operators remain rejected. Regression
+   coverage checks read,
    flagged, multiple boolean branches, and multiple phrase branches while
    excluding reversed phrase candidates. Deployed as
    `deploy-2026-11-24-eas-kql-negated-bool-or-81fdc6c`; homelab commit
    `b681fae`, image
    `sha256:9effefda5525d695bfb3e561cc4759d479e42df8910a340d2574adbd960c62cc`,
    started `2026-11-24T12:43:36Z`, restart count zero, `/healthz` `ok`, and
-   `/readyz` `ready`. Flat mixed AND/OR phrase queries are deployed as
+   `/readyz` `ready`. Explicitly parenthesized groups of phrase and boolean
+   terms in mixed AND/OR expressions are deployed as
+   `deploy-2026-11-24-eas-kql-phrase-boolean-groups-1d43ee4`; homelab commit
+   `e613031`, image
+   `sha256:850bd2508f5fb030ea74150feb7889ee33f1bac7d6a34a164c7d4349af0d12fb`,
+   started `2026-11-24T13:12:06Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
+   formatting, and diff checks passed. Flat mixed AND/OR phrase queries are deployed as
    `deploy-2026-11-24-eas-kql-phrase-boolean-precedence-d338991`; homelab
    commit `0a847c1`, image
    `sha256:a932a14480d9e435369386b02fb7964156c3969691354e76a8787edce662621d`,
@@ -112,9 +120,9 @@ Current prioritized work:
    order, totals, and range paging. An OR expression made only of positive
    phrase terms is exact-filtered across its alternatives. A phrase may also
    be ORed with `isread`, `isflagged`, or `hasattachment(s)` boolean
-   restrictions. Other mixed OR terms, parenthesized expressions, implicit
-   mixed AND/OR, and negated phrases combined with non-phrase predicates remain
-   rejected because local evaluation cannot yet preserve their Boolean meaning.
+   restrictions. Other mixed OR terms, implicit mixed AND/OR, and negated
+   phrases combined with non-phrase predicates remain rejected because local
+   evaluation cannot yet preserve their Boolean meaning.
    A single positive `body:"multiword phrase"`
    or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
    body and text scans fetch message bodies and reject a truncated body rather
