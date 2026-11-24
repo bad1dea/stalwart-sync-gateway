@@ -640,6 +640,26 @@ mod tests {
         )
         .unwrap());
         assert!(email_matches_phrases(
+            "Alpha beta and gamma delta",
+            None,
+            query::PhraseMatch::All,
+            &[
+                ("subject".to_owned(), "alpha beta".to_owned()),
+                ("subject".to_owned(), "gamma delta".to_owned())
+            ]
+        )
+        .unwrap());
+        assert!(!email_matches_phrases(
+            "Alpha beta only",
+            None,
+            query::PhraseMatch::All,
+            &[
+                ("subject".to_owned(), "alpha beta".to_owned()),
+                ("subject".to_owned(), "gamma delta".to_owned())
+            ]
+        )
+        .unwrap());
+        assert!(email_matches_phrases(
             "Other subject",
             Some(&plain),
             query::PhraseMatch::Any,

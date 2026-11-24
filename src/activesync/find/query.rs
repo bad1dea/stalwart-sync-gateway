@@ -37,7 +37,9 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
         })
         .collect::<Vec<_>>();
     if !phrases.is_empty() && phrases_for_postfilter(input).is_none() {
-        return Err("quoted phrases require an AND-only expression with unique phrase properties");
+        return Err(
+            "quoted phrases require an AND-only expression with unambiguous property grouping",
+        );
     }
     let mut parser = Parser {
         tokens,
@@ -72,13 +74,21 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         return None;
     }
     let mut phrases = Vec::new();
-    for token in &tokens {
+    let mut phrase_positions = std::collections::HashMap::<String, usize>::new();
+    for (index, token) in tokens.iter().enumerate() {
         let Token::Word(word) = token else { continue };
         let qualified_word = word.strip_prefix('+').unwrap_or(word);
         if let Some((property, value)) = search_phrase_word(qualified_word) {
-            if phrases.iter().any(|(existing, _)| existing == &property) {
-                return None;
+            if let Some(previous) = phrase_positions.get(&property).copied() {
+                // Repeating a property is safe only when an explicit AND
+                // separates each phrase occurrence. Adjacent restrictions
+                // on one property are implicitly OR-grouped by MS-KQL and
+                // must not be post-filtered as an AND.
+                if !tokens[previous + 1..index].contains(&Token::And) {
+                    return None;
+                }
             }
+            phrase_positions.insert(property.clone(), index);
             phrases.push((property, value));
             continue;
         }
@@ -100,17 +110,15 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         return None;
     }
     for (phrase_property, _) in &phrases {
-        if tokens
-            .iter()
-            .filter_map(|token| match token {
-                Token::Word(word) => word.split_once(':').map(|(property, _)| property),
-                _ => None,
-            })
-            .filter(|property| property.eq_ignore_ascii_case(phrase_property))
-            .count()
-            != 1
-        {
-            return None;
+        for token in &tokens {
+            let Token::Word(word) = token else { continue };
+            if word
+                .split_once(':')
+                .is_some_and(|(property, _)| property.eq_ignore_ascii_case(phrase_property))
+                && search_phrase_word(word.strip_prefix('+').unwrap_or(word)).is_none()
+            {
+                return None;
+            }
         }
     }
     Some((PhraseMatch::All, phrases))
@@ -844,8 +852,24 @@ mod tests {
                 {"subject":"alpha beta"}, {"body":"gamma delta"}
             ]})
         );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" AND subject:"gamma delta""#),
+            Some((
+                PhraseMatch::All,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("subject".to_owned(), "gamma delta".to_owned())
+                ]
+            ))
+        );
+        assert_eq!(
+            to_filter(r#"subject:"alpha beta" AND subject:"gamma delta""#).unwrap(),
+            json!({"operator":"AND", "conditions":[
+                {"subject":"alpha beta"}, {"subject":"gamma delta"}
+            ]})
+        );
         for query in [
-            r#"subject:"alpha beta" AND subject:"gamma delta""#,
+            r#"subject:"alpha beta" subject:"gamma delta""#,
             r#"subject:"alpha beta" body:"gamma delta" OR isread:true"#,
             r#"subject:"alpha beta" AND NOT body:"gamma delta""#,
         ] {
