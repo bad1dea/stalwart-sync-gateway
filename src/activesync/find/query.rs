@@ -388,6 +388,7 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
     let mut phrase_count = 0;
     let mut operator_count = 0;
     let mut properties = std::collections::HashSet::new();
+    let mut phrase_positions = std::collections::HashMap::<String, usize>::new();
     while position < tokens.len() {
         if expect_operand {
             if tokens.get(position) == Some(&Token::Left) {
@@ -413,7 +414,13 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                 output.push((format!("$not{property}"), value));
             } else if let Some(negative) = word.strip_prefix('-') {
                 if let Some((property, value)) = search_phrase_word(negative) {
-                    if !properties.insert(property.clone()) {
+                    if !register_expression_phrase(
+                        tokens,
+                        &mut properties,
+                        &mut phrase_positions,
+                        &property,
+                        position,
+                    ) {
                         return None;
                     }
                     output.push((format!("$not${property}"), value));
@@ -428,7 +435,13 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
             } else {
                 let positive = word.strip_prefix('+').unwrap_or(word);
                 if let Some(phrase) = search_phrase_word(positive) {
-                    if !properties.insert(phrase.0.clone()) {
+                    if !register_expression_phrase(
+                        tokens,
+                        &mut properties,
+                        &mut phrase_positions,
+                        &phrase.0,
+                        position,
+                    ) {
                         return None;
                     }
                     output.push(phrase);
@@ -521,6 +534,39 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
         ));
     }
     Some(output)
+}
+
+fn register_expression_phrase(
+    tokens: &[Token],
+    properties: &mut std::collections::HashSet<String>,
+    phrase_positions: &mut std::collections::HashMap<String, usize>,
+    property: &str,
+    position: usize,
+) -> bool {
+    if let Some(previous) = phrase_positions.get(property).copied() {
+        let depth_at = |index: usize| {
+            tokens[..index]
+                .iter()
+                .fold(0isize, |depth, token| match token {
+                    Token::Left => depth + 1,
+                    Token::Right => depth - 1,
+                    _ => depth,
+                })
+        };
+        let depth = depth_at(previous);
+        if depth == 0
+            || depth != depth_at(position)
+            || !tokens[previous + 1..position]
+                .iter()
+                .all(|token| *token == Token::Or)
+        {
+            return false;
+        }
+    } else {
+        properties.insert(property.to_owned());
+    }
+    phrase_positions.insert(property.to_owned(), position);
+    true
 }
 
 fn search_phrase_word(word: &str) -> Option<(String, String)> {
@@ -1540,6 +1586,21 @@ mod tests {
                     ("$not$subject".to_owned(), "alpha beta".to_owned()),
                     ("subject".to_owned(), "gamma delta".to_owned()),
                     ("$op$or".to_owned(), String::new())
+                ]
+            ))
+        );
+        assert_eq!(
+            phrases_for_postfilter(
+                r#"(subject:"alpha beta" OR subject:"gamma delta") AND isread:true"#
+            ),
+            Some((
+                PhraseMatch::Expression,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("subject".to_owned(), "gamma delta".to_owned()),
+                    ("$op$or".to_owned(), String::new()),
+                    ("$isread".to_owned(), "true".to_owned()),
+                    ("$op$and".to_owned(), String::new())
                 ]
             ))
         );
