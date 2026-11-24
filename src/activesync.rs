@@ -5882,6 +5882,15 @@ async fn sync_calendar_collection(
     }
 
     for command in &collection.commands {
+        if command.instance_id.is_some()
+            && (!matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1)
+                || command.kind != wbxml::eas::SyncClientCommandKind::Delete)
+        {
+            if command.kind == wbxml::eas::SyncClientCommandKind::Change {
+                change_responses.push((command.server_id.clone(), "6"));
+            }
+            continue;
+        }
         if command.calendar.unsupported_reminder
             || (command.calendar.reminder == Some(None)
                 && !matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1))
@@ -6095,20 +6104,30 @@ async fn sync_calendar_collection(
                 }
             }
             wbxml::eas::SyncClientCommandKind::Delete => {
-                match state
-                    .jmap
-                    .destroy_calendar_event(auth, &command.server_id)
-                    .await
-                {
+                let result = if let Some(instance_id) = command.instance_id.as_deref() {
+                    state
+                        .jmap
+                        .exclude_calendar_event_instance(auth, &command.server_id, instance_id)
+                        .await
+                } else {
+                    state
+                        .jmap
+                        .destroy_calendar_event(auth, &command.server_id)
+                        .await
+                };
+                match result {
                     Ok(()) => {
-                        previous_by_id.remove(&command.server_id);
+                        if command.instance_id.is_none() {
+                            previous_by_id.remove(&command.server_id);
+                        }
                         deleted = true;
                     }
                     Err(error) => {
                         tracing::warn!(
                             %error,
                             server_id = command.server_id,
-                            "failed to delete calendar event"
+                            instance_id = command.instance_id,
+                            "failed to delete calendar event or recurrence occurrence"
                         );
                     }
                 }
@@ -6349,6 +6368,7 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     event.cancelled.hash(&mut hasher);
     event.response_type.hash(&mut hasher);
     event.attendees.hash(&mut hasher);
+    event.recurrence_exceptions.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -6507,6 +6527,28 @@ fn write_calendar_fields(
         builder.end();
     } else if is_change && matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
         builder.empty_tag(cal::RECURRENCE);
+    }
+    if !event.recurrence_exceptions.is_empty() {
+        builder.start(cal::EXCEPTIONS);
+        for occurrence in &event.recurrence_exceptions {
+            builder.start(cal::EXCEPTION);
+            if let Some(uid) = &event.uid {
+                builder.leaf(cal::UID, uid.clone());
+            }
+            if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
+                use wbxml::eas::airsync_base as base;
+                let instance_id =
+                    chrono::NaiveDateTime::parse_from_str(occurrence, "%Y%m%dT%H%M%SZ")
+                        .map(|date| date.format("%Y-%m-%dT%H:%M:%S.000Z").to_string())
+                        .unwrap_or_else(|_| occurrence.clone());
+                builder.leaf(base::INSTANCE_ID, instance_id);
+            } else {
+                builder.leaf(cal::EXCEPTION_START_TIME, occurrence.clone());
+            }
+            builder.leaf(cal::DELETED, "1");
+            builder.end();
+        }
+        builder.end();
     }
     if let Some(minutes) = event.reminder_minutes {
         builder.leaf(cal::REMINDER, minutes.to_string());
@@ -8231,6 +8273,42 @@ mod tests {
             eas::find_text_after(&document, cal::RECURRENCE_OCCURRENCES),
             Some("12")
         );
+    }
+
+    #[test]
+    fn excluded_occurrences_use_versioned_exception_identifiers() {
+        use crate::wbxml::eas::{self, airsync as air, airsync_base as base, calendar as cal};
+        let event = crate::model::CalendarEvent {
+            uid: Some("series-uid".to_owned()),
+            recurrence_exceptions: vec!["20261125T170000Z".to_owned()],
+            ..Default::default()
+        };
+        for (version, expected_token, expected_value) in [
+            (
+                ProtocolVersion::V14_0,
+                cal::EXCEPTION_START_TIME,
+                "20261125T170000Z",
+            ),
+            (
+                ProtocolVersion::V16_1,
+                base::INSTANCE_ID,
+                "2026-11-25T17:00:00.000Z",
+            ),
+        ] {
+            let mut builder = eas::DocumentBuilder::new();
+            super::write_calendar_command(&mut builder, air::CHANGE, &event, version, &[]);
+            let document = builder.finish();
+            assert_eq!(
+                eas::find_text_after(&document, expected_token),
+                Some(expected_value)
+            );
+            assert_eq!(eas::find_text_after(&document, cal::DELETED), Some("1"));
+            assert_eq!(
+                eas::find_text_after(&document, cal::UID),
+                Some("series-uid")
+            );
+            assert!(eas::contains_token(&document, cal::EXCEPTIONS));
+        }
     }
 
     #[test]

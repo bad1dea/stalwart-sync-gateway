@@ -4500,6 +4500,78 @@ impl JmapClient {
         anyhow::bail!("CalendarEvent/set response was missing")
     }
 
+    /// Excludes one recurrence occurrence using the EAS 16.x `InstanceId`.
+    /// The identifier names the original occurrence start, so it is converted
+    /// to the parent event's local JSCalendar recurrence key before patching.
+    pub async fn exclude_calendar_event_instance(
+        &self,
+        auth: &AuthenticatedSession,
+        id: &str,
+        instance_id: &str,
+    ) -> anyhow::Result<()> {
+        let account_id = auth
+            .session
+            .primary_account_for(capabilities::CALENDARS)
+            .context("JMAP Calendars capability is not available")?;
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
+                vec![MethodCall::new(
+                    "CalendarEvent/get",
+                    serde_json::json!({"accountId":account_id,"ids":[id],"properties":["id","timeZone","recurrenceRule"]}),
+                    "instance",
+                )],
+            )
+            .await?;
+        let result = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/get")
+            .context("calendar event lookup failed")?;
+        let event = result.1["list"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["id"] == id))
+            .context("calendar event not found")?;
+        anyhow::ensure!(
+            !event["recurrenceRule"].is_null(),
+            "InstanceId requires a recurring calendar event"
+        );
+        let timezone = event["timeZone"].as_str();
+        let key = recurrence_override_key(instance_id, timezone)?;
+        let state = result.1["state"]
+            .as_str()
+            .context("calendar state missing")?;
+        let update = serde_json::json!({
+            "accountId": account_id,
+            "ifInState": state,
+            "update": { id: { format!("recurrenceOverrides/{key}"): {"excluded": true} } }
+        });
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CALENDARS.to_owned(),
+                ],
+                vec![MethodCall::new("CalendarEvent/set", update, "exclude")],
+            )
+            .await?;
+        let result = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/set")
+            .context("calendar exception update failed")?;
+        if let Some(error) = result.1["notUpdated"].get(id) {
+            anyhow::bail!("calendar exception update rejected: {error}");
+        }
+        anyhow::ensure!(
+            result.1["updated"].get(id).is_some(),
+            "calendar exception update was not confirmed"
+        );
+        Ok(())
+    }
+
     /// Tasks live in the SAME `CalendarEvent` storage as Events on this
     /// Stalwart instance -- confirmed live (2026-08-25) that `@type:
     /// "Task"` objects are accepted and round-trip `title`/`due`/`start`/
@@ -7464,15 +7536,47 @@ fn simple_geo(value: &str) -> Option<(&str, &str)> {
     Some((latitude, longitude))
 }
 
+fn excluded_recurrence_overrides(
+    overrides: Option<&serde_json::Value>,
+    timezone: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let Some(overrides) = overrides else {
+        return Ok(Vec::new());
+    };
+    if overrides.is_null() {
+        return Ok(Vec::new());
+    }
+    let overrides = overrides
+        .as_object()
+        .context("invalid recurrenceOverrides map")?;
+    overrides
+        .iter()
+        .map(|(local_start, patch)| {
+            anyhow::ensure!(
+                patch.as_object().is_some_and(|patch| {
+                    patch.len() == 1
+                        && patch.get("excluded") == Some(&serde_json::Value::Bool(true))
+                }),
+                "non-exclusion recurrence override is unsupported"
+            );
+            local_to_utc_eas(local_start, timezone)
+                .context("invalid recurrence exception local start")
+        })
+        .collect()
+}
+
 impl From<CalendarEventObject> for CalendarEvent {
     fn from(value: CalendarEventObject) -> Self {
         let recurrence_rule = value.recurrence_rule;
         let recurrence_time_zone = value.time_zone.clone();
-        let recurrence_overrides = value
-            .recurrence_overrides
-            .as_ref()
-            .is_some_and(|overrides| overrides.as_object().is_some_and(|items| !items.is_empty()));
-        let recurrence = (!recurrence_overrides)
+        let recurrence_exceptions = excluded_recurrence_overrides(
+            value.recurrence_overrides.as_ref(),
+            recurrence_time_zone.as_deref(),
+        );
+        let recurrence_overrides_unsupported = recurrence_exceptions.is_err();
+        let recurrence_exceptions = recurrence_exceptions.unwrap_or_default();
+        let exception_uid_missing = !recurrence_exceptions.is_empty() && value.uid.is_none();
+        let recurrence = (!recurrence_overrides_unsupported)
             .then(|| {
                 recurrence_rule.as_ref().and_then(|rule| {
                     crate::jmap::calendar_recurrence::from_jscalendar(
@@ -7483,8 +7587,9 @@ impl From<CalendarEventObject> for CalendarEvent {
                 })
             })
             .flatten();
-        let unsupported_recurrence =
-            recurrence_overrides || (recurrence_rule.is_some() && recurrence.is_none());
+        let unsupported_recurrence = recurrence_overrides_unsupported
+            || exception_uid_missing
+            || (recurrence_rule.is_some() && recurrence.is_none());
         let start_utc = value
             .start
             .as_deref()
@@ -7634,6 +7739,7 @@ impl From<CalendarEventObject> for CalendarEvent {
                 .filter_map(|(name, present)| present.then_some(name))
                 .collect(),
             recurrence,
+            recurrence_exceptions,
             unsupported_recurrence,
             reminder_minutes: value
                 .alerts
@@ -7865,6 +7971,23 @@ fn eas_to_calendar_local(compact: &str, timezone: Option<&str>) -> Option<chrono
     (local_to_utc_eas(&local.format("%Y-%m-%dT%H:%M:%S").to_string(), timezone).as_deref()
         == Some(compact))
     .then_some(local)
+}
+
+fn recurrence_override_key(instance_id: &str, timezone: Option<&str>) -> anyhow::Result<String> {
+    let instant = chrono::DateTime::parse_from_rfc3339(instance_id)
+        .context("invalid ActiveSync InstanceId")?
+        .with_timezone(&chrono::Utc);
+    let local = match timezone {
+        Some(timezone) => {
+            let timezone = timezone
+                .parse::<chrono_tz::Tz>()
+                .context("invalid calendar time zone")?;
+            instant.with_timezone(&timezone).naive_local()
+        }
+        None => instant.naive_utc(),
+    };
+    let key = local.format("%Y-%m-%dT%H:%M:%S").to_string();
+    Ok(key.replace('~', "~0").replace('/', "~1"))
 }
 
 fn eas_compact_to_local_iso(compact: &str) -> Option<String> {
@@ -8115,7 +8238,7 @@ mod tests {
     }
 
     #[test]
-    fn calendar_recurrence_rules_round_trip_and_flag_exceptions() {
+    fn calendar_recurrence_rules_round_trip_and_map_excluded_exceptions() {
         let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
             "id":"e",
             "recurrenceRule":{"frequency":"weekly","interval":2,"byDay":[{"day":"mo"},{"day":"we"}],"count":12},
@@ -8136,13 +8259,29 @@ mod tests {
         assert!(!event.unsupported_recurrence);
 
         let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
-            "id":"e", "recurrenceRule":{"frequency":"weekly","byDay":[{"day":"mo"}]},
+            "id":"e", "uid":"series-uid",
+            "recurrenceRule":{"frequency":"weekly","byDay":[{"day":"mo"}]},
+            "timeZone":"America/Toronto",
             "recurrenceOverrides":{"2026-11-25T12:00:00":{"excluded":true}}
         }))
         .unwrap();
         let event = crate::model::CalendarEvent::from(object);
-        assert!(event.unsupported_recurrence);
-        assert!(event.recurrence.is_none());
+        assert!(!event.unsupported_recurrence);
+        assert!(event.recurrence.is_some());
+        assert_eq!(event.recurrence_exceptions, vec!["20261125T170000Z"]);
+
+        let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
+            "id":"e", "recurrenceOverrides":{"2026-11-25T12:00:00":{"excluded":true}}
+        }))
+        .unwrap();
+        assert!(crate::model::CalendarEvent::from(object).unsupported_recurrence);
+
+        let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
+            "id":"e", "recurrenceRule":{"frequency":"weekly","byDay":[{"day":"mo"}]},
+            "recurrenceOverrides":{"2026-11-25T12:00:00":{"title":"Moved instance"}}
+        }))
+        .unwrap();
+        assert!(crate::model::CalendarEvent::from(object).unsupported_recurrence);
     }
 
     #[test]
@@ -8382,6 +8521,23 @@ mod tests {
     }
 
     #[test]
+    fn eas_instance_id_maps_to_the_original_local_recurrence_key() {
+        assert_eq!(
+            super::recurrence_override_key("2026-11-15T15:00:00.000Z", Some("America/Toronto"))
+                .unwrap(),
+            "2026-11-15T10:00:00"
+        );
+        assert_eq!(
+            super::recurrence_override_key("2026-11-15T15:00:00Z", None).unwrap(),
+            "2026-11-15T15:00:00"
+        );
+        assert!(super::recurrence_override_key("not-a-date", None).is_err());
+        assert!(
+            super::recurrence_override_key("2026-11-15T15:00:00Z", Some("Invalid/Zone")).is_err()
+        );
+    }
+
+    #[test]
     fn duration_parses_hours_only() {
         assert_eq!(parse_calendar_duration("PT1H"), Some((0, 3600)));
     }
@@ -8604,6 +8760,73 @@ mod calendar_update_state_tests {
                 .unwrap(),
             "event-1"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn calendar_instance_delete_patches_an_excluded_recurrence_override() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = requests.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(request): Json<serde_json::Value>| {
+                let request_count = request_count.clone();
+                async move {
+                    let call = &request["methodCalls"][0];
+                    match request_count.fetch_add(1, Ordering::SeqCst) {
+                        0 => {
+                            assert_eq!(call[0], "CalendarEvent/get");
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/get", {
+                                    "state":"state-1",
+                                    "list":[{"id":"event-1", "timeZone":"America/Toronto",
+                                        "recurrenceRule":{"frequency":"weekly"}}]
+                                }, "instance"
+                            ]]}))
+                        }
+                        1 => {
+                            assert_eq!(call[0], "CalendarEvent/set");
+                            assert_eq!(call[1]["ifInState"], "state-1");
+                            assert_eq!(
+                                call[1]["update"]["event-1"]
+                                    ["recurrenceOverrides/2026-11-15T10:00:00"],
+                                serde_json::json!({"excluded":true})
+                            );
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/set", {"updated":{"event-1":null}}, "exclude"
+                            ]]}))
+                        }
+                        _ => panic!("unexpected JMAP call"),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CALENDARS:"a"},
+            "apiUrl":url, "downloadUrl":url, "uploadUrl":url, "username":"user", "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        client
+            .exclude_calendar_event_instance(&auth, "event-1", "2026-11-15T15:00:00.000Z")
+            .await
+            .unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
         server.abort();
     }
 

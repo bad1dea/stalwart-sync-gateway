@@ -351,6 +351,9 @@ pub mod airsync_base {
     // attachment context, and NEVER sent the real NativeBodyType at all.
     pub const NATIVE_BODY_TYPE: Token = tag(0x16, false);
     pub const LOCATION: Token = tag(0x20, true);
+    /// Identifies one occurrence of a recurring item in Sync commands and
+    /// responses (16.0/16.1), per MS-ASAIRS and MS-ASWBXML codepage 17.
+    pub const INSTANCE_ID: Token = tag(0x2d, false);
     pub const LATITUDE: Token = tag(0x27, false);
     pub const LONGITUDE: Token = tag(0x28, false);
     pub const CONTENT_TYPE: Token = tag(0x17, false);
@@ -1242,6 +1245,8 @@ pub struct SyncClientCommand {
     pub client_id: String,
     /// The item's ServerId. Present on Change/Delete/Fetch; empty on Add.
     pub server_id: String,
+    /// EAS 16.0/16.1 occurrence identifier paired with ServerId.
+    pub instance_id: Option<String>,
     pub read: Option<bool>,
     pub flag_status: Option<u8>,
     pub flag_fields: Vec<(u8, u8, String)>,
@@ -2027,6 +2032,7 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             kind,
                             client_id: String::new(),
                             server_id: String::new(),
+                            instance_id: None,
                             read: None,
                             flag_status: None,
                             flag_fields: Vec::new(),
@@ -2132,6 +2138,9 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             .flat_map(child_elements)
                             .any(|child| !matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, email::READ) || same_token(*t, email::FLAG)));
                         command.document = command_doc;
+                        command.instance_id =
+                            find_text_after(&command.document, airsync_base::INSTANCE_ID)
+                                .map(str::to_owned);
                         command.note = extract_note_fields(&document.nodes[start + 1..idx]);
                         command.contact = extract_contact_fields(&document.nodes[start + 1..idx]);
                         command.calendar = extract_calendar_fields(&document.nodes[start + 1..idx]);
@@ -3683,6 +3692,35 @@ mod tests {
         assert_eq!(
             command.note.categories,
             vec!["Work".to_owned(), "Personal".to_owned()]
+        );
+    }
+
+    #[test]
+    fn parses_sync_instance_id_on_the_occurrence_command() {
+        let mut builder = DocumentBuilder::new();
+        builder.start(airsync::SYNC);
+        builder.start(airsync::COLLECTIONS);
+        builder.start(airsync::COLLECTION);
+        builder.leaf(airsync::COLLECTION_ID, "cal_1");
+        builder.start(airsync::COMMANDS);
+        builder.start(airsync::DELETE);
+        builder.leaf(airsync::SERVER_ID, "series-id");
+        builder.leaf(airsync_base::INSTANCE_ID, "2026-11-25T14:00:00.000Z");
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+
+        let collections = sync_collections(&builder.finish());
+        assert_eq!(airsync_base::INSTANCE_ID.code_page, airsync_base::PAGE);
+        assert_eq!(airsync_base::INSTANCE_ID.token, 0x2d);
+        assert_eq!(collections.len(), 1);
+        let command = &collections[0].commands[0];
+        assert_eq!(command.server_id, "series-id");
+        assert_eq!(
+            command.instance_id.as_deref(),
+            Some("2026-11-25T14:00:00.000Z")
         );
     }
 
