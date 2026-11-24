@@ -546,10 +546,9 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
             // object graphs, so contain parser panics and treat malformed PDFs as
             // non-extractable rather than failing the whole Find request.
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                pdf_extract::extract_text_from_mem(bytes)
+                extract_bounded_pdf_text(bytes)
             }))
-            .ok()?
-            .ok()?
+            .ok()??
         }
         "message/rfc822" | "message/global" => {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| extract_rfc822_text(bytes)))
@@ -577,7 +576,27 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
         }
         _ => return None,
     };
-    Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
+    normalize_find_attachment_text(&text)
+}
+
+fn normalize_find_attachment_text(text: &str) -> Option<String> {
+    let mut normalized = String::new();
+    for word in text.split_whitespace() {
+        let separator = usize::from(!normalized.is_empty());
+        if normalized
+            .len()
+            .saturating_add(separator)
+            .saturating_add(word.len())
+            > MAX_FIND_ATTACHMENT_TEXT_BYTES as usize
+        {
+            return None;
+        }
+        if separator != 0 {
+            normalized.push(' ');
+        }
+        normalized.push_str(word);
+    }
+    Some(normalized)
 }
 
 fn decode_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<String> {
@@ -726,16 +745,100 @@ fn extract_xml_text(bytes: &[u8]) -> Option<String> {
             return None;
         }
         match event {
-            Event::Start(_) | Event::End(_) | Event::Empty(_) => text.push(' '),
-            Event::Text(value) => text.push_str(&value.unescape().ok()?),
-            Event::CData(value) => text.push_str(&reader.decoder().decode(value.as_ref()).ok()?),
+            Event::Start(_) | Event::End(_) | Event::Empty(_) => {
+                append_find_extracted_text(&mut text, " ")?
+            }
+            Event::Text(value) => {
+                let decoded = value.unescape().ok()?;
+                append_find_extracted_text(&mut text, &decoded)?;
+            }
+            Event::CData(value) => {
+                let decoded = reader.decoder().decode(value.as_ref()).ok()?;
+                append_find_extracted_text(&mut text, &decoded)?;
+            }
             Event::DocType(_) => return None,
             Event::Eof => break,
             _ => {}
         }
         buffer.clear();
     }
-    Some(text)
+    (text.len() <= MAX_FIND_ATTACHMENT_TEXT_BYTES as usize).then_some(text)
+}
+
+fn append_find_extracted_text(output: &mut String, text: &str) -> Option<()> {
+    if output.len().saturating_add(text.len()) > MAX_FIND_ATTACHMENT_TEXT_BYTES as usize {
+        return None;
+    }
+    output.push_str(text);
+    Some(())
+}
+
+fn extract_bounded_pdf_text(bytes: &[u8]) -> Option<String> {
+    struct BoundedOutput {
+        text: String,
+    }
+
+    impl pdf_extract::OutputDev for BoundedOutput {
+        fn begin_page(
+            &mut self,
+            _page_num: u32,
+            _media_box: &pdf_extract::MediaBox,
+            _art_box: Option<(f64, f64, f64, f64)>,
+        ) -> Result<(), pdf_extract::OutputError> {
+            Ok(())
+        }
+
+        fn end_page(&mut self) -> Result<(), pdf_extract::OutputError> {
+            self.push(" ")
+        }
+
+        fn output_character(
+            &mut self,
+            _trm: &pdf_extract::Transform,
+            _width: f64,
+            _spacing: f64,
+            _font_size: f64,
+            character: &str,
+        ) -> Result<(), pdf_extract::OutputError> {
+            self.push(character)
+        }
+
+        fn begin_word(&mut self) -> Result<(), pdf_extract::OutputError> {
+            if !self.text.is_empty() && !self.text.chars().last().is_some_and(char::is_whitespace) {
+                self.push(" ")?;
+            }
+            Ok(())
+        }
+
+        fn end_word(&mut self) -> Result<(), pdf_extract::OutputError> {
+            Ok(())
+        }
+
+        fn end_line(&mut self) -> Result<(), pdf_extract::OutputError> {
+            self.push(" ")
+        }
+    }
+
+    impl BoundedOutput {
+        fn push(&mut self, value: &str) -> Result<(), pdf_extract::OutputError> {
+            if self.text.len().saturating_add(value.len()) > MAX_FIND_ATTACHMENT_TEXT_BYTES as usize
+            {
+                return Err(pdf_extract::OutputError::FormatError(std::fmt::Error));
+            }
+            self.text.push_str(value);
+            Ok(())
+        }
+    }
+
+    let document = pdf_extract::Document::load_mem(bytes).ok()?;
+    if document.is_encrypted() {
+        return None;
+    }
+    let mut output = BoundedOutput {
+        text: String::new(),
+    };
+    pdf_extract::output_doc(&document, &mut output).ok()?;
+    Some(output.text)
 }
 
 pub(super) fn matching_principals(
@@ -2629,6 +2732,22 @@ mod tests {
             ],
         )
         .unwrap());
+    }
+
+    #[test]
+    fn find_extracted_and_normalized_text_never_exceeds_limit() {
+        let limit = MAX_FIND_ATTACHMENT_TEXT_BYTES as usize;
+        let exact = "x".repeat(limit);
+        assert_eq!(normalize_find_attachment_text(&exact).unwrap().len(), limit);
+        assert!(normalize_find_attachment_text(&format!("{exact} x")).is_none());
+
+        let xml = format!("<root>{}</root>", "x".repeat(limit - 2));
+        assert_eq!(extract_xml_text(xml.as_bytes()).unwrap().len(), limit);
+        let oversized_xml = format!("<root>{}</root>", "x".repeat(limit - 1));
+        assert!(extract_xml_text(oversized_xml.as_bytes()).is_none());
+
+        let pdf = test_pdf_with_text(&"x".repeat(limit + 1));
+        assert!(extract_bounded_pdf_text(&pdf).is_none());
     }
 
     fn test_pdf_with_text(text: &str) -> Vec<u8> {

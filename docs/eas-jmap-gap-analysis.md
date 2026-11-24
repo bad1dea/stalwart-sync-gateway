@@ -396,7 +396,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    checks. Text attachments honor MIME `charset` parameters, including common
    legacy single-byte encodings and UTF-16LE, with BOM detection when the
    charset parameter is absent; XML text also honors its encoding declaration.
-   Decoded text output is capped at 2 MiB. RFC 822 and
+   Extracted and normalized text output is capped at 2 MiB, including bounded
+   streaming output from the PDF parser and XML entity/CDATA decoding. RFC 822 and
    Outlook message decoding are capped at the same 2 MiB
    extracted-text limit; compressed Outlook RTF is not expanded. Mocked 16.1
    Find regressions exercise quoted-printable EML extraction through download
@@ -404,14 +405,17 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    Outlook message fixture, `application/problem+json` extraction, Windows-1252
    and UTF-16LE text decoding (including BOM-only UTF-16LE), and Windows-1252
    XML declaration decoding.
-   PDF parsing failures and parser panics are
-   contained as non-matches.
+   PDF parsing failures, output-limit errors, and parser panics are contained as
+   non-matches. XML output is stopped as soon as its decoded text limit is
+   reached, and normalization avoids a per-word temporary allocation. Regression
+   coverage checks exact-limit XML and normalization, plus rejection above the
+   limit. The full suite passes 395 tests (73 ignored); strict Clippy, format,
+   and diff checks pass.
    Archive entry count and cumulative selected XML expansion are bounded.
    EPUB XHTML chapters use the same archive-entry and expanded-XML limits; a
    mocked HTTP Find regression verifies proximity matching in EPUB text. The
    macro-enabled OOXML types use the same restricted document parts; a mocked
-   Find regression covers an `.xlsm` attachment. The current full suite passes
-   394 tests (73 ignored), with strict Clippy and format checks passing. RFC
+   Find regression covers an `.xlsm` attachment. RFC
    822 extraction is deployed as `deploy-2026-11-24-eas-find-rfc822-e5c4f0f`;
    homelab commit `1aff02a`, image
    `sha256:8b763e9e24545d2b8779f54f816ec792c0d758ccca38db9bb807626e80d05d33`,
