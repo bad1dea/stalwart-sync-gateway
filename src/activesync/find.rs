@@ -194,7 +194,9 @@ async fn execute(
     // messages that do not contain all indexed phrase terms. Scan the scoped
     // mailbox and decide the one standalone negative phrase locally.
     let query = if phrase_match == query::PhraseMatch::None
-        || phrases.iter().any(|(property, _)| property == "$isread")
+        || phrases
+            .iter()
+            .any(|(property, _)| property.starts_with('$'))
     {
         json!({})
     } else {
@@ -272,6 +274,8 @@ async fn execute(
                     &email.subject,
                     email.body.as_ref(),
                     Some(email.read),
+                    Some(email.keywords.iter().any(|keyword| keyword == "$flagged")),
+                    Some(!email.attachments.is_empty()),
                     phrase_match,
                     &phrases,
                 )? {
@@ -530,6 +534,8 @@ fn email_matches_phrases(
     subject: &str,
     body: Option<&crate::model::EmailBody>,
     is_read: Option<bool>,
+    is_flagged: Option<bool>,
+    has_attachment: Option<bool>,
     phrase_match: query::PhraseMatch,
     phrases: &[(String, String)],
 ) -> anyhow::Result<bool> {
@@ -544,8 +550,14 @@ fn email_matches_phrases(
         }
         query::PhraseMatch::Any => {
             for (property, phrase) in phrases {
-                let matched = if property == "$isread" {
-                    is_read.is_some_and(|read| read == (phrase == "true"))
+                let boolean_match = match property.as_str() {
+                    "$isread" => is_read,
+                    "$isflagged" => is_flagged,
+                    "$hasattachment" => has_attachment,
+                    _ => None,
+                };
+                let matched = if property.starts_with('$') {
+                    boolean_match.is_some_and(|value| value == (phrase == "true"))
                 } else {
                     email_matches_phrase(subject, body, property, phrase)?
                 };
@@ -652,6 +664,8 @@ mod tests {
             "Alpha beta subject",
             Some(&plain),
             None,
+            None,
+            None,
             query::PhraseMatch::All,
             &[
                 ("subject".to_owned(), "alpha beta".to_owned()),
@@ -663,6 +677,8 @@ mod tests {
             "Alpha beta subject",
             Some(&plain),
             None,
+            None,
+            None,
             query::PhraseMatch::All,
             &[
                 ("subject".to_owned(), "alpha beta".to_owned()),
@@ -672,6 +688,8 @@ mod tests {
         .unwrap());
         assert!(email_matches_phrases(
             "Alpha beta and gamma delta",
+            None,
+            None,
             None,
             None,
             query::PhraseMatch::All,
@@ -685,6 +703,8 @@ mod tests {
             "Alpha beta only",
             None,
             None,
+            None,
+            None,
             query::PhraseMatch::All,
             &[
                 ("subject".to_owned(), "alpha beta".to_owned()),
@@ -696,12 +716,16 @@ mod tests {
             "Unrelated subject",
             None,
             None,
+            None,
+            None,
             query::PhraseMatch::None,
             &[("subject".to_owned(), "alpha beta".to_owned())]
         )
         .unwrap());
         assert!(!email_matches_phrases(
             "Alpha beta subject",
+            None,
+            None,
             None,
             None,
             query::PhraseMatch::None,
@@ -711,6 +735,8 @@ mod tests {
         assert!(email_matches_phrases(
             "Other subject",
             Some(&plain),
+            None,
+            None,
             None,
             query::PhraseMatch::Any,
             &[
@@ -723,11 +749,33 @@ mod tests {
             "Other subject",
             None,
             None,
+            None,
+            None,
             query::PhraseMatch::Any,
             &[
                 ("subject".to_owned(), "alpha beta".to_owned()),
                 ("text".to_owned(), "alpha beta".to_owned())
             ]
+        )
+        .unwrap());
+        assert!(email_matches_phrases(
+            "Other subject",
+            None,
+            Some(false),
+            Some(true),
+            Some(false),
+            query::PhraseMatch::Any,
+            &[("$isflagged".to_owned(), "true".to_owned())]
+        )
+        .unwrap());
+        assert!(email_matches_phrases(
+            "Other subject",
+            None,
+            Some(false),
+            Some(false),
+            Some(false),
+            query::PhraseMatch::Any,
+            &[("$hasattachment".to_owned(), "false".to_owned())]
         )
         .unwrap());
     }

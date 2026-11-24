@@ -68,8 +68,23 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         let right_phrase = search_phrase_word(right.strip_prefix('+').unwrap_or(right));
         let boolean = |word: &str| {
             let (property, value) = word.split_once(':')?;
-            (property.eq_ignore_ascii_case("isread") && matches!(value, "true" | "false"))
-                .then(|| ("$isread".to_owned(), value.to_owned()))
+            let property = property.to_ascii_lowercase();
+            let enabled = match value.to_ascii_lowercase().as_str() {
+                "true" | "yes" | "1" => "true",
+                "false" | "no" | "0" => "false",
+                _ => return None,
+            };
+            matches!(
+                property.as_str(),
+                "isread" | "isflagged" | "hasattachment" | "hasattachments"
+            )
+            .then(|| {
+                let property = match property.as_str() {
+                    "hasattachments" => "hasattachment",
+                    value => value,
+                };
+                (format!("${property}"), enabled.to_owned())
+            })
         };
         if let (Some(phrase), Some(boolean)) = (left_phrase, boolean(right)) {
             return Some((PhraseMatch::Any, vec![phrase, boolean]));
@@ -860,6 +875,26 @@ mod tests {
             json!({"operator":"OR", "conditions":[
                 {"subject":"alpha beta"}, {"hasKeyword":"$seen"}
             ]})
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" OR isflagged:yes"#),
+            Some((
+                PhraseMatch::Any,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$isflagged".to_owned(), "true".to_owned())
+                ]
+            ))
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"hasattachments:no OR subject:"alpha beta""#),
+            Some((
+                PhraseMatch::Any,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$hasattachment".to_owned(), "false".to_owned())
+                ]
+            ))
         );
         for query in [
             r#"subject:"alpha beta" subject:gamma"#,

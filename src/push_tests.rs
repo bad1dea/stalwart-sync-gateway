@@ -13389,7 +13389,7 @@ async fn find_repeated_and_negated_subject_phrases_are_exact() {
 }
 
 #[tokio::test]
-async fn find_phrase_or_read_state_uses_both_exact_branches() {
+async fn find_phrase_or_boolean_state_uses_both_exact_branches() {
     use eas::{airsync as air, find as f};
     let env = start_env(Opts::default()).await;
     env.mock.add_mail("inbox", "alpha-beta");
@@ -13412,6 +13412,25 @@ async fn find_phrase_or_read_state_uses_both_exact_branches() {
     let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
     ids.sort();
     assert_eq!(ids, vec!["alpha-beta", "m2"]);
+
+    env.mock.set_keyword("m1", "$flagged", true);
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "0a52f0c4-860a-467c-a7fb-a0fd7591b6cc",
+            r#"subject:"alpha beta" OR isflagged:true"#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("2"));
+    let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
+    ids.sort();
+    assert_eq!(ids, vec!["alpha-beta", "m1"]);
 }
 
 #[tokio::test]
