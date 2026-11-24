@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `2727f06` (2026-11-24)
+## Reconciled status for source `main` at `fb4eb72` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -39,9 +39,9 @@ Current prioritized work:
    EAS meaning.
 2. **Remaining recurring series exception edits.** Common event and task
    recurrence rules map to Stalwart's singular JSCalendar `recurrenceRule`.
-   EAS 16.0/16.1 occurrence deletes and subject/plain-text body edits now map
-   through `InstanceId` and `recurrenceOverrides`; exclusions and those two
-   fields round-trip. Per-instance time/location/other field changes and Task
+   EAS 16.0/16.1 occurrence deletes and subject/plain-text body/location edits
+   now map through `InstanceId` and `recurrenceOverrides`; exclusions and
+   those fields round-trip. Per-instance time/other field changes and Task
    exceptions remain unsupported and fail closed.
 3. **Real-client 16.1 certification and rollout.** Production remains pinned
    to a tagged 14.0 build. Forced-version protocol tests do not establish that

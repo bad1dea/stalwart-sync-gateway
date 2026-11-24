@@ -6,7 +6,7 @@ cited below is transcribed directly from [MS-ASWBXML] v20250520 (fetched as a PD
 from `officeprotocoldoc.z19.web.core.windows.net`), section 2.1.2.1's per-codepage
 tables — the same primary source used to scaffold the corresponding `pub mod`
 blocks in `src/wbxml/eas.rs`. Current implementation status is read fresh from that
-file and `src/activesync.rs` at commit `d99b3a3`, not carried over from memory.
+file and `src/activesync.rs` at commit `fb4eb72`, not carried over from memory.
 
 **Verdict key:** ✅ Implemented · 🟡 Possible via JMAP, not built · ⛔ No JMAP
 equivalent · ❓ Needs live verification.
@@ -39,11 +39,11 @@ inferred.
 | Categories / Category | 0x0E-0x0F | All | ✅ | JSCalendar `categories` | Values round-trip; clear and omission are distinguished on client edits. |
 | DtStamp | 0x11 | All | ✅ | `CalendarEvent`'s `updated` or the JMAP response's own timestamp | |
 | EndTime | 0x12 | All | ✅ | `start` + `duration`, or explicit `end` (jscalendarbis) | |
-| Exception / Exceptions / Deleted / ExceptionStartTime | 0x13-0x16 | All (16.0+ uses AirSyncBase:InstanceId for occurrence identity) | ✅ deletes, subject, plain body | JSCalendar `recurrenceOverrides` | Deleted occurrences map to `{"excluded":true}`; subject and plain-text body patches map to per-instance overrides. Other field patches fail closed. |
-| Location | 0x17 | 2.5-14.1 (16.0+ uses AirSyncBase:Location, codepage 17) | ✅ | JSCalendar `locations` (map; `locations["1"].name` for the simple case) | Gateway only emits the codepage-4 form — fine for the versions it advertises (`12.0,12.1,14.0` — all within the 2.5-14.1 window), but would need the AirSyncBase form too if 16.x is ever re-enabled. |
+| Exception / Exceptions / Deleted / ExceptionStartTime | 0x13-0x16 | All (16.0+ uses AirSyncBase:InstanceId for occurrence identity) | ✅ deletes, subject, plain body, location | JSCalendar `recurrenceOverrides` | Deleted occurrences map to `{"excluded":true}`; subject, plain-text body, and location patches map to per-instance overrides. Other field patches fail closed. |
+| Location | 0x17 | All (16.0+ uses AirSyncBase:Location, codepage 17) | ✅ versioned | JSCalendar `locations` (map; `locations["1"].name` for the simple case) | Uses codepage 4 through 14.1 and AirSyncBase:Location for 16.0/16.1. Instance-specific location names and coordinates use the same JMAP property in `recurrenceOverrides`. |
 | MeetingStatus | 0x18 | All | ✅ derived | Participant roles, authenticated user's status, and cancellation state | Emits appointment/meeting/received/cancelled states from the JSCalendar participants and event state. |
 | OrganizerEmail / OrganizerName | 0x19-0x1A | All | ✅ two-way | JSCalendar `participants` entry with role `owner` | Organizer is represented by the owner participant; attendee lists exclude the organizer. |
-| **Recurrence** (0x1B, container) with **Type** (0x1C), **Until** (0x1D), **Occurrences** (0x1E), **Interval** (0x1F), **DayOfWeek** (0x20), **DayOfMonth** (0x21), **WeekOfMonth** (0x22), **MonthOfYear** (0x23) | 0x1B-0x23 | All | ✅ Common rules, excluded occurrences, subject/plain-body overrides | Stalwart singular JSCalendar `recurrenceRule` plus `recurrenceOverrides` | Maps daily, weekly, monthly, nth-weekday, and yearly rules both ways. EAS occurrence deletes map to JSCalendar exclusions; subject and plain-text body changes map to overrides. Other fields, Task exceptions, and non-representable patterns remain unsupported. |
+| **Recurrence** (0x1B, container) with **Type** (0x1C), **Until** (0x1D), **Occurrences** (0x1E), **Interval** (0x1F), **DayOfWeek** (0x20), **DayOfMonth** (0x21), **WeekOfMonth** (0x22), **MonthOfYear** (0x23) | 0x1B-0x23 | All | ✅ Common rules, excluded occurrences, subject/plain-body/location overrides | Stalwart singular JSCalendar `recurrenceRule` plus `recurrenceOverrides` | Maps daily, weekly, monthly, nth-weekday, and yearly rules both ways. EAS occurrence deletes map to JSCalendar exclusions; subject, plain-text body, and location changes map to overrides. Other fields, Task exceptions, and non-representable patterns remain unsupported. |
 | Reminder | 0x24 | All | ✅ | JSCalendar `alerts` | Maps the representable default-relative alert to EAS minutes; unsupported multi-alert shapes fail closed. |
 | Sensitivity | 0x25 | All | ✅ | JSCalendar `privacy` (`public`/`private`/`secret`) | |
 | Subject | 0x26 | All | ✅ | JSCalendar `title` | |
