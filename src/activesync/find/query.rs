@@ -21,9 +21,14 @@ pub(super) enum PhraseMatch {
     Any,
     None,
     Expression,
+    Near { max_words: usize },
+    Onear { max_words: usize },
 }
 
 pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
+    if parse_proximity(input).is_some() {
+        return Ok(json!({}));
+    }
     let tokens = tokenize(input)?;
     let phrases = tokens
         .iter()
@@ -82,6 +87,18 @@ fn needs_broad_importance_negation(tokens: &[Token]) -> bool {
 }
 
 pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(String, String)>)> {
+    if let Some((operator, max_words, left, right)) = parse_proximity(input) {
+        return Some((
+            match operator {
+                ProximityOperator::Near => PhraseMatch::Near { max_words },
+                ProximityOperator::Onear => PhraseMatch::Onear { max_words },
+            },
+            vec![
+                ("$proximity-left".to_owned(), left),
+                ("$proximity-right".to_owned(), right),
+            ],
+        ));
+    }
     let tokens = tokenize(input).ok()?;
     if let [Token::Not, Token::Word(word)] = tokens.as_slice() {
         if let Some(phrase) = search_phrase_word(word) {
@@ -409,6 +426,84 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         }
     }
     Some((PhraseMatch::All, phrases))
+}
+
+#[derive(Clone, Copy)]
+enum ProximityOperator {
+    Near,
+    Onear,
+}
+
+fn parse_proximity(input: &str) -> Option<(ProximityOperator, usize, String, String)> {
+    fn read_term(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+        while chars.peek().is_some_and(|ch| ch.is_whitespace()) {
+            chars.next();
+        }
+        let mut result = String::new();
+        if chars.peek() == Some(&'"') {
+            result.push(chars.next()?);
+            let mut closed = false;
+            for ch in chars.by_ref() {
+                result.push(ch);
+                if ch == '"' {
+                    closed = true;
+                    break;
+                }
+                if ch == '\\' {
+                    return None;
+                }
+            }
+            if !closed || chars.peek().is_some_and(|ch| !ch.is_whitespace()) {
+                return None;
+            }
+        } else {
+            while chars.peek().is_some_and(|ch| !ch.is_whitespace()) {
+                result.push(chars.next()?);
+            }
+        }
+        (!result.is_empty()).then_some(result)
+    }
+
+    let mut chars = input.chars().peekable();
+    let left = read_term(&mut chars)?;
+    let operator = read_term(&mut chars)?;
+    let right = read_term(&mut chars)?;
+    if chars.any(|ch| !ch.is_whitespace()) {
+        return None;
+    }
+    let (name, distance) = if let Some((name, args)) = operator.split_once('(') {
+        let args = args.strip_suffix(')')?;
+        let distance = args
+            .strip_prefix("n=")
+            .unwrap_or(args)
+            .parse::<usize>()
+            .ok()?;
+        (name, distance)
+    } else {
+        (operator.as_str(), 8)
+    };
+    let operator = match name {
+        "NEAR" => ProximityOperator::Near,
+        "ONEAR" => ProximityOperator::Onear,
+        _ => return None,
+    };
+    let normalize_operand = |operand: String| {
+        let value = if operand.starts_with('"') {
+            operand.strip_prefix('"')?.strip_suffix('"')?.to_owned()
+        } else {
+            operand
+        };
+        if value.contains(':') || value.contains('"') || value.trim().is_empty() {
+            return None;
+        }
+        Some(value)
+    };
+    Some((
+        operator,
+        distance,
+        normalize_operand(left)?,
+        normalize_operand(right)?,
+    ))
 }
 
 fn is_flat_or_expression(tokens: &[Token]) -> bool {
@@ -2472,7 +2567,6 @@ mod tests {
             "sent:2026-02-30",
             "foo*",
             "\"hello world\"",
-            "a NEAR b",
             "subject:\"unfinished",
         ] {
             assert!(to_filter(query).is_err(), "{query}");
@@ -2483,5 +2577,32 @@ mod tests {
         );
         assert_eq!(to_filter("from:").unwrap(), json!({"text":"from:"}));
         assert!(to_filter(&format!("{}a{}", "(".repeat(40), ")".repeat(40))).is_err());
+    }
+
+    #[test]
+    fn parses_direct_kql_near_and_onear_distance_forms() {
+        assert_eq!(
+            phrases_for_postfilter("alpha NEAR beta"),
+            Some((
+                PhraseMatch::Near { max_words: 8 },
+                vec![
+                    ("$proximity-left".to_owned(), "alpha".to_owned()),
+                    ("$proximity-right".to_owned(), "beta".to_owned()),
+                ],
+            ))
+        );
+        assert_eq!(
+            phrases_for_postfilter("\"alpha beta\" ONEAR(n=2) gamma"),
+            Some((
+                PhraseMatch::Onear { max_words: 2 },
+                vec![
+                    ("$proximity-left".to_owned(), "alpha beta".to_owned()),
+                    ("$proximity-right".to_owned(), "gamma".to_owned()),
+                ],
+            ))
+        );
+        assert_eq!(to_filter("alpha NEAR(3) beta").unwrap(), json!({}));
+        assert!(phrases_for_postfilter("subject:alpha NEAR beta").is_none());
+        assert!(phrases_for_postfilter("alpha NEAR(999x) beta").is_none());
     }
 }

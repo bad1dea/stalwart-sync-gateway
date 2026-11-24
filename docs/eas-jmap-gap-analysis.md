@@ -287,6 +287,14 @@ Current prioritized work:
    phrase property mixed with explicit operators remain rejected unless
    explicit AND/OR tokens separate each occurrence, preserving the expression
    tree's grouping.
+   Direct two-operand `NEAR` and `ONEAR` queries now broaden to the selected
+   mailbox and exact-filter token positions locally, with the KQL default
+   distance of eight or an explicit distance; ordered searches preserve operand
+   order. Regression coverage exercises phrase operands, direction, distance,
+   exact totals, and range paging. Boolean combinations containing proximity
+   expressions and attachment-content positions remain unsupported. The
+   current full suite passes 351 tests (73 ignored); strict Clippy, formatting,
+   and diff checks pass.
    Phrase matching is case-insensitive and requires adjacent
    words in order. Regression tests cover plain, HTML, and RTF bodies,
    subject/body conjunctions, truncation, and unsupported Boolean forms. Full

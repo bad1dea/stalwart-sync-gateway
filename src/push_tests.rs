@@ -13497,6 +13497,84 @@ async fn find_exact_subject_phrase_filters_unordered_index_candidates() {
 }
 
 #[tokio::test]
+async fn find_proximity_queries_filter_complete_message_text_and_page_exactly() {
+    use eas::{airsync as air, find as f};
+    let env = start_env(Opts::default()).await;
+    for (id, body) in [
+        ("near-forward", "alpha beta x gamma"),
+        ("near-reversed", "gamma alpha beta"),
+        ("near-too-far", "alpha beta x x gamma"),
+    ] {
+        env.mock.add_mail("inbox", id);
+        env.mock
+            .mail_bodies
+            .lock()
+            .unwrap()
+            .insert(id.to_owned(), (body.to_owned(), false));
+    }
+    for (index, query, expected) in [
+        (1, "\"alpha beta\" ONEAR(1) gamma", vec!["near-forward"]),
+        (2, "\"alpha beta\" NEAR(n=0) gamma", vec!["near-reversed"]),
+        (3, "gamma NEAR(0) \"alpha beta\"", vec!["near-reversed"]),
+    ] {
+        let search_id = format!("20000000-0000-4000-8000-{index:012}");
+        let response = env
+            .req("Find", "client")
+            .header("MS-ASProtocolVersion", "16.1")
+            .body(find_body(&search_id, query, None, "0-0"))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(
+            eas::find_text_after(&doc, f::TOTAL),
+            Some(expected.len().to_string()).as_deref(),
+            "{query}"
+        );
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::SERVER_ID),
+            expected,
+            "{query}"
+        );
+        if !expected.is_empty() {
+            let page = env
+                .req("Find", "client")
+                .header("MS-ASProtocolVersion", "16.1")
+                .body(find_body(&search_id, query, None, "0-0"))
+                .send()
+                .await
+                .unwrap();
+            let page = wbxml::decode_document(&page.bytes().await.unwrap()).unwrap();
+            assert_eq!(eas::find_all_text_after(&page, air::SERVER_ID), expected);
+        }
+    }
+    let sid = "20000000-0000-4000-8000-000000000004";
+    let query = "\"alpha beta\" NEAR(1) gamma";
+    let first = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(sid, query, None, "0-0"))
+        .send()
+        .await
+        .unwrap();
+    let first = wbxml::decode_document(&first.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&first, f::TOTAL), Some("2"));
+    assert_eq!(eas::find_all_text_after(&first, air::SERVER_ID).len(), 1);
+    assert_eq!(eas::find_text_after(&first, f::RANGE), Some("0-0"));
+    let second = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(sid, query, None, "1-1"))
+        .send()
+        .await
+        .unwrap();
+    let second = wbxml::decode_document(&second.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&second, f::TOTAL), Some("2"));
+    assert_eq!(eas::find_all_text_after(&second, air::SERVER_ID).len(), 1);
+    assert_eq!(eas::find_text_after(&second, f::RANGE), Some("1-1"));
+}
+
+#[tokio::test]
 async fn find_exact_subject_phrase_preserves_conjunctive_restrictions() {
     use eas::{airsync as air, find as f};
     let env = start_env(Opts::default()).await;

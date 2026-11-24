@@ -195,6 +195,10 @@ async fn execute(
     // including negated ones, remain exact JMAP predicates, so retaining the
     // query preserves a smaller safe candidate set for positive phrase forms.
     let query = if phrase_match == query::PhraseMatch::None
+        || matches!(
+            phrase_match,
+            query::PhraseMatch::Near { .. } | query::PhraseMatch::Onear { .. }
+        )
         || phrases.iter().any(|(property, _)| {
             matches!(
                 property.as_str(),
@@ -241,10 +245,9 @@ async fn execute(
         "attachments",
         "header:Importance:asText",
     ];
-    if phrases
-        .iter()
-        .any(|(property, _)| matches!(property.as_str(), "body" | "text"))
-    {
+    if phrases.iter().any(|(property, _)| {
+        matches!(property.as_str(), "body" | "text") || property.starts_with("$proximity-")
+    }) {
         properties.extend(["textBody", "htmlBody", "bodyValues"]);
     }
     let page = if !phrases.is_empty() {
@@ -785,7 +788,98 @@ fn email_matches_phrases_with_addresses(
             }
             Ok(values[0])
         }
+        query::PhraseMatch::Near { max_words } => {
+            proximity_matches_email(subject, body, from, to, cc, bcc, false, max_words, phrases)
+        }
+        query::PhraseMatch::Onear { max_words } => {
+            proximity_matches_email(subject, body, from, to, cc, bcc, true, max_words, phrases)
+        }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn proximity_matches_email(
+    subject: &str,
+    body: Option<&crate::model::EmailBody>,
+    from: &str,
+    to: &str,
+    cc: &str,
+    bcc: &str,
+    ordered: bool,
+    max_words: usize,
+    operands: &[(String, String)],
+) -> anyhow::Result<bool> {
+    anyhow::ensure!(operands.len() == 2, "invalid proximity query");
+    let left = proximity_words(&operands[0].1);
+    let right = proximity_words(&operands[1].1);
+    if left.is_empty() || right.is_empty() {
+        return Ok(false);
+    }
+    let mut fields = vec![
+        subject.to_owned(),
+        from.to_owned(),
+        to.to_owned(),
+        cc.to_owned(),
+        bcc.to_owned(),
+    ];
+    if let Some(body) = body {
+        anyhow::ensure!(
+            !body.is_truncated,
+            "Find cannot exact-match proximity in a truncated message body"
+        );
+        fields.push(match body.body_type {
+            crate::model::EmailBodyType::Plain => body.value.clone(),
+            crate::model::EmailBodyType::Html => {
+                super::strip_html_tags(&body.value.replace('>', "> "))
+            }
+            crate::model::EmailBodyType::Rtf => super::rtf_to_plain_text(&body.value),
+        });
+    }
+    for field in fields {
+        let words = proximity_words(&field);
+        let left_positions = find_term_positions(&words, &left);
+        let right_positions = find_term_positions(&words, &right);
+        for left_start in left_positions {
+            let left_end = left_start + left.len();
+            let next = right_positions.partition_point(|position| *position < left_end);
+            if right_positions
+                .get(next)
+                .is_some_and(|right_start| right_start.saturating_sub(left_end) <= max_words)
+            {
+                return Ok(true);
+            }
+            if !ordered {
+                if let Some(right_start) = next.checked_sub(1).map(|index| right_positions[index]) {
+                    if right_start != left_start {
+                        let right_end = right_start.saturating_add(right.len());
+                        let gap = left_start.saturating_sub(right_end);
+                        if right_end >= left_start || gap <= max_words {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn proximity_words(text: &str) -> Vec<String> {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn find_term_positions(words: &[String], term: &[String]) -> Vec<usize> {
+    if term.is_empty() || term.len() > words.len() {
+        return Vec::new();
+    }
+    words
+        .windows(term.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == term).then_some(index))
+        .collect()
 }
 
 fn email_matches_phrase(
@@ -1382,5 +1476,53 @@ mod tests {
         };
         assert!(email_matches_phrase("Other", Some(&truncated), "body", "alpha beta").is_err());
         assert!(!email_matches_phrase("Other", None, "body", "alpha beta").unwrap());
+    }
+
+    #[test]
+    fn proximity_filters_enforce_distance_and_order() {
+        let terms = vec![
+            ("$proximity-left".to_owned(), "alpha beta".to_owned()),
+            ("$proximity-right".to_owned(), "gamma".to_owned()),
+        ];
+        let matches = |subject: &str, filter| {
+            email_matches_phrases_with_addresses(
+                subject,
+                None,
+                "",
+                "",
+                "",
+                "",
+                None,
+                None,
+                0,
+                1,
+                Some(false),
+                Some(false),
+                Some(false),
+                filter,
+                &terms,
+            )
+            .unwrap()
+        };
+        assert!(matches(
+            "alpha beta x gamma",
+            query::PhraseMatch::Near { max_words: 1 }
+        ));
+        assert!(matches(
+            "gamma alpha beta",
+            query::PhraseMatch::Near { max_words: 8 }
+        ));
+        assert!(!matches(
+            "alpha beta x x gamma",
+            query::PhraseMatch::Near { max_words: 1 }
+        ));
+        assert!(!matches(
+            "gamma alpha beta",
+            query::PhraseMatch::Onear { max_words: 8 }
+        ));
+        assert!(matches(
+            "alpha beta gamma",
+            query::PhraseMatch::Onear { max_words: 0 }
+        ));
     }
 }
