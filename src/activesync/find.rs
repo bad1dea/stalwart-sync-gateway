@@ -99,8 +99,13 @@ fn parse(document: &wbxml::Document) -> Result<Request, &'static str> {
 #[derive(Serialize, Deserialize)]
 struct SearchState {
     filter: Value,
+    search_text: String,
     query_state: String,
     created: i64,
+}
+
+fn same_search(session: &SearchState, filter: &Value, search_text: &str) -> bool {
+    session.filter == *filter && session.search_text == search_text
 }
 const SEARCHES: &str = "__find__";
 
@@ -228,7 +233,7 @@ async fn execute(
     if request.start != 0
         && previous
             .as_ref()
-            .is_none_or(|session| session.filter != filter)
+            .is_none_or(|session| !same_search(session, &filter, &request.text))
     {
         return Ok(restart_document());
     }
@@ -347,6 +352,7 @@ async fn execute(
             item_id: request.search_id,
             hash: serde_json::to_string(&SearchState {
                 filter,
+                search_text: request.text.clone(),
                 query_state,
                 created: now,
             })?,
@@ -479,9 +485,9 @@ async fn execute_gal(
         .find(|item| item.item_id == request.search_id)
         .and_then(|item| serde_json::from_str::<SearchState>(&item.hash).ok());
     if request.start != 0
-        && previous
-            .as_ref()
-            .is_none_or(|session| session.filter != filter || session.query_state != query_state)
+        && previous.as_ref().is_none_or(|session| {
+            !same_search(session, &filter, &term) || session.query_state != query_state
+        })
     {
         return Ok(restart_document());
     }
@@ -494,6 +500,7 @@ async fn execute_gal(
             item_id: request.search_id,
             hash: serde_json::to_string(&SearchState {
                 filter,
+                search_text: term,
                 query_state,
                 created: now,
             })?,
@@ -1516,6 +1523,18 @@ fn respond(state: &AppState, document: wbxml::Document) -> Response {
 mod tests {
     use super::*;
     use crate::model::{EmailBody, EmailBodyType};
+
+    #[test]
+    fn find_paging_identity_includes_the_original_kql_query() {
+        let session = SearchState {
+            filter: json!({"operator":"AND", "conditions":[json!({})]}),
+            search_text: "alpha NEAR beta".to_owned(),
+            query_state: "state".to_owned(),
+            created: 0,
+        };
+        assert!(same_search(&session, &session.filter, "alpha NEAR beta"));
+        assert!(!same_search(&session, &session.filter, "gamma NEAR delta"));
+    }
 
     #[test]
     fn importance_comparisons_follow_low_normal_high_order() {

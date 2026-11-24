@@ -301,6 +301,10 @@ Current prioritized work:
    matching, reversed span order, and `NOT` over a parenthesized proximity
    expression, consistent with the [MS-KQL NEAR
    operator](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-kql/31e6a96d-8b5d-4d3b-b4fa-af4b58e90a39).
+   Find paging sessions now also bind the original KQL text, so queries that
+   share a broadened JMAP candidate filter cannot reuse each other's page
+   state. Regression coverage checks that proximity queries with the same
+   broad filter retain distinct paging identities.
    Proximity
    matching also evaluates attachment filenames;
    attachment payload text remains unavailable for local proximity checks.
@@ -330,9 +334,9 @@ Current prioritized work:
    `attachment:*` matches any non-empty attachment list) per
    [MS-KQL property restrictions](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-kql/1b4eb34a-0e20-4aca-b38e-41f531a747ff).
    Unordered NEAR also accepts both operands matching one
-   indexed token, as MS-KQL specifies. Regression suite: 363 passed,
+   indexed token, as MS-KQL specifies. Regression suite: 364 passed,
    73 ignored; strict Clippy, formatting, and diff checks passed. The nested
-   proximity change is not deployed or runtime-verified.
+   current proximity and paging changes are not deployed or runtime-verified.
    Phrase matching is case-insensitive and requires adjacent
    words in order. Regression tests cover plain, HTML, and RTF bodies,
    subject/body conjunctions, truncation, and unsupported Boolean forms. Full
