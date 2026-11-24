@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `81b1409` (2026-11-24)
+## Reconciled status for source `main` at `dfca21b` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -428,7 +428,16 @@ Current prioritized work:
    drafts and non-draft Email items in the requested Mailbox. ResolveRecipients,
    ValidateCert, MeetingResponse, and ItemOperations fetches for mail, contacts,
    calendars, tasks, notes, and attachment blobs are implemented. Enterprise
-   IRM remains out of scope for the personal-account gateway.
+   IRM remains out of scope for the personal-account gateway. Search now accepts
+   multiple `Store` elements in one request, evaluates each query independently,
+   and returns each store's status, results, range, and total. Regression
+   coverage exercises separate mailbox queries. Full suite: 339 passed, 73
+   ignored; strict Clippy, formatting, and diff checks passed. Deployed as
+   `deploy-2026-11-24-eas-search-multiple-stores-dfca21b`; homelab commit
+   `de8c4a3`, image
+   `sha256:b77ae82a99d0ba62cd7c1cf97382f14a06138db639f2dfd691a296aff71de0f7`,
+   started `2026-11-24T15:22:13Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
 7. **Online meeting URI fields.** Stalwart 0.16.27's generic JSCalendar
    property handling exposes RFC 8984 `virtualLocations` even though the
    CalendarEvent-specific Rust struct does not name the property. The gateway
