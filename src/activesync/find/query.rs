@@ -513,12 +513,13 @@ fn parse_proximity(input: &str) -> Option<(ProximityOperator, usize, String, Str
         _ => return None,
     };
     let normalize_operand = |operand: String| {
-        let value = if operand.starts_with('"') {
+        let quoted = operand.starts_with('"');
+        let value = if quoted {
             operand.strip_prefix('"')?.strip_suffix('"')?.to_owned()
         } else {
             operand
         };
-        if value.contains(':') || value.contains('"') || value.trim().is_empty() {
+        if (!quoted && value.contains(':')) || value.contains('"') || value.trim().is_empty() {
             return None;
         }
         Some(value)
@@ -797,12 +798,17 @@ fn expression_operator(operator: &Token) -> Option<(String, String)> {
 }
 
 fn free_text_operand(word: &str) -> Option<String> {
-    let value = if word.starts_with('"') && word.ends_with('"') && word.len() >= 2 {
+    let quoted = word.starts_with('"') && word.ends_with('"') && word.len() >= 2;
+    let value = if quoted {
         &word[1..word.len() - 1]
     } else {
         word
     };
-    if value.is_empty() || value.contains(['"', ':', '\\']) || value.trim().is_empty() {
+    if value.is_empty()
+        || value.contains(['"', '\\'])
+        || (!quoted && value.contains(':'))
+        || value.trim().is_empty()
+    {
         return None;
     }
     Some(value.to_owned())
@@ -2730,6 +2736,19 @@ mod tests {
             ))
         );
         assert!(to_filter("subject:alpha NEAR beta").is_err());
+        assert_eq!(
+            phrases_for_postfilter("\"http://example.test/a\" NEAR(2) \"token:value\""),
+            Some((
+                PhraseMatch::Near { max_words: 2 },
+                vec![
+                    (
+                        "$proximity-left".to_owned(),
+                        "http://example.test/a".to_owned()
+                    ),
+                    ("$proximity-right".to_owned(), "token:value".to_owned()),
+                ],
+            ))
+        );
     }
 
     #[test]
