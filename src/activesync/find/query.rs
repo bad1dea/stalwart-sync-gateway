@@ -66,41 +66,51 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
     if tokens.contains(&Token::Or)
         && tokens
             .iter()
-            .all(|token| matches!(token, Token::Word(_) | Token::Or))
+            .all(|token| matches!(token, Token::Word(_) | Token::Or | Token::Not))
     {
-        if tokens.len() < 3
-            || tokens.len() % 2 == 0
-            || tokens.iter().enumerate().any(|(index, token)| {
-                if index % 2 == 0 {
-                    !matches!(token, Token::Word(_))
-                } else {
-                    *token != Token::Or
-                }
-            })
-        {
-            return None;
-        }
         let mut terms = Vec::new();
         let mut phrase_count = 0;
-        let mut boolean_count = 0;
-        for token in &tokens {
-            let Token::Word(word) = token else { continue };
-            let positive = word.strip_prefix('+').unwrap_or(word);
-            if let Some(phrase) = search_phrase_word(positive) {
-                terms.push(phrase);
-                phrase_count += 1;
-            } else if let Some(negative) = word.strip_prefix('-') {
-                let (property, value) = boolean_search_term(negative)?;
+        let mut position = 0;
+        let mut term_count = 0;
+        while position < tokens.len() {
+            let negated = tokens.get(position) == Some(&Token::Not);
+            if negated {
+                position += 1;
+            }
+            let Token::Word(word) = tokens.get(position)? else {
+                return None;
+            };
+            if negated {
+                // Negative phrase alternatives need an AND/OR expression tree
+                // to retain their meaning, so keep those forms unsupported.
+                if word.starts_with(['+', '-']) || search_phrase_word(word).is_some() {
+                    return None;
+                }
+                let (property, value) = boolean_search_term(word)?;
                 terms.push((format!("$not{property}"), value));
-                boolean_count += 1;
             } else {
-                let boolean = boolean_search_term(word)?;
-                terms.push(boolean);
-                boolean_count += 1;
+                let positive = word.strip_prefix('+').unwrap_or(word);
+                if let Some(phrase) = search_phrase_word(positive) {
+                    terms.push(phrase);
+                    phrase_count += 1;
+                } else if let Some(negative) = word.strip_prefix('-') {
+                    let (property, value) = boolean_search_term(negative)?;
+                    terms.push((format!("$not{property}"), value));
+                } else {
+                    let boolean = boolean_search_term(word)?;
+                    terms.push(boolean);
+                }
+            }
+            term_count += 1;
+            position += 1;
+            if position < tokens.len() {
+                if tokens.get(position) != Some(&Token::Or) {
+                    return None;
+                }
+                position += 1;
             }
         }
-        return (phrase_count > 0 && (boolean_count > 0 || phrase_count > 1))
-            .then_some((PhraseMatch::Any, terms));
+        return (term_count > 1 && phrase_count > 0).then_some((PhraseMatch::Any, terms));
     }
     if tokens
         .iter()
@@ -954,6 +964,16 @@ mod tests {
                 vec![
                     ("subject".to_owned(), "alpha beta".to_owned()),
                     ("$isread".to_owned(), "true".to_owned())
+                ]
+            ))
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" OR NOT isread:true"#),
+            Some((
+                PhraseMatch::Any,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$not$isread".to_owned(), "true".to_owned())
                 ]
             ))
         );
