@@ -488,6 +488,7 @@ fn is_extractable_attachment_type(content_type: &str) -> bool {
         .to_ascii_lowercase();
     media_type.starts_with("text/")
         || media_type.ends_with("+xml")
+        || media_type.ends_with("+json")
         || matches!(
             media_type.as_str(),
             "application/rtf"
@@ -564,7 +565,10 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
         }
         "application/xml" | "text/xml" => extract_xml_text(bytes)?,
         _ if media_type.ends_with("+xml") => extract_xml_text(bytes)?,
-        _ if media_type.starts_with("text/") || media_type == "application/json" => {
+        _ if media_type.starts_with("text/")
+            || media_type == "application/json"
+            || media_type.ends_with("+json") =>
+        {
             String::from_utf8_lossy(bytes).into_owned()
         }
         _ => return None,
@@ -2432,6 +2436,7 @@ mod tests {
         assert!(is_extractable_attachment_type("application/atom+xml"));
         assert!(is_extractable_attachment_type("application/pdf"));
         assert!(is_extractable_attachment_type("application/vnd.ms-outlook"));
+        assert!(is_extractable_attachment_type("application/problem+json"));
         assert!(is_extractable_attachment_type("message/rfc822"));
         assert!(is_extractable_attachment_type("message/global"));
         assert!(is_extractable_attachment_type("application/epub+zip"));
@@ -2464,6 +2469,10 @@ mod tests {
         );
         assert_eq!(
             extract_find_attachment_text("application/json", b"alpha beta"),
+            Some("alpha beta".to_owned())
+        );
+        assert_eq!(
+            extract_find_attachment_text("application/problem+json", b"alpha beta"),
             Some("alpha beta".to_owned())
         );
         let eml = b"From: sender@example.test\r\nSubject: alpha subject\r\nContent-Type: multipart/alternative; boundary=body\r\n\r\n--body\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nplain=20beta\r\n--body\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>html gamma</p>\r\n--body--\r\n";

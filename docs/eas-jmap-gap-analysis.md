@@ -47,10 +47,10 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    retained for attachment records; it is not a selector in the
    `BodyPartPreference` schema and is not required to answer these requests.
    The current deployment tag
-   `deploy-2026-11-24-eas-find-rfc822-e5c4f0f` includes this path; deployed
-   with homelab commit `1aff02a`, image
-   `sha256:8b763e9e24545d2b8779f54f816ec792c0d758ccca38db9bb807626e80d05d33`,
-   started `2026-11-24T20:54:20Z`, restart count zero, `/healthz` `ok`, and
+   `deploy-2026-11-24-eas-find-outlook-msg-570285e` includes this path;
+   deployed with homelab commit `25d23c4`, image
+   `sha256:b45a5d0cb91c6d317d18d55f5bbc371a19261ea4bf35691a2c03558a41fd0ffa`,
+   started `2026-11-24T21:04:00Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Real-client 16.1 behavior remains unverified. Sources:
    Microsoft [MS-ASCON Elements](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascon/605bd946-0750-4d9b-b04c-8be28badfa8e),
    [MS-ASAIRS Appendix A](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asairs/fbbc1af9-5a71-4925-aca8-60a95339c722),
@@ -375,7 +375,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    text/html, common Office/OpenDocument formats, EPUB, RTF, and PDF, with
    configurable size/decompression limits and partial-index cases ([Stalwart
    attachment text extraction](https://www.stalw.art/docs/storage/text-extraction/)). A
-   Find now downloads and locally extracts `text/*`, JSON, XML (`+xml`),
+   Find now downloads and locally extracts `text/*`, JSON (including vendor
+   `+json` media types), XML (`+xml`),
    RFC 822 `message/rfc822` and `message/global` attachments (including decoded
    plain/HTML MIME bodies and embedded-message subjects), Outlook
    `application/vnd.ms-outlook` messages (subject, plain body, and HTML body),
@@ -386,8 +387,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    checks. RFC 822 and Outlook message decoding are capped at the same 2 MiB
    extracted-text limit; compressed Outlook RTF is not expanded. Mocked 16.1
    Find regressions exercise quoted-printable EML extraction through download
-   and exact proximity matching, plus exact subject matching against a real
-   OLE Outlook message fixture. PDF parsing failures and parser panics are
+   and exact proximity matching, exact subject matching against a real OLE
+   Outlook message fixture, and `application/problem+json` text extraction.
+   PDF parsing failures and parser panics are
    contained as non-matches.
    Archive entry count and cumulative selected XML expansion are bounded.
    EPUB XHTML chapters use the same archive-entry and expanded-XML limits; a
@@ -399,6 +401,10 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    homelab commit `1aff02a`, image
    `sha256:8b763e9e24545d2b8779f54f816ec792c0d758ccca38db9bb807626e80d05d33`,
    started `2026-11-24T20:54:20Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Outlook `.msg` extraction is deployed as
+   `deploy-2026-11-24-eas-find-outlook-msg-570285e`; homelab commit `25d23c4`,
+   image `sha256:b45a5d0cb91c6d317d18d55f5bbc371a19261ea4bf35691a2c03558a41fd0ffa`,
+   started `2026-11-24T21:04:00Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. EPUB
    extraction is deployed as `deploy-2026-11-24-eas-find-epub-55daf09`;
    homelab commit `97d913d`, image
