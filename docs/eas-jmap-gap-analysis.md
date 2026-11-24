@@ -42,7 +42,15 @@ Current prioritized work:
    EAS 16.0/16.1 occurrence deletes and subject/plain-text body/location edits
    now map through `InstanceId` and `recurrenceOverrides`; exclusions and
    those fields round-trip. Per-instance time/other field changes and Task
-   exceptions remain unsupported and fail closed.
+   exceptions remain unsupported and fail closed. Regression tests cover
+   location names and coordinates in override writes, reads, and Sync output;
+   the full suite passes (303 passed, 73 ignored), and Clippy with warnings
+   denied passes. Deployed as
+   `deploy-2026-11-24-eas-calendar-instance-location-fb4eb72`; homelab commit
+   `8e9e20d`. The forced Compose build produced image
+   `sha256:42a88cd789681e1743bd1c7f5368e87f61559a0072e8b74cae236236b5eeb277`.
+   The container started at `2026-11-24T08:02:34Z` with restart count zero;
+   `/healthz` returned `ok` and `/readyz` returned `ready`.
 3. **Real-client 16.1 certification and rollout.** Production remains pinned
    to a tagged 14.0 build. Forced-version protocol tests do not establish that
    iOS/Outlook negotiate or behave correctly against an advertised 16.1 build.
