@@ -571,9 +571,18 @@ fn register_expression_phrase(
 
 fn search_phrase_word(word: &str) -> Option<(String, String)> {
     let (property, value) = word.split_once(':')?;
-    if !["subject", "body", "text"]
-        .iter()
-        .any(|allowed| property.eq_ignore_ascii_case(allowed))
+    if ![
+        "subject",
+        "body",
+        "text",
+        "from",
+        "to",
+        "cc",
+        "bcc",
+        "participants",
+    ]
+    .iter()
+    .any(|allowed| property.eq_ignore_ascii_case(allowed))
         || !value.starts_with('"')
         || !value.ends_with('"')
         || value.len() < 4
@@ -1148,6 +1157,11 @@ fn condition(property: &str, value: &str) -> Result<Value, &'static str> {
     if value.starts_with('"') && value.chars().any(char::is_whitespace) {
         if let Some((phrase_property, phrase)) = search_phrase_word(&format!("{property}:{value}"))
         {
+            if phrase_property == "participants" {
+                return Ok(json!({"operator":"OR", "conditions":[
+                    {"from": phrase}, {"to": phrase}, {"cc": phrase}, {"bcc": phrase}
+                ]}));
+            }
             return Ok(json!({phrase_property: phrase}));
         }
         return Err("phrase search is unavailable");
@@ -1243,6 +1257,24 @@ mod tests {
                 PhraseMatch::All,
                 vec![("subject".to_owned(), "alpha beta".to_owned())]
             ))
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"from:"Alice Example""#),
+            Some((
+                PhraseMatch::All,
+                vec![("from".to_owned(), "Alice Example".to_owned())]
+            ))
+        );
+        assert_eq!(
+            to_filter(r#"from:"Alice Example""#).unwrap(),
+            json!({"from":"Alice Example"})
+        );
+        assert_eq!(
+            to_filter(r#"participants:"Alice Example""#).unwrap(),
+            json!({"operator":"OR", "conditions":[
+                {"from":"Alice Example"}, {"to":"Alice Example"},
+                {"cc":"Alice Example"}, {"bcc":"Alice Example"}
+            ]})
         );
         assert_eq!(
             phrases_for_postfilter(r#"subject:"alpha beta" AND isread:true"#),
