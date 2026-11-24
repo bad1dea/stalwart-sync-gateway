@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `9b61ba2` (2026-11-24)
+## Reconciled status for source `main` at `81b1409` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -116,6 +116,15 @@ Current prioritized work:
    `238b77e`, image
    `sha256:41d4d9c36a880e8a36533c89f77d387ba78502872ce033898e53557a4bc0e2b8`,
    started `2026-11-24T14:56:15Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. KQL `sent` date restrictions now filter from the JMAP
+   Email `sentAt` property, including UTC-day boundaries and mixed phrase
+   expressions; because JMAP has no equivalent `sentAt` query condition, Find
+   scans candidates in the selected mailbox and applies the exact local date
+   filter. Regression suite: 338 passed, 73 ignored; strict Clippy, formatting,
+   and diff checks passed. Deployed as
+   `deploy-2026-11-24-eas-kql-sent-date-81b1409`; homelab commit `b0367aa`,
+   image `sha256:b8ae02312614bb4c6ec41932d72ced10a18759a767932c235bc7f3c7e25648ee`,
+   started `2026-11-24T15:09:22Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. The standalone negated form
    `NOT subject:"..."` and unary-minus forms such as
    `-body:"..."` are exact-filtered over the scoped mailbox. Positive phrase
@@ -231,11 +240,12 @@ Current prioritized work:
    together; candidate filtering preserves the other restrictions, result
    order, totals, and range paging. An OR expression made only of positive
    phrase terms is exact-filtered across its alternatives. A phrase may also
-   be ORed with `isread`, `isflagged`, or `hasattachment(s)` boolean
-   restrictions. Other mixed OR terms and ambiguous repeated properties in
-   mixed explicit AND/OR expressions remain unsupported; negated phrases combined with unsupported
-   non-boolean predicates remain rejected because local evaluation cannot yet
-   preserve their Boolean meaning.
+   be ORed with `isread`, `isflagged`, `hasattachment(s)`, importance, received,
+   sent, and size restrictions. Other mixed OR terms that lack a safe candidate
+   filter or exact local matcher, and ambiguous repeated properties in mixed
+   explicit AND/OR expressions, remain unsupported. Negated phrases combined
+   with predicates outside the supported boolean, importance, received, sent,
+   and size set remain rejected to preserve their Boolean meaning.
    A single positive `body:"multiword phrase"`
    or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
    body and text scans fetch message bodies and reject a truncated body rather
