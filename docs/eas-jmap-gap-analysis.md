@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `d725eae` (2026-11-24)
+## Reconciled status for source `main` at `2cc3025` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -24,6 +24,21 @@ Current prioritized work:
    `2e8cf77`, image
    `sha256:b95951125b4ba0a0209ff365cca0c006ec57ac3f696c10d54653f1b2776903e0`,
    started `2026-11-24T13:24:32Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Implicitly grouped same-property phrases can be combined
+   with supported boolean restrictions and are locally evaluated with KQL's
+   OR-within-property, AND-between-property semantics. Deployed as
+   `deploy-2026-11-24-eas-kql-implicit-phrase-groups-15f21fb`; homelab commit
+   `fc7db64`, image
+   `sha256:3eec3a90858d790a89b559e2ab2aded5932dfd31b476b27c510b29bf63ee87a5`,
+   started `2026-11-24T13:31:15Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. KQL `WORDS(...)` can be ANDed with an exact phrase and
+   retain its JMAP candidate restriction. Positive phrase expressions retain
+   safe JMAP candidates while exact local phrase checks preserve result
+   semantics. Deployed as
+   `deploy-2026-11-24-eas-kql-safe-phrase-candidates-2cc3025`; homelab commit
+   `4c6baf8`, image
+   `sha256:004107e934579c29c2627e8ebf1fb726be5200f24f572d2c272319386f0a4c39`,
+   started `2026-11-24T13:37:12Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
    formatting, and diff checks passed. The standalone negated form
    `NOT subject:"..."` and unary-minus forms such as
@@ -39,9 +54,10 @@ Current prioritized work:
    unary-minus and explicit `NOT` boolean alternatives. Flat explicit
    AND/OR expressions over phrases and supported boolean restrictions honor
    AND precedence through exact local evaluation, including explicitly
-   parenthesized groups and implicit groups around explicit operators when each
-   supported property occurs once. Repeated-property implicit grouping and
-   unsupported qualifiers remain rejected. Regression coverage checks read,
+   parenthesized groups and implicit groups around explicit operators when
+   supported properties occur once. Repeated properties in mixed explicit
+   AND/OR expressions and unsupported qualifiers remain rejected. Regression
+   coverage checks read,
    flagged, multiple boolean branches, and multiple phrase branches while
    excluding reversed phrase candidates. Deployed as
    `deploy-2026-11-24-eas-kql-negated-bool-or-81fdc6c`; homelab commit
@@ -134,10 +150,10 @@ Current prioritized work:
    order, totals, and range paging. An OR expression made only of positive
    phrase terms is exact-filtered across its alternatives. A phrase may also
    be ORed with `isread`, `isflagged`, or `hasattachment(s)` boolean
-   restrictions. Other mixed OR terms, implicit repeated-property groups that
-   combine phrases with other restrictions, and negated phrases combined with
-   non-phrase predicates remain rejected because local evaluation cannot yet
-   preserve their Boolean meaning.
+   restrictions. Other mixed OR terms, repeated properties in mixed explicit
+   AND/OR expressions, and negated phrases combined with non-phrase predicates
+   remain rejected because local evaluation cannot yet preserve their Boolean
+   meaning.
    A single positive `body:"multiword phrase"`
    or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
    body and text scans fetch message bodies and reject a truncated body rather
