@@ -107,16 +107,48 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         .enumerate()
         .any(|(index, token)| match token {
             Token::Word(_) | Token::And => false,
-            Token::Not => !matches!(tokens.get(index + 1), Some(Token::Word(word)) if boolean_search_term(word).is_some()),
+            Token::Not => !matches!(tokens.get(index + 1), Some(Token::Word(word)) if boolean_search_term(word).is_some() || search_phrase_word(word).is_some()),
             _ => true,
         })
     {
+        return None;
+    }
+    let has_negated_phrase = tokens.iter().enumerate().any(|(index, token)| {
+        matches!(token, Token::Not)
+            && matches!(tokens.get(index + 1), Some(Token::Word(word)) if search_phrase_word(word).is_some())
+    }) || tokens.iter().any(|token| {
+        matches!(token, Token::Word(word) if word.strip_prefix('-').is_some_and(|word| search_phrase_word(word).is_some()))
+    });
+    if has_negated_phrase
+        && tokens.iter().enumerate().any(|(index, token)| {
+            matches!(token, Token::Word(word) if search_phrase_word(word.strip_prefix('+').or_else(|| word.strip_prefix('-')).unwrap_or(word)).is_none())
+                && !(index > 0 && tokens[index - 1] == Token::Not)
+        })
+    {
+        // The candidate query is broadened to the whole mailbox for negated
+        // phrases. Keep this form phrase-only until every other KQL predicate
+        // can also be reproduced locally.
         return None;
     }
     let mut phrases = Vec::new();
     let mut phrase_positions = std::collections::HashMap::<String, usize>::new();
     for (index, token) in tokens.iter().enumerate() {
         let Token::Word(word) = token else { continue };
+        if index > 0 && tokens[index - 1] == Token::Not {
+            if let Some((property, value)) = search_phrase_word(word) {
+                phrases.push((format!("$not${property}"), value));
+                continue;
+            }
+            if boolean_search_term(word).is_some() {
+                continue;
+            }
+        }
+        if let Some(negative) = word.strip_prefix('-') {
+            if let Some((property, value)) = search_phrase_word(negative) {
+                phrases.push((format!("$not${property}"), value));
+                continue;
+            }
+        }
         let qualified_word = word.strip_prefix('+').unwrap_or(word);
         if let Some((property, value)) = search_phrase_word(qualified_word) {
             if let Some(previous) = phrase_positions.get(&property).copied() {
@@ -158,7 +190,12 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
             if word
                 .split_once(':')
                 .is_some_and(|(property, _)| property.eq_ignore_ascii_case(phrase_property))
-                && search_phrase_word(word.strip_prefix('+').unwrap_or(word)).is_none()
+                && search_phrase_word(
+                    word.strip_prefix('+')
+                        .or_else(|| word.strip_prefix('-'))
+                        .unwrap_or(word),
+                )
+                .is_none()
             {
                 return None;
             }
@@ -1052,11 +1089,20 @@ mod tests {
         for query in [
             r#"subject:"alpha beta" subject:"gamma delta""#,
             r#"subject:"alpha beta" body:"gamma delta" OR isread:true"#,
-            r#"subject:"alpha beta" AND NOT body:"gamma delta""#,
         ] {
             assert!(phrases_for_postfilter(query).is_none(), "{query}");
             assert!(to_filter(query).is_err(), "{query}");
         }
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" AND NOT body:"gamma delta""#),
+            Some((
+                PhraseMatch::All,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$not$body".to_owned(), "gamma delta".to_owned())
+                ]
+            ))
+        );
         assert_eq!(
             phrases_for_postfilter(r#"subject:"alpha beta" OR body:"gamma delta""#),
             Some((
