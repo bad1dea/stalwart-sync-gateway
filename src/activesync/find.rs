@@ -493,14 +493,40 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
         "text/plain" => String::from_utf8_lossy(bytes).into_owned(),
         "text/html" => super::strip_html_tags(&String::from_utf8_lossy(bytes).replace('>', "> ")),
         "text/rtf" | "application/rtf" => super::rtf_to_plain_text(&String::from_utf8_lossy(bytes)),
-        _ if media_type.starts_with("text/")
-            || matches!(media_type.as_str(), "application/json" | "application/xml") =>
-        {
+        "application/xml" | "text/xml" => extract_xml_text(bytes)?,
+        _ if media_type.starts_with("text/") || media_type == "application/json" => {
             String::from_utf8_lossy(bytes).into_owned()
         }
         _ => return None,
     };
     Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+fn extract_xml_text(bytes: &[u8]) -> Option<String> {
+    use quick_xml::events::Event;
+
+    let mut reader = quick_xml::Reader::from_reader(bytes);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut text = String::new();
+    let mut event_count = 0usize;
+    loop {
+        let event = reader.read_event_into(&mut buffer).ok()?;
+        event_count += 1;
+        if event_count > 250_000 {
+            return None;
+        }
+        match event {
+            Event::Start(_) | Event::End(_) | Event::Empty(_) => text.push(' '),
+            Event::Text(value) => text.push_str(&value.unescape().ok()?),
+            Event::CData(value) => text.push_str(&reader.decoder().decode(value.as_ref()).ok()?),
+            Event::DocType(_) => return None,
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Some(text)
 }
 
 pub(super) fn matching_principals(
@@ -2089,6 +2115,17 @@ mod tests {
         );
         assert_eq!(
             extract_find_attachment_text("application/json", b"alpha beta"),
+            Some("alpha beta".to_owned())
+        );
+        assert_eq!(
+            extract_find_attachment_text(
+                "application/xml",
+                b"<root><first>alpha</first><second>beta &amp; gamma</second></root>",
+            ),
+            Some("alpha beta & gamma".to_owned())
+        );
+        assert_eq!(
+            extract_find_attachment_text("text/xml", b"<root><![CDATA[alpha beta]]></root>",),
             Some("alpha beta".to_owned())
         );
         assert_eq!(
