@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `0b5503d` (2026-11-24)
+## Reconciled status for source `main` at `c960f05` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -20,8 +20,10 @@ Current prioritized work:
    now maps to the standard `Importance` header filter; invalid values and
    ordered/equality comparisons are rejected because JMAP header matching is
    text based. Mailbox Find also accepts `kind:email` as already satisfied by
-   its Email-only query; other kinds remain unsupported in this scope. Extend
-   coverage only where the backend preserves EAS meaning.
+   its Email-only query; other kinds remain unsupported in this scope.
+   Received-date restrictions also support `tomorrow`, `last week`, `next
+   month`, and the `past month` alias; relative weeks use Monday boundaries in
+   UTC. Extend coverage only where the backend preserves EAS meaning.
 2. **Recurring calendar events.** The old 0.16.19 probe found JMAP recurrence
    unsupported. A direct create/read probe against the available Stalwart
    0.16.27 sandbox still rejected `recurrenceRules`; this remains blocked by the
@@ -64,6 +66,21 @@ homelab commit `a9816d0`; runtime image
 started at `2026-11-24T05:11:06Z` with restart count zero. Mesh `/healthz`
 returned `ok` and `/readyz` returned `ready`. Production continues to
 advertise EAS 14.0.
+
+Also completed (`c960f05`): **KQL relative received dates**. In addition to
+the existing today/yesterday/current-period support, the parser now handles
+tomorrow, last week, next month, and the Exchange AQS `past month` term.
+Relative week boundaries are Monday-based and relative date filters use UTC
+because the request does not provide a client time zone. Regression tests use
+a fixed date to cover all added ranges and their inclusive-day/exclusive-end
+semantics. Full suite: 278 passed, 73 ignored; clippy with warnings denied,
+formatting, and diff checks pass. Deployed as
+`deploy-2026-11-24-eas-kql-relative-dates-c960f05`; homelab commit `321188b`.
+Compose built image
+`sha256:172c3bfb43aaf613377bbc66f29c037d52c0fc7dbd069ef48c50f11486f3c50a`.
+The replacement started at `2026-11-24T05:17:50Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
+continues to advertise EAS 14.0.
 
 Audit corrections from the current source: mail Sync Add creates idempotent
 drafts and non-draft Email items with attachment/MIME support;
