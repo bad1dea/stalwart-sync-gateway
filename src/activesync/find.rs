@@ -496,6 +496,7 @@ fn is_extractable_attachment_type(content_type: &str) -> bool {
                 | "application/xml"
                 | "application/pdf"
                 | "application/vnd.ms-outlook"
+                | "application/vnd.ms-excel"
                 | "message/rfc822"
                 | "message/global"
         )
@@ -547,6 +548,12 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
             // non-extractable rather than failing the whole Find request.
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 extract_bounded_pdf_text(bytes)
+            }))
+            .ok()??
+        }
+        "application/vnd.ms-excel" => {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                extract_legacy_xls_text(bytes)
             }))
             .ok()??
         }
@@ -839,6 +846,34 @@ fn extract_bounded_pdf_text(bytes: &[u8]) -> Option<String> {
     };
     pdf_extract::output_doc(&document, &mut output).ok()?;
     Some(output.text)
+}
+
+fn extract_legacy_xls_text(bytes: &[u8]) -> Option<String> {
+    use calamine::{Data, Reader, Xls};
+
+    let mut workbook = Xls::new(std::io::Cursor::new(bytes)).ok()?;
+    let sheet_names = workbook.sheet_names();
+    if sheet_names.len() > 256 {
+        return None;
+    }
+    let mut output = String::new();
+    for sheet in sheet_names {
+        let range = workbook.worksheet_range(&sheet).ok()?;
+        for (_, _, cell) in range.used_cells() {
+            let value = match cell {
+                Data::String(value) | Data::DateTimeIso(value) | Data::DurationIso(value) => {
+                    value.clone()
+                }
+                Data::Int(value) => value.to_string(),
+                Data::Float(value) => value.to_string(),
+                Data::Bool(value) => value.to_string(),
+                Data::DateTime(value) => value.to_string(),
+                Data::Error(_) | Data::Empty => continue,
+            };
+            append_find_text(&mut output, &value)?;
+        }
+    }
+    Some(output)
 }
 
 pub(super) fn matching_principals(
@@ -2748,6 +2783,37 @@ mod tests {
 
         let pdf = test_pdf_with_text(&"x".repeat(limit + 1));
         assert!(extract_bounded_pdf_text(&pdf).is_none());
+    }
+
+    #[test]
+    fn legacy_xls_find_is_bounded_against_large_declared_ranges() {
+        assert!(is_extractable_attachment_type("application/vnd.ms-excel"));
+        let fixture = include_bytes!("../../tests/fixtures/legacy-xls.xls");
+        assert_eq!(
+            extract_find_attachment_text("application/vnd.ms-excel", fixture),
+            Some("aa bb aa bb 88 bb".to_owned())
+        );
+
+        // XLS Dimensions records can claim the entire 65,536 by 256 cell
+        // grid while containing only a few values. Calamine would otherwise
+        // reserve a dense range from that declaration before reading cells.
+        let mut expanded = fixture.to_vec();
+        let mut dimensions_records = 0;
+        for index in 0..expanded.len().saturating_sub(18) {
+            if expanded[index..index + 4] == [0x00, 0x02, 0x0e, 0x00] {
+                expanded[index + 8..index + 12].copy_from_slice(&65_536u32.to_le_bytes());
+                expanded[index + 14..index + 16].copy_from_slice(&256u16.to_le_bytes());
+                dimensions_records += 1;
+            }
+        }
+        assert!(
+            dimensions_records > 0,
+            "fixture has worksheet Dimensions records"
+        );
+        assert_eq!(
+            extract_find_attachment_text("application/vnd.ms-excel", &expanded),
+            Some("aa bb aa bb 88 bb".to_owned())
+        );
     }
 
     fn test_pdf_with_text(text: &str) -> Vec<u8> {

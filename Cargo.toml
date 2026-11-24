@@ -11,6 +11,7 @@ async-trait = "0.1"
 axum = { version = "0.7", features = ["macros"] }
 base64 = "0.22"
 bytes = "1"
+calamine = { path = "vendor/calamine", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 chrono-tz = "0.10"
 encoding_rs = "0.8"

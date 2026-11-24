@@ -135,8 +135,10 @@ Text, JSON, XML,
 text-bearing PDF, EPUB XHTML, OOXML Word/Excel/PowerPoint (including
 macro-enabled variants), and OpenDocument Text/Spreadsheet/Presentation
 attachments are extracted for exact text/proximity matching up to
-2 MiB, with bounded archive expansion. Legacy binary Office formats, scanned-PDF
-OCR, and larger attachment content remain unsupported. These extraction changes
+2 MiB, with bounded archive expansion. Legacy `.xls` workbooks are also parsed
+with a 250,000-cell dense-range limit to prevent oversized worksheet coordinates
+from causing large allocations. Legacy binary Word and PowerPoint formats,
+scanned-PDF OCR, and larger attachment content remain unsupported. These extraction changes
 are source-tested and deployed; real-client validation remains open. Find is
 protocol-version gated to 16.1 and is not advertised while production negotiates
 only 14.0. Mailbox results include the EAS `Importance` response property in

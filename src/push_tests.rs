@@ -13969,6 +13969,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     let env = start_env(Opts::default()).await;
     let eml = b"From: sender@example.test\r\nSubject: message attachment\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nnovember=20oscar in EML".to_vec();
     let outlook_msg = include_bytes!("../tests/fixtures/outlook-ascii.msg").to_vec();
+    let legacy_xls = include_bytes!("../tests/fixtures/legacy-xls.xls").to_vec();
     let pdf_stream = "BT /F1 12 Tf 72 720 Td (charlie delta in PDF) Tj ET";
     let pdf_objects = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
@@ -14036,6 +14037,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     env.mock.add_mail("inbox", "docx-attachment");
     env.mock.add_mail("inbox", "epub-attachment");
     env.mock.add_mail("inbox", "xlsm-attachment");
+    env.mock.add_mail("inbox", "xls-attachment");
     env.mock.add_mail("inbox", "eml-attachment");
     env.mock.add_mail("inbox", "outlook-msg-attachment");
     env.mock.mail_bodies.lock().unwrap().insert(
@@ -14106,6 +14108,17 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         })],
     );
     env.mock.mail_bodies.lock().unwrap().insert(
+        "xls-attachment".to_owned(),
+        ("unrelated body".to_owned(), false),
+    );
+    env.mock.mail_attachments.lock().unwrap().insert(
+        "xls-attachment".to_owned(),
+        vec![serde_json::json!({
+            "blobId":"xls-blob", "name":"legacy.xls",
+            "type":"application/vnd.ms-excel", "size":legacy_xls.len()
+        })],
+    );
+    env.mock.mail_bodies.lock().unwrap().insert(
         "eml-attachment".to_owned(),
         ("unrelated body".to_owned(), false),
     );
@@ -14153,6 +14166,10 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
             "application/vnd.ms-excel.sheet.macroEnabled.12".to_owned(),
             xlsm,
         ),
+    );
+    env.mock.download_blobs.lock().unwrap().insert(
+        "xls-blob".to_owned(),
+        ("application/vnd.ms-excel".to_owned(), legacy_xls),
     );
     env.mock
         .download_blobs
@@ -14269,6 +14286,25 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     assert_eq!(
         eas::find_all_text_after(&doc, air::SERVER_ID),
         vec!["xlsm-attachment"]
+    );
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "30000000-0000-4000-8000-000000000093",
+            "aa NEAR(0) bb",
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["xls-attachment"]
     );
 
     let response = env
