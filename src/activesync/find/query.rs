@@ -136,6 +136,12 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         let Token::Word(word) = token else { continue };
         if index > 0 && tokens[index - 1] == Token::Not {
             if let Some((property, value)) = search_phrase_word(word) {
+                if let Some(previous) = phrase_positions.get(&property).copied() {
+                    if !tokens[previous + 1..index].contains(&Token::And) {
+                        return None;
+                    }
+                }
+                phrase_positions.insert(property.clone(), index);
                 phrases.push((format!("$not${property}"), value));
                 continue;
             }
@@ -145,6 +151,12 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         }
         if let Some(negative) = word.strip_prefix('-') {
             if let Some((property, value)) = search_phrase_word(negative) {
+                if let Some(previous) = phrase_positions.get(&property).copied() {
+                    if !tokens[previous + 1..index].contains(&Token::And) {
+                        return None;
+                    }
+                }
+                phrase_positions.insert(property.clone(), index);
                 phrases.push((format!("$not${property}"), value));
                 continue;
             }
@@ -1088,6 +1100,7 @@ mod tests {
         );
         for query in [
             r#"subject:"alpha beta" subject:"gamma delta""#,
+            r#"subject:"alpha beta" -subject:"gamma delta""#,
             r#"subject:"alpha beta" body:"gamma delta" OR isread:true"#,
         ] {
             assert!(phrases_for_postfilter(query).is_none(), "{query}");
