@@ -6,7 +6,7 @@ cited below is transcribed directly from [MS-ASWBXML] v20250520 (fetched as a PD
 from `officeprotocoldoc.z19.web.core.windows.net`), section 2.1.2.1's per-codepage
 tables — the same primary source used to scaffold the corresponding `pub mod`
 blocks in `src/wbxml/eas.rs`. Current implementation status is read fresh from that
-file and `src/activesync.rs` at commit `2f9cdbc`, not carried over from memory.
+file and `src/activesync.rs` at commit `7e5bec5`, not carried over from memory.
 
 **Verdict key:** ✅ Implemented · 🟡 Possible via JMAP, not built · ⛔ No JMAP
 equivalent · ❓ Needs live verification.
@@ -39,11 +39,11 @@ inferred.
 | Categories / Category | 0x0E-0x0F | All | ✅ | JSCalendar `categories` | Values round-trip; clear and omission are distinguished on client edits. |
 | DtStamp | 0x11 | All | ✅ | `CalendarEvent`'s `updated` or the JMAP response's own timestamp | |
 | EndTime | 0x12 | All | ✅ | `start` + `duration`, or explicit `end` (jscalendarbis) | |
-| Exception / Exceptions / Deleted / ExceptionStartTime | 0x13-0x16 | All (ExceptionStartTime capped at 14.1, dropped 16.0+ with no listed replacement) | ⛔ | JSCalendar `recurrenceOverrides` | EAS exception patch semantics are not yet mapped, and Stalwart override behavior has not been verified. Non-empty exception input is rejected instead of dropped. |
+| Exception / Exceptions / Deleted / ExceptionStartTime | 0x13-0x16 | All (16.0+ uses AirSyncBase:InstanceId for occurrence identity) | ✅ excluded occurrences | JSCalendar `recurrenceOverrides` | Deleted occurrences map to `{"excluded":true}` and round-trip with the version-appropriate identifier; per-instance field patches still fail closed. |
 | Location | 0x17 | 2.5-14.1 (16.0+ uses AirSyncBase:Location, codepage 17) | ✅ | JSCalendar `locations` (map; `locations["1"].name` for the simple case) | Gateway only emits the codepage-4 form — fine for the versions it advertises (`12.0,12.1,14.0` — all within the 2.5-14.1 window), but would need the AirSyncBase form too if 16.x is ever re-enabled. |
 | MeetingStatus | 0x18 | All | ✅ derived | Participant roles, authenticated user's status, and cancellation state | Emits appointment/meeting/received/cancelled states from the JSCalendar participants and event state. |
 | OrganizerEmail / OrganizerName | 0x19-0x1A | All | ✅ two-way | JSCalendar `participants` entry with role `owner` | Organizer is represented by the owner participant; attendee lists exclude the organizer. |
-| **Recurrence** (0x1B, container) with **Type** (0x1C), **Until** (0x1D), **Occurrences** (0x1E), **Interval** (0x1F), **DayOfWeek** (0x20), **DayOfMonth** (0x21), **WeekOfMonth** (0x22), **MonthOfYear** (0x23) | 0x1B-0x23 | All | ✅ Common rules implemented; exceptions unsupported | Stalwart singular JSCalendar `recurrenceRule` | Maps daily, weekly, monthly, nth-weekday, and yearly EAS rules to the server's singular `recurrenceRule`. August's plural `recurrenceRules` probe was the wrong property name; localhost-only Stalwart 0.16.27 and 1.2.0 create/get probes verified the singular property. Per-instance exceptions (`recurrenceOverrides`) and non-representable patterns are rejected. Implementation: `src/jmap/calendar_recurrence.rs`, EAS parser/writer, JMAP create/update and round-trip verification. |
+| **Recurrence** (0x1B, container) with **Type** (0x1C), **Until** (0x1D), **Occurrences** (0x1E), **Interval** (0x1F), **DayOfWeek** (0x20), **DayOfMonth** (0x21), **WeekOfMonth** (0x22), **MonthOfYear** (0x23) | 0x1B-0x23 | All | ✅ Common rules and excluded occurrences | Stalwart singular JSCalendar `recurrenceRule` plus `recurrenceOverrides` | Maps daily, weekly, monthly, nth-weekday, and yearly rules both ways. EAS occurrence deletes map to JSCalendar exclusions. Per-instance field changes, Task exceptions, and non-representable patterns remain unsupported. |
 | Reminder | 0x24 | All | ✅ | JSCalendar `alerts` | Maps the representable default-relative alert to EAS minutes; unsupported multi-alert shapes fail closed. |
 | Sensitivity | 0x25 | All | ✅ | JSCalendar `privacy` (`public`/`private`/`secret`) | |
 | Subject | 0x26 | All | ✅ | JSCalendar `title` | |
@@ -102,7 +102,10 @@ current known-good subset (`DATE_RECEIVED`, `DISPLAY_TO`, `IMPORTANCE`,
 codepage 17) is considered materially complete for the fields this gateway actually
 uses, verified against real device behavior rather than spec-reading alone — a
 different, stronger kind of confidence than the Calendar/Contacts fields above ever
-had before this pass. Codepage 22 (Email2) has one field actually wired up now:
+had before this pass. AirSyncBase `InstanceId` (0x2D) is additionally parsed and
+written for recurrence exclusions as required by the 16.0/16.1 spec; this mapping
+has regression coverage but still needs real-client verification. Codepage 22
+(Email2) has one field actually wired up now:
 `CONVERSATION_ID` (0x09) is sent for every message with a JMAP `threadId`, as a
 deterministic fixed-16-byte value (see the gap-analysis doc's conversation-threading
 row for the full story, including why a redo was needed and what's still unverified
@@ -156,7 +159,8 @@ The codepage's recurrence-field shape (`Type`/`Start`/`Until`/`Occurrences`/
 `recurrenceRule` conversion (`deploy-2026-11-24-eas-task-recurrence-a28032b`).
 Local tests cover WBXML parse/write and JMAP Task-object conversion; a
 Task-specific Stalwart create/get and a real-client sync remain unverified.
-Per-instance recurrence exceptions and non-Gregorian patterns are unsupported.
+Per-instance event exclusions are supported. Per-instance field changes, Task
+exceptions, and non-Gregorian patterns remain unsupported.
 
 ## Notes (MS-ASNOTE, WBXML codepage 23)
 
