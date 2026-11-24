@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `8955793` (2026-11-23)
+## Reconciled status for source `main` at `ef6f5e9` (2026-11-23)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -250,6 +250,22 @@ warnings denied, formatting, and diff checks pass. Deployed as
 Compose produced image
 `sha256:bee5f6682599dff81913383e2bf3b21981d05742af656e42b3ae87e39559d369`.
 The replacement started at `2026-11-24T04:17:59Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
+continues to advertise EAS 14.0.
+
+Also completed (`ef6f5e9`): **EAS Task reminders**. `ReminderSet` and the
+absolute UTC `ReminderTime` now map to JSCalendar display alerts. Updates retain
+non-display alerts, clear the prior acknowledgement when changing the time,
+and reject malformed input, multiple display alerts, or tasks inheriting
+calendar-default alerts because those effective alerts cannot be safely
+rewritten without expanding the calendar defaults. Regression coverage checks
+WBXML validation, UTC conversion, alert preservation/clear, task Sync output,
+and a client Change persisted through `CalendarEvent/set`. Full suite: 274
+passed, 73 ignored; clippy with warnings denied, formatting, and diff checks
+pass. Deployed as `deploy-2026-11-23-eas-task-reminder-ef6f5e9`; homelab
+commit `6abddce`. Compose produced image
+`sha256:07ad3f284ec192df4d043830a09c41ce3e09603dbaf1adec68ccd1c694f799e7`.
+The replacement started at `2026-11-24T04:49:27Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
 continues to advertise EAS 14.0.
 
