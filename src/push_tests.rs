@@ -15769,6 +15769,7 @@ async fn task_add_recurrence_round_trips_through_sync_and_jmap() {
     }
     let response = env
         .req("Sync", "ipad")
+        .header("MS-ASProtocolVersion", "16.1")
         .body(wbxml::encode_document(&b.finish()))
         .send()
         .await
@@ -15819,6 +15820,7 @@ async fn task_add_recurrence_round_trips_through_sync_and_jmap() {
     }
     let response = env
         .req("Sync", "ipad")
+        .header("MS-ASProtocolVersion", "16.1")
         .body(wbxml::encode_document(&b.finish()))
         .send()
         .await
