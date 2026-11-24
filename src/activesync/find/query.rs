@@ -163,16 +163,24 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
     }) || tokens.iter().any(|token| {
         matches!(token, Token::Word(word) if word.strip_prefix('-').is_some_and(|word| search_phrase_word(word).is_some()))
     });
-    if has_negated_phrase
-        && tokens.iter().enumerate().any(|(index, token)| {
-            matches!(token, Token::Word(word) if search_phrase_word(word.strip_prefix('+').or_else(|| word.strip_prefix('-')).unwrap_or(word)).is_none())
-                && !(index > 0 && tokens[index - 1] == Token::Not)
-        })
-    {
-        // The candidate query is broadened to the whole mailbox for negated
-        // phrases. Keep this form phrase-only until every other KQL predicate
-        // can also be reproduced locally.
-        return None;
+    if has_negated_phrase {
+        for (index, token) in tokens.iter().enumerate() {
+            let Token::Word(word) = token else { continue };
+            let phrase = search_phrase_word(
+                word.strip_prefix('+')
+                    .or_else(|| word.strip_prefix('-'))
+                    .unwrap_or(word),
+            );
+            let boolean = boolean_search_term(word)
+                .or_else(|| word.strip_prefix('-').and_then(boolean_search_term));
+            let negated_boolean =
+                index > 0 && tokens[index - 1] == Token::Not && boolean_search_term(word).is_some();
+            if phrase.is_none() && boolean.is_none() && !negated_boolean {
+                // The candidate query is broadened to the whole mailbox for
+                // negated phrases. Accept only predicates reproduced locally.
+                return None;
+            }
+        }
     }
     let mut phrases = Vec::new();
     let mut phrase_positions = std::collections::HashMap::<String, usize>::new();
@@ -189,7 +197,8 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                 phrases.push((format!("$not${property}"), value));
                 continue;
             }
-            if boolean_search_term(word).is_some() {
+            if let Some((property, value)) = boolean_search_term(word) {
+                phrases.push((format!("$not{property}"), value));
                 continue;
             }
         }
@@ -225,8 +234,14 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                 return None;
             }
             if boolean_search_term(negative).is_some() {
+                let (property, value) = boolean_search_term(negative)?;
+                phrases.push((format!("$not{property}"), value));
                 continue;
             }
+        }
+        if let Some((property, value)) = boolean_search_term(word) {
+            phrases.push((property, value));
+            continue;
         }
         if let Some((property, _)) = word.split_once(':') {
             if phrases
@@ -1163,7 +1178,10 @@ mod tests {
             phrases_for_postfilter(r#"subject:"alpha beta" AND isread:true"#),
             Some((
                 PhraseMatch::All,
-                vec![("subject".to_owned(), "alpha beta".to_owned())]
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$isread".to_owned(), "true".to_owned())
+                ]
             ))
         );
         assert_eq!(
@@ -1190,7 +1208,10 @@ mod tests {
             phrases_for_postfilter(r#"subject:"alpha beta" AND NOT isread:true"#),
             Some((
                 PhraseMatch::All,
-                vec![("subject".to_owned(), "alpha beta".to_owned())]
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$not$isread".to_owned(), "true".to_owned())
+                ]
             ))
         );
         assert_eq!(
@@ -1204,7 +1225,10 @@ mod tests {
             phrases_for_postfilter(r#"subject:"alpha beta" AND -isflagged:true"#),
             Some((
                 PhraseMatch::All,
-                vec![("subject".to_owned(), "alpha beta".to_owned())]
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$not$isflagged".to_owned(), "true".to_owned())
+                ]
             ))
         );
         assert_eq!(
@@ -1361,7 +1385,10 @@ mod tests {
             phrases_for_postfilter(r#"body:"alpha beta" AND isread:true"#),
             Some((
                 PhraseMatch::All,
-                vec![("body".to_owned(), "alpha beta".to_owned())]
+                vec![
+                    ("body".to_owned(), "alpha beta".to_owned()),
+                    ("$isread".to_owned(), "true".to_owned())
+                ]
             ))
         );
         assert_eq!(
@@ -1487,7 +1514,16 @@ mod tests {
                 {"subject":"alpha beta"}, {"body":"gamma delta"}
             ]})
         );
-        assert!(phrases_for_postfilter(r#"NOT subject:"alpha beta" AND isread:true"#).is_none());
+        assert_eq!(
+            phrases_for_postfilter(r#"NOT subject:"alpha beta" AND isread:true"#),
+            Some((
+                PhraseMatch::All,
+                vec![
+                    ("$not$subject".to_owned(), "alpha beta".to_owned()),
+                    ("$isread".to_owned(), "true".to_owned())
+                ]
+            ))
+        );
     }
 
     #[test]

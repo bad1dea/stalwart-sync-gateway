@@ -545,10 +545,25 @@ fn email_matches_phrases(
     match phrase_match {
         query::PhraseMatch::All => {
             for (property, phrase) in phrases {
-                let (negated, property) = property
-                    .strip_prefix("$not$")
-                    .map_or((false, property.as_str()), |property| (true, property));
-                let matched = email_matches_phrase(subject, body, property, phrase)?;
+                let negated = property.starts_with("$not$");
+                let property = property.strip_prefix("$not$").unwrap_or(property);
+                let boolean_property = match property {
+                    "isread" | "$isread" => Some("$isread"),
+                    "isflagged" | "$isflagged" => Some("$isflagged"),
+                    "hasattachment" | "$hasattachment" => Some("$hasattachment"),
+                    _ => None,
+                };
+                let boolean_match = boolean_property.and_then(|property| match property {
+                    "$isread" => is_read,
+                    "$isflagged" => is_flagged,
+                    "$hasattachment" => has_attachment,
+                    _ => None,
+                });
+                let matched = if boolean_property.is_some() {
+                    boolean_match.is_some_and(|value| value == (phrase == "true"))
+                } else {
+                    email_matches_phrase(subject, body, property, phrase)?
+                };
                 if matched == negated {
                     return Ok(false);
                 }
