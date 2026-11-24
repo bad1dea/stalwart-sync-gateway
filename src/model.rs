@@ -369,6 +369,8 @@ pub struct CalendarEventException {
     pub all_day: Option<bool>,
     pub busy_status: Option<u8>,
     pub categories: Option<Vec<String>>,
+    /// None inherits the series attendee list; Some(empty) explicitly clears it.
+    pub attendees: Option<Vec<Attendee>>,
     /// None inherits the series reminder; Some(None) removes it for this
     /// occurrence; Some(Some(minutes)) sets an occurrence-specific reminder.
     pub reminder_minutes: Option<Option<u32>>,

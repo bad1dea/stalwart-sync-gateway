@@ -5843,7 +5843,8 @@ fn calendar_instance_change_supported(fields: &wbxml::eas::CalendarFields) -> bo
         || fields.all_day_event.is_some()
         || fields.busy_status.is_some()
         || fields.categories.is_some()
-        || fields.reminder.is_some())
+        || fields.reminder.is_some()
+        || fields.attendees_present)
         && !fields.unsupported_location
         && !fields.unsupported_busy_status
         && !fields.unsupported_sensitivity
@@ -5857,8 +5858,6 @@ fn calendar_instance_change_supported(fields: &wbxml::eas::CalendarFields) -> bo
         && !fields.unsupported_client_uid
         && !fields.uid_present
         && !fields.unsupported_response_type
-        && fields.attendees.is_empty()
-        && !fields.attendees_present
         && !fields.unsupported_attendees
         && !fields.unsupported_body
         && fields.body_type.is_none_or(|body_type| body_type == 1)
@@ -6441,6 +6440,7 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
         exception.all_day.hash(&mut hasher);
         exception.busy_status.hash(&mut hasher);
         exception.categories.hash(&mut hasher);
+        exception.attendees.hash(&mut hasher);
         exception.reminder_minutes.hash(&mut hasher);
         if let Some(description) = &exception.description {
             description.body_type.eas_value().hash(&mut hasher);
@@ -6642,6 +6642,31 @@ fn write_calendar_fields(
                     builder.start(cal::CATEGORIES);
                     for category in categories {
                         builder.leaf(cal::CATEGORY, category.clone());
+                    }
+                    builder.end();
+                }
+                if let Some(attendees) = &exception.attendees {
+                    builder.start(cal::ATTENDEES);
+                    for attendee in attendees {
+                        builder.start(cal::ATTENDEE);
+                        builder.leaf(cal::ATTENDEE_EMAIL, attendee.email.clone());
+                        if let Some(name) = &attendee.name {
+                            builder.leaf(cal::ATTENDEE_NAME, name.clone());
+                        }
+                        builder.leaf(
+                            cal::ATTENDEE_STATUS,
+                            match attendee.participation_status.as_deref() {
+                                Some("accepted") => "3",
+                                Some("declined") => "4",
+                                Some("tentative") => "2",
+                                _ => "5",
+                            },
+                        );
+                        builder.leaf(
+                            cal::ATTENDEE_TYPE,
+                            if attendee.optional { "2" } else { "1" },
+                        );
+                        builder.end();
                     }
                     builder.end();
                 }
@@ -8469,6 +8494,12 @@ mod tests {
                 busy_status: Some(1),
                 reminder_minutes: Some(Some(15)),
                 categories: Some(vec!["Work".to_owned()]),
+                attendees: Some(vec![crate::model::Attendee {
+                    email: "guest@example.test".to_owned(),
+                    name: Some("Guest".to_owned()),
+                    participation_status: Some("tentative".to_owned()),
+                    optional: true,
+                }]),
                 description: Some(crate::model::EmailBody {
                     body_type: crate::model::EmailBodyType::Plain,
                     value: "Changed body".to_owned(),
@@ -8524,6 +8555,14 @@ mod tests {
         assert_eq!(
             eas::find_all_text_after(&document, cal::CATEGORY),
             vec!["Work"]
+        );
+        assert_eq!(
+            eas::find_text_after(&document, cal::ATTENDEE_EMAIL),
+            Some("guest@example.test")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, cal::ATTENDEE_STATUS),
+            Some("2")
         );
         assert!(!eas::contains_token(&document, cal::DELETED));
     }

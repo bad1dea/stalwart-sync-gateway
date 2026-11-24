@@ -4227,10 +4227,18 @@ impl JmapClient {
                 if attendee.optional {
                     roles["optional"] = serde_json::Value::Bool(true);
                 }
+                let participation_status = match attendee.status {
+                    None => "needs-action",
+                    Some(2) => "tentative",
+                    Some(3) => "accepted",
+                    Some(4) => "declined",
+                    Some(5) => "needs-action",
+                    Some(_) => anyhow::bail!("unsupported attendee status"),
+                };
                 let mut participant = serde_json::json!({
                     "@type":"Participant", "email":attendee.email,
                     "calendarAddress":format!("mailto:{}", attendee.email),
-                    "roles":roles, "participationStatus":"needs-action", "expectReply":true,
+                    "roles":roles, "participationStatus":participation_status, "expectReply":true,
                     "sendTo":{"imip":format!("mailto:{}", attendee.email)}
                 });
                 if let Some(name) = &attendee.name {
@@ -4293,12 +4301,20 @@ impl JmapClient {
                 if attendee.optional {
                     roles.insert("optional".to_owned(), serde_json::Value::Bool(true));
                 }
+                let participation_status = match attendee.status {
+                    None => "needs-action",
+                    Some(2) => "tentative",
+                    Some(3) => "accepted",
+                    Some(4) => "declined",
+                    Some(5) => "needs-action",
+                    Some(_) => anyhow::bail!("unsupported attendee status"),
+                };
                 let mut participant = serde_json::json!({
                     "@type": "Participant",
                     "email": attendee.email,
                     "calendarAddress": format!("mailto:{}", attendee.email),
                     "roles": roles,
-                    "participationStatus": "needs-action",
+                    "participationStatus": participation_status,
                     "expectReply": true,
                     "sendTo": {"imip": format!("mailto:{}", attendee.email)}
                 });
@@ -4601,7 +4617,8 @@ impl JmapClient {
                 || fields.all_day_event.is_some()
                 || fields.busy_status.is_some()
                 || fields.categories.is_some()
-                || fields.reminder.is_some())
+                || fields.reminder.is_some()
+                || fields.attendees_present)
                 && !fields.unsupported_location
                 && !fields.unsupported_busy_status
                 && !fields.unsupported_sensitivity
@@ -4615,8 +4632,6 @@ impl JmapClient {
                 && !fields.unsupported_client_uid
                 && !fields.uid_present
                 && !fields.unsupported_response_type
-                && fields.attendees.is_empty()
-                && !fields.attendees_present
                 && !fields.unsupported_attendees
                 && !fields.unsupported_body
                 && fields.body_type.is_none_or(|body_type| body_type == 1),
@@ -4632,7 +4647,7 @@ impl JmapClient {
                 &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
                 vec![MethodCall::new(
                     "CalendarEvent/get",
-                    serde_json::json!({"accountId":account_id,"ids":[id],"properties":["id","timeZone","recurrenceRule","recurrenceOverrides","alerts","useDefaultAlerts"]}),
+                    serde_json::json!({"accountId":account_id,"ids":[id],"properties":["id","timeZone","recurrenceRule","recurrenceOverrides","alerts","useDefaultAlerts","participants"]}),
                     "instance",
                 )],
             )
@@ -4685,6 +4700,108 @@ impl JmapClient {
             for (path, value) in alert_patch {
                 patch.insert(format!("recurrenceOverrides/{key}/{path}"), value);
             }
+        }
+        if fields.attendees_present {
+            let participants = event["participants"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            let owner = participants
+                .iter()
+                .find(|(_, value)| value["roles"]["owner"] == true)
+                .map(|(id, value)| (id.clone(), value.clone()));
+            anyhow::ensure!(
+                fields.attendees.is_empty() || owner.is_some(),
+                "cannot add occurrence attendees without an existing organizer"
+            );
+            let mut replacement = serde_json::Map::new();
+            if let Some((id, value)) = owner {
+                replacement.insert(id, value);
+            }
+            let mut seen = BTreeSet::new();
+            for (index, attendee) in fields.attendees.iter().enumerate() {
+                anyhow::ensure!(
+                    !attendee.email.is_empty() && seen.insert(attendee.email.to_ascii_lowercase()),
+                    "invalid or duplicate occurrence attendee"
+                );
+                anyhow::ensure!(
+                    !participants.values().any(|participant| {
+                        participant["roles"]["owner"] == true
+                            && participant["email"]
+                                .as_str()
+                                .is_some_and(|email| email.eq_ignore_ascii_case(&attendee.email))
+                    }),
+                    "the organizer cannot be listed as an occurrence attendee"
+                );
+                let existing = participants
+                    .iter()
+                    .find(|(_, participant)| {
+                        participant["roles"]["owner"] != true
+                            && participant["email"]
+                                .as_str()
+                                .is_some_and(|email| email.eq_ignore_ascii_case(&attendee.email))
+                    })
+                    .map(|(id, participant)| (id.clone(), participant.clone()));
+                let (participant_id, mut participant) = existing.unwrap_or_else(|| {
+                    (
+                        format!("eas-occurrence-{index}"),
+                        serde_json::json!({"@type":"Participant"}),
+                    )
+                });
+                participant["@type"] = serde_json::json!("Participant");
+                participant["email"] = serde_json::json!(attendee.email);
+                participant
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("calendarAddress".to_owned())
+                    .or_insert_with(|| serde_json::json!(format!("mailto:{}", attendee.email)));
+                participant["roles"] = participant
+                    .get("roles")
+                    .filter(|roles| roles.is_object())
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                participant["roles"]["attendee"] = serde_json::json!(true);
+                if attendee.optional {
+                    participant["roles"]["optional"] = serde_json::json!(true);
+                } else if let Some(roles) = participant["roles"].as_object_mut() {
+                    roles.remove("optional");
+                }
+                if let Some(status) = attendee.status {
+                    participant["participationStatus"] = serde_json::json!(match status {
+                        2 => "tentative",
+                        3 => "accepted",
+                        4 => "declined",
+                        5 => "needs-action",
+                        _ => anyhow::bail!("unsupported attendee status"),
+                    });
+                } else if participant.get("participationStatus").is_none() {
+                    participant["participationStatus"] = serde_json::json!("needs-action");
+                }
+                if let Some(name) = &attendee.name {
+                    participant["name"] = serde_json::json!(name);
+                }
+                participant
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("sendTo".to_owned())
+                    .or_insert_with(
+                        || serde_json::json!({"imip":format!("mailto:{}", attendee.email)}),
+                    );
+                participant
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("expectReply".to_owned())
+                    .or_insert(serde_json::Value::Bool(true));
+                replacement.insert(participant_id, participant);
+            }
+            patch.insert(
+                format!("recurrenceOverrides/{key}/participants"),
+                if replacement.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::Object(replacement)
+                },
+            );
         }
         if let Some(subject) = &fields.subject {
             patch.insert(
@@ -7773,6 +7890,7 @@ fn simple_geo(value: &str) -> Option<(&str, &str)> {
 fn calendar_recurrence_exceptions(
     overrides: Option<&serde_json::Value>,
     base_alerts: Option<&serde_json::Value>,
+    base_participants: Option<&BTreeMap<String, ParticipantObject>>,
     timezone: Option<&str>,
     event_duration: Option<&str>,
 ) -> anyhow::Result<Vec<crate::model::CalendarEventException>> {
@@ -7815,7 +7933,9 @@ fn calendar_recurrence_exceptions(
                             | "freeBusyStatus"
                             | "keywords"
                             | "alerts"
+                            | "participants"
                     ) || key.starts_with("alerts/")
+                        || key.starts_with("participants/")
                 }),
                 "unsupported recurrence exception fields"
             );
@@ -7949,6 +8069,17 @@ fn calendar_recurrence_exceptions(
             } else {
                 None
             };
+            let has_participant_patch = patch
+                .keys()
+                .any(|key| key == "participants" || key.starts_with("participants/"));
+            let attendees = if has_participant_patch {
+                Some(calendar_recurrence_exception_attendees(
+                    base_participants,
+                    patch,
+                )?)
+            } else {
+                None
+            };
             Ok(crate::model::CalendarEventException {
                 instance_id,
                 deleted: false,
@@ -7960,8 +8091,146 @@ fn calendar_recurrence_exceptions(
                 all_day,
                 busy_status,
                 categories,
+                attendees,
                 reminder_minutes,
                 description,
+            })
+        })
+        .collect()
+}
+
+fn calendar_recurrence_exception_attendees(
+    base: Option<&BTreeMap<String, ParticipantObject>>,
+    override_patch: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<Vec<crate::model::Attendee>> {
+    fn unescape(token: &str) -> anyhow::Result<String> {
+        let mut result = String::new();
+        let mut chars = token.chars();
+        while let Some(character) = chars.next() {
+            if character == '~' {
+                match chars
+                    .next()
+                    .context("invalid escaped recurrence participant path")?
+                {
+                    '0' => result.push('~'),
+                    '1' => result.push('/'),
+                    _ => anyhow::bail!("invalid escaped recurrence participant path"),
+                }
+            } else {
+                result.push(character);
+            }
+        }
+        Ok(result)
+    }
+
+    let mut participants = serde_json::Map::new();
+    if let Some(base) = base {
+        for (id, participant) in base {
+            let mut value = serde_json::Map::new();
+            if let Some(email) = &participant.email {
+                value.insert("email".to_owned(), serde_json::json!(email));
+            }
+            if let Some(name) = &participant.name {
+                value.insert("name".to_owned(), serde_json::json!(name));
+            }
+            if !participant.roles.is_empty() {
+                value.insert("roles".to_owned(), serde_json::json!(participant.roles));
+            }
+            if let Some(status) = &participant.participation_status {
+                value.insert("participationStatus".to_owned(), serde_json::json!(status));
+            }
+            participants.insert(id.clone(), serde_json::Value::Object(value));
+        }
+    }
+    if let Some(replacement) = override_patch.get("participants") {
+        anyhow::ensure!(
+            !override_patch
+                .keys()
+                .any(|key| key.starts_with("participants/")),
+            "overlapping recurrence participant patches"
+        );
+        participants = if replacement.is_null() {
+            serde_json::Map::new()
+        } else {
+            replacement
+                .as_object()
+                .context("invalid recurrence participants replacement")?
+                .clone()
+        };
+    } else {
+        for (path, value) in override_patch
+            .iter()
+            .filter_map(|(key, value)| key.strip_prefix("participants/").map(|path| (path, value)))
+        {
+            let tokens = path
+                .split('/')
+                .map(unescape)
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            anyhow::ensure!(
+                !tokens.is_empty(),
+                "empty recurrence participant patch path"
+            );
+            let (last, parents) = tokens.split_last().unwrap();
+            let mut root = serde_json::Value::Object(participants);
+            let mut target = &mut root;
+            for token in parents {
+                target = target
+                    .as_object_mut()
+                    .and_then(|object| object.get_mut(token))
+                    .context("recurrence participant patch parent is missing")?;
+            }
+            let object = target
+                .as_object_mut()
+                .context("recurrence participant patch parent is not an object")?;
+            if value.is_null() {
+                object.remove(last);
+            } else {
+                object.insert(last.clone(), value.clone());
+            }
+            participants = root
+                .as_object()
+                .cloned()
+                .context("invalid recurrence participants map")?;
+        }
+    }
+
+    participants
+        .into_values()
+        .filter_map(|value| {
+            let roles = value.get("roles")?.as_object()?;
+            if roles.get("owner").and_then(serde_json::Value::as_bool) == Some(true)
+                || roles.get("attendee").and_then(serde_json::Value::as_bool) != Some(true)
+            {
+                return None;
+            }
+            let roles = roles.clone();
+            Some((value, roles))
+        })
+        .map(|(value, roles)| {
+            let email = value
+                .get("email")
+                .and_then(serde_json::Value::as_str)
+                .filter(|email| !email.is_empty())
+                .context("recurrence attendee email missing")?
+                .to_owned();
+            let participation_status = match value
+                .get("participationStatus")
+                .and_then(serde_json::Value::as_str)
+            {
+                None | Some("needs-action") => Some("needs-action".to_owned()),
+                Some("accepted") => Some("accepted".to_owned()),
+                Some("declined") => Some("declined".to_owned()),
+                Some("tentative") => Some("tentative".to_owned()),
+                Some(_) => anyhow::bail!("unsupported recurrence attendee status"),
+            };
+            Ok(crate::model::Attendee {
+                email,
+                name: value
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                participation_status,
+                optional: roles.get("optional").and_then(serde_json::Value::as_bool) == Some(true),
             })
         })
         .collect()
@@ -8046,6 +8315,7 @@ impl From<CalendarEventObject> for CalendarEvent {
         let recurrence_exceptions = calendar_recurrence_exceptions(
             value.recurrence_overrides.as_ref(),
             value.alerts.as_ref(),
+            value.participants.as_ref(),
             recurrence_time_zone.as_deref(),
             value.duration.as_deref(),
         );
@@ -8739,6 +9009,7 @@ mod tests {
         assert!(merged.get("email").is_some());
     }
 
+    #[test]
     fn calendar_recurrence_rules_round_trip_and_map_excluded_exceptions() {
         let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
             "id":"e",
@@ -8787,11 +9058,16 @@ mod tests {
         let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
             "id":"e", "recurrenceRule":{"frequency":"weekly","byDay":[{"day":"mo"}]},
             "uid":"series-uid", "timeZone":"America/Toronto",
+            "participants":{
+                "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                "guest":{"email":"guest@example.test","name":"Guest","roles":{"attendee":true,"optional":true},"participationStatus":"accepted"}
+            },
             "alerts":{"display":{"@type":"Alert","trigger":{"@type":"OffsetTrigger","relativeTo":"start","offset":"-PT30M"}}},
             "recurrenceOverrides":{"2026-11-25T12:00:00":{
                 "start":"2026-11-25T13:00:00", "duration":"PT3600S", "showWithoutTime":true,
                 "freeBusyStatus":"x-eas-tentative",
                 "alerts/display/trigger":{"@type":"OffsetTrigger","relativeTo":"start","offset":"-PT20M"},
+                "participants/guest/participationStatus":"declined",
                 "keywords":{"Work":true,"Hidden":false},
                 "title":"Changed occurrence", "description":"Exception body",
                 "descriptionContentType":"text/plain",
@@ -8837,6 +9113,15 @@ mod tests {
         assert_eq!(
             event.recurrence_exceptions[0].categories,
             Some(vec!["Work".to_owned()])
+        );
+        assert_eq!(
+            event.recurrence_exceptions[0].attendees,
+            Some(vec![crate::model::Attendee {
+                email: "guest@example.test".to_owned(),
+                name: Some("Guest".to_owned()),
+                participation_status: Some("declined".to_owned()),
+                optional: true,
+            }])
         );
 
         let privacy_override: super::CalendarEventObject =
@@ -9508,7 +9793,9 @@ mod calendar_update_state_tests {
                                 "state":"state-2",
                                 "list":[{"id":"event-2", "timeZone":"America/Toronto",
                                     "recurrenceRule":{"frequency":"weekly"},
-                                    "alerts":{"display":{"@type":"Alert","trigger":{"@type":"OffsetTrigger","relativeTo":"start","offset":"-PT30M"}}}}]
+                                    "alerts":{"display":{"@type":"Alert","trigger":{"@type":"OffsetTrigger","relativeTo":"start","offset":"-PT30M"}}},
+                                    "participants":{"owner":{"email":"owner@example.test","roles":{"owner":true}},
+                                        "guest":{"email":"guest@example.test","roles":{"attendee":true},"participationStatus":"accepted"}}}]
                             }, "instance"
                         ]]})),
                         1 => {
@@ -9533,6 +9820,9 @@ mod calendar_update_state_tests {
                             assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/freeBusyStatus"], "x-eas-out-of-office");
                             assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/keywords"], serde_json::json!({}));
                             assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/alerts/display/trigger"], serde_json::json!({"@type":"OffsetTrigger","relativeTo":"start","offset":"-PT15M"}));
+                            assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/participants"]["owner"]["email"], "owner@example.test");
+                            assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/participants"]["guest"]["participationStatus"], "tentative");
+                            assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/participants"]["guest"]["roles"]["optional"], true);
                             Json(serde_json::json!({"methodResponses":[[
                                 "CalendarEvent/set", {"updated":{"event-2":null}}, "instance-change"
                             ]]}))
@@ -9575,6 +9865,13 @@ mod calendar_update_state_tests {
             busy_status: Some(3),
             categories: Some(Vec::new()),
             reminder: Some(Some(15)),
+            attendees_present: true,
+            attendees: vec![crate::wbxml::eas::AttendeeField {
+                email: "guest@example.test".to_owned(),
+                name: Some("Guest".to_owned()),
+                optional: true,
+                status: Some(2),
+            }],
             ..Default::default()
         };
         client

@@ -1329,6 +1329,10 @@ pub struct AttendeeField {
     pub email: String,
     pub name: Option<String>,
     pub optional: bool,
+    /// MS-ASCAL AttendeeStatus: 2 tentative, 3 accepted, 4 declined,
+    /// 5 not responded. Unknown status 0 is rejected because JMAP has no
+    /// distinct equivalent for it.
+    pub status: Option<u8>,
 }
 
 /// ActiveSync Tasks class fields decoded from one Add/Change command's
@@ -2878,6 +2882,13 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                         attendee.name = Some(text.clone());
                     } else if same_token(top, calendar::ATTENDEE_TYPE) {
                         attendee.optional = text == "2";
+                    } else if same_token(top, calendar::ATTENDEE_STATUS) {
+                        match text.parse::<u8>() {
+                            Ok(status @ (2..=5)) if attendee.status.is_none() => {
+                                attendee.status = Some(status);
+                            }
+                            _ => fields.unsupported_attendees = true,
+                        }
                     }
                     continue;
                 }
@@ -4512,7 +4523,7 @@ mod tests {
         // two sibling Attendee blocks must produce two separate
         // AttendeeField entries, not get merged or dropped, and
         // AttendeeType 2 must set `optional` while the default (absent)
-        // stays Required.
+        // stays Required; supported response statuses must survive parsing.
         let mut builder = DocumentBuilder::new();
         builder.start(airsync::SYNC);
         builder.start(airsync::COLLECTIONS);
@@ -4528,10 +4539,12 @@ mod tests {
         builder.start(calendar::ATTENDEE);
         builder.leaf(calendar::ATTENDEE_EMAIL, "chris@fourthcoffee.com");
         builder.leaf(calendar::ATTENDEE_NAME, "Chris Gray");
+        builder.leaf(calendar::ATTENDEE_STATUS, "3");
         builder.end();
         builder.start(calendar::ATTENDEE);
         builder.leaf(calendar::ATTENDEE_EMAIL, "pat@fourthcoffee.com");
         builder.leaf(calendar::ATTENDEE_TYPE, "2");
+        builder.leaf(calendar::ATTENDEE_STATUS, "2");
         builder.end();
         builder.end();
         builder.end();
@@ -4556,9 +4569,11 @@ mod tests {
             Some("Chris Gray")
         );
         assert!(!command.calendar.attendees[0].optional);
+        assert_eq!(command.calendar.attendees[0].status, Some(3));
         assert_eq!(command.calendar.attendees[1].email, "pat@fourthcoffee.com");
         assert_eq!(command.calendar.attendees[1].name, None);
         assert!(command.calendar.attendees[1].optional);
+        assert_eq!(command.calendar.attendees[1].status, Some(2));
     }
 
     #[test]
