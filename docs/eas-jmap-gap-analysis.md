@@ -38,7 +38,14 @@ Current prioritized work:
    `b681fae`, image
    `sha256:9effefda5525d695bfb3e561cc4759d479e42df8910a340d2574adbd960c62cc`,
    started `2026-11-24T12:43:36Z`, restart count zero, `/healthz` `ok`, and
-   `/readyz` `ready`. The previous negated-phrase feature tag before the
+   `/readyz` `ready`. Compound phrase AND NOT phrase (including unary-minus
+   negation) is deployed as
+   `deploy-2026-11-24-eas-kql-negated-phrase-grouping-0b53db8`; homelab commit
+   `ab695ba`, image
+   `sha256:6e0904559ecb893323dbd6c60615e09bb314101ade29cd41da041e8f8ed56a62`,
+   started `2026-11-24T12:53:14Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The full suite passed 333 tests (73 ignored); strict
+   Clippy, formatting, and diff checks passed. The previous negated-phrase feature tag before the
    same-property grouping guard is
    `deploy-2026-11-24-eas-kql-negated-phrase-and-db13a97`; it was not deployed.
    The preceding positive-boolean-OR release was deployed as
