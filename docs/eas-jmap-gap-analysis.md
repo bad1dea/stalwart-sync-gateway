@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `12ded9c` (2026-11-24)
+## Reconciled status for source `main` at `d17467e` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -81,6 +81,14 @@ Current prioritized work:
    `b49a401`, image
    `sha256:65ca8b2e80e004139f1754dbd580252a373a4f627b7a48b2563fd5fc2fdc0608`,
    started `2026-11-24T14:22:38Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
+   formatting, and diff checks passed. Boolean equality spellings such as
+   `isread=true` and `hasattachment=false` are accepted in the same phrase
+   expressions as colon-form predicates. Deployed as
+   `deploy-2026-11-24-eas-kql-phrase-boolean-equality-d17467e`; homelab commit
+   `e0576e5`, image
+   `sha256:0a307e52388f5116b69625dc33c423879efca96777dc413e8bdc45089e74dab9`,
+   started `2026-11-24T14:28:01Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
    formatting, and diff checks passed. The standalone negated form
    `NOT subject:"..."` and unary-minus forms such as
