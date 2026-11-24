@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `b90e06d` (2026-11-24)
+## Reconciled status for source `main` at `b11914b` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -47,12 +47,17 @@ Current prioritized work:
    calendars, tasks, notes, and attachment blobs are implemented. Enterprise
    IRM remains out of scope for the personal-account gateway.
 
-Also completed (`pending`): **KQL timestamp offset normalization**. RFC3339
+Also completed (`b11914b`): **KQL timestamp offset normalization**. RFC3339
 timestamps in `received:` restrictions now resolve to the UTC calendar day
 before translation into JMAP date boundaries. Regression tests cover offsets
 crossing a UTC day boundary in both directions. Full suite: 280 passed, 73
-ignored; clippy with warnings denied and formatting checks pass. Deployment
-details will be recorded after rollout.
+ignored; clippy with warnings denied, formatting, and diff checks pass.
+Deployed as `deploy-2026-11-24-eas-kql-tz-b11914b`; homelab commit `163ac03`.
+The forced Compose build produced image
+`sha256:6d73b374107acbf6bc98e96dfbcf39b6b48500fcf82c7dcd761f11a3149466a4`.
+The container started at `2026-11-24T05:39:57Z` with restart count zero; mesh
+`/healthz` returned `ok` and `/readyz` returned `ready`. Production continues
+to advertise EAS 14.0.
 
 Also completed (`b981802`): **KQL message importance restriction**. Find now
 maps `importance:low`, `importance:normal`/`medium`, and `importance:high` to
