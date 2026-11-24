@@ -26,7 +26,7 @@ Current prioritized work:
    retained for attachment records; it is not a selector in the
    `BodyPartPreference` schema and is not required to answer these requests.
    The current deployment tag
-   `deploy-2026-11-24-eas-find-importance-c79fa3b` includes this path; the
+   `deploy-2026-11-24-eas-kql-proximity-prefix-4cd2896` includes this path; the
    container is healthy and ready, while real-client 16.1 behavior remains
    unverified. Sources:
    Microsoft [MS-ASCON Elements](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascon/605bd946-0750-4d9b-b04c-8be28badfa8e),
@@ -396,8 +396,13 @@ Current prioritized work:
    match token starts locally, so ordered and unordered distance checks use
    the same prefix semantics as ordinary KQL terms. Regressions exercise
    prefix operands in both operators, including reversed order and a
-   non-match. Targeted HTTP and unit regressions, strict Clippy, formatting,
-   and diff checks pass. The full suite and deployment verification follow.
+   non-match. The full suite passes 383 tests (73 ignored); strict Clippy,
+   formatting, and diff checks pass. Deployed as
+   `deploy-2026-11-24-eas-kql-proximity-prefix-4cd2896`; homelab commit
+   `374fb9b`, image
+   `sha256:498c8fca0dc611fdec6c58da0c8bbf6c053cd396f29a6f6491d6763bd9b8337a`,
+   started `2026-11-24T19:47:27Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
    These queries use a scoped mailbox scan and exact local token-prefix
    comparison because JMAP text filters cannot preserve prefix semantics. A
    property-qualified prefix can also be negated with `NOT` or unary minus and
