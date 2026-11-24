@@ -44,10 +44,10 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    retained for attachment records; it is not a selector in the
    `BodyPartPreference` schema and is not required to answer these requests.
    The current deployment tag
-   `deploy-2026-11-24-eas-kql-property-presence-338f10a` includes this path;
-   deployed with homelab commit `6107c09`, image
-   `sha256:fbebbdab42bb34790b64edfe6b452e486c71ebfac1c040cc0f2424238452a6dc`,
-   started `2026-11-24T20:09:07Z`, restart count zero, `/healthz` `ok`, and
+   `deploy-2026-11-24-eas-task-recurrence-start-1e9b8cd` includes this path;
+   deployed with homelab commit `e5f6987`, image
+   `sha256:6a535f46888e0725d7af05be102eda16eb4b406876e7f5c41672e6875eb8852f`,
+   started `2026-11-24T20:20:42Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Real-client 16.1 behavior remains unverified. Sources:
    Microsoft [MS-ASCON Elements](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascon/605bd946-0750-4d9b-b04c-8be28badfa8e),
    [MS-ASAIRS Appendix A](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asairs/fbbc1af9-5a71-4925-aca8-60a95339c722),
@@ -917,8 +917,12 @@ series start. A new Sync Add → JMAP `CalendarEvent` → Sync Fetch regression
 checks the recurring task fields end to end through the mocked gateway; a
 focused parser regression covers both matching and conflicting dates. Full
 suite: 387 passed, 73 ignored; strict Clippy, formatting, and diff checks
-pass. Deployment verification follows. Real Stalwart and real-client Task
-recurrence verification remains open.
+pass. Deployed as `deploy-2026-11-24-eas-task-recurrence-start-1e9b8cd`;
+homelab commit `e5f6987`, image
+`sha256:6a535f46888e0725d7af05be102eda16eb4b406876e7f5c41672e6875eb8852f`,
+started `2026-11-24T20:20:42Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. Real Stalwart and real-client Task recurrence verification
+remains open.
 
 Also completed (`7e5bec5`): **Calendar recurrence occurrence exclusions**.
 Sync Delete with a 16.0/16.1 `InstanceId` now excludes only that occurrence
@@ -1506,7 +1510,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Sync: Calendar (read) | **Done** | `CalendarEvent/query`+`/get` (JSCalendar, draft-ietf-calext-jscalendarbis superseding RFC 8984) | Confirmed live against a real event; recurrence is now mapped where supported. |
 | Sync: Calendar (write: add/edit/delete) | **Done** (`deploy-2026-08-25t`; recurrence `deploy-2026-11-24-eas-calendar-recurrence-bea1387`; instance fields `deploy-2026-11-24-eas-calendar-instance-fields-d99b3a3`; HTML exception body `deploy-2026-11-24-eas-calendar-exception-html-gate-8cf107d`) | `CalendarEvent/set` | `save_calendar_event`/`destroy_calendar_event` handle lifecycle and supported recurrence rules. EAS 16.0/16.1 occurrence deletes and mapped per-instance fields use `recurrenceOverrides`; sensitivity remains unsupported because JSCalendar disallows `privacy` in recurrence patches. |
 | Sync: Calendar recurrence (RRULE) | **Done** (`deploy-2026-11-24-eas-calendar-recurrence-bea1387`; instance support `deploy-2026-11-24-eas-calendar-instance-fields-d99b3a3`; HTML exception body `deploy-2026-11-24-eas-calendar-exception-html-gate-8cf107d`) | Stalwart singular JSCalendar `recurrenceRule` and `recurrenceOverrides` | Common EAS daily, weekly, monthly, nth-weekday, and yearly rules map both ways. Exclusions and supported subject/plain/HTML body overrides round-trip. Non-representable recurrence patterns and sensitivity overrides remain unsupported. |
-| Sync: Tasks | **Done, two-way (`deploy-2026-08-26i`); recurrence mapping (`deploy-2026-11-24-eas-task-recurrence-a28032b`) | `CalendarEvent` with `@type: "Task"` — confirmed live, not a separate JMAP object | Existing Add/Change/Delete lifecycle is live-verified over WBXML. Common EAS recurrence patterns map through the shared JSCalendar `recurrenceRule` conversion. Mocked Sync Add/Fetch regression now covers recurring Task creation with matching top-level and recurrence starts; real Stalwart create/get and real-client recurrence behavior remain open. MS-ASTASK’s repeating `xs:choice` does not constrain field order; actual iOS handling remains unverified. Per-instance recurrence overrides are rejected. |
+| Sync: Tasks | **Done, two-way (`deploy-2026-08-26i`); recurrence mapping (`deploy-2026-11-24-eas-task-recurrence-a28032b`); matching recurrence starts (`deploy-2026-11-24-eas-task-recurrence-start-1e9b8cd`) | `CalendarEvent` with `@type: "Task"` — confirmed live, not a separate JMAP object | Existing Add/Change/Delete lifecycle is live-verified over WBXML. Common EAS recurrence patterns map through the shared JSCalendar `recurrenceRule` conversion. Mocked Sync Add/Fetch regression covers recurring Task creation with matching top-level and recurrence starts; real Stalwart create/get and real-client recurrence behavior remain open. MS-ASTASK’s repeating `xs:choice` does not constrain field order; actual iOS handling remains unverified. Per-instance recurrence overrides are rejected. |
 | Sync: Notes | **Done, two-way** | Email-backed synthetic-message workaround (`src/jmap/notes.rs`) | The most structurally interesting piece of this whole gateway — see that file's module doc. Full Add/Change/Delete supported. |
 | FolderSync | **Done, incremental** | `Mailbox/get`, `AddressBook/get`, `Calendar/get` | Key 0 sends a full Adds snapshot; subsequent keys diff per-device collection fingerprints into Adds/Updates/Deletes. Unknown keys return Status 9. |
 | FolderCreate/Update/Delete | **Done** (`deploy-2026-11-22-eas-groupware-folders-094b478`) | `Mailbox/set`, `AddressBook/set`, and `Calendar/set` | Mail folders retain hierarchical parent support. User Contacts (`Type=14`) and Calendar (`Type=13`) folders create, rename, and delete JMAP collections with synthetic `ab_`/`cal_` EAS IDs; those collections remain root-level because JMAP has no parent hierarchy. Notes and Tasks remain derived collections without independent CRUD. Mocked HTTP regression covers create/rename/delete for both types and rejects invalid types. |
