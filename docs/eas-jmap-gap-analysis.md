@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `77d3077` (2026-11-24)
+## Reconciled status for source `main` at `b58685a` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -132,17 +132,30 @@ Current prioritized work:
    formatting, and diff checks passed. Binary-layout regressions cover Toronto
    daylight transitions and fixed UTC; transition rules use the event's local
    year, including events whose UTC and local dates fall in different years.
-4. **Real-client 16.1 certification and rollout.** Production remains pinned
+4. **Contact notes.** Contacts Sync now reads and writes JSContact `notes`
+   through AirSyncBase:Body, including the selected EAS BodyPreference,
+   truncation size, and truncated flag. Writes use a dedicated `eas_notes`
+   note key and preserve other JMAP note entries under the existing state
+   guard. HTML notes are rejected because a plain JSContact note cannot retain
+   the original markup. Deployed as
+   `deploy-2026-11-24-eas-contact-notes-b58685a`; homelab commit `4e50b0d`,
+   image
+   `sha256:fb4c623a0c98eb42c7602fd2321112d79388bbf3db5ef0ad4be350635dc65e10`,
+   started `2026-11-24T10:01:30Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The suite passed 314 tests (73 ignored); strict Clippy,
+   formatting, and diff checks passed. The matrix also corrects already
+   implemented AssistantPhoneNumber, OfficeLocation, and phonetic Yomi fields.
+5. **Real-client 16.1 certification and rollout.** Production remains pinned
    to a tagged 14.0 build. Forced-version protocol tests do not establish that
    iOS/Outlook negotiate or behave correctly against an advertised 16.1 build.
    Keep 16.1 unadvertised until the implementation and a fresh device pass are
    complete.
-5. **Legacy/low-priority commands and operations.** Mail Sync Add now creates
+6. **Legacy/low-priority commands and operations.** Mail Sync Add now creates
    drafts and non-draft Email items in the requested Mailbox. ResolveRecipients,
    ValidateCert, MeetingResponse, and ItemOperations fetches for mail, contacts,
    calendars, tasks, notes, and attachment blobs are implemented. Enterprise
    IRM remains out of scope for the personal-account gateway.
-6. **Online meeting URI fields.** EAS defines `OnlineMeetingConfLink` and
+7. **Online meeting URI fields.** EAS defines `OnlineMeetingConfLink` and
    `OnlineMeetingExternalLink` from 14.1, but the deployed Stalwart 0.16.27
    CalendarEvent implementation has no `virtualLocations` property. The
    JSCalendar-standard mapping cannot be enabled until the backend exposes a
