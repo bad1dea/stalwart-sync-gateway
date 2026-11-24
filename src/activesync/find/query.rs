@@ -69,6 +69,12 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
     if !phrases.is_empty() && phrases_for_postfilter(input).is_none() {
         return Err("quoted phrases require an expression with unambiguous property grouping");
     }
+    if phrases.iter().any(|(_, phrase)| phrase.contains('*')) {
+        if phrases_for_postfilter(input).is_some() {
+            return Ok(json!({}));
+        }
+        return Err("wildcard phrases require exact local matching");
+    }
     if tokens.iter().any(|token| {
         matches!(token, Token::Word(word) if search_phrase_word(word).is_some_and(|(property, _)| property == "attachment"))
     }) {
@@ -1204,6 +1210,13 @@ fn search_phrase_word(word: &str) -> Option<(String, String)> {
     } else {
         return None;
     };
+    if phrase.contains(['*', '?'])
+        && (phrase.contains('?')
+            || !phrase.ends_with('*')
+            || phrase[..phrase.len() - 1].contains('*'))
+    {
+        return None;
+    }
     (phrase.split_whitespace().count() > 1 || property.eq_ignore_ascii_case("attachment"))
         .then(|| (property.to_ascii_lowercase(), phrase.to_owned()))
 }
@@ -2607,6 +2620,16 @@ mod tests {
         assert!(!subject_has_phrase("Alpha unrelated Beta", "alpha beta"));
         assert!(subject_has_phrase("Annual Report.pdf", "annual rep*"));
         assert!(!subject_has_phrase("Report Annual.pdf", "annual rep*"));
+        assert_eq!(to_filter(r#"subject:"annual rep*""#).unwrap(), json!({}));
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"annual rep*""#),
+            Some((
+                PhraseMatch::All,
+                vec![("subject".to_owned(), "annual rep*".to_owned())]
+            ))
+        );
+        assert!(to_filter(r#"subject:"rep* annual""#).is_err());
+        assert!(to_filter(r#"subject:"rep? annual""#).is_err());
     }
 
     #[test]

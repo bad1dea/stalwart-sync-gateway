@@ -351,9 +351,9 @@ Current prioritized work:
    See [MS-SEARCH Synonyms](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-search/3e8338e0-d5fe-4a9f-ada9-85bc292d4c1a).
    Free-text and supported string-property terms now accept KQL's trailing `*`
    prefix operator, including supported AND/OR combinations with boolean
-   predicates. These queries use a scoped mailbox scan and exact local
-   token-prefix comparison because JMAP text filters cannot preserve prefix
-   semantics.
+   predicates. Quoted property phrases can use it on the final phrase token.
+   These queries use a scoped mailbox scan and exact local token-prefix
+   comparison because JMAP text filters cannot preserve prefix semantics.
    See the [KeyQL wildcard reference](https://learn.microsoft.com/en-us/sharepoint/dev/general-development/keyword-query-language-kql-syntax-reference).
    Regression suite: 371 passed,
    73 ignored; strict Clippy, formatting, and diff checks passed. The nested
