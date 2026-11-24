@@ -2131,6 +2131,19 @@ mod tests {
         assert!(
             !email_matches_phrases("beta alpha", None, None, None, None, kind, &terms,).unwrap()
         );
+
+        let (kind, terms) = query::phrases_for_postfilter("(cat OR dog) ONEAR(0) mouse").unwrap();
+        assert!(email_matches_phrases("dog mouse", None, None, None, None, kind, &terms,).unwrap());
+        assert!(
+            !email_matches_phrases("mouse dog", None, None, None, None, kind, &terms,).unwrap()
+        );
+
+        let (kind, terms) =
+            query::phrases_for_postfilter("alpha NEAR(0) (beta OR gamma) OR isread:true").unwrap();
+        assert!(
+            email_matches_phrases("unrelated", None, Some(true), None, None, kind, &terms,)
+                .unwrap()
+        );
     }
 
     #[test]
