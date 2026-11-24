@@ -13722,6 +13722,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     use eas::{airsync as air, find as f};
     let env = start_env(Opts::default()).await;
     env.mock.add_mail("inbox", "text-attachment");
+    env.mock.add_mail("inbox", "oversized-text-attachment");
     env.mock.mail_bodies.lock().unwrap().insert(
         "text-attachment".to_owned(),
         ("unrelated body".to_owned(), false),
@@ -13733,9 +13734,26 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
             "type":"text/plain", "size":10
         })],
     );
+    env.mock.mail_bodies.lock().unwrap().insert(
+        "oversized-text-attachment".to_owned(),
+        ("unrelated body".to_owned(), false),
+    );
+    env.mock.mail_attachments.lock().unwrap().insert(
+        "oversized-text-attachment".to_owned(),
+        vec![serde_json::json!({
+            "blobId":"oversized-text-blob", "name":"oversized.txt",
+            "type":"text/plain", "size":1
+        })],
+    );
     env.mock.download_blobs.lock().unwrap().insert(
         "text-blob".to_owned(),
         ("text/plain".to_owned(), b"alpha beta in file".to_vec()),
+    );
+    let mut oversized_text = vec![b'x'; 2 * 1024 * 1024 + 1];
+    oversized_text[..10].copy_from_slice(b"alpha beta");
+    env.mock.download_blobs.lock().unwrap().insert(
+        "oversized-text-blob".to_owned(),
+        ("text/plain".to_owned(), oversized_text),
     );
 
     for (index, query) in ["text:\"alpha beta\"", "alpha NEAR(0) beta"]

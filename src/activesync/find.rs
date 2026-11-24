@@ -327,10 +327,18 @@ async fn execute(
                         {
                             continue;
                         }
-                        let (bytes, downloaded_type) = state
+                        let Some((bytes, downloaded_type)) = state
                             .jmap
-                            .download_blob_with_type(auth, &attachment.blob_id, &attachment.name)
-                            .await?;
+                            .download_blob_with_type_limited(
+                                auth,
+                                &attachment.blob_id,
+                                &attachment.name,
+                                MAX_FIND_ATTACHMENT_TEXT_BYTES as usize,
+                            )
+                            .await?
+                        else {
+                            continue;
+                        };
                         let content_type = if downloaded_type == "application/octet-stream" {
                             &attachment.content_type
                         } else {

@@ -6441,6 +6441,20 @@ impl JmapClient {
             .await
     }
 
+    pub async fn download_blob_with_type_limited(
+        &self,
+        auth: &AuthenticatedSession,
+        blob_id: &str,
+        name: &str,
+        max_bytes: usize,
+    ) -> anyhow::Result<Option<(Vec<u8>, String)>> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
+            anyhow::bail!("JMAP Mail capability is not available");
+        };
+        self.download_blob_from_account_limited(auth, account_id, blob_id, name, Some(max_bytes))
+            .await
+    }
+
     pub async fn download_calendar_blob_with_type(
         &self,
         auth: &AuthenticatedSession,
@@ -6461,6 +6475,19 @@ impl JmapClient {
         blob_id: &str,
         name: &str,
     ) -> anyhow::Result<(Vec<u8>, String)> {
+        self.download_blob_from_account_limited(auth, account_id, blob_id, name, None)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("unbounded JMAP blob download was limited"))
+    }
+
+    async fn download_blob_from_account_limited(
+        &self,
+        auth: &AuthenticatedSession,
+        account_id: &str,
+        blob_id: &str,
+        name: &str,
+        max_bytes: Option<usize>,
+    ) -> anyhow::Result<Option<(Vec<u8>, String)>> {
         let url = auth
             .session
             .download_url
@@ -6488,12 +6515,38 @@ impl JmapClient {
             .and_then(|value| value.to_str().ok())
             .unwrap_or("application/octet-stream")
             .to_owned();
+        if let Some(max_bytes) = max_bytes {
+            if response
+                .content_length()
+                .is_some_and(|length| length > max_bytes as u64)
+            {
+                return Ok(None);
+            }
+            let mut response = response;
+            let mut bytes = Vec::with_capacity(
+                response
+                    .content_length()
+                    .unwrap_or_default()
+                    .min(max_bytes as u64) as usize,
+            );
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .context("failed to read blob download body")?
+            {
+                if bytes.len().saturating_add(chunk.len()) > max_bytes {
+                    return Ok(None);
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            return Ok(Some((bytes, content_type)));
+        }
         let bytes = response
             .bytes()
             .await
             .context("failed to read blob download body")?
             .to_vec();
-        Ok((bytes, content_type))
+        Ok(Some((bytes, content_type)))
     }
 
     pub(crate) async fn upload_blob(

@@ -338,7 +338,9 @@ Current prioritized work:
    attachment text extraction](https://www.stalw.art/docs/storage/text-extraction/)). A
    Find now downloads and locally extracts `text/*`, JSON, and XML (`+xml`)
    attachment blobs up to 2 MiB (with HTML/RTF conversion and XML element/entity/CDATA
-   handling) for exact text/NEAR checks;
+   handling) for exact text/NEAR checks. The downloader enforces the cap from
+   the actual body size even if attachment metadata advertises less; a mocked
+   end-to-end regression confirms oversized content is skipped.
    text-property searches broad-scan the selected mailbox so those attachment
    checks do not depend on JMAP's attachment index setting. PDF, Office,
    OpenDocument, and larger attachment extraction remain unsupported, so
