@@ -405,13 +405,18 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    EPUB XHTML, OOXML Word/Excel/PowerPoint (including
    macro-enabled variants), and OpenDocument Text, Spreadsheet, and Presentation
    attachment containers up to 4 MiB for exact text/NEAR checks, with extracted
-   text still capped at 2 MiB. Legacy `.xls` worksheets,
+   text still capped at 2 MiB. Explicit textual MIME aliases for CSV, NDJSON,
+   YAML, and TOML use the same charset-aware bounded extraction path. Legacy
+   `.xls` worksheets,
    `.ppt` streams, and Word `.doc` piece tables are also parsed within explicit
    limits. Text
    attachments honor MIME
    `charset` parameters, including common
    legacy single-byte encodings and UTF-16LE, with BOM detection when the
    charset parameter is absent; XML text also honors its encoding declaration.
+   CSV, NDJSON, YAML, and TOML application MIME aliases use this same bounded
+   decoding path; mocked 16.1 Find verifies exact proximity matching in a
+   downloaded YAML attachment.
    Extracted and normalized text output is capped at 2 MiB, including bounded
    streaming output from the PDF parser and XML entity/CDATA decoding. RFC 822 and
    Outlook message decoding are capped at the same 2 MiB extracted-text limit;

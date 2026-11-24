@@ -490,6 +490,7 @@ fn is_extractable_attachment_type(content_type: &str) -> bool {
     media_type.starts_with("text/")
         || media_type.ends_with("+xml")
         || media_type.ends_with("+json")
+        || is_textual_application_type(&media_type)
         || matches!(
             media_type.as_str(),
             "application/rtf"
@@ -504,6 +505,18 @@ fn is_extractable_attachment_type(content_type: &str) -> bool {
                 | "message/global"
         )
         || is_extractable_archive_type(&media_type)
+}
+
+fn is_textual_application_type(media_type: &str) -> bool {
+    matches!(
+        media_type,
+        "application/csv"
+            | "application/ndjson"
+            | "application/x-ndjson"
+            | "application/yaml"
+            | "application/x-yaml"
+            | "application/toml"
+    )
 }
 
 fn is_extractable_archive_type(media_type: &str) -> bool {
@@ -590,7 +603,8 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
         _ if media_type.ends_with("+xml") => extract_xml_text(bytes)?,
         _ if media_type.starts_with("text/")
             || media_type == "application/json"
-            || media_type.ends_with("+json") =>
+            || media_type.ends_with("+json")
+            || is_textual_application_type(&media_type) =>
         {
             decode_find_attachment_text(content_type, bytes)?
         }
@@ -2841,6 +2855,16 @@ mod tests {
         assert!(is_extractable_attachment_type("application/pdf"));
         assert!(is_extractable_attachment_type("application/vnd.ms-outlook"));
         assert!(is_extractable_attachment_type("application/problem+json"));
+        for media_type in [
+            "application/csv",
+            "application/ndjson",
+            "application/x-ndjson",
+            "application/yaml",
+            "application/x-yaml",
+            "application/toml",
+        ] {
+            assert!(is_extractable_attachment_type(media_type), "{media_type}");
+        }
         assert!(is_extractable_attachment_type("message/rfc822"));
         assert!(is_extractable_attachment_type("message/global"));
         assert!(is_extractable_attachment_type("application/epub+zip"));
@@ -2890,6 +2914,20 @@ mod tests {
         assert_eq!(
             extract_find_attachment_text("application/problem+json", b"alpha beta"),
             Some("alpha beta".to_owned())
+        );
+        assert_eq!(
+            extract_find_attachment_text(
+                "application/yaml; charset=utf-8",
+                b"title: alpha\nbody: beta",
+            ),
+            Some("title: alpha body: beta".to_owned())
+        );
+        assert_eq!(
+            extract_find_attachment_text(
+                "application/x-ndjson",
+                b"{\"event\":\"alpha\"}\n{\"event\":\"beta\"}",
+            ),
+            Some("{\"event\":\"alpha\"} {\"event\":\"beta\"}".to_owned())
         );
         let eml = b"From: sender@example.test\r\nSubject: alpha subject\r\nContent-Type: multipart/alternative; boundary=body\r\n\r\n--body\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nplain=20beta\r\n--body\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>html gamma</p>\r\n--body--\r\n";
         let extracted = extract_find_attachment_text("message/rfc822", eml).unwrap();

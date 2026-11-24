@@ -14242,6 +14242,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     env.mock.add_mail("inbox", "doc-attachment");
     env.mock.add_mail("inbox", "eml-attachment");
     env.mock.add_mail("inbox", "outlook-msg-attachment");
+    env.mock.add_mail("inbox", "yaml-attachment");
     env.mock.mail_bodies.lock().unwrap().insert(
         "text-attachment".to_owned(),
         ("unrelated body".to_owned(), false),
@@ -14376,6 +14377,17 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
             "type":"application/vnd.ms-outlook", "size":outlook_msg.len()
         })],
     );
+    env.mock.mail_bodies.lock().unwrap().insert(
+        "yaml-attachment".to_owned(),
+        ("unrelated body".to_owned(), false),
+    );
+    env.mock.mail_attachments.lock().unwrap().insert(
+        "yaml-attachment".to_owned(),
+        vec![serde_json::json!({
+            "blobId":"yaml-blob", "name":"settings.yaml",
+            "type":"application/yaml; charset=utf-8", "size":27
+        })],
+    );
     env.mock.download_blobs.lock().unwrap().insert(
         "text-blob".to_owned(),
         ("text/plain".to_owned(), b"alpha beta in file".to_vec()),
@@ -14424,6 +14436,13 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         "outlook-msg-blob".to_owned(),
         ("application/vnd.ms-outlook".to_owned(), outlook_msg),
     );
+    env.mock.download_blobs.lock().unwrap().insert(
+        "yaml-blob".to_owned(),
+        (
+            "application/yaml; charset=utf-8".to_owned(),
+            b"first: alpha\nsecond: beta".to_vec(),
+        ),
+    );
     let mut oversized_text = vec![b'x'; 2 * 1024 * 1024 + 1];
     oversized_text[..10].copy_from_slice(b"alpha beta");
     env.mock.download_blobs.lock().unwrap().insert(
@@ -14455,6 +14474,25 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
             "{query}"
         );
     }
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "30000000-0000-4000-8000-000000000091",
+            "first NEAR(0) alpha",
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["yaml-attachment"]
+    );
 
     let response = env
         .req("Find", "client")
