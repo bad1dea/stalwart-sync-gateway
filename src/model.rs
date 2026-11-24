@@ -362,6 +362,8 @@ pub struct CalendarEventException {
     pub instance_id: String,
     pub deleted: bool,
     pub title: Option<String>,
+    pub location: Option<String>,
+    pub location_coordinates: Option<(String, String)>,
     pub description: Option<EmailBody>,
 }
 

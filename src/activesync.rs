@@ -5834,10 +5834,11 @@ fn write_contact_address_fields(
 }
 
 fn calendar_instance_change_supported(fields: &wbxml::eas::CalendarFields) -> bool {
-    (fields.subject.is_some() || fields.body.is_some())
+    (fields.subject.is_some()
+        || fields.body.is_some()
+        || fields.location.is_some()
+        || fields.location_coordinates.is_some())
         && !fields.unsupported_location
-        && fields.location.is_none()
-        && fields.location_coordinates.is_none()
         && fields.start_time.is_none()
         && fields.end_time.is_none()
         && fields.all_day_event.is_none()
@@ -6416,6 +6417,8 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
         exception.instance_id.hash(&mut hasher);
         exception.deleted.hash(&mut hasher);
         exception.title.hash(&mut hasher);
+        exception.location.hash(&mut hasher);
+        exception.location_coordinates.hash(&mut hasher);
         if let Some(description) = &exception.description {
             description.body_type.eas_value().hash(&mut hasher);
             description.value.hash(&mut hasher);
@@ -6618,6 +6621,22 @@ fn write_calendar_fields(
                         }
                         builder.end();
                     }
+                }
+                if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
+                    use wbxml::eas::airsync_base as base;
+                    if exception.location.is_some() || exception.location_coordinates.is_some() {
+                        builder.start(base::LOCATION);
+                        if let Some(location) = &exception.location {
+                            builder.leaf(base::DISPLAY_NAME, location.clone());
+                        }
+                        if let Some((latitude, longitude)) = &exception.location_coordinates {
+                            builder.leaf(base::LATITUDE, latitude);
+                            builder.leaf(base::LONGITUDE, longitude);
+                        }
+                        builder.end();
+                    }
+                } else if let Some(location) = &exception.location {
+                    builder.leaf(cal::LOCATION, location.clone());
                 }
             }
             builder.end();
@@ -8393,6 +8412,8 @@ mod tests {
             recurrence_exceptions: vec![crate::model::CalendarEventException {
                 instance_id: "20261125T170000Z".to_owned(),
                 title: Some("Changed occurrence".to_owned()),
+                location: Some("Changed room".to_owned()),
+                location_coordinates: Some(("43.65".to_owned(), "-79.38".to_owned())),
                 description: Some(crate::model::EmailBody {
                     body_type: crate::model::EmailBodyType::Plain,
                     value: "Changed body".to_owned(),
@@ -8417,6 +8438,17 @@ mod tests {
         assert!(eas::find_all_text_after(&document, base::DATA)
             .iter()
             .any(|body| body == "Changed body"));
+        assert!(eas::find_all_text_after(&document, base::DISPLAY_NAME)
+            .iter()
+            .any(|location| location == "Changed room"));
+        assert_eq!(
+            eas::find_text_after(&document, base::LATITUDE),
+            Some("43.65")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, base::LONGITUDE),
+            Some("-79.38")
+        );
         assert!(!eas::contains_token(&document, cal::DELETED));
     }
 
@@ -8432,6 +8464,11 @@ mod tests {
         fields.start_time = None;
         fields.body = Some("body".to_owned());
         fields.body_type = Some(3);
+        assert!(!super::calendar_instance_change_supported(&fields));
+        fields.body_type = None;
+        fields.location = Some("Room".to_owned());
+        assert!(super::calendar_instance_change_supported(&fields));
+        fields.unsupported_location = true;
         assert!(!super::calendar_instance_change_supported(&fields));
     }
 

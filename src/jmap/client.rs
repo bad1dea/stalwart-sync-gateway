@@ -4572,8 +4572,8 @@ impl JmapClient {
         Ok(())
     }
 
-    /// Updates the EAS 16.x occurrence fields that have a lossless
-    /// JSCalendar override representation (currently subject and body).
+    /// Updates EAS 16.x occurrence fields with a lossless JSCalendar
+    /// override representation (subject, body, and location).
     pub async fn save_calendar_event_instance(
         &self,
         auth: &AuthenticatedSession,
@@ -4582,10 +4582,11 @@ impl JmapClient {
         fields: &crate::wbxml::eas::CalendarFields,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
-            (fields.subject.is_some() || fields.body.is_some())
+            (fields.subject.is_some()
+                || fields.body.is_some()
+                || fields.location.is_some()
+                || fields.location_coordinates.is_some())
                 && !fields.unsupported_location
-                && fields.location.is_none()
-                && fields.location_coordinates.is_none()
                 && fields.start_time.is_none()
                 && fields.end_time.is_none()
                 && fields.all_day_event.is_none()
@@ -4659,6 +4660,24 @@ impl JmapClient {
                 format!("recurrenceOverrides/{key}/description"),
                 serde_json::json!(body),
             );
+        }
+        if fields.location.is_some() || fields.location_coordinates.is_some() {
+            let mut location = serde_json::Map::new();
+            if let Some(name) = fields.location.as_deref().filter(|name| !name.is_empty()) {
+                location.insert("name".to_owned(), serde_json::json!(name));
+            }
+            if let Some((latitude, longitude)) = &fields.location_coordinates {
+                location.insert(
+                    "coordinates".to_owned(),
+                    serde_json::json!(format!("geo:{latitude},{longitude}")),
+                );
+            }
+            let locations = if location.is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::json!({"loc1": location})
+            };
+            patch.insert(format!("recurrenceOverrides/{key}/locations"), locations);
         }
         let update = serde_json::json!({
             "accountId": account_id,
@@ -7691,7 +7710,7 @@ fn calendar_recurrence_exceptions(
                 patch.keys().all(|key| {
                     matches!(
                         key.as_str(),
-                        "title" | "description" | "descriptionContentType"
+                        "title" | "description" | "descriptionContentType" | "locations"
                     )
                 }),
                 "unsupported recurrence exception fields"
@@ -7728,10 +7747,41 @@ fn calendar_recurrence_exceptions(
                 value: value.to_owned(),
                 is_truncated: false,
             });
+            let (location, location_coordinates) = match patch.get("locations") {
+                None => (None, None),
+                Some(serde_json::Value::Null) => (Some(String::new()), None),
+                Some(locations) => {
+                    let locations = locations
+                        .as_object()
+                        .context("invalid exception locations")?;
+                    anyhow::ensure!(
+                        locations.len() <= 1,
+                        "multiple exception locations are unsupported"
+                    );
+                    if let Some(value) = locations.values().next() {
+                        let value: CalendarEventLocation = serde_json::from_value(value.clone())
+                            .context("invalid exception location")?;
+                        let coordinates = value
+                            .coordinates
+                            .as_deref()
+                            .and_then(simple_geo)
+                            .map(|(lat, lon)| (lat.to_owned(), lon.to_owned()));
+                        anyhow::ensure!(
+                            value.coordinates.is_none() || coordinates.is_some(),
+                            "invalid exception location coordinates"
+                        );
+                        (value.name, coordinates)
+                    } else {
+                        (Some(String::new()), None)
+                    }
+                }
+            };
             Ok(crate::model::CalendarEventException {
                 instance_id,
                 deleted: false,
                 title,
+                location,
+                location_coordinates,
                 description,
             })
         })
@@ -8466,7 +8516,8 @@ mod tests {
             "uid":"series-uid", "timeZone":"America/Toronto",
             "recurrenceOverrides":{"2026-11-25T12:00:00":{
                 "title":"Changed occurrence", "description":"Exception body",
-                "descriptionContentType":"text/plain"
+                "descriptionContentType":"text/plain",
+                "locations":{"room":{"name":"Changed room", "coordinates":"geo:43.65,-79.38"}}
             }}
         }))
         .unwrap();
@@ -8483,6 +8534,14 @@ mod tests {
         let body = event.recurrence_exceptions[0].description.as_ref().unwrap();
         assert_eq!(body.body_type, crate::model::EmailBodyType::Plain);
         assert_eq!(body.value, "Exception body");
+        assert_eq!(
+            event.recurrence_exceptions[0].location.as_deref(),
+            Some("Changed room")
+        );
+        assert_eq!(
+            event.recurrence_exceptions[0].location_coordinates,
+            Some(("43.65".to_owned(), "-79.38".to_owned()))
+        );
 
         let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
             "id":"e", "recurrenceRule":{"frequency":"weekly","byDay":[{"day":"mo"}]},
@@ -9047,7 +9106,7 @@ mod calendar_update_state_tests {
     }
 
     #[tokio::test]
-    async fn calendar_instance_change_patches_subject_and_body_only() {
+    async fn calendar_instance_change_patches_subject_body_and_location() {
         let requests = Arc::new(AtomicUsize::new(0));
         let request_count = requests.clone();
         let app = Router::new().route(
@@ -9075,6 +9134,10 @@ mod calendar_update_state_tests {
                             assert_eq!(
                                 patch["recurrenceOverrides/2026-11-15T10:00:00/description"],
                                 "Body"
+                            );
+                            assert_eq!(
+                                patch["recurrenceOverrides/2026-11-15T10:00:00/locations"],
+                                serde_json::json!({"loc1":{"name":"New room", "coordinates":"geo:43.65,-79.38"}})
                             );
                             Json(serde_json::json!({"methodResponses":[[
                                 "CalendarEvent/set", {"updated":{"event-2":null}}, "instance-change"
@@ -9110,6 +9173,8 @@ mod calendar_update_state_tests {
             subject: Some("New title".to_owned()),
             body: Some("Body".to_owned()),
             body_type: Some(1),
+            location: Some("New room".to_owned()),
+            location_coordinates: Some(("43.65".to_owned(), "-79.38".to_owned())),
             ..Default::default()
         };
         client
