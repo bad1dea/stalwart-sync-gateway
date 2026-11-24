@@ -21,7 +21,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    now accepts matching values and rejects conflicts. `Complete` now accepts
    only 0 or 1, duplicate values fail, and Task Add requires `Complete`.
    Task `Occurrences` is limited to its MS-ASTASK `unsignedByte` range, with
-   255 accepted and 256 rejected before a JMAP write.
+   255 accepted and 256 rejected before a JMAP write; unsupported backend
+   recurrence counts above 255 fail before an invalid Task response is emitted.
    Recurrence replies include `CalendarType=1` for monthly/yearly patterns;
    Gregorian calendar variants are accepted on input, while non-Gregorian
    systems and leap-month recurrences remain rejected. Weekly Task responses
@@ -997,6 +998,16 @@ diff checks pass. Deployed as
 `430aedd`, image
 `sha256:4e6770b9c5e6cf0945a3ef4ce767233775613ab4a304fb8a7a99c4d3965c2032`,
 started `2026-11-24T21:55:05Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`.
+
+Task objects read from JMAP now fail closed when `recurrenceRule.count` exceeds
+255, so the gateway never serializes a value outside MS-ASTASK's unsigned-byte
+range. The JMAP mapping regression checks that count 256 is rejected. The full
+suite passes 394 tests (73 ignored); strict Clippy, formatting, and diff checks
+pass. Deployed as
+`deploy-2026-11-24-eas-task-read-count-limit-03da07c`; homelab commit `3bc3b87`,
+image `sha256:79b5550d92a8669db1716a185e821a4a903ca114aa33da5504362aa72b183ac1`,
+started `2026-11-24T22:06:51Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`.
 
 Weekly Task recurrence responses now always include `FirstDayOfWeek` for
