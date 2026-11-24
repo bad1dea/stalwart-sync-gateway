@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `11ee294` (2026-11-24)
+## Reconciled status for source `main` at `a0304e8` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -21,19 +21,26 @@ Current prioritized work:
    repeated-property restrictions without `AND` remain rejected because
    MS-KQL groups those restrictions with OR. The standalone negated form
    `NOT subject:"..."` and unary-minus forms such as
-   `-body:"..."` are exact-filtered over the scoped mailbox; mixed negation
-   expressions remain rejected. A positive phrase OR boolean filter is also
+   `-body:"..."` are exact-filtered over the scoped mailbox. Positive phrase
+   AND negated boolean restrictions (`NOT isread:true` or `-isflagged:true`)
+   retain JMAP's exact boolean filter while exact-checking the phrase; compound
+   negated phrases remain rejected. A positive phrase OR boolean filter is also
    supported for `isread`, `isflagged`, and `hasattachment(s)` values, with
    exact local evaluation of both branches. Multiple boolean alternatives
    may accompany positive phrase terms in a flat OR expression; implicit
    AND/OR precedence remains rejected. Regression coverage checks read,
    flagged, multiple boolean branches, and multiple phrase branches while
    excluding reversed phrase candidates. Deployed as
+   `deploy-2026-11-24-eas-kql-phrase-negated-bool-a0304e8`; homelab commit
+   `9749ba1`, image
+   `sha256:2d4aaca2cc911156f3ebc69807449ac4ab733d624ca2bb215f7a9623f19026f8`,
+   started `2026-11-24T12:35:18Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The prior multi-phrase mixed OR release was deployed as
    `deploy-2026-11-24-eas-kql-phrase-mixed-multi-or-11ee294`; homelab commit
    `92c0d22`, image
    `sha256:bd7c5c29e327c7352add810fd40c792825a77a0da9d5c43923514ac29d07d4dd`,
-   started `2026-11-24T12:28:43Z`, restart count zero, `/healthz` `ok`, and
-   `/readyz` `ready`. The preceding mixed phrase/boolean OR release was
+   started `2026-11-24T12:28:43Z`, restart count zero, and health/readiness
+   passed. The preceding mixed phrase/boolean OR release was
    `deploy-2026-11-24-eas-kql-phrase-multi-or-225027a`; homelab commit
    `be7245f`, image
    `sha256:4bce35ec72192e121b71d217de16c874068b9b0733efa7f836107e4942660ab3`,
@@ -70,9 +77,9 @@ Current prioritized work:
    order, totals, and range paging. An OR expression made only of positive
    phrase terms is exact-filtered across its alternatives. A phrase may also
    be ORed with `isread`, `isflagged`, or `hasattachment(s)` boolean
-   restrictions; other mixed OR terms, mixed AND/OR precedence, and compound
-   NOT forms remain rejected because the candidate filter could change their
-   Boolean meaning.
+   restrictions. Other mixed OR terms, mixed AND/OR precedence, and compound
+   NOT phrase forms remain rejected because the candidate filter could change
+   their Boolean meaning.
    A single positive `body:"multiword phrase"`
    or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
    body and text scans fetch message bodies and reject a truncated body rather
@@ -82,7 +89,7 @@ Current prioritized work:
    Boolean meaning. Phrase matching is case-insensitive and requires adjacent
    words in order. Regression tests cover plain, HTML, and RTF bodies,
    subject/body conjunctions, truncation, and unsupported Boolean forms. Full
-   suite: 332 passed, 73 ignored; strict Clippy, formatting, and diff checks
+   suite: 333 passed, 73 ignored; strict Clippy, formatting, and diff checks
    passed. Deployed as
    `deploy-2026-11-24-eas-kql-phrase-or-05bbe4b`; homelab commit
    `4de6cf1`, image
