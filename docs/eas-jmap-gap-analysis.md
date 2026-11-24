@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `c07ded1` (2026-11-24)
+## Reconciled status for source `main` at `9ee6fb0` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -22,14 +22,20 @@ Current prioritized work:
    MS-KQL groups those restrictions with OR. The standalone negated form
    `NOT subject:"..."` and unary-minus forms such as
    `-body:"..."` are exact-filtered over the scoped mailbox; mixed negation
-   expressions remain rejected. A positive phrase OR `isread:true/false` is
-   also supported through exact local evaluation. Regression coverage checks
-   both branches and excludes reversed phrase candidates. Deployed as
+   expressions remain rejected. A positive phrase OR boolean filter is also
+   supported for `isread`, `isflagged`, and `hasattachment(s)` values, with
+   exact local evaluation of both branches. Regression coverage checks the
+   read and flagged branches and excludes reversed phrase candidates. Deployed
+   as `deploy-2026-11-24-eas-kql-phrase-boolean-or-9ee6fb0`; homelab commit
+   `815e085`, image
+   `sha256:f47da35f7aacbfe826fc23d9008c649ce86605bee764fcff648eb30e261c0361`,
+   started `2026-11-24T12:16:32Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The initial phrase/read OR support was deployed as
    `deploy-2026-11-24-eas-kql-phrase-read-or-c07ded1`; homelab commit
    `3a88b30`, image
    `sha256:fcca8355ec570fe7af2214c196470b4864688d720699809024611e19b7852ca4`,
-   started `2026-11-24T12:10:15Z`, restart count zero, `/healthz` `ok`, and
-   `/readyz` `ready`. The initial standalone NOT support was deployed as
+   started `2026-11-24T12:10:15Z`, restart count zero, with health and
+   readiness passing. The initial standalone NOT support was deployed as
    `deploy-2026-11-24-eas-kql-negative-phrase-26627d7`; homelab commit
    `1a0de67`, image
    `sha256:51ec7da6f0293dfd841016ed06aa75e1d9f37bd03b5244190e42b046526d3670`,
@@ -50,9 +56,10 @@ Current prioritized work:
    together; candidate filtering preserves the other restrictions, result
    order, totals, and range paging. An OR expression made only of positive
    phrase terms is exact-filtered across its alternatives. A phrase may also
-   be ORed with `isread:true` or `isread:false`; other mixed OR terms, mixed
-   AND/OR precedence, and compound NOT forms remain rejected because the
-   candidate filter could change their Boolean meaning.
+   be ORed with `isread`, `isflagged`, or `hasattachment(s)` boolean
+   restrictions; other mixed OR terms, mixed AND/OR precedence, and compound
+   NOT forms remain rejected because the candidate filter could change their
+   Boolean meaning.
    A single positive `body:"multiword phrase"`
    or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
    body and text scans fetch message bodies and reject a truncated body rather
