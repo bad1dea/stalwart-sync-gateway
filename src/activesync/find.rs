@@ -1370,6 +1370,13 @@ fn email_matches_phrase_with_attachments(
             .into_iter()
             .any(|value| query::subject_has_phrase(value, phrase)));
     }
+    if property == "text"
+        && [from, to, cc, bcc]
+            .into_iter()
+            .any(|value| query::subject_has_phrase(value, phrase))
+    {
+        return Ok(true);
+    }
     if property == "attachment" {
         if phrase.trim() == "*" {
             return Ok(!attachments.is_empty());
@@ -2105,6 +2112,18 @@ mod tests {
             "",
             &[],
             "from",
+            "alice",
+        )
+        .unwrap());
+        assert!(email_matches_phrase_with_attachments(
+            "unrelated subject",
+            None,
+            "Alice Example <alice@example.test>",
+            "",
+            "",
+            "",
+            &[],
+            "text",
             "alice",
         )
         .unwrap());
