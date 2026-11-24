@@ -450,7 +450,11 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    CLX piece tables; invalid offsets, oversized stream declarations, malformed
    OLE files, and parser panics fail closed. A generated fixture exercises
    Windows-1252 piece decoding and exact proximity matching through mocked 16.1
-   Find, including a malicious stream length.
+   Find, including a malicious stream length. Deployed as
+   `deploy-2026-11-24-eas-find-doc-0001c24`; homelab commit `81e0d7a`, image
+   `sha256:362e0ab3b9f8cf783641c22be87d5a4f4f6e8ab3f26cceb8ceedf1219c189ecc`,
+   started `2026-11-24T23:19:04Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
    EPUB XHTML chapters use the same archive-entry and expanded-XML limits; a
    mocked HTTP Find regression verifies proximity matching in EPUB text. The
    macro-enabled OOXML types use the same bounded document-part selection; a
