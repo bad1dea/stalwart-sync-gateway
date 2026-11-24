@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `fdbf559` (2026-11-24)
+## Reconciled status for source `main` at `f159afe` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -47,6 +47,15 @@ Current prioritized work:
    `HOMELAB_COMMIT`, image
    `sha256:f6bec07796a29c5b82d5da2bcaa024eb1d492fa3153f464360d49a3d63867fd5`,
    started `2026-11-24T13:52:06Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
+   formatting, and diff checks passed. Parenthesized same-property phrase OR
+   groups can now participate in mixed expressions, including conjunctions
+   with supported boolean restrictions. Ambiguous repeated-property forms
+   remain rejected. Deployed as
+   `deploy-2026-11-24-eas-kql-repeated-phrase-or-group-f159afe`; homelab commit
+   `afef4bf`, image
+   `sha256:c7b3e83b9b03a5a1f2eaee504bc2c31b9cdddbae177f2e7cc97646110dd854e0`,
+   started `2026-11-24T13:59:06Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
    formatting, and diff checks passed. The standalone negated form
    `NOT subject:"..."` and unary-minus forms such as
@@ -164,8 +173,8 @@ Current prioritized work:
    order, totals, and range paging. An OR expression made only of positive
    phrase terms is exact-filtered across its alternatives. A phrase may also
    be ORed with `isread`, `isflagged`, or `hasattachment(s)` boolean
-   restrictions. Other mixed OR terms, repeated properties in mixed explicit
-   AND/OR expressions, and negated phrases combined with unsupported
+   restrictions. Other mixed OR terms and ambiguous repeated properties in
+   mixed explicit AND/OR expressions remain unsupported; negated phrases combined with unsupported
    non-boolean predicates remain rejected because local evaluation cannot yet
    preserve their Boolean meaning.
    A single positive `body:"multiword phrase"`
