@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `225027a` (2026-11-24)
+## Reconciled status for source `main` at `11ee294` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -25,14 +25,20 @@ Current prioritized work:
    expressions remain rejected. A positive phrase OR boolean filter is also
    supported for `isread`, `isflagged`, and `hasattachment(s)` values, with
    exact local evaluation of both branches. Multiple boolean alternatives
-   may accompany one phrase in a flat OR expression; mixed AND/OR precedence
-   remains rejected. Regression coverage checks read, flagged, and multiple
-   boolean branches and excludes reversed phrase candidates. Deployed as
+   may accompany positive phrase terms in a flat OR expression; implicit
+   AND/OR precedence remains rejected. Regression coverage checks read,
+   flagged, multiple boolean branches, and multiple phrase branches while
+   excluding reversed phrase candidates. Deployed as
+   `deploy-2026-11-24-eas-kql-phrase-mixed-multi-or-11ee294`; homelab commit
+   `92c0d22`, image
+   `sha256:bd7c5c29e327c7352add810fd40c792825a77a0da9d5c43923514ac29d07d4dd`,
+   started `2026-11-24T12:28:43Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The preceding mixed phrase/boolean OR release was
    `deploy-2026-11-24-eas-kql-phrase-multi-or-225027a`; homelab commit
    `be7245f`, image
    `sha256:4bce35ec72192e121b71d217de16c874068b9b0733efa7f836107e4942660ab3`,
-   started `2026-11-24T12:23:29Z`, restart count zero, `/healthz` `ok`, and
-   `/readyz` `ready`. The initial boolean/phrase OR support was deployed as
+   started `2026-11-24T12:23:29Z`, restart count zero, and health/readiness
+   passed. The initial boolean/phrase OR support was deployed as
    `deploy-2026-11-24-eas-kql-phrase-boolean-or-9ee6fb0`; homelab commit
    `815e085`, image
    `sha256:f47da35f7aacbfe826fc23d9008c649ce86605bee764fcff648eb30e261c0361`,
