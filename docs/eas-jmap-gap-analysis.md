@@ -38,6 +38,12 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    an explicit `EAS_MAX_PROTOCOL_VERSION=16.1` test configuration and includes
    Find in the 16.1 command advertisement. The default remains 14.0; production
    continues to advertise 14.0 until the client pass succeeds.
+   Deployed with that production default as
+   `deploy-2026-11-24-eas-16.1-opt-in-13bea13`; homelab commit `fcb698e`, image
+   `sha256:902bfe01a2ec516b68b7517f9a38ba730bfafdeb66eb5cd5ec85822ef4e44b0d`,
+   started `2026-11-24T23:30:09Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The container has no protocol override, so the live
+   production endpoint continues to use the tested 14.0 default.
 3. **Find content coverage.** Add exact local search over remaining supported
    attachment formats and assess resource-bounded scanned-PDF OCR and large
    attachments. Current extraction is bounded and supports legacy `.xls`,
@@ -742,8 +748,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
 5. **Real-client 16.1 certification and rollout.** Production remains pinned
    to a tagged 14.0 build. Forced-version protocol tests do not establish that
    iOS/Outlook negotiate or behave correctly against an advertised 16.1 build.
-   Keep 16.1 unadvertised until the implementation and a fresh device pass are
-   complete.
+   Keep 16.1 unadvertised on production until the implementation and a fresh
+   device pass are complete.
 6. **Legacy/low-priority commands and operations.** Mail Sync Add now creates
    drafts and non-draft Email items in the requested Mailbox. ResolveRecipients,
    ValidateCert, MeetingResponse, and ItemOperations fetches for mail, contacts,
