@@ -89,6 +89,10 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
             if let Some(phrase) = search_phrase_word(positive) {
                 terms.push(phrase);
                 phrase_count += 1;
+            } else if let Some(negative) = word.strip_prefix('-') {
+                let (property, value) = boolean_search_term(negative)?;
+                terms.push((format!("$not{property}"), value));
+                boolean_count += 1;
             } else {
                 let boolean = boolean_search_term(word)?;
                 terms.push(boolean);
@@ -948,6 +952,16 @@ mod tests {
                     ("subject".to_owned(), "alpha beta".to_owned()),
                     ("$isread".to_owned(), "true".to_owned()),
                     ("$isflagged".to_owned(), "true".to_owned())
+                ]
+            ))
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" OR -isread:true"#),
+            Some((
+                PhraseMatch::Any,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$not$isread".to_owned(), "true".to_owned())
                 ]
             ))
         );

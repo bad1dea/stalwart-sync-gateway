@@ -554,6 +554,9 @@ fn email_matches_phrases(
                     "$isread" => is_read,
                     "$isflagged" => is_flagged,
                     "$hasattachment" => has_attachment,
+                    "$not$isread" => is_read.map(|value| !value),
+                    "$not$isflagged" => is_flagged.map(|value| !value),
+                    "$not$hasattachment" => has_attachment.map(|value| !value),
                     _ => None,
                 };
                 let matched = if property.starts_with('$') {
@@ -766,6 +769,16 @@ mod tests {
             Some(false),
             query::PhraseMatch::Any,
             &[("$isflagged".to_owned(), "true".to_owned())]
+        )
+        .unwrap());
+        assert!(email_matches_phrases(
+            "Other subject",
+            None,
+            Some(false),
+            Some(false),
+            Some(false),
+            query::PhraseMatch::Any,
+            &[("$not$isread".to_owned(), "true".to_owned())]
         )
         .unwrap());
         assert!(email_matches_phrases(

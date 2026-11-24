@@ -13459,6 +13459,27 @@ async fn find_phrase_or_boolean_state_uses_both_exact_branches() {
     ids.sort();
     assert_eq!(ids, vec!["alpha-beta", "m1"]);
 
+    env.mock.set_keyword("m1", "$seen", true);
+    env.mock.set_keyword("beta-alpha", "$seen", true);
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "50a868ad-132d-4b07-a15a-fd7f525b169b",
+            r#"subject:"alpha beta" OR -isread:true"#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["alpha-beta"]
+    );
+
     let response = env
         .req("Find", "client")
         .header("MS-ASProtocolVersion", "16.1")
@@ -13472,7 +13493,7 @@ async fn find_phrase_or_boolean_state_uses_both_exact_branches() {
         .await
         .unwrap();
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
-    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("3"));
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("4"));
 }
 
 #[tokio::test]
