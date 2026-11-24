@@ -117,6 +117,56 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         ));
     }
     let tokens = tokenize(input).ok()?;
+    if matches!(tokens.first(), Some(Token::Words)) {
+        let mut position = 1;
+        if tokens.get(position) != Some(&Token::Left) {
+            return None;
+        }
+        position += 1;
+        let mut terms = Vec::new();
+        let mut has_phrase = false;
+        loop {
+            let Token::Word(word) = tokens.get(position)? else {
+                return None;
+            };
+            position += 1;
+            let word = word.trim_start_matches(['+', '-']);
+            let value = if word.starts_with('"')
+                && word.ends_with('"')
+                && word.len() >= 2
+                && !word[1..word.len() - 1].contains(['"', '\\'])
+            {
+                let phrase = &word[1..word.len() - 1];
+                if phrase.trim().is_empty() {
+                    return None;
+                }
+                has_phrase |= phrase.split_whitespace().count() > 1;
+                phrase
+            } else if !word.is_empty()
+                && !word.contains(['"', '\\', ':', '*', '?'])
+                && comparison_index(word).is_none()
+                && !word.chars().any(char::is_whitespace)
+            {
+                word
+            } else {
+                return None;
+            };
+            terms.push(("text".to_owned(), value.to_owned()));
+            match tokens.get(position) {
+                Some(Token::Comma) => position += 1,
+                Some(Token::Word(_)) => {}
+                Some(Token::Right) => {
+                    position += 1;
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        if position != tokens.len() || terms.is_empty() || !has_phrase {
+            return None;
+        }
+        return Some((PhraseMatch::Any, terms));
+    }
     if tokens
         .iter()
         .any(|token| matches!(token, Token::Near(_) | Token::Onear(_)))
@@ -1540,11 +1590,21 @@ impl Parser {
                     } else {
                         word.as_str()
                     };
+                    let term = if ignore_qualifiers
+                        && term.starts_with('"')
+                        && term.ends_with('"')
+                        && term.len() >= 2
+                        && !term[1..term.len() - 1].contains(['"', '\\'])
+                    {
+                        &term[1..term.len() - 1]
+                    } else {
+                        term
+                    };
                     if term.is_empty()
                         || (!ignore_qualifiers && term.starts_with(['+', '-']))
                         || (!term.starts_with('"')
                             && (comparison_index(term).is_some() || term.contains(':')))
-                        || (term.starts_with('"') && term.chars().any(char::is_whitespace))
+                        || (ignore_qualifiers && term.starts_with('"'))
                     {
                         return Err("operator accepts only searchable text terms");
                     }
@@ -2742,7 +2802,27 @@ mod tests {
         );
         assert!(to_filter("WORDS()").is_err());
         assert!(to_filter("WORDS(subject:TV)").is_err());
-        assert!(to_filter("WORDS(\"two words\")").is_err());
+        assert_eq!(
+            to_filter("WORDS(\"two words\")").unwrap(),
+            json!({"text":"two words"})
+        );
+        assert_eq!(
+            to_filter("WORDS(\"two words\", other)").unwrap(),
+            json!({"operator":"OR", "conditions":[
+                {"text":"two words"}, {"text":"other"}
+            ]})
+        );
+        assert_eq!(
+            phrases_for_postfilter("WORDS(\"two words\", other)"),
+            Some((
+                PhraseMatch::Any,
+                vec![
+                    ("text".to_owned(), "two words".to_owned()),
+                    ("text".to_owned(), "other".to_owned()),
+                ]
+            ))
+        );
+        assert!(phrases_for_postfilter("WORDS(\"two words\", other) OR cat").is_none());
     }
 
     #[test]

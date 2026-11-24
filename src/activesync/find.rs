@@ -1949,6 +1949,27 @@ mod tests {
     }
 
     #[test]
+    fn words_operator_matches_quoted_synonym_as_an_exact_phrase() {
+        let (kind, terms) = query::phrases_for_postfilter(r#"WORDS("alpha beta", gamma)"#).unwrap();
+        assert_eq!(kind, query::PhraseMatch::Any);
+        assert!(
+            email_matches_phrases("Alpha beta subject", None, None, None, None, kind, &terms,)
+                .unwrap()
+        );
+        assert!(
+            email_matches_phrases("Gamma subject", None, None, None, None, kind, &terms,).unwrap()
+        );
+        assert!(
+            !email_matches_phrases("Alpha between beta", None, None, None, None, kind, &terms,)
+                .unwrap()
+        );
+        assert!(
+            !email_matches_phrases("Beta alpha subject", None, None, None, None, kind, &terms,)
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn body_phrase_fails_closed_on_truncated_body_and_handles_missing_body() {
         let truncated = EmailBody {
             body_type: EmailBodyType::Plain,

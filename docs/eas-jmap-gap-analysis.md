@@ -342,7 +342,14 @@ Current prioritized work:
    `attachment:*` matches any non-empty attachment list) per
    [MS-KQL property restrictions](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-kql/1b4eb34a-0e20-4aca-b38e-41f531a747ff).
    Unordered NEAR also accepts both operands matching one
-   indexed token, as MS-KQL specifies. Regression suite: 367 passed,
+   indexed token, as MS-KQL specifies. `WORDS(...)` now accepts quoted
+   multiword synonym operands, matching MS-SEARCH's specified equivalence
+   between a word and a phrase alternative; the candidate query remains an OR
+   of JMAP text terms and the local matcher enforces the quoted phrase's word
+   order and adjacency. As with proximity, exact local matching cannot inspect
+   extracted attachment payload text; that indexing limitation remains open.
+   See [MS-SEARCH Synonyms](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-search/3e8338e0-d5fe-4a9f-ada9-85bc292d4c1a).
+   Regression suite: 368 passed,
    73 ignored; strict Clippy, formatting, and diff checks passed. The nested
    current proximity and paging changes are not deployed or runtime-verified.
    Phrase matching is case-insensitive and requires adjacent
