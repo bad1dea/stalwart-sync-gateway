@@ -13510,6 +13510,34 @@ async fn find_repeated_and_negated_subject_phrases_are_exact() {
     let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
     ids.sort();
     assert_eq!(ids, vec!["m1", "m2", "unrelated subject"]);
+
+    env.mock.add_mail("inbox", "gamma delta only");
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "e1059fdc-a0e2-43b8-9f65-c5748d4f1a1c",
+            r#"NOT subject:"alpha beta" OR subject:"gamma delta""#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("5"));
+    let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![
+            "alpha beta gamma delta",
+            "gamma delta only",
+            "m1",
+            "m2",
+            "unrelated subject"
+        ]
+    );
 }
 
 #[tokio::test]

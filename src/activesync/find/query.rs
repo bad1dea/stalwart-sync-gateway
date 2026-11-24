@@ -93,6 +93,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         let mut phrase_count = 0;
         let mut position = 0;
         let mut term_count = 0;
+        let mut has_negated_phrase = false;
         while position < tokens.len() {
             let negated = tokens.get(position) == Some(&Token::Not);
             if negated {
@@ -102,21 +103,31 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                 return None;
             };
             if negated {
-                // Negative phrase alternatives need an AND/OR expression tree
-                // to retain their meaning, so keep those forms unsupported.
-                if word.starts_with(['+', '-']) || search_phrase_word(word).is_some() {
+                if word.starts_with(['+', '-']) {
                     return None;
                 }
-                let (property, value) = boolean_search_term(word)?;
-                terms.push((format!("$not{property}"), value));
+                if let Some((property, value)) = search_phrase_word(word) {
+                    terms.push((format!("$not${property}"), value));
+                    phrase_count += 1;
+                    has_negated_phrase = true;
+                } else {
+                    let (property, value) = boolean_search_term(word)?;
+                    terms.push((format!("$not{property}"), value));
+                }
             } else {
                 let positive = word.strip_prefix('+').unwrap_or(word);
                 if let Some(phrase) = search_phrase_word(positive) {
                     terms.push(phrase);
                     phrase_count += 1;
                 } else if let Some(negative) = word.strip_prefix('-') {
-                    let (property, value) = boolean_search_term(negative)?;
-                    terms.push((format!("$not{property}"), value));
+                    if let Some((property, value)) = search_phrase_word(negative) {
+                        terms.push((format!("$not${property}"), value));
+                        phrase_count += 1;
+                        has_negated_phrase = true;
+                    } else {
+                        let (property, value) = boolean_search_term(negative)?;
+                        terms.push((format!("$not{property}"), value));
+                    }
                 } else {
                     let boolean = boolean_search_term(word)?;
                     terms.push(boolean);
@@ -131,7 +142,20 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                 position += 1;
             }
         }
-        return (term_count > 1 && phrase_count > 0).then_some((PhraseMatch::Any, terms));
+        if term_count > 1 && phrase_count > 0 {
+            if has_negated_phrase {
+                let mut expression = Vec::with_capacity(terms.len() * 2 - 1);
+                for (index, term) in terms.into_iter().enumerate() {
+                    expression.push(term);
+                    if index > 0 {
+                        expression.push(("$op$or".to_owned(), String::new()));
+                    }
+                }
+                return Some((PhraseMatch::Expression, expression));
+            }
+            return Some((PhraseMatch::Any, terms));
+        }
+        return None;
     }
     if tokens.contains(&Token::Or)
         && tokens.iter().any(|token| {
@@ -1505,6 +1529,17 @@ mod tests {
                 vec![
                     ("subject".to_owned(), "alpha beta".to_owned()),
                     ("body".to_owned(), "gamma delta".to_owned())
+                ]
+            ))
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"NOT subject:"alpha beta" OR subject:"gamma delta""#),
+            Some((
+                PhraseMatch::Expression,
+                vec![
+                    ("$not$subject".to_owned(), "alpha beta".to_owned()),
+                    ("subject".to_owned(), "gamma delta".to_owned()),
+                    ("$op$or".to_owned(), String::new())
                 ]
             ))
         );
