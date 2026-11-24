@@ -2536,6 +2536,13 @@ mod tests {
             Some("alpha beta & gamma".to_owned())
         );
         assert_eq!(
+            extract_find_attachment_text(
+                "application/xml",
+                b"<?xml version=\"1.0\" encoding=\"windows-1252\"?><root>caf\xe9</root>",
+            ),
+            Some("café".to_owned())
+        );
+        assert_eq!(
             extract_find_attachment_text("text/xml", b"<root><![CDATA[alpha beta]]></root>",),
             Some("alpha beta".to_owned())
         );
