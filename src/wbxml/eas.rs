@@ -3267,14 +3267,20 @@ fn extract_task_fields(nodes: &[Node]) -> TaskFields {
             Ok((recurrence, recurrence_start)) => {
                 fields.recurrence = recurrence;
                 if let Some(start) = recurrence_start {
-                    if fields
-                        .start_date
+                    // MS-ASTASK carries the series start inside Recurrence
+                    // alongside the task's StartDate/UtcStartDate. Our writer
+                    // emits the UTC start in Recurrence/Start, so prefer that
+                    // field when both date forms are present; otherwise use
+                    // the available top-level start as the consistency check.
+                    let existing_start = fields
+                        .utc_start_date
                         .as_ref()
+                        .or(fields.start_date.as_ref());
+                    if existing_start
                         .is_some_and(|current| eas_to_rfc3339(current) != eas_to_rfc3339(&start))
-                        || fields.utc_start_date.is_some()
                     {
                         fields.unsupported_recurrence = true;
-                    } else {
+                    } else if existing_start.is_none() {
                         fields.start_date = Some(start);
                     }
                 }
@@ -4184,6 +4190,7 @@ mod tests {
         let mut builder = DocumentBuilder::new();
         builder.start(airsync::APPLICATION_DATA);
         builder.leaf(tasks::START_DATE, "2026-11-24T09:00:00.000Z");
+        builder.leaf(tasks::UTC_START_DATE, "2026-11-24T09:00:00.000Z");
         builder.start(tasks::RECURRENCE);
         builder.leaf(tasks::START, "2026-11-24T09:00:00.000Z");
         builder.leaf(tasks::TYPE, "1");
@@ -4204,6 +4211,17 @@ mod tests {
                 ..Default::default()
             })
         );
+
+        let mut mismatch = DocumentBuilder::new();
+        mismatch.start(airsync::APPLICATION_DATA);
+        mismatch.leaf(tasks::START_DATE, "2026-11-24T09:00:00.000Z");
+        mismatch.leaf(tasks::UTC_START_DATE, "2026-11-24T09:00:00.000Z");
+        mismatch.start(tasks::RECURRENCE);
+        mismatch.leaf(tasks::START, "2026-11-25T09:00:00.000Z");
+        mismatch.leaf(tasks::TYPE, "1");
+        mismatch.end();
+        mismatch.end();
+        assert!(extract_task_fields(&mismatch.finish().nodes).unsupported_recurrence);
 
         let mut clear = DocumentBuilder::new();
         clear.start(airsync::APPLICATION_DATA);

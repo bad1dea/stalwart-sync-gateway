@@ -252,6 +252,10 @@ session's fixes were, not against spec-reading alone.
 
 ## Remaining verification items
 
+- Tasks — MS-ASTASK Appendix A defines `AllProps` as a repeating `xs:choice`,
+  so the schema does not prescribe an element order. Sync emits the fields in
+  its current writer order; actual iOS parsing and recurring-task round trips
+  still require test-bridge/device validation.
 - KQL proximity — direct `NEAR`/`ONEAR` and Boolean combinations with supported
   predicates exact-filter full message text and common address fields, using
   the default distance of eight or an explicit distance. Attachment payload
@@ -262,5 +266,5 @@ session's fixes were, not against spec-reading alone.
   `recurrenceRule`; unsupported patterns fail closed. Task-specific backend
   create/get and real-client recurrence behavior still need verification.
   Sensitivity cannot be patched per occurrence under RFC 8984.
-- Real-client 16.1 negotiation and behavior, including Tasks field order and
+- Real-client 16.1 negotiation and behavior, including Tasks recurrence and
   enabled Oof rendering. Production remains on 14.0 until that pass.

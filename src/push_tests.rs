@@ -737,6 +737,20 @@ async fn mock_download(
 fn mock_calendar_event_set(mock: &Mock, args: &serde_json::Value) -> serde_json::Value {
     let mut all = mock.groupware.lock().unwrap();
     let list = all.entry("calendar".to_owned()).or_default();
+    if let Some(create) = args["create"].as_object() {
+        let mut created = serde_json::Map::new();
+        for (creation_id, values) in create {
+            let id = format!(
+                "calendar-event-{}",
+                mock.counter.fetch_add(1, Ordering::SeqCst)
+            );
+            let mut object = values.clone();
+            object["id"] = serde_json::Value::String(id.clone());
+            list.push(object.clone());
+            created.insert(creation_id.clone(), object);
+        }
+        return serde_json::json!({"created":created});
+    }
     let Some(update) = args["update"].as_object() else {
         return serde_json::json!({"type":"invalidArguments"});
     };
@@ -15716,6 +15730,118 @@ async fn task_search_returns_results_and_fetches_them() {
             Some("a unique description token")
         );
     }
+}
+
+#[tokio::test]
+async fn task_add_recurrence_round_trips_through_sync_and_jmap() {
+    use eas::{airsync as air, tasks};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 1);
+
+    let prime = item_sync(&env, "ipad", "task_calendar", "0", "100").await;
+    let initial = item_sync(&env, "ipad", "task_calendar", &sync_key(&prime), "100").await;
+
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, sync_key(&initial));
+    b.leaf(air::COLLECTION_ID, "task_calendar");
+    b.empty_tag(air::GET_CHANGES);
+    b.start(air::COMMANDS);
+    b.start(air::ADD);
+    b.leaf(air::CLIENT_ID, "recurring-task-add");
+    b.start(air::APPLICATION_DATA);
+    b.leaf(tasks::SUBJECT, "Recurring task fixture");
+    b.leaf(tasks::START_DATE, "2026-11-24T09:00:00.000Z");
+    b.leaf(tasks::UTC_START_DATE, "2026-11-24T09:00:00.000Z");
+    b.leaf(tasks::DUE_DATE, "2026-11-25T09:00:00.000Z");
+    b.leaf(tasks::UTC_DUE_DATE, "2026-11-25T09:00:00.000Z");
+    b.start(tasks::RECURRENCE);
+    b.leaf(tasks::TYPE, "1");
+    b.leaf(tasks::START, "2026-11-24T09:00:00.000Z");
+    b.leaf(tasks::INTERVAL, "2");
+    b.leaf(tasks::DAY_OF_WEEK, "10");
+    b.leaf(tasks::OCCURRENCES, "8");
+    b.end();
+    for _ in 0..6 {
+        b.end();
+    }
+    let response = env
+        .req("Sync", "ipad")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let added = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        eas::find_all_text_after(&added, air::STATUS),
+        vec!["1", "1"]
+    );
+    let task_id = eas::find_text_after(&added, air::SERVER_ID).unwrap();
+
+    {
+        let items = env.mock.groupware.lock().unwrap();
+        let stored = items
+            .get("calendar")
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == task_id)
+            .unwrap();
+        assert_eq!(stored["@type"], "Task");
+        assert_eq!(stored["title"], "Recurring task fixture");
+        assert_eq!(stored["start"], "2026-11-24T09:00:00");
+        assert_eq!(stored["due"], "2026-11-25T09:00:00");
+        assert_eq!(
+            stored["recurrenceRule"],
+            serde_json::json!({
+                "frequency": "weekly",
+                "interval": 2,
+                "byDay": [{"day": "mo"}, {"day": "we"}],
+                "count": 8
+            })
+        );
+    }
+
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, sync_key(&added));
+    b.leaf(air::COLLECTION_ID, "task_calendar");
+    b.empty_tag(air::GET_CHANGES);
+    b.start(air::COMMANDS);
+    b.start(air::FETCH);
+    b.leaf(air::SERVER_ID, task_id);
+    for _ in 0..5 {
+        b.end();
+    }
+    let response = env
+        .req("Sync", "ipad")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let fetched = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        eas::find_all_text_after(&fetched, air::STATUS),
+        vec!["1", "1"]
+    );
+    assert_eq!(
+        eas::find_text_after(&fetched, tasks::SUBJECT),
+        Some("Recurring task fixture")
+    );
+    assert_eq!(eas::find_text_after(&fetched, tasks::TYPE), Some("1"));
+    assert_eq!(eas::find_text_after(&fetched, tasks::INTERVAL), Some("2"));
+    assert_eq!(
+        eas::find_text_after(&fetched, tasks::DAY_OF_WEEK),
+        Some("10")
+    );
+    assert_eq!(
+        eas::find_text_after(&fetched, tasks::OCCURRENCES),
+        Some("8")
+    );
 }
 
 #[tokio::test]

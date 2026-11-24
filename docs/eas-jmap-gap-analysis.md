@@ -14,10 +14,13 @@ Current prioritized work:
 
 Remaining 16.1 readiness backlog (ordered by runtime impact):
 
-1. **Task protocol parity.** Audit Sync/ItemOperations field order against
-   MS-ASTASK, then verify create/get round trips and recurrence against
-   Stalwart JMAP. This is the next implementation target; production remains
-   gated on real-client verification.
+1. **Task recurrence verification.** The MS-ASTASK schema audit confirms
+   task properties use a repeating `xs:choice`, so the schema imposes no
+   field order. A valid recurring Task carrying `StartDate`, `UtcStartDate`,
+   and `Recurrence/Start` was rejected when those starts agreed; the parser
+   now accepts matching values and rejects conflicts. A mocked Sync Add →
+   JMAP object → Sync Fetch regression covers the round trip. Next verify
+   create/get and recurrence against real Stalwart, then on an actual client.
 2. **Real-client 16.1 validation.** Exercise negotiation, Tasks, BodyPart,
    Find, and enabled Oof on the isolated test bridge. Production continues to
    advertise 14.0 until this pass succeeds.
@@ -906,6 +909,17 @@ Task` and the same `recurrenceRule` property, but Task-specific backend create/
 get and real-client recurrence paths have not been verified. Production
 continues to advertise EAS 14.0.
 
+Also completed: **Task recurrence start consistency**. EAS clients may send
+the series start both as top-level `StartDate`/`UtcStartDate` and inside
+`Recurrence/Start`. The parser now accepts matching start values, preferring
+UTC when both top-level forms are present, and still rejects a conflicting
+series start. A new Sync Add → JMAP `CalendarEvent` → Sync Fetch regression
+checks the recurring task fields end to end through the mocked gateway; a
+focused parser regression covers both matching and conflicting dates. Full
+suite: 387 passed, 73 ignored; strict Clippy, formatting, and diff checks
+pass. Deployment verification follows. Real Stalwart and real-client Task
+recurrence verification remains open.
+
 Also completed (`7e5bec5`): **Calendar recurrence occurrence exclusions**.
 Sync Delete with a 16.0/16.1 `InstanceId` now excludes only that occurrence
 through Stalwart's `recurrenceOverrides`; ordinary Sync Delete still removes
@@ -1492,7 +1506,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Sync: Calendar (read) | **Done** | `CalendarEvent/query`+`/get` (JSCalendar, draft-ietf-calext-jscalendarbis superseding RFC 8984) | Confirmed live against a real event; recurrence is now mapped where supported. |
 | Sync: Calendar (write: add/edit/delete) | **Done** (`deploy-2026-08-25t`; recurrence `deploy-2026-11-24-eas-calendar-recurrence-bea1387`; instance fields `deploy-2026-11-24-eas-calendar-instance-fields-d99b3a3`; HTML exception body `deploy-2026-11-24-eas-calendar-exception-html-gate-8cf107d`) | `CalendarEvent/set` | `save_calendar_event`/`destroy_calendar_event` handle lifecycle and supported recurrence rules. EAS 16.0/16.1 occurrence deletes and mapped per-instance fields use `recurrenceOverrides`; sensitivity remains unsupported because JSCalendar disallows `privacy` in recurrence patches. |
 | Sync: Calendar recurrence (RRULE) | **Done** (`deploy-2026-11-24-eas-calendar-recurrence-bea1387`; instance support `deploy-2026-11-24-eas-calendar-instance-fields-d99b3a3`; HTML exception body `deploy-2026-11-24-eas-calendar-exception-html-gate-8cf107d`) | Stalwart singular JSCalendar `recurrenceRule` and `recurrenceOverrides` | Common EAS daily, weekly, monthly, nth-weekday, and yearly rules map both ways. Exclusions and supported subject/plain/HTML body overrides round-trip. Non-representable recurrence patterns and sensitivity overrides remain unsupported. |
-| Sync: Tasks | **Done, two-way (`deploy-2026-08-26i`); recurrence mapping (`deploy-2026-11-24-eas-task-recurrence-a28032b`) | `CalendarEvent` with `@type: "Task"` — confirmed live, not a separate JMAP object | Existing Add/Change/Delete lifecycle is live-verified over WBXML. Common EAS recurrence patterns map through the shared JSCalendar `recurrenceRule` conversion; local regressions cover WBXML parse/write and JMAP Task-object conversion. Task-specific Stalwart create/get and real-client recurrence behavior remain unverified. Per-instance recurrence overrides are rejected. The Task field order still needs real-device verification. |
+| Sync: Tasks | **Done, two-way (`deploy-2026-08-26i`); recurrence mapping (`deploy-2026-11-24-eas-task-recurrence-a28032b`) | `CalendarEvent` with `@type: "Task"` — confirmed live, not a separate JMAP object | Existing Add/Change/Delete lifecycle is live-verified over WBXML. Common EAS recurrence patterns map through the shared JSCalendar `recurrenceRule` conversion. Mocked Sync Add/Fetch regression now covers recurring Task creation with matching top-level and recurrence starts; real Stalwart create/get and real-client recurrence behavior remain open. MS-ASTASK’s repeating `xs:choice` does not constrain field order; actual iOS handling remains unverified. Per-instance recurrence overrides are rejected. |
 | Sync: Notes | **Done, two-way** | Email-backed synthetic-message workaround (`src/jmap/notes.rs`) | The most structurally interesting piece of this whole gateway — see that file's module doc. Full Add/Change/Delete supported. |
 | FolderSync | **Done, incremental** | `Mailbox/get`, `AddressBook/get`, `Calendar/get` | Key 0 sends a full Adds snapshot; subsequent keys diff per-device collection fingerprints into Adds/Updates/Deletes. Unknown keys return Status 9. |
 | FolderCreate/Update/Delete | **Done** (`deploy-2026-11-22-eas-groupware-folders-094b478`) | `Mailbox/set`, `AddressBook/set`, and `Calendar/set` | Mail folders retain hierarchical parent support. User Contacts (`Type=14`) and Calendar (`Type=13`) folders create, rename, and delete JMAP collections with synthetic `ab_`/`cal_` EAS IDs; those collections remain root-level because JMAP has no parent hierarchy. Notes and Tasks remain derived collections without independent CRUD. Mocked HTTP regression covers create/rename/delete for both types and rejects invalid types. |
