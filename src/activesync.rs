@@ -5897,7 +5897,9 @@ fn calendar_instance_change_supported(fields: &wbxml::eas::CalendarFields) -> bo
         && !fields.unsupported_disallow_new_time_proposal
         && !fields.unsupported_attendees
         && !fields.unsupported_body
-        && fields.body_type.is_none_or(|body_type| body_type == 1)
+        && fields
+            .body_type
+            .is_none_or(|body_type| matches!(body_type, 1 | 2))
 }
 
 fn calendar_series_change_clears_exceptions(
@@ -9004,6 +9006,8 @@ mod tests {
         fields.body = Some("body".to_owned());
         fields.body_type = Some(3);
         assert!(!super::calendar_instance_change_supported(&fields));
+        fields.body_type = Some(2);
+        assert!(super::calendar_instance_change_supported(&fields));
         fields.body_type = None;
         fields.location = Some("Room".to_owned());
         assert!(super::calendar_instance_change_supported(&fields));
