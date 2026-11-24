@@ -280,6 +280,7 @@ async fn execute(
                     &email.to,
                     &email.cc,
                     &email.bcc,
+                    email.received_at.as_deref(),
                     email.importance,
                     Some(email.read),
                     Some(email.keywords.iter().any(|keyword| keyword == "$flagged")),
@@ -554,6 +555,7 @@ fn email_matches_phrases(
         "",
         "",
         "",
+        None,
         1,
         is_read,
         is_flagged,
@@ -571,6 +573,7 @@ fn email_matches_phrases_with_addresses(
     to: &str,
     cc: &str,
     bcc: &str,
+    received_at: Option<&str>,
     importance: u8,
     is_read: Option<bool>,
     is_flagged: Option<bool>,
@@ -599,6 +602,8 @@ fn email_matches_phrases_with_addresses(
                 });
                 let matched = if matches!(property, "importance" | "$importance") {
                     importance_matches(importance, phrase)
+                } else if property == "$received" {
+                    received_filter_matches(received_at, phrase)?
                 } else if boolean_property.is_some() {
                     boolean_match.is_some_and(|value| value == (phrase == "true"))
                 } else {
@@ -622,6 +627,18 @@ fn email_matches_phrases_with_addresses(
                 }
                 if property == "$not$importance" {
                     if !importance_matches(importance, phrase) {
+                        return Ok(true);
+                    }
+                    continue;
+                }
+                if property == "$received" {
+                    if received_filter_matches(received_at, phrase)? {
+                        return Ok(true);
+                    }
+                    continue;
+                }
+                if property == "$not$$received" {
+                    if !received_filter_matches(received_at, phrase)? {
                         return Ok(true);
                     }
                     continue;
@@ -688,6 +705,8 @@ fn email_matches_phrases_with_addresses(
                         };
                         let matched = if matches!(property, "importance" | "$importance") {
                             importance_matches(importance, phrase)
+                        } else if property == "$received" {
+                            received_filter_matches(received_at, phrase)?
                         } else if let Some(boolean_property) = boolean_property {
                             let value = match boolean_property {
                                 "$isread" => is_read,
@@ -776,6 +795,42 @@ fn importance_matches(importance: u8, expected: &str) -> bool {
         "high" => importance == 2,
         _ => false,
     }
+}
+
+fn received_filter_matches(received_at: Option<&str>, filter: &str) -> anyhow::Result<bool> {
+    fn matches(
+        received_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+        filter: &serde_json::Value,
+    ) -> anyhow::Result<bool> {
+        if let Some(operator) = filter.get("operator").and_then(serde_json::Value::as_str) {
+            let conditions = filter
+                .get("conditions")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| anyhow::anyhow!("invalid received date filter"))?;
+            let values = conditions
+                .iter()
+                .map(|condition| matches(received_at, condition))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            return Ok(match operator {
+                "AND" => values.into_iter().all(|value| value),
+                "OR" => values.into_iter().any(|value| value),
+                "NOT" if values.len() == 1 => !values[0],
+                _ => anyhow::bail!("unsupported received date filter operator"),
+            });
+        }
+        let before = filter
+            .get("before")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("invalid received date filter leaf"))?;
+        let before = chrono::DateTime::parse_from_rfc3339(before)?;
+        Ok(received_at.is_some_and(|received_at| received_at < before))
+    }
+
+    let filter: serde_json::Value = serde_json::from_str(filter)?;
+    let received_at = received_at
+        .map(chrono::DateTime::parse_from_rfc3339)
+        .transpose()?;
+    matches(received_at, &filter)
 }
 
 fn error_document(status: &str) -> wbxml::Document {
@@ -958,6 +1013,7 @@ mod tests {
             "",
             "",
             "",
+            None,
             2,
             None,
             None,
@@ -977,6 +1033,7 @@ mod tests {
             "",
             "",
             "",
+            None,
             1,
             None,
             None,
@@ -996,6 +1053,7 @@ mod tests {
             "",
             "",
             "",
+            None,
             1,
             None,
             None,
@@ -1014,6 +1072,7 @@ mod tests {
             "",
             "",
             "",
+            None,
             2,
             None,
             None,

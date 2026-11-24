@@ -13642,6 +13642,25 @@ async fn find_phrase_or_boolean_state_uses_both_exact_branches() {
     ids.sort();
     assert_eq!(ids, vec!["alpha-beta", "m2"]);
 
+    env.mock.set_date("m2", "2026-11-22T12:00:00Z");
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "04a074a9-3a57-4c97-9d16-ec3a5adab15e",
+            r#"subject:"alpha beta" OR received:2026-11-22"#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("2"));
+    let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
+    ids.sort();
+    assert_eq!(ids, vec!["alpha-beta", "m2"]);
+
     env.mock.set_keyword("m1", "$flagged", true);
     let response = env
         .req("Find", "client")
