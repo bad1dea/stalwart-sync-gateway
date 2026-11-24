@@ -7801,13 +7801,18 @@ fn write_task_fields(
         if let Some(month) = recurrence.month_of_year {
             builder.leaf(tasks::MONTH_OF_YEAR, month.to_string());
         }
-        if let Some(first_day) = recurrence.first_day_of_week.filter(|_| {
-            matches!(
-                version,
-                ProtocolVersion::V14_1 | ProtocolVersion::V16_0 | ProtocolVersion::V16_1
-            )
-        }) {
-            builder.leaf(tasks::FIRST_DAY_OF_WEEK, first_day.to_string());
+        if matches!(
+            version,
+            ProtocolVersion::V14_1 | ProtocolVersion::V16_0 | ProtocolVersion::V16_1
+        ) && (recurrence.kind == 1 || recurrence.first_day_of_week.is_some())
+        {
+            // MS-ASTASK requires FirstDayOfWeek on every weekly Task
+            // recurrence response; Sunday is the protocol's safe fallback
+            // when the JMAP rule has no explicit locale preference.
+            builder.leaf(
+                tasks::FIRST_DAY_OF_WEEK,
+                recurrence.first_day_of_week.unwrap_or(0).to_string(),
+            );
         }
         builder.end();
     } else if is_change && matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
@@ -9421,7 +9426,34 @@ mod tests {
             eas::find_text_after(&document, tasks::OCCURRENCES),
             Some("8")
         );
+        assert_eq!(
+            eas::find_text_after(&document, tasks::FIRST_DAY_OF_WEEK),
+            Some("0")
+        );
         assert_eq!(eas::find_text_after(&document, tasks::CALENDAR_TYPE), None);
+
+        for (version, present) in [
+            (ProtocolVersion::V14_0, false),
+            (ProtocolVersion::V14_1, true),
+            (ProtocolVersion::V16_0, true),
+            (ProtocolVersion::V16_1, true),
+        ] {
+            let mut builder = eas::DocumentBuilder::new();
+            super::write_task_command(&mut builder, air::ADD, &task, &[], version);
+            assert_eq!(
+                eas::contains_token(&builder.finish(), tasks::FIRST_DAY_OF_WEEK),
+                present,
+                "FirstDayOfWeek for protocol {version:?}"
+            );
+        }
+
+        task.recurrence.as_mut().unwrap().first_day_of_week = Some(1);
+        let mut builder = eas::DocumentBuilder::new();
+        super::write_task_command(&mut builder, air::ADD, &task, &[], ProtocolVersion::V16_1);
+        assert_eq!(
+            eas::find_text_after(&builder.finish(), tasks::FIRST_DAY_OF_WEEK),
+            Some("1")
+        );
 
         task.recurrence.as_mut().unwrap().kind = 2;
         let mut builder = eas::DocumentBuilder::new();
