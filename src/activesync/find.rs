@@ -2197,6 +2197,24 @@ mod tests {
     }
 
     #[test]
+    fn boolean_text_operators_filter_phrase_expressions_exactly() {
+        for (input, expected) in [
+            (r#"subject:"alpha beta" AND ALL(alpha beta)"#, true),
+            (r#"subject:"alpha beta" AND ANY(alpha gamma)"#, true),
+            (r#"subject:"alpha beta" AND NONE(gamma delta)"#, true),
+            (r#"subject:"beta alpha" AND ALL(alpha beta)"#, false),
+            (r#"subject:"alpha beta" AND NONE(beta)"#, false),
+        ] {
+            let (kind, terms) = query::phrases_for_postfilter(input).unwrap();
+            assert_eq!(
+                email_matches_phrases("alpha beta", None, None, None, None, kind, &terms).unwrap(),
+                expected,
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
     fn kql_prefix_queries_keep_boolean_and_or_meaning() {
         let (and_kind, and_terms) =
             query::phrases_for_postfilter("subject:serv* AND isread:true").unwrap();

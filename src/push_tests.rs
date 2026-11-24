@@ -14303,6 +14303,34 @@ async fn find_negated_prefix_keeps_local_boolean_or_semantics() {
 }
 
 #[tokio::test]
+async fn find_boolean_text_operators_are_exact_with_phrase_restrictions() {
+    use eas::{airsync as air, find as f};
+    let env = start_env(Opts::default()).await;
+    env.mock.add_mail("inbox", "alpha beta");
+    env.mock.add_mail("inbox", "alpha beta gamma");
+    env.mock.add_mail("inbox", "beta alpha");
+    env.mock.add_mail("inbox", "alpha only");
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "9c021b9e-aab6-4ef8-b1ca-36d02f20f57e",
+            r#"subject:"alpha beta" AND ALL(alpha beta)"#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("2"));
+    let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
+    ids.sort();
+    assert_eq!(ids, vec!["alpha beta", "alpha beta gamma"]);
+}
+
+#[tokio::test]
 async fn find_scopes_queries_and_rejects_unsupported_inputs() {
     use eas::{airsync as air, find as f};
     let env = start_env(Opts::default()).await;

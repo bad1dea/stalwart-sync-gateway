@@ -33,6 +33,14 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
         return Ok(json!({}));
     }
     let tokens = tokenize(input)?;
+    if let Some(expanded) = expand_boolean_text_operators(&tokens) {
+        let has_exact_term = tokens.iter().any(|token| {
+            matches!(token, Token::Word(word) if search_phrase_word(word).is_some() || prefix_search_term(word).is_some())
+        });
+        if has_exact_term && flat_phrase_boolean_expression(&expanded).is_some() {
+            return Ok(json!({}));
+        }
+    }
     let has_prefix_term = tokens.iter().any(|token| {
         matches!(token, Token::Word(word) if prefix_search_term(word.strip_prefix('+').or_else(|| word.strip_prefix('-')).unwrap_or(word)).is_some())
     });
@@ -137,6 +145,17 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         ));
     }
     let tokens = tokenize(input).ok()?;
+    if let Some(expanded) = expand_boolean_text_operators(&tokens) {
+        let has_exact_term = tokens.iter().any(|token| {
+            matches!(token, Token::Word(word) if search_phrase_word(word).is_some() || prefix_search_term(word).is_some())
+        });
+        if has_exact_term {
+            return Some((
+                PhraseMatch::Expression,
+                flat_phrase_boolean_expression(&expanded)?,
+            ));
+        }
+    }
     if let [Token::Word(word)] = tokens.as_slice() {
         if let Some(term) = prefix_search_term(word) {
             return Some((PhraseMatch::Any, vec![term]));
@@ -652,6 +671,70 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         }
     }
     Some((PhraseMatch::All, phrases))
+}
+
+fn expand_boolean_text_operators(tokens: &[Token]) -> Option<Vec<Token>> {
+    if !tokens
+        .iter()
+        .any(|token| matches!(token, Token::All | Token::Any | Token::None))
+    {
+        return None;
+    }
+    let mut expanded = Vec::new();
+    let mut position = 0;
+    while position < tokens.len() {
+        let operator = match tokens.get(position) {
+            Some(Token::All) => Some(Token::And),
+            Some(Token::Any | Token::None) => Some(Token::Or),
+            _ => None,
+        };
+        let Some(operator) = operator else {
+            if tokens[position] == Token::Words {
+                // WORDS has independent synonym semantics and remains handled
+                // by its existing dedicated parser.
+                expanded.push(tokens[position].clone());
+                position += 1;
+                continue;
+            }
+            expanded.push(tokens[position].clone());
+            position += 1;
+            continue;
+        };
+        let is_none = tokens[position] == Token::None;
+        if tokens.get(position + 1) != Some(&Token::Left) {
+            return None;
+        }
+        position += 2;
+        let mut terms = Vec::new();
+        while let Some(Token::Word(word)) = tokens.get(position) {
+            let value = free_text_operand(word)?;
+            if value.contains(':') {
+                return None;
+            }
+            terms.push(format!("text:{value}"));
+            position += 1;
+        }
+        if terms.is_empty() || tokens.get(position) != Some(&Token::Right) {
+            return None;
+        }
+        position += 1;
+        expanded.push(Token::Left);
+        if is_none {
+            expanded.push(Token::Not);
+            expanded.push(Token::Left);
+        }
+        for (index, term) in terms.into_iter().enumerate() {
+            if index != 0 {
+                expanded.push(operator.clone());
+            }
+            expanded.push(Token::Word(term));
+        }
+        if is_none {
+            expanded.push(Token::Right);
+        }
+        expanded.push(Token::Right);
+    }
+    Some(expanded)
 }
 
 #[derive(Clone, Copy)]
@@ -3042,6 +3125,19 @@ mod tests {
                 PhraseMatch::Expression
             );
             assert_eq!(to_filter(input).unwrap(), json!({}));
+        }
+    }
+
+    #[test]
+    fn boolean_text_operators_are_expanded_for_exact_phrase_expressions() {
+        for input in [
+            r#"subject:"alpha beta" AND ALL(alpha beta)"#,
+            r#"subject:"alpha beta" AND ANY(alpha beta)"#,
+            r#"subject:"alpha beta" AND NONE(gamma delta)"#,
+        ] {
+            let postfilter = phrases_for_postfilter(input);
+            assert!(postfilter.is_some(), "{input}");
+            assert_eq!(to_filter(input).unwrap(), json!({}), "{input}");
         }
     }
 

@@ -288,6 +288,11 @@ Current prioritized work:
    Other predicates outside the supported boolean, importance, received, sent,
    size, and string-property set remain rejected when paired with negated
    phrases.
+   The KQL `ALL(...)`, `ANY(...)`, and `NONE(...)` free-text operators can
+   also combine with exact phrase expressions; their terms are locally
+   evaluated with AND, OR, and negated-OR semantics during the scoped mailbox
+   scan. Unit coverage exercises all three, and a mocked end-to-end Find test
+   verifies `ALL(...)` together with phrase order and exact result totals.
    A single positive `body:"multiword phrase"`
    or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
    body and text scans fetch message bodies and reject a truncated body rather
@@ -365,7 +370,7 @@ Current prioritized work:
    Boolean expressions. A mocked end-to-end Find regression checks the
    negated prefix and its boolean OR branch against exact IDs and totals.
    See the [KeyQL wildcard reference](https://learn.microsoft.com/en-us/sharepoint/dev/general-development/keyword-query-language-kql-syntax-reference).
-   Regression suite: 376 passed,
+   Regression suite: 379 passed,
    73 ignored; strict Clippy, formatting, and diff checks passed. The recent
    prefix-negation and text-attachment extraction additions are source-tested
    but not deployed or runtime-verified; real-client 16.1 certification remains
