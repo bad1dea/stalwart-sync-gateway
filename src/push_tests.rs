@@ -13342,6 +13342,33 @@ async fn find_exact_subject_phrase_preserves_conjunctive_restrictions() {
 }
 
 #[tokio::test]
+async fn find_phrase_and_negated_read_filter_preserves_kql_and_semantics() {
+    use eas::{airsync as air, find as f};
+    let env = start_env(Opts::default()).await;
+    env.mock.add_mail("inbox", "alpha-beta-unread");
+    env.mock.add_mail("inbox", "alpha-beta-read");
+    env.mock.set_keyword("alpha-beta-read", "$seen", true);
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "257f8f56-b76a-46ee-b9b9-a9d122824725",
+            r#"subject:"alpha beta" AND NOT isread:true"#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["alpha-beta-unread"]
+    );
+}
+
+#[tokio::test]
 async fn find_repeated_and_negated_subject_phrases_are_exact() {
     use eas::{airsync as air, find as f};
     let env = start_env(Opts::default()).await;

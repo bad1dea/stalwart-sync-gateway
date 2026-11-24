@@ -80,28 +80,6 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         {
             return None;
         }
-        let boolean = |word: &str| {
-            let word = word.strip_prefix('+').unwrap_or(word);
-            let (property, value) = word.split_once(':')?;
-            let property = property.to_ascii_lowercase();
-            let enabled = match value.to_ascii_lowercase().as_str() {
-                "true" | "yes" | "1" => "true",
-                "false" | "no" | "0" => "false",
-                _ => return None,
-            };
-            matches!(
-                property.as_str(),
-                "isread" | "isflagged" | "hasattachment" | "hasattachments"
-            )
-            .then(|| {
-                let property = if property == "hasattachments" {
-                    "hasattachment"
-                } else {
-                    property.as_str()
-                };
-                (format!("${property}"), enabled.to_owned())
-            })
-        };
         let mut terms = Vec::new();
         let mut phrase_count = 0;
         let mut boolean_count = 0;
@@ -112,7 +90,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                 terms.push(phrase);
                 phrase_count += 1;
             } else {
-                let boolean = boolean(word)?;
+                let boolean = boolean_search_term(word)?;
                 terms.push(boolean);
                 boolean_count += 1;
             }
@@ -122,7 +100,12 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
     }
     if tokens
         .iter()
-        .any(|token| !matches!(token, Token::Word(_) | Token::And))
+        .enumerate()
+        .any(|(index, token)| match token {
+            Token::Word(_) | Token::And => false,
+            Token::Not => !matches!(tokens.get(index + 1), Some(Token::Word(word)) if boolean_search_term(word).is_some()),
+            _ => true,
+        })
     {
         return None;
     }
@@ -148,6 +131,9 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         if let Some(negative) = word.strip_prefix('-') {
             if search_phrase_word(negative).is_some() {
                 return None;
+            }
+            if boolean_search_term(negative).is_some() {
+                continue;
             }
         }
         if let Some((property, _)) = word.split_once(':') {
@@ -193,6 +179,29 @@ fn search_phrase_word(word: &str) -> Option<(String, String)> {
     let phrase = &value[1..value.len() - 1];
     (phrase.split_whitespace().count() > 1)
         .then(|| (property.to_ascii_lowercase(), phrase.to_owned()))
+}
+
+fn boolean_search_term(word: &str) -> Option<(String, String)> {
+    let word = word.strip_prefix('+').unwrap_or(word);
+    let (property, value) = word.split_once(':')?;
+    let property = property.to_ascii_lowercase();
+    let enabled = match value.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "1" => "true",
+        "false" | "no" | "0" => "false",
+        _ => return None,
+    };
+    matches!(
+        property.as_str(),
+        "isread" | "isflagged" | "hasattachment" | "hasattachments"
+    )
+    .then(|| {
+        let property = if property == "hasattachments" {
+            "hasattachment"
+        } else {
+            property.as_str()
+        };
+        (format!("${property}"), enabled.to_owned())
+    })
 }
 
 pub(super) fn subject_has_phrase(subject: &str, phrase: &str) -> bool {
@@ -841,6 +850,27 @@ mod tests {
             json!({"operator":"AND", "conditions":[
                 {"subject":"alpha beta"}, {"hasKeyword":"$seen"}
             ]})
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" AND NOT isread:true"#),
+            Some((
+                PhraseMatch::All,
+                vec![("subject".to_owned(), "alpha beta".to_owned())]
+            ))
+        );
+        assert_eq!(
+            to_filter(r#"subject:"alpha beta" AND NOT isread:true"#).unwrap(),
+            json!({"operator":"AND", "conditions":[
+                {"subject":"alpha beta"},
+                {"operator":"NOT", "conditions":[{"hasKeyword":"$seen"}]}
+            ]})
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" AND -isflagged:true"#),
+            Some((
+                PhraseMatch::All,
+                vec![("subject".to_owned(), "alpha beta".to_owned())]
+            ))
         );
         assert_eq!(
             to_filter(r#"subject:"alpha beta""#).unwrap(),
