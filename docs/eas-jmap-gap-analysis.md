@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `e1a7d86` (2026-11-24)
+## Reconciled status for source `main` at `26627d7` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -19,13 +19,20 @@ Current prioritized work:
    Explicitly ANDed phrases on the same property (for example two distinct
    `subject:"..."` terms) are also exact-filtered together; adjacent
    repeated-property restrictions without `AND` remain rejected because
-   MS-KQL groups those restrictions with OR. Regression tests cover the
-   matching and non-matching subject cases. Deployed as
+   MS-KQL groups those restrictions with OR. The standalone negated form
+   `NOT subject:"..."` is exact-filtered over the scoped mailbox; mixed
+   negation expressions remain rejected. Regression coverage confirms both
+   matching and non-matching cases. Deployed as
+   `deploy-2026-11-24-eas-kql-negative-phrase-26627d7`; homelab commit
+   `1a0de67`, image
+   `sha256:51ec7da6f0293dfd841016ed06aa75e1d9f37bd03b5244190e42b046526d3670`,
+   started `2026-11-24T11:58:13Z`, restart count zero, `/healthz` `ok`,
+   and `/readyz` `ready`. The prior same-property AND release was
    `deploy-2026-11-24-eas-kql-repeat-property-e1a7d86`; homelab commit
    `5b8a529`, image
    `sha256:ac8282f1f2104983c0dcfb9b5e41b439bcbd0cbeab9494fffc406ee80787be7c`,
-   started `2026-11-24T11:50:37Z`, restart count zero, `/healthz` `ok`,
-   and `/readyz` `ready`.
+   started `2026-11-24T11:50:37Z`, restart count zero, with health and
+   readiness passing.
    Positive phrases can be combined with KQL AND terms. Multiple phrases on
    distinct properties (for example subject plus body) are exact-filtered
    together; candidate filtering preserves the other restrictions, result
