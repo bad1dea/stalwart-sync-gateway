@@ -340,14 +340,16 @@ Current prioritized work:
    text/html, common Office/OpenDocument formats, EPUB, RTF, and PDF, with
    configurable size/decompression limits and partial-index cases ([Stalwart
    attachment text extraction](https://www.stalw.art/docs/storage/text-extraction/)). A
-   Find now downloads and locally extracts `text/*`, JSON, and XML (`+xml`)
-   attachment blobs up to 2 MiB (with HTML/RTF conversion and XML element/entity/CDATA
-   handling) for exact text/NEAR checks. The downloader enforces the cap from
-   the actual body size even if attachment metadata advertises less; a mocked
-   end-to-end regression confirms oversized content is skipped.
+   Find now downloads and locally extracts `text/*`, JSON, XML (`+xml`), and
+   text-bearing PDFs up to 2 MiB for exact text/NEAR checks. PDF parsing
+   failures and parser panics are contained as non-matches. HTML/RTF conversion
+   and XML element/entity/CDATA handling are covered as well. The downloader
+   enforces the cap from the actual body size even if attachment metadata
+   advertises less; mocked end-to-end regressions confirm PDF text matching and
+   oversized-content rejection.
    text-property searches broad-scan the selected mailbox so those attachment
-   checks do not depend on JMAP's attachment index setting. PDF, Office,
-   OpenDocument, and larger attachment extraction remain unsupported, so
+   checks do not depend on JMAP's attachment index setting. Office,
+   OpenDocument, scanned-PDF OCR, and larger attachment extraction remain unsupported, so
    attachment-content proximity is still incomplete for those formats. Boolean
    combinations use the existing exact matcher for supported predicates.
    Mocked HTTP end-to-end coverage verifies both a `text:` phrase and NEAR

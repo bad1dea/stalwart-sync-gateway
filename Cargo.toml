@@ -15,6 +15,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 chrono-tz = "0.10"
 http = "1"
 prometheus = "0.13"
+pdf-extract = "0.12.1"
 quick-xml = { version = "0.36", features = ["serialize"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "stream"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }

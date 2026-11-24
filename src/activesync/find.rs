@@ -487,7 +487,7 @@ fn is_extractable_attachment_type(content_type: &str) -> bool {
         || media_type.ends_with("+xml")
         || matches!(
             media_type.as_str(),
-            "application/rtf" | "application/json" | "application/xml"
+            "application/rtf" | "application/json" | "application/xml" | "application/pdf"
         )
 }
 
@@ -502,6 +502,16 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
         "text/plain" => String::from_utf8_lossy(bytes).into_owned(),
         "text/html" => super::strip_html_tags(&String::from_utf8_lossy(bytes).replace('>', "> ")),
         "text/rtf" | "application/rtf" => super::rtf_to_plain_text(&String::from_utf8_lossy(bytes)),
+        "application/pdf" => {
+            // Attachments are untrusted input. pdf-extract can panic on malformed
+            // object graphs, so contain parser panics and treat malformed PDFs as
+            // non-extractable rather than failing the whole Find request.
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pdf_extract::extract_text_from_mem(bytes)
+            }))
+            .ok()?
+            .ok()?
+        }
         "application/xml" | "text/xml" => extract_xml_text(bytes)?,
         _ if media_type.ends_with("+xml") => extract_xml_text(bytes)?,
         _ if media_type.starts_with("text/") || media_type == "application/json" => {
@@ -2150,6 +2160,7 @@ mod tests {
     fn find_extracts_text_attachments_for_exact_search_matching() {
         assert!(is_extractable_attachment_type("application/xhtml+xml"));
         assert!(is_extractable_attachment_type("application/atom+xml"));
+        assert!(is_extractable_attachment_type("application/pdf"));
         assert_eq!(
             extract_find_attachment_text("text/plain; charset=utf-8", b"alpha beta"),
             Some("alpha beta".to_owned())
@@ -2184,8 +2195,13 @@ mod tests {
             ),
             Some("alpha beta".to_owned())
         );
+        let pdf = test_pdf_with_text("alpha beta");
         assert_eq!(
-            extract_find_attachment_text("application/pdf", b"alpha beta"),
+            extract_find_attachment_text("application/pdf", &pdf),
+            Some("alpha beta".to_owned())
+        );
+        assert_eq!(
+            extract_find_attachment_text("application/pdf", b"not a PDF"),
             None
         );
 
@@ -2228,6 +2244,38 @@ mod tests {
             ],
         )
         .unwrap());
+    }
+
+    fn test_pdf_with_text(text: &str) -> Vec<u8> {
+        let stream = format!("BT /F1 12 Tf 72 720 Td ({text}) Tj ET");
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_owned(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{}\nendstream", stream.len(), stream),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, object).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
     }
 
     #[test]
