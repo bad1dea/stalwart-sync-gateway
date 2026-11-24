@@ -9,6 +9,8 @@ struct Options {
     mime_support: u8,
     #[serde(default)]
     body_preferences: Vec<crate::wbxml::eas::RequestedBodyPreference>,
+    #[serde(default)]
+    body_part_preferences: Vec<crate::wbxml::eas::RequestedBodyPreference>,
     #[serde(default, skip_serializing)]
     body_type: Option<u8>,
     #[serde(default, skip_serializing)]
@@ -33,6 +35,7 @@ pub(super) async fn apply(
             filter_type: collection.filter_type,
             mime_support: collection.mime_support,
             body_preferences: collection.body_preferences.clone(),
+            body_part_preferences: collection.body_part_preferences.clone(),
             body_type: None,
             truncation_size: None,
         };
@@ -63,6 +66,7 @@ pub(super) async fn apply(
         collection.filter_type = Some(options.filter_type.unwrap_or(0));
         collection.mime_support = options.mime_support;
         collection.body_preferences = options.body_preferences;
+        collection.body_part_preferences = options.body_part_preferences;
         if collection.body_preferences.is_empty() {
             if let Some(body_type) = options.body_type {
                 collection

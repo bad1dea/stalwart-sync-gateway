@@ -19,9 +19,11 @@ Current prioritized work:
    `Email.bodyStructure` by matching the shared `blobId` (`cd0119b`); this
    mapping has a regression test. The WBXML tokens and independent parser for
    `BodyPartPreference` are now in place, with a regression proving that
-   whole-body and part preferences remain distinct. Wiring parsed preferences
-   into Sync/Search/ItemOperations and emitting EAS `BodyPart` responses are
-   still open. Microsoft
+   whole-body and part preferences remain distinct. Parsed values are carried
+   in the Sync, Search, and ItemOperations request models, and Sync option
+   persistence now records them separately from whole-body preferences.
+   Applying them to response generation and emitting EAS `BodyPart` responses
+   are still open. Microsoft
    defines these for 14.1, 16.0, and 16.1. `BodyPartPreference` uses the same
    Type, TruncationSize, AllOrNone, and Preview shape as `BodyPreference`;
    `BodyPart` returns Status, Type, EstimatedDataSize, optional Truncated,

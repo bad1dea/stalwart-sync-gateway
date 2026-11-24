@@ -1230,6 +1230,7 @@ pub struct SyncCollectionRequest {
     pub options_count: usize,
     pub options_class: Option<String>,
     pub body_preferences: Vec<RequestedBodyPreference>,
+    pub body_part_preferences: Vec<RequestedBodyPreference>,
     pub mime_support: u8,
     pub body_preferences_valid: bool,
     /// Options > FilterType, if sent this request. Absent means "same as the
@@ -1249,6 +1250,7 @@ impl Default for SyncCollectionRequest {
             options_count: 0,
             options_class: None,
             body_preferences: Vec::new(),
+            body_part_preferences: Vec::new(),
             mime_support: 0,
             body_preferences_valid: true,
             filter_type: None,
@@ -1498,6 +1500,7 @@ pub struct ItemOperationsFetchRequest {
     pub file_reference: Option<String>,
     pub range: Option<String>,
     pub body_preferences: Vec<RequestedBodyPreference>,
+    pub body_part_preferences: Vec<RequestedBodyPreference>,
     pub mime_support: u8,
     /// Optional ItemOperations Schema: top-level class fields allowed in
     /// the returned Properties element. `None` means return all fields.
@@ -1582,6 +1585,7 @@ pub fn item_operations_fetch(document: &Document) -> Option<ItemOperationsFetchR
         file_reference,
         range: find_text_after(document, item_operations::RANGE).map(str::to_owned),
         body_preferences: body_preferences(document).ok()?,
+        body_part_preferences: body_part_preferences(document).ok()?,
         mime_support: mime_support(document).ok()?,
         schema,
     })
@@ -1615,6 +1619,7 @@ pub struct SearchRequest {
     pub range: Option<(i64, i64)>,
     pub range_error: Option<&'static str>,
     pub body_preferences: Vec<RequestedBodyPreference>,
+    pub body_part_preferences: Vec<RequestedBodyPreference>,
     pub mime_support: u8,
 }
 
@@ -1661,6 +1666,7 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
         None => (None, None),
     };
     let body_preferences = body_preferences(document).ok()?;
+    let body_part_preferences = body_part_preferences(document).ok()?;
     let store = child_elements(document).into_iter().find(|child|
         matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, search::STORE)))?;
     let mime_support = mime_support(&store).ok()?;
@@ -1707,6 +1713,7 @@ pub fn search_request(document: &Document) -> Option<SearchRequest> {
         range,
         range_error,
         body_preferences,
+        body_part_preferences,
         mime_support,
     })
 }
@@ -2235,6 +2242,12 @@ pub fn sync_collections(document: &Document) -> Vec<SyncCollectionRequest> {
                             }
                             match body_preferences(&options) {
                                 Ok(preferences) => collection.body_preferences.extend(preferences),
+                                Err(_) => collection.body_preferences_valid = false,
+                            }
+                            match body_part_preferences(&options) {
+                                Ok(preferences) => {
+                                    collection.body_part_preferences.extend(preferences)
+                                }
                                 Err(_) => collection.body_preferences_valid = false,
                             }
                         }
