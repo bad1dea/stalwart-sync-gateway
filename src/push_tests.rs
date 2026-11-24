@@ -13414,6 +13414,29 @@ async fn find_repeated_and_negated_subject_phrases_are_exact() {
     ids.sort();
     assert_eq!(ids, vec!["alpha beta gamma delta", "alpha beta only"]);
 
+    env.mock.set_keyword("alpha beta only", "$flagged", true);
+    env.mock.set_keyword("alpha beta only", "$seen", true);
+    env.mock
+        .set_keyword("alpha beta gamma delta", "$flagged", true);
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "52c375b7-f1eb-4cb1-9657-a36a8fcd0ad5",
+            r#"(subject:"alpha beta" OR isread:true OR subject:"gamma delta") AND isflagged:true"#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("2"));
+    let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
+    ids.sort();
+    assert_eq!(ids, vec!["alpha beta gamma delta", "alpha beta only"]);
+    env.mock.set_keyword("alpha beta only", "$seen", false);
+
     env.mock
         .set_keyword("alpha beta gamma delta", "$seen", true);
     let response = env

@@ -578,7 +578,7 @@ fn register_expression_phrase(
             || depth != depth_at(position)
             || !tokens[previous + 1..position]
                 .iter()
-                .all(|token| *token == Token::Or)
+                .all(|token| matches!(token, Token::Or | Token::Word(_) | Token::Not))
         {
             return false;
         }
@@ -1671,6 +1671,23 @@ mod tests {
                     ("subject".to_owned(), "gamma delta".to_owned()),
                     ("$op$or".to_owned(), String::new()),
                     ("$isread".to_owned(), "true".to_owned()),
+                    ("$op$and".to_owned(), String::new())
+                ]
+            ))
+        );
+        assert_eq!(
+            phrases_for_postfilter(
+                r#"(subject:"alpha beta" OR isread:true OR subject:"gamma delta") AND isflagged:true"#
+            ),
+            Some((
+                PhraseMatch::Expression,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$isread".to_owned(), "true".to_owned()),
+                    ("$op$or".to_owned(), String::new()),
+                    ("subject".to_owned(), "gamma delta".to_owned()),
+                    ("$op$or".to_owned(), String::new()),
+                    ("$isflagged".to_owned(), "true".to_owned()),
                     ("$op$and".to_owned(), String::new())
                 ]
             ))
