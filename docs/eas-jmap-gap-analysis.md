@@ -21,9 +21,10 @@ Current prioritized work:
    `BodyPartPreference` are now in place, with a regression proving that
    whole-body and part preferences remain distinct. Parsed values are carried
    in the Sync, Search, and ItemOperations request models, and Sync option
-   persistence now records them separately from whole-body preferences.
-   Applying them to response generation and emitting EAS `BodyPart` responses
-   are still open. Microsoft
+   persistence now records them separately from whole-body preferences, with
+   backward-compatible load coverage for older saved options. Applying them
+   to response generation and emitting EAS `BodyPart` responses are still
+   open. Microsoft
    defines these for 14.1, 16.0, and 16.1. `BodyPartPreference` uses the same
    Type, TruncationSize, AllOrNone, and Preview shape as `BodyPreference`;
    `BodyPart` returns Status, Type, EstimatedDataSize, optional Truncated,

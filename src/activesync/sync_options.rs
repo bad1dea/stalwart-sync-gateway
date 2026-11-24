@@ -83,3 +83,41 @@ pub(super) async fn apply(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Options;
+    use crate::wbxml::eas::RequestedBodyPreference;
+
+    #[test]
+    fn options_persist_body_part_preferences_independently() {
+        let options = Options {
+            filter_type: Some(0),
+            mime_support: 0,
+            body_preferences: vec![RequestedBodyPreference {
+                body_type: 1,
+                ..Default::default()
+            }],
+            body_part_preferences: vec![RequestedBodyPreference {
+                body_type: 4,
+                truncation_size: Some(4096),
+                ..Default::default()
+            }],
+            body_type: None,
+            truncation_size: None,
+        };
+        let decoded: Options =
+            serde_json::from_str(&serde_json::to_string(&options).unwrap()).unwrap();
+        assert_eq!(decoded.body_preferences[0].body_type, 1);
+        assert_eq!(decoded.body_part_preferences[0].body_type, 4);
+        assert_eq!(decoded.body_part_preferences[0].truncation_size, Some(4096));
+    }
+
+    #[test]
+    fn old_options_without_body_part_preferences_still_load() {
+        let options: Options =
+            serde_json::from_str(r#"{"filter_type":0,"mime_support":0,"body_preferences":[]}"#)
+                .unwrap();
+        assert!(options.body_part_preferences.is_empty());
+    }
+}
