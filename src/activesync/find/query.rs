@@ -63,10 +63,13 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
             return Some((PhraseMatch::None, vec![search_phrase_word(negative)?]));
         }
     }
-    if let [Token::Word(left), Token::Or, Token::Word(right)] = tokens.as_slice() {
-        let left_phrase = search_phrase_word(left.strip_prefix('+').unwrap_or(left));
-        let right_phrase = search_phrase_word(right.strip_prefix('+').unwrap_or(right));
+    if tokens.contains(&Token::Or)
+        && tokens
+            .iter()
+            .all(|token| matches!(token, Token::Word(_) | Token::Or))
+    {
         let boolean = |word: &str| {
+            let word = word.strip_prefix('+').unwrap_or(word);
             let (property, value) = word.split_once(':')?;
             let property = property.to_ascii_lowercase();
             let enabled = match value.to_ascii_lowercase().as_str() {
@@ -79,32 +82,31 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                 "isread" | "isflagged" | "hasattachment" | "hasattachments"
             )
             .then(|| {
-                let property = match property.as_str() {
-                    "hasattachments" => "hasattachment",
-                    value => value,
+                let property = if property == "hasattachments" {
+                    "hasattachment"
+                } else {
+                    property.as_str()
                 };
                 (format!("${property}"), enabled.to_owned())
             })
         };
-        if let (Some(phrase), Some(boolean)) = (left_phrase, boolean(right)) {
-            return Some((PhraseMatch::Any, vec![phrase, boolean]));
-        }
-        if let (Some(boolean), Some(phrase)) = (boolean(left), right_phrase) {
-            return Some((PhraseMatch::Any, vec![phrase, boolean]));
-        }
-    }
-    if tokens.contains(&Token::Or)
-        && tokens
-            .iter()
-            .all(|token| matches!(token, Token::Word(_) | Token::Or))
-    {
-        let mut phrases = Vec::new();
+        let mut terms = Vec::new();
+        let mut phrase_count = 0;
+        let mut boolean_count = 0;
         for token in &tokens {
             let Token::Word(word) = token else { continue };
-            let word = word.strip_prefix('+').unwrap_or(word);
-            phrases.push(search_phrase_word(word)?);
+            let positive = word.strip_prefix('+').unwrap_or(word);
+            if let Some(phrase) = search_phrase_word(positive) {
+                terms.push(phrase);
+                phrase_count += 1;
+            } else {
+                let boolean = boolean(word)?;
+                terms.push(boolean);
+                boolean_count += 1;
+            }
         }
-        return (!phrases.is_empty()).then_some((PhraseMatch::Any, phrases));
+        return (phrase_count > 0 && (boolean_count == 0 || phrase_count == 1))
+            .then_some((PhraseMatch::Any, terms));
     }
     if tokens
         .iter()
@@ -865,8 +867,8 @@ mod tests {
             Some((
                 PhraseMatch::Any,
                 vec![
-                    ("subject".to_owned(), "alpha beta".to_owned()),
-                    ("$isread".to_owned(), "false".to_owned())
+                    ("$isread".to_owned(), "false".to_owned()),
+                    ("subject".to_owned(), "alpha beta".to_owned())
                 ]
             ))
         );
@@ -891,8 +893,19 @@ mod tests {
             Some((
                 PhraseMatch::Any,
                 vec![
+                    ("$hasattachment".to_owned(), "false".to_owned()),
+                    ("subject".to_owned(), "alpha beta".to_owned())
+                ]
+            ))
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" OR isread:true OR isflagged:yes"#),
+            Some((
+                PhraseMatch::Any,
+                vec![
                     ("subject".to_owned(), "alpha beta".to_owned()),
-                    ("$hasattachment".to_owned(), "false".to_owned())
+                    ("$isread".to_owned(), "true".to_owned()),
+                    ("$isflagged".to_owned(), "true".to_owned())
                 ]
             ))
         );
