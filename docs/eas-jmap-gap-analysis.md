@@ -291,8 +291,10 @@ Current prioritized work:
    expressions containing proximity operators now broaden to the selected
    mailbox and exact-filter token positions locally. The KQL default distance
    of eight or an explicit distance is supported; ordered searches preserve
-   operand order. Boolean combinations use the existing exact matcher for
-   supported predicates. Regression coverage exercises phrase operands,
+   operand order. Proximity matching also evaluates attachment filenames;
+   attachment payload text remains unindexed locally. Boolean combinations
+   use the existing exact matcher for supported predicates. Regression
+   coverage exercises phrase operands,
    direction, distance, proximity AND/OR combinations, exact totals, and range
    paging. Attachment-content positions remain unsupported. `attachment:` terms
    and phrases also match contiguous words in attachment filenames with exact

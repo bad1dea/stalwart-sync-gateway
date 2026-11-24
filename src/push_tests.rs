@@ -13640,6 +13640,25 @@ async fn find_attachment_phrase_matches_filename_and_scopes_to_mailbox() {
         .req("Find", "client")
         .header("MS-ASProtocolVersion", "16.1")
         .body(find_body(
+            "30000000-0000-4000-8000-000000000004",
+            "annual ONEAR(0) report",
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["attachment-match"]
+    );
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
             "30000000-0000-4000-8000-000000000003",
             "attachment:\"annual rep*\"",
             None,

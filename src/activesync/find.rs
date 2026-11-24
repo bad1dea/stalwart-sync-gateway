@@ -897,6 +897,7 @@ fn email_matches_phrases_with_addresses_and_attachments(
                         to,
                         cc,
                         bcc,
+                        attachments,
                         false,
                         max_words,
                         &[
@@ -926,6 +927,7 @@ fn email_matches_phrases_with_addresses_and_attachments(
                         to,
                         cc,
                         bcc,
+                        attachments,
                         true,
                         max_words,
                         &[
@@ -944,12 +946,30 @@ fn email_matches_phrases_with_addresses_and_attachments(
                 _ => anyhow::bail!("invalid phrase expression"),
             }
         }
-        query::PhraseMatch::Near { max_words } => {
-            proximity_matches_email(subject, body, from, to, cc, bcc, false, max_words, phrases)
-        }
-        query::PhraseMatch::Onear { max_words } => {
-            proximity_matches_email(subject, body, from, to, cc, bcc, true, max_words, phrases)
-        }
+        query::PhraseMatch::Near { max_words } => proximity_matches_email(
+            subject,
+            body,
+            from,
+            to,
+            cc,
+            bcc,
+            attachments,
+            false,
+            max_words,
+            phrases,
+        ),
+        query::PhraseMatch::Onear { max_words } => proximity_matches_email(
+            subject,
+            body,
+            from,
+            to,
+            cc,
+            bcc,
+            attachments,
+            true,
+            max_words,
+            phrases,
+        ),
     }
 }
 
@@ -961,6 +981,7 @@ fn proximity_matches_email(
     to: &str,
     cc: &str,
     bcc: &str,
+    attachments: &[crate::model::EmailAttachment],
     ordered: bool,
     max_words: usize,
     operands: &[(String, String)],
@@ -991,6 +1012,7 @@ fn proximity_matches_email(
             crate::model::EmailBodyType::Rtf => super::rtf_to_plain_text(&body.value),
         });
     }
+    fields.extend(attachments.iter().map(|attachment| attachment.name.clone()));
     for field in fields {
         let words = proximity_words(&field);
         let left_positions = find_term_positions(&words, &left);
