@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `b5dbff2` (2026-11-24)
+## Reconciled status for source `main` at `7f07cd4` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -39,9 +39,10 @@ Current prioritized work:
    EAS meaning.
 2. **Remaining recurring series exception edits.** Common event and task
    recurrence rules map to Stalwart's singular JSCalendar `recurrenceRule`.
-   EAS 16.0/16.1 occurrence deletes and subject/plain-text body/location/time
-   edits now map through `InstanceId` and `recurrenceOverrides`; exclusions
-   and those fields round-trip. Start/end edits convert through the parent
+   EAS 16.0/16.1 occurrence deletes and subject/plain-text body/location/time,
+   all-day, availability, sensitivity, and category edits now map through
+   `InstanceId` and `recurrenceOverrides`; exclusions and those fields
+   round-trip. Start/end edits convert through the parent
    event's IANA timezone, preserve the inherited endpoint when only one is
    changed, derive the new duration, and reject negative durations. All-day
    flags are occurrence-specific. Other fields and Task exceptions remain
@@ -57,7 +58,14 @@ Current prioritized work:
    homelab commit `c53e767`. The forced Compose build produced image
    `sha256:dd5981dbf3696e21b935a5e7cb292adfa67a8a4d2707329535a15b81f7ef70df`.
    The container started at `2026-11-24T08:17:03Z` with restart count zero;
-   `/healthz` returned `ok` and `/readyz` returned `ready`.
+   `/healthz` returned `ok` and `/readyz` returned `ready`. Availability,
+   sensitivity, and category overrides are deployed as
+   `deploy-2026-11-24-eas-calendar-instance-metadata-7f07cd4`; homelab commit
+   `74169dc`. The forced Compose build produced image
+   `sha256:dd5981dbf3696e21b935a5e7cb292adfa67a8a4d2707329535a15b81f7ef70df`.
+   The container started at `2026-11-24T08:17:03Z` with restart count zero;
+   `/healthz` returned `ok` and `/readyz` returned `ready`. Regression suite: 303
+   passed, 73 ignored; strict Clippy passed.
 3. **Real-client 16.1 certification and rollout.** Production remains pinned
    to a tagged 14.0 build. Forced-version protocol tests do not establish that
    iOS/Outlook negotiate or behave correctly against an advertised 16.1 build.
