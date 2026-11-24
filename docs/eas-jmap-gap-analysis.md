@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `e8e0243` (2026-11-24; reconciliation in progress)
+## Reconciled status for source `main` at `0f5d869` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -171,8 +171,14 @@ Current prioritized work:
    `OnlineMeetingExternalLink`, including recurring-instance overrides, for
    EAS 14.1/16.0/16.1. These EAS fields are response-only per MS-ASCAL and
    client writes fail closed. Regression coverage checks base and exception
-   mappings, request rejection, and versioned wire output. Pending full-suite
-   validation and deployment.
+   mappings, request rejection, and versioned wire output. The full suite
+   passed 319 tests (73 ignored); strict Clippy, formatting, and diff checks
+   passed. Deployed as
+   `deploy-2026-11-24-eas-online-meeting-uris-0f5d869`; homelab commit
+   `49e235f`, image
+   `sha256:79ddd9a9cfdd5c76333215384e141a0b6bbb87a53d75d8a108883e0e7966e0fc`,
+   started `2026-11-24T10:27:23Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
 
 Also completed (`b11914b`): **KQL timestamp offset normalization**. RFC3339
 timestamps in `received:` restrictions now resolve to the UTC calendar day
