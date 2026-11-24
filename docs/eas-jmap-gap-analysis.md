@@ -28,9 +28,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    advertise 14.0 until this pass succeeds.
 3. **Find content coverage.** Add exact local search over remaining supported
    attachment formats and assess resource-bounded scanned-PDF OCR and large
-   attachments. Current extraction is bounded and supports EPUB and macro-
-   enabled OOXML, but legacy binary Office, scanned PDFs, and payloads above
-   the extraction limit remain outside exact local matching.
+   attachments. Current extraction is bounded and supports EPUB, macro-enabled
+   OOXML, and RFC 822 message attachments; legacy binary Office, scanned PDFs,
+   and payloads above the extraction limit remain outside exact local matching.
 
 1. **BodyPartPreference / BodyPart response path — implemented and deployed.**
    Request parsing and independent Sync option
@@ -375,16 +375,21 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    configurable size/decompression limits and partial-index cases ([Stalwart
    attachment text extraction](https://www.stalw.art/docs/storage/text-extraction/)). A
    Find now downloads and locally extracts `text/*`, JSON, XML (`+xml`),
-   text-bearing PDFs, EPUB XHTML, OOXML Word/Excel/PowerPoint (including
+   RFC 822 `message/rfc822` and `message/global` attachments (including decoded
+   plain/HTML MIME bodies and embedded-message subjects), text-bearing PDFs,
+   EPUB XHTML, OOXML Word/Excel/PowerPoint (including
    macro-enabled variants), and OpenDocument Text, Spreadsheet, and Presentation
    attachments up to 2 MiB for exact text/NEAR
-   checks. PDF parsing failures and parser panics are contained as non-matches.
+   checks. RFC 822 decoding is capped at the same 2 MiB extracted-text limit.
+   A mocked 16.1 Find regression exercises quoted-printable EML extraction
+   through download and exact proximity matching. PDF parsing failures and
+   parser panics are contained as non-matches.
    Archive entry count and cumulative selected XML expansion are bounded.
    EPUB XHTML chapters use the same archive-entry and expanded-XML limits; a
    mocked HTTP Find regression verifies proximity matching in EPUB text. The
    macro-enabled OOXML types use the same restricted document parts; a mocked
    Find regression covers an `.xlsm` attachment. The current full suite passes
-   383 tests (73 ignored), with strict Clippy and format checks passing. EPUB
+   391 tests (73 ignored), with strict Clippy and format checks passing. EPUB
    extraction is deployed as `deploy-2026-11-24-eas-find-epub-55daf09`;
    homelab commit `97d913d`, image
    `sha256:8aa204bddf21960de0338ff595f81ce66564bf5c4015940521b5fa15730e6b23`,

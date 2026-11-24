@@ -490,7 +490,12 @@ fn is_extractable_attachment_type(content_type: &str) -> bool {
         || media_type.ends_with("+xml")
         || matches!(
             media_type.as_str(),
-            "application/rtf" | "application/json" | "application/xml" | "application/pdf"
+            "application/rtf"
+                | "application/json"
+                | "application/xml"
+                | "application/pdf"
+                | "message/rfc822"
+                | "message/global"
         )
         || is_extractable_archive_type(&media_type)
 }
@@ -540,6 +545,10 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
             .ok()?
             .ok()?
         }
+        "message/rfc822" | "message/global" => {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| extract_rfc822_text(bytes)))
+                .ok()??
+        }
         _ if is_extractable_archive_type(&media_type) => {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 extract_archive_text(bytes, &media_type)
@@ -554,6 +563,42 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
         _ => return None,
     };
     Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+fn extract_rfc822_text(bytes: &[u8]) -> Option<String> {
+    let message = mail_parser::MessageParser::default().parse(bytes)?;
+    let mut output = String::new();
+    for part in message.messages() {
+        if let Some(subject) = part.subject() {
+            append_find_text(&mut output, subject)?;
+        }
+        for body in part.text_bodies() {
+            append_find_text(&mut output, &body)?;
+        }
+        for body in part.html_body() {
+            if let Some(html) = body.text() {
+                append_find_text(&mut output, &mail_parser::html_to_text(&html))?;
+            }
+        }
+    }
+    Some(output)
+}
+
+fn append_find_text(output: &mut String, text: &str) -> Option<()> {
+    let separator = usize::from(!output.is_empty());
+    if output
+        .len()
+        .saturating_add(separator)
+        .saturating_add(text.len())
+        > MAX_FIND_ATTACHMENT_TEXT_BYTES as usize
+    {
+        return None;
+    }
+    if separator != 0 {
+        output.push(' ');
+    }
+    output.push_str(text);
+    Some(())
 }
 
 fn extract_archive_text(bytes: &[u8], media_type: &str) -> Option<String> {
@@ -2368,6 +2413,8 @@ mod tests {
         assert!(is_extractable_attachment_type("application/xhtml+xml"));
         assert!(is_extractable_attachment_type("application/atom+xml"));
         assert!(is_extractable_attachment_type("application/pdf"));
+        assert!(is_extractable_attachment_type("message/rfc822"));
+        assert!(is_extractable_attachment_type("message/global"));
         assert!(is_extractable_attachment_type("application/epub+zip"));
         assert!(is_extractable_attachment_type(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -2400,6 +2447,18 @@ mod tests {
             extract_find_attachment_text("application/json", b"alpha beta"),
             Some("alpha beta".to_owned())
         );
+        let eml = b"From: sender@example.test\r\nSubject: alpha subject\r\nContent-Type: multipart/alternative; boundary=body\r\n\r\n--body\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nplain=20beta\r\n--body\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>html gamma</p>\r\n--body--\r\n";
+        let extracted = extract_find_attachment_text("message/rfc822", eml).unwrap();
+        assert!(extracted.contains("alpha subject"));
+        assert!(extracted.contains("plain beta"));
+        assert!(extracted.contains("html gamma"));
+        let extracted = extract_find_attachment_text(
+            "message/global",
+            b"From: sender@example.test\r\nSubject: delta\r\n\r\nbody epsilon",
+        )
+        .unwrap();
+        assert!(extracted.contains("delta"));
+        assert!(extracted.contains("body epsilon"));
         assert_eq!(
             extract_find_attachment_text(
                 "application/xml",
@@ -2773,6 +2832,13 @@ mod tests {
             "alpha beta gamma",
             query::PhraseMatch::Onear { max_words: 0 }
         ));
+    }
+
+    #[test]
+    fn rfc822_attachment_extraction_stays_within_the_configured_text_limit() {
+        let mut output = "x".repeat(MAX_FIND_ATTACHMENT_TEXT_BYTES as usize);
+        assert!(append_find_text(&mut output, "extra").is_none());
+        assert_eq!(output.len(), MAX_FIND_ATTACHMENT_TEXT_BYTES as usize);
     }
 
     #[test]
