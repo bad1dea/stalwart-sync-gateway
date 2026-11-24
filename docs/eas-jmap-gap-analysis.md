@@ -353,7 +353,7 @@ Current prioritized work:
    configurable size/decompression limits and partial-index cases ([Stalwart
    attachment text extraction](https://www.stalw.art/docs/storage/text-extraction/)). A
    Find now downloads and locally extracts `text/*`, JSON, XML (`+xml`),
-   text-bearing PDFs, OOXML Word/Excel/PowerPoint, and OpenDocument Text,
+   text-bearing PDFs, EPUB XHTML, OOXML Word/Excel/PowerPoint, and OpenDocument Text,
    Spreadsheet, and Presentation attachments up to 2 MiB for exact text/NEAR
    checks. PDF parsing failures and parser panics are contained as non-matches.
    Archive entry count and cumulative selected XML expansion are bounded.

@@ -13812,10 +13812,22 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         .write_all(b"<w:document><w:p><w:t>echo</w:t><w:t>foxtrot in DOCX</w:t></w:p></w:document>")
         .unwrap();
     let docx = docx_archive.finish().unwrap().into_inner();
+    let mut epub_archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    epub_archive
+        .start_file(
+            "EPUB/chapter.xhtml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+    epub_archive
+        .write_all(b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>hotel</p><p>india in EPUB</p></body></html>")
+        .unwrap();
+    let epub = epub_archive.finish().unwrap().into_inner();
     env.mock.add_mail("inbox", "text-attachment");
     env.mock.add_mail("inbox", "oversized-text-attachment");
     env.mock.add_mail("inbox", "pdf-attachment");
     env.mock.add_mail("inbox", "docx-attachment");
+    env.mock.add_mail("inbox", "epub-attachment");
     env.mock.mail_bodies.lock().unwrap().insert(
         "text-attachment".to_owned(),
         ("unrelated body".to_owned(), false),
@@ -13861,6 +13873,17 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
             "size":docx.len()
         })],
     );
+    env.mock.mail_bodies.lock().unwrap().insert(
+        "epub-attachment".to_owned(),
+        ("unrelated body".to_owned(), false),
+    );
+    env.mock.mail_attachments.lock().unwrap().insert(
+        "epub-attachment".to_owned(),
+        vec![serde_json::json!({
+            "blobId":"epub-blob", "name":"book.epub",
+            "type":"application/epub+zip", "size":epub.len()
+        })],
+    );
     env.mock.download_blobs.lock().unwrap().insert(
         "text-blob".to_owned(),
         ("text/plain".to_owned(), b"alpha beta in file".to_vec()),
@@ -13876,6 +13899,10 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_owned(),
             docx,
         ),
+    );
+    env.mock.download_blobs.lock().unwrap().insert(
+        "epub-blob".to_owned(),
+        ("application/epub+zip".to_owned(), epub),
     );
     let mut oversized_text = vec![b'x'; 2 * 1024 * 1024 + 1];
     oversized_text[..10].copy_from_slice(b"alpha beta");
@@ -13945,6 +13972,25 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     assert_eq!(
         eas::find_all_text_after(&doc, air::SERVER_ID),
         vec!["docx-attachment"]
+    );
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "30000000-0000-4000-8000-000000000097",
+            "hotel ONEAR(0) india",
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["epub-attachment"]
     );
 }
 

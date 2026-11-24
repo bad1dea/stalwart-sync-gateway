@@ -492,13 +492,14 @@ fn is_extractable_attachment_type(content_type: &str) -> bool {
             media_type.as_str(),
             "application/rtf" | "application/json" | "application/xml" | "application/pdf"
         )
-        || is_extractable_office_type(&media_type)
+        || is_extractable_archive_type(&media_type)
 }
 
-fn is_extractable_office_type(media_type: &str) -> bool {
+fn is_extractable_archive_type(media_type: &str) -> bool {
     matches!(
         media_type,
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        "application/epub+zip"
+            | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
             | "application/vnd.oasis.opendocument.text"
@@ -528,9 +529,9 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
             .ok()?
             .ok()?
         }
-        _ if is_extractable_office_type(&media_type) => {
+        _ if is_extractable_archive_type(&media_type) => {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                extract_office_archive_text(bytes, &media_type)
+                extract_archive_text(bytes, &media_type)
             }))
             .ok()??
         }
@@ -544,7 +545,7 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
     Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
-fn extract_office_archive_text(bytes: &[u8], media_type: &str) -> Option<String> {
+fn extract_archive_text(bytes: &[u8], media_type: &str) -> Option<String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
     if archive.len() > MAX_FIND_ARCHIVE_ENTRIES {
         return None;
@@ -568,6 +569,7 @@ fn extract_office_archive_text(bytes: &[u8], media_type: &str) -> Option<String>
         "application/vnd.oasis.opendocument.text"
         | "application/vnd.oasis.opendocument.spreadsheet"
         | "application/vnd.oasis.opendocument.presentation" => name == "content.xml",
+        "application/epub+zip" => name.to_ascii_lowercase().ends_with(".xhtml"),
         _ => false,
     };
     let mut remaining = MAX_FIND_ATTACHMENT_TEXT_BYTES as usize;
@@ -2258,6 +2260,7 @@ mod tests {
         assert!(is_extractable_attachment_type("application/xhtml+xml"));
         assert!(is_extractable_attachment_type("application/atom+xml"));
         assert!(is_extractable_attachment_type("application/pdf"));
+        assert!(is_extractable_attachment_type("application/epub+zip"));
         assert!(is_extractable_attachment_type(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         ));
@@ -2325,6 +2328,14 @@ mod tests {
         assert_eq!(
             extract_find_attachment_text("application/vnd.oasis.opendocument.text", &odt),
             Some("gamma delta".to_owned())
+        );
+        let epub = test_office_archive(&[(
+            "EPUB/chapter.xhtml",
+            b"<html><body><p>hotel</p><p>india</p></body></html>",
+        )]);
+        assert_eq!(
+            extract_find_attachment_text("application/epub+zip", &epub),
+            Some("hotel india".to_owned())
         );
 
         let attachment = crate::model::EmailAttachment {
