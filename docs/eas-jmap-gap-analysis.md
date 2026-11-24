@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `4d00728` (2026-11-23)
+## Reconciled status for source `main` at `1f7f7c9` (2026-11-23)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -250,6 +250,19 @@ warnings denied, formatting, and diff checks pass. Deployed as
 Compose produced image
 `sha256:bee5f6682599dff81913383e2bf3b21981d05742af656e42b3ae87e39559d369`.
 The replacement started at `2026-11-24T04:17:59Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
+continues to advertise EAS 14.0.
+
+Also completed (`1f7f7c9`): **EAS Task importance**. EAS `Importance` values
+0/1/2 map to JSCalendar priorities 9/5/1; reads map priority bands back to
+low/normal/high, while an unspecified JSCalendar priority stays omitted.
+Regression tests cover the full supported priority range, invalid EAS values,
+WBXML output, and a client task Change. Full suite: 270 passed, 73 ignored;
+clippy with warnings denied, formatting, and diff checks pass. Deployed as
+`deploy-2026-11-23-eas-task-importance-1f7f7c9`; homelab commit `3318315`.
+Compose produced image
+`sha256:9331e35a119187f72aab8501aae0e94125521fd948637c65c6e068463cb7e6d2`.
+The replacement started at `2026-11-24T04:33:17Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
 continues to advertise EAS 14.0.
 
