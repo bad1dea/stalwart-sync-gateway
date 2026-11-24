@@ -296,7 +296,9 @@ Current prioritized work:
    direction, distance, proximity AND/OR combinations, exact totals, and range
    paging. Attachment-content positions remain unsupported. `attachment:` terms
    and phrases also match contiguous words in attachment filenames with exact
-   local post-filtering. Unordered NEAR also accepts both operands matching one
+   local post-filtering; trailing `*` performs a final-token prefix match per
+   [MS-KQL property restrictions](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-kql/1b4eb34a-0e20-4aca-b38e-41f531a747ff).
+   Unordered NEAR also accepts both operands matching one
    indexed token, as MS-KQL specifies. Regression suite: 357 passed,
    73 ignored; strict Clippy, formatting, and diff checks passed. Neither
    source change is deployed or runtime-verified.

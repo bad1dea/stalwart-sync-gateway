@@ -1029,8 +1029,17 @@ pub(super) fn subject_has_phrase(subject: &str, phrase: &str) -> bool {
             .collect::<Vec<_>>()
     };
     let subject = words(subject);
-    let phrase = words(phrase);
-    !phrase.is_empty() && subject.windows(phrase.len()).any(|window| window == phrase)
+    let prefix_last = phrase.trim_end().ends_with('*');
+    let phrase = words(phrase.trim_end_matches('*').trim_end());
+    !phrase.is_empty()
+        && subject.windows(phrase.len()).any(|window| {
+            if prefix_last {
+                window[..phrase.len() - 1] == phrase[..phrase.len() - 1]
+                    && window[phrase.len() - 1].starts_with(&phrase[phrase.len() - 1])
+            } else {
+                window == phrase
+            }
+        })
 }
 
 fn tokenize(input: &str) -> Result<Vec<Token>, &'static str> {
@@ -2175,6 +2184,8 @@ mod tests {
         assert!(subject_has_phrase("Re: Alpha, BETA! Update", "alpha beta"));
         assert!(!subject_has_phrase("Beta Alpha", "alpha beta"));
         assert!(!subject_has_phrase("Alpha unrelated Beta", "alpha beta"));
+        assert!(subject_has_phrase("Annual Report.pdf", "annual rep*"));
+        assert!(!subject_has_phrase("Report Annual.pdf", "annual rep*"));
     }
 
     #[test]
