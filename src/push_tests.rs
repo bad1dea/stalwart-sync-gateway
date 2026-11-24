@@ -14096,6 +14096,7 @@ async fn task_description_changes_are_synced() {
         task["start"] = serde_json::json!("2026-11-20T08:30:00");
         task["priority"] = serde_json::json!(9);
         task["keywords"] = serde_json::json!({"Work": true});
+        task["alerts"] = serde_json::json!({"due":{"@type":"Alert","trigger":{"@type":"AbsoluteTrigger","when":"2026-11-20T16:00:00Z"}}});
     }
     let update = item_sync(&env, "ipad", "task_calendar", &sync_key(&first), "100").await;
     assert!(eas::contains_token(&update, air::CHANGE));
@@ -14117,6 +14118,14 @@ async fn task_description_changes_are_synced() {
     );
     assert_eq!(eas::find_text_after(&update, tasks::IMPORTANCE), Some("0"));
     assert_eq!(eas::find_text_after(&update, tasks::CATEGORY), Some("Work"));
+    assert_eq!(
+        eas::find_text_after(&update, tasks::REMINDER_SET),
+        Some("1")
+    );
+    assert_eq!(
+        eas::find_text_after(&update, tasks::REMINDER_TIME),
+        Some("2026-11-20T16:00:00.000Z")
+    );
 }
 
 #[tokio::test]
@@ -14139,6 +14148,8 @@ async fn task_completion_date_changes_are_saved() {
     b.start(air::APPLICATION_DATA);
     b.leaf(tasks::COMPLETE, "1");
     b.leaf(tasks::IMPORTANCE, "2");
+    b.leaf(tasks::REMINDER_SET, "1");
+    b.leaf(tasks::REMINDER_TIME, "2026-11-22T08:00:00.000Z");
     b.start(tasks::CATEGORIES);
     b.leaf(tasks::CATEGORY, "Work");
     b.end();
@@ -14173,6 +14184,11 @@ async fn task_completion_date_changes_are_saved() {
     assert_eq!(task["priority"], 1);
     assert_eq!(task["keywords"], serde_json::json!({"Work": true}));
     assert_eq!(task["start"], "2026-11-21T08:00:00");
+    assert_eq!(task["useDefaultAlerts"], false);
+    assert_eq!(
+        task["alerts"].as_object().unwrap().values().next().unwrap()["trigger"]["when"],
+        "2026-11-22T08:00:00Z"
+    );
 }
 
 #[tokio::test]

@@ -4462,6 +4462,8 @@ impl JmapClient {
                     "start",
                     "priority",
                     "keywords",
+                    "alerts",
+                    "useDefaultAlerts",
                 ]),
                 limit,
             )
@@ -4519,6 +4521,7 @@ impl JmapClient {
             !fields.unsupported_categories,
             "unsupported task categories"
         );
+        anyhow::ensure!(!fields.unsupported_reminder, "unsupported task reminder");
         let mut task = serde_json::Map::new();
         if let Some(body) = &fields.body {
             task.insert("description".to_owned(), serde_json::json!(body));
@@ -4551,6 +4554,57 @@ impl JmapClient {
             task.insert("keywords".to_owned(), serde_json::json!(keywords));
         }
         let mut update_state = None;
+        let needs_lookup = fields.due_date.is_some()
+            || fields.utc_due_date.is_some()
+            || fields.start_date.is_some()
+            || fields.utc_start_date.is_some()
+            || fields.reminder_set.is_some()
+            || fields.reminder_time.is_some();
+        let mut timezone = None;
+        let mut current_alerts = serde_json::Value::Null;
+        let mut use_default_alerts = false;
+        if let Some(id) = id.filter(|_| needs_lookup) {
+            let response: JmapResponse<serde_json::Value> = self
+                .api_call(
+                    auth,
+                    &[
+                        capabilities::CORE.to_owned(),
+                        capabilities::CALENDARS.to_owned(),
+                    ],
+                    vec![MethodCall::new(
+                        "CalendarEvent/get",
+                        serde_json::json!({
+                            "accountId":account_id,"ids":[id],"properties":["id","timeZone","alerts","useDefaultAlerts"]
+                        }),
+                        "0",
+                    )],
+                )
+                .await?;
+            let result = response
+                .method_responses
+                .iter()
+                .find(|method| method.0 == "CalendarEvent/get")
+                .context("task state lookup failed")?;
+            update_state = Some(
+                result.1["state"]
+                    .as_str()
+                    .context("task state missing")?
+                    .to_owned(),
+            );
+            let item = result.1["list"]
+                .as_array()
+                .and_then(|list| list.iter().find(|item| item["id"] == id))
+                .context("task not found")?;
+            timezone = match item.get("timeZone") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(zone) => Some(zone.as_str().context("invalid task time zone")?.to_owned()),
+            };
+            current_alerts = item
+                .get("alerts")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            use_default_alerts = item["useDefaultAlerts"].as_bool().unwrap_or(false);
+        }
         if fields.due_date.is_some()
             || fields.utc_due_date.is_some()
             || fields.start_date.is_some()
@@ -4565,45 +4619,6 @@ impl JmapClient {
                             .map(|date| date.naive_utc().format("%Y-%m-%dT%H:%M:%S").to_string())
                     })
                     .context("invalid task date")
-            };
-            let timezone = if let Some(id) = id {
-                let response: JmapResponse<serde_json::Value> = self
-                    .api_call(
-                        auth,
-                        &[
-                            capabilities::CORE.to_owned(),
-                            capabilities::CALENDARS.to_owned(),
-                        ],
-                        vec![MethodCall::new(
-                            "CalendarEvent/get",
-                            serde_json::json!({
-                                "accountId":account_id,"ids":[id],"properties":["id","timeZone"]
-                            }),
-                            "0",
-                        )],
-                    )
-                    .await?;
-                let result = response
-                    .method_responses
-                    .iter()
-                    .find(|method| method.0 == "CalendarEvent/get")
-                    .context("task timezone lookup failed")?;
-                update_state = Some(
-                    result.1["state"]
-                        .as_str()
-                        .context("task state missing")?
-                        .to_owned(),
-                );
-                let item = result.1["list"]
-                    .as_array()
-                    .and_then(|list| list.iter().find(|item| item["id"] == id))
-                    .context("task not found")?;
-                match item.get("timeZone") {
-                    None | Some(serde_json::Value::Null) => None,
-                    Some(zone) => Some(zone.as_str().context("invalid task time zone")?.to_owned()),
-                }
-            } else {
-                None
             };
             let write_date = |local: Option<String>,
                               utc: Option<String>,
@@ -4692,6 +4707,13 @@ impl JmapClient {
         } else if fields.complete == Some(false) {
             task.insert("progressUpdated".to_owned(), serde_json::Value::Null);
         }
+        crate::jmap::task_reminder::write_reminder(
+            &mut task,
+            &current_alerts,
+            use_default_alerts,
+            fields.reminder_set,
+            fields.reminder_time.as_deref(),
+        )?;
 
         let call = match id {
             Some(existing_id) => MethodCall::new(
@@ -7531,6 +7553,10 @@ struct TaskObject {
     priority: Option<u8>,
     #[serde(default)]
     keywords: std::collections::BTreeMap<String, bool>,
+    #[serde(default)]
+    alerts: Option<serde_json::Value>,
+    #[serde(default, rename = "useDefaultAlerts")]
+    use_default_alerts: bool,
     #[serde(rename = "@type", default)]
     kind: String,
 }
@@ -7564,6 +7590,14 @@ impl From<TaskObject> for Task {
                 .into_iter()
                 .filter_map(|(category, enabled)| enabled.then_some(category))
                 .collect(),
+            reminder_time: (!value.use_default_alerts)
+                .then(|| {
+                    value
+                        .alerts
+                        .as_ref()
+                        .and_then(crate::jmap::task_reminder::read_reminder)
+                })
+                .flatten(),
             start: value.start.as_deref().and_then(|start| {
                 if value
                     .time_zone
@@ -7841,7 +7875,8 @@ mod tests {
             "progressUpdated": "2026-11-20T11:45:00-05:00",
             "start": "2026-11-20T11:30:00",
             "priority": 1,
-            "keywords": {"Work": true, "Hidden": false}
+            "keywords": {"Work": true, "Hidden": false},
+            "alerts": {"a":{"@type":"Alert","trigger":{"@type":"AbsoluteTrigger","when":"2026-11-20T11:45:00-05:00"}}}
         }))
         .unwrap();
         let task = crate::model::Task::from(task);
@@ -7852,6 +7887,10 @@ mod tests {
         assert_eq!(task.start.as_deref(), Some("20261120T113000Z"));
         assert_eq!(task.importance, Some(2));
         assert_eq!(task.categories, vec!["Work"]);
+        assert_eq!(
+            task.reminder_time.as_deref(),
+            Some("2026-11-20T16:45:00.000Z")
+        );
 
         let task: super::TaskObject = serde_json::from_value(serde_json::json!({
             "id": "t", "@type": "Task", "progress": "needs-action",

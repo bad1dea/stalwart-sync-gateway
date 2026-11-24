@@ -1325,6 +1325,9 @@ pub struct TaskFields {
     pub importance: Option<String>,
     pub categories: Option<Vec<String>>,
     pub unsupported_categories: bool,
+    pub reminder_set: Option<bool>,
+    pub reminder_time: Option<String>,
+    pub unsupported_reminder: bool,
 }
 
 /// ActiveSync Contacts class fields decoded from one Add/Change command's
@@ -2988,6 +2991,8 @@ fn extract_task_fields(nodes: &[Node]) -> TaskFields {
         ..Default::default()
     };
     let mut path: Vec<Token> = Vec::new();
+    let mut reminder_set_count = 0;
+    let mut reminder_time_count = 0;
 
     for node in nodes {
         match node {
@@ -3010,6 +3015,23 @@ fn extract_task_fields(nodes: &[Node]) -> TaskFields {
                     fields.date_completed = Some(text.clone());
                 } else if same_token(top, tasks::IMPORTANCE) {
                     fields.importance = Some(text.clone());
+                } else if same_token(top, tasks::REMINDER_SET) {
+                    reminder_set_count += 1;
+                    fields.reminder_set = match text.as_str() {
+                        "0" => Some(false),
+                        "1" => Some(true),
+                        _ => {
+                            fields.unsupported_reminder = true;
+                            None
+                        }
+                    };
+                } else if same_token(top, tasks::REMINDER_TIME) {
+                    reminder_time_count += 1;
+                    if text.ends_with('Z') && chrono::DateTime::parse_from_rfc3339(text).is_ok() {
+                        fields.reminder_time = Some(text.clone());
+                    } else {
+                        fields.unsupported_reminder = true;
+                    }
                 }
             }
             Node::End => {
@@ -3018,6 +3040,10 @@ fn extract_task_fields(nodes: &[Node]) -> TaskFields {
             Node::Opaque(_) => {}
         }
     }
+
+    fields.unsupported_reminder |= reminder_set_count > 1
+        || reminder_time_count > 1
+        || (fields.reminder_set == Some(false) && fields.reminder_time.is_some());
 
     fields
 }
@@ -3465,6 +3491,8 @@ mod tests {
         builder.leaf(tasks::SUBJECT, "Renew passport");
         builder.leaf(tasks::COMPLETE, "0");
         builder.leaf(tasks::IMPORTANCE, "2");
+        builder.leaf(tasks::REMINDER_SET, "1");
+        builder.leaf(tasks::REMINDER_TIME, "2026-09-03T09:00:00.000Z");
         builder.start(tasks::CATEGORIES);
         builder.leaf(tasks::CATEGORY, "Work");
         builder.leaf(tasks::CATEGORY, "Friends");
@@ -3491,6 +3519,11 @@ mod tests {
         assert_eq!(command.task.subject.as_deref(), Some("Renew passport"));
         assert_eq!(command.task.complete, Some(false));
         assert_eq!(command.task.importance.as_deref(), Some("2"));
+        assert_eq!(command.task.reminder_set, Some(true));
+        assert_eq!(
+            command.task.reminder_time.as_deref(),
+            Some("2026-09-03T09:00:00.000Z")
+        );
         assert_eq!(
             command.task.categories.as_deref(),
             Some(&["Friends".to_owned(), "Work".to_owned()][..])
@@ -3505,6 +3538,29 @@ mod tests {
             command.task.date_completed.as_deref(),
             Some("2026-09-04T15:30:00.000Z")
         );
+    }
+
+    #[test]
+    fn task_reminders_reject_invalid_and_duplicate_fields() {
+        for invalid in ["2", "true", ""] {
+            let mut builder = DocumentBuilder::new();
+            builder.start(airsync::APPLICATION_DATA);
+            builder.leaf(tasks::REMINDER_SET, invalid);
+            builder.end();
+            assert!(extract_task_fields(&builder.finish().nodes).unsupported_reminder);
+        }
+        let mut builder = DocumentBuilder::new();
+        builder.start(airsync::APPLICATION_DATA);
+        builder.leaf(tasks::REMINDER_TIME, "invalid");
+        builder.end();
+        assert!(extract_task_fields(&builder.finish().nodes).unsupported_reminder);
+
+        let mut builder = DocumentBuilder::new();
+        builder.start(airsync::APPLICATION_DATA);
+        builder.leaf(tasks::REMINDER_SET, "1");
+        builder.leaf(tasks::REMINDER_SET, "1");
+        builder.end();
+        assert!(extract_task_fields(&builder.finish().nodes).unsupported_reminder);
     }
 
     #[test]
