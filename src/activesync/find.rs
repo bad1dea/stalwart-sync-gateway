@@ -1970,6 +1970,21 @@ mod tests {
     }
 
     #[test]
+    fn kql_prefix_queries_match_only_word_prefixes() {
+        let (kind, terms) = query::phrases_for_postfilter("subject:serv*").unwrap();
+        assert!(
+            email_matches_phrases("Server outage", None, None, None, None, kind, &terms,).unwrap()
+        );
+        assert!(
+            !email_matches_phrases("observe outage", None, None, None, None, kind, &terms,)
+                .unwrap()
+        );
+        assert!(
+            email_matches_phrases("Service outage", None, None, None, None, kind, &terms,).unwrap()
+        );
+    }
+
+    #[test]
     fn body_phrase_fails_closed_on_truncated_body_and_handles_missing_body() {
         let truncated = EmailBody {
             body_type: EmailBodyType::Plain,

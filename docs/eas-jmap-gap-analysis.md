@@ -349,7 +349,12 @@ Current prioritized work:
    order and adjacency. As with proximity, exact local matching cannot inspect
    extracted attachment payload text; that indexing limitation remains open.
    See [MS-SEARCH Synonyms](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-search/3e8338e0-d5fe-4a9f-ada9-85bc292d4c1a).
-   Regression suite: 368 passed,
+   Standalone free-text and supported string-property terms now accept KQL's
+   trailing `*` prefix operator, with a scoped mailbox scan and exact local
+   token-prefix comparison because JMAP text filters cannot preserve prefix
+   semantics. Prefix wildcards remain unsupported inside compound expressions.
+   See the [KeyQL wildcard reference](https://learn.microsoft.com/en-us/sharepoint/dev/general-development/keyword-query-language-kql-syntax-reference).
+   Regression suite: 370 passed,
    73 ignored; strict Clippy, formatting, and diff checks passed. The nested
    current proximity and paging changes are not deployed or runtime-verified.
    Phrase matching is case-insensitive and requires adjacent

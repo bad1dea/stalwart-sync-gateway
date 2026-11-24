@@ -33,6 +33,11 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
         return Ok(json!({}));
     }
     let tokens = tokenize(input)?;
+    if let [Token::Word(word)] = tokens.as_slice() {
+        if prefix_search_term(word).is_some() {
+            return Ok(json!({}));
+        }
+    }
     if tokens
         .iter()
         .any(|token| matches!(token, Token::Near(_) | Token::Onear(_)))
@@ -117,6 +122,11 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         ));
     }
     let tokens = tokenize(input).ok()?;
+    if let [Token::Word(word)] = tokens.as_slice() {
+        if let Some(term) = prefix_search_term(word) {
+            return Some((PhraseMatch::Any, vec![term]));
+        }
+    }
     if matches!(tokens.first(), Some(Token::Words)) {
         let mut position = 1;
         if tokens.get(position) != Some(&Token::Left) {
@@ -1212,6 +1222,37 @@ fn simple_search_property_word(word: &str) -> Option<(String, String)> {
         return None;
     };
     if value.trim().is_empty() || value.chars().any(char::is_whitespace) || value.contains('\\') {
+        return None;
+    }
+    Some((property, value.to_owned()))
+}
+
+fn prefix_search_term(word: &str) -> Option<(String, String)> {
+    if word.starts_with(['+', '-']) {
+        return None;
+    }
+    let (property, value) = word.split_once(':').unwrap_or(("text", word));
+    let property = property.to_ascii_lowercase();
+    if ![
+        "subject",
+        "body",
+        "text",
+        "from",
+        "to",
+        "cc",
+        "bcc",
+        "participants",
+    ]
+    .contains(&property.as_str())
+        || !value.ends_with('*')
+    {
+        return None;
+    }
+    let prefix = value.strip_suffix('*')?;
+    if prefix.is_empty()
+        || prefix.contains(['*', '?', '"', '\\'])
+        || prefix.chars().any(char::is_whitespace)
+    {
         return None;
     }
     Some((property, value.to_owned()))
@@ -2826,6 +2867,20 @@ mod tests {
     }
 
     #[test]
+    fn standalone_kql_prefix_queries_broad_scan_for_exact_local_matching() {
+        for input in ["serv*", "subject:serv*", "participants:serv*"] {
+            assert_eq!(to_filter(input).unwrap(), json!({}), "{input}");
+            let (kind, terms) = phrases_for_postfilter(input).unwrap();
+            assert_eq!(kind, PhraseMatch::Any, "{input}");
+            assert_eq!(terms.len(), 1, "{input}");
+            assert!(terms[0].1.ends_with('*'), "{input}");
+        }
+        for input in ["*serv", "serv**", "subject:two words*", "-serv*"] {
+            assert!(to_filter(input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
     fn all_any_and_none_operators_map_to_boolean_text_filters() {
         assert_eq!(
             to_filter("ALL(cat dog fox)").unwrap(),
@@ -3061,12 +3116,12 @@ mod tests {
             "(a",
             "a)",
             "sent:2026-02-30",
-            "foo*",
             "\"hello world\"",
             "subject:\"unfinished",
         ] {
             assert!(to_filter(query).is_err(), "{query}");
         }
+        assert_eq!(to_filter("foo*").unwrap(), json!({}));
         assert_eq!(
             to_filter("subject:\"hello world\"").unwrap(),
             json!({"subject":"hello world"})
