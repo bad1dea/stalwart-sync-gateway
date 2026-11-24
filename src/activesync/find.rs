@@ -469,30 +469,35 @@ async fn execute(
 }
 
 fn is_extractable_attachment_type(content_type: &str) -> bool {
-    matches!(
-        content_type
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "text/plain" | "text/html" | "text/rtf" | "application/rtf"
-    )
-}
-
-fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<String> {
-    let text = match content_type
+    let media_type = content_type
         .split(';')
         .next()
         .unwrap_or_default()
         .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
+        .to_ascii_lowercase();
+    media_type.starts_with("text/")
+        || matches!(
+            media_type.as_str(),
+            "application/rtf" | "application/json" | "application/xml"
+        )
+}
+
+fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<String> {
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let text = match media_type.as_str() {
         "text/plain" => String::from_utf8_lossy(bytes).into_owned(),
         "text/html" => super::strip_html_tags(&String::from_utf8_lossy(bytes).replace('>', "> ")),
         "text/rtf" | "application/rtf" => super::rtf_to_plain_text(&String::from_utf8_lossy(bytes)),
+        _ if media_type.starts_with("text/")
+            || matches!(media_type.as_str(), "application/json" | "application/xml") =>
+        {
+            String::from_utf8_lossy(bytes).into_owned()
+        }
         _ => return None,
     };
     Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -2076,6 +2081,14 @@ mod tests {
         );
         assert_eq!(
             extract_find_attachment_text("text/html", b"<p>alpha</p><p>beta</p>"),
+            Some("alpha beta".to_owned())
+        );
+        assert_eq!(
+            extract_find_attachment_text("text/csv; charset=utf-8", b"alpha,beta"),
+            Some("alpha,beta".to_owned())
+        );
+        assert_eq!(
+            extract_find_attachment_text("application/json", b"alpha beta"),
             Some("alpha beta".to_owned())
         );
         assert_eq!(

@@ -329,8 +329,8 @@ Current prioritized work:
    text/html, common Office/OpenDocument formats, EPUB, RTF, and PDF, with
    configurable size/decompression limits and partial-index cases ([Stalwart
    attachment text extraction](https://www.stalw.art/docs/storage/text-extraction/)). A
-   Find now downloads and locally extracts direct `text/plain`, `text/html`,
-   and `text/rtf` attachment blobs up to 2 MiB for exact text/NEAR checks;
+   Find now downloads and locally extracts `text/*`, JSON, and XML attachment
+   blobs up to 2 MiB (with HTML and RTF handling) for exact text/NEAR checks;
    text-property searches broad-scan the selected mailbox so those attachment
    checks do not depend on JMAP's attachment index setting. PDF, Office,
    OpenDocument, and larger attachment extraction remain unsupported, so
