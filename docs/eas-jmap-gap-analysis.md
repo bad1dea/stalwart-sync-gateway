@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `d5de354` (2026-11-24)
+## Reconciled status for source `main` at `b90e06d` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -23,7 +23,8 @@ Current prioritized work:
    its Email-only query; other kinds remain unsupported in this scope.
    Received-date restrictions also support `tomorrow`, `last week`, `next
    month`, the `past month` alias, and weekday names for the current week;
-   relative weeks use Monday boundaries in UTC. Extend coverage only where the
+   numeric `MM/DD/YYYY` and current-year `MM/DD` dates are also accepted.
+   Relative weeks use Monday boundaries in UTC. Extend coverage only where the
    backend preserves EAS meaning.
 2. **Recurring calendar events.** The old 0.16.19 probe found JMAP recurrence
    unsupported. A direct create/read probe against the available Stalwart
@@ -92,6 +93,19 @@ denied, formatting, and diff checks pass. Deployment as
 `43f2d15`. Compose built image
 `sha256:aed78ce179af9be148752613cc420d3f0f55c7ad255fb28a93594f1af805ccb9`.
 The replacement started at `2026-11-24T05:22:44Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
+continues to advertise EAS 14.0.
+
+Also completed (`b90e06d`): **KQL numeric received dates**. In addition to
+ISO dates and timestamps, the parser accepts Exchange-style `MM/DD/YYYY` and
+`MM/DD` values (the latter uses the current year). Invalid month/day values
+are rejected. Tests use a fixed date to cover both accepted formats and an
+invalid date. Full suite: 280 passed, 73 ignored; clippy with warnings denied,
+formatting, and diff checks pass. Deployment as
+`deploy-2026-11-24-eas-kql-numeric-dates-b90e06d` completed through homelab
+commit `1fb8700`. Compose built image
+`sha256:915e541b180f0fdcb3b9ae5928a4c45573feb1d6302e5ab642289eccab911269`.
+The replacement started at `2026-11-24T05:29:12Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
 continues to advertise EAS 14.0.
 
