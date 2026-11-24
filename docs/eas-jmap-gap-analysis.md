@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `a0304e8` (2026-11-24)
+## Reconciled status for source `main` at `81fdc6c` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -27,10 +27,16 @@ Current prioritized work:
    negated phrases remain rejected. A positive phrase OR boolean filter is also
    supported for `isread`, `isflagged`, and `hasattachment(s)` values, with
    exact local evaluation of both branches. Multiple boolean alternatives
-   may accompany positive phrase terms in a flat OR expression; implicit
+   may accompany positive phrase terms in a flat OR expression, including
+   unary-minus negated boolean alternatives; implicit
    AND/OR precedence remains rejected. Regression coverage checks read,
    flagged, multiple boolean branches, and multiple phrase branches while
    excluding reversed phrase candidates. Deployed as
+   `deploy-2026-11-24-eas-kql-negated-bool-or-81fdc6c`; homelab commit
+   `b681fae`, image
+   `sha256:9effefda5525d695bfb3e561cc4759d479e42df8910a340d2574adbd960c62cc`,
+   started `2026-11-24T12:43:36Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The preceding positive-boolean-OR release was deployed as
    `deploy-2026-11-24-eas-kql-phrase-negated-bool-a0304e8`; homelab commit
    `9749ba1`, image
    `sha256:2d4aaca2cc911156f3ebc69807449ac4ab733d624ca2bb215f7a9623f19026f8`,
