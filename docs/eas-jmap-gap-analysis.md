@@ -24,7 +24,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    255 accepted and 256 rejected before a JMAP write.
    Recurrence replies include `CalendarType=1` for monthly/yearly patterns;
    Gregorian calendar variants are accepted on input, while non-Gregorian
-   systems and leap-month recurrences remain rejected.
+   systems and leap-month recurrences remain rejected. Weekly Task responses
+   include the required `FirstDayOfWeek`, with Sunday as the fallback when the
+   JMAP recurrence has no explicit preference.
    Mocked Sync regressions cover recurring Add/Fetch and invalid or missing
    Complete without a JMAP write. Next verify create/get and recurrence
    against real Stalwart, then on a client.
@@ -995,6 +997,19 @@ diff checks pass. Deployed as
 `430aedd`, image
 `sha256:4e6770b9c5e6cf0945a3ef4ce767233775613ab4a304fb8a7a99c4d3965c2032`,
 started `2026-11-24T21:55:05Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`.
+
+Weekly Task recurrence responses now always include `FirstDayOfWeek` for
+protocol 14.1, 16.0, and 16.1. The writer preserves an explicit JMAP value and
+uses Sunday (`0`) when none is stored; protocol 14.0 omits the field because
+the token is not supported there. Tests cover the fallback, an explicit Monday
+value, and version gating. Source: Microsoft [MS-ASTASK FirstDayOfWeek]
+(https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-astask/05d687ce-95f1-4caa-97d2-38ff41c3ad54).
+The full suite passes 394 tests (73 ignored); strict Clippy, formatting, and
+diff checks pass. Deployed as
+`deploy-2026-11-24-eas-task-first-day-46e04af`; homelab commit `9321d03`,
+image `sha256:c4cc887225dce134ae5fc5e30db907b13e2ab45371f7e0b6a67d21708bbfa68f`,
+started `2026-11-24T22:01:14Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`.
 
 Also completed: **Task Complete validation**. MS-ASTASK requires `Complete`
