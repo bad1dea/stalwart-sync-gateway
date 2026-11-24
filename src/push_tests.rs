@@ -13400,6 +13400,24 @@ async fn find_repeated_and_negated_subject_phrases_are_exact() {
         .req("Find", "client")
         .header("MS-ASProtocolVersion", "16.1")
         .body(find_body(
+            "b740b2d8-85cd-45a0-b60d-ecb0bcab58e0",
+            r#"subject:"alpha beta" subject:"gamma delta""#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("2"));
+    let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
+    ids.sort();
+    assert_eq!(ids, vec!["alpha beta gamma delta", "alpha beta only"]);
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
             "8fb2173a-9747-470a-9ad7-281a36b5a668",
             r#"subject:"alpha beta" AND NOT subject:"gamma delta""#,
             None,

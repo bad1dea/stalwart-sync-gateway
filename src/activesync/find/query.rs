@@ -64,6 +64,19 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
             return Some((PhraseMatch::None, vec![search_phrase_word(negative)?]));
         }
     }
+    if tokens.len() > 1 && tokens.iter().all(|token| matches!(token, Token::Word(_))) {
+        let terms = tokens
+            .iter()
+            .filter_map(|token| match token {
+                Token::Word(word) => search_phrase_word(word.strip_prefix('+').unwrap_or(word)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if terms.len() == tokens.len() && terms.iter().all(|(property, _)| property == &terms[0].0)
+        {
+            return Some((PhraseMatch::Any, terms));
+        }
+    }
     if tokens.contains(&Token::Or)
         && !tokens.contains(&Token::And)
         && is_flat_or_expression(&tokens)
@@ -1328,13 +1341,25 @@ mod tests {
                 {"subject":"alpha beta"}, {"subject":"gamma delta"}
             ]})
         );
-        for query in [
-            r#"subject:"alpha beta" subject:"gamma delta""#,
-            r#"subject:"alpha beta" -subject:"gamma delta""#,
-        ] {
-            assert!(phrases_for_postfilter(query).is_none(), "{query}");
-            assert!(to_filter(query).is_err(), "{query}");
-        }
+        let query = r#"subject:"alpha beta" -subject:"gamma delta""#;
+        assert!(phrases_for_postfilter(query).is_none(), "{query}");
+        assert!(to_filter(query).is_err(), "{query}");
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" subject:"gamma delta""#),
+            Some((
+                PhraseMatch::Any,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("subject".to_owned(), "gamma delta".to_owned())
+                ]
+            ))
+        );
+        assert_eq!(
+            to_filter(r#"subject:"alpha beta" subject:"gamma delta""#).unwrap(),
+            json!({"operator":"OR", "conditions":[
+                {"subject":"alpha beta"}, {"subject":"gamma delta"}
+            ]})
+        );
         assert_eq!(
             phrases_for_postfilter(r#"subject:"alpha beta" body:"gamma delta" OR isread:true"#),
             Some((
