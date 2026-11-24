@@ -16,10 +16,23 @@ enum Token {
 }
 
 pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
-    if let Some(phrase) = standalone_subject_phrase(input) {
-        return Ok(json!({"subject": phrase}));
-    }
     let tokens = tokenize(input)?;
+    let phrases = tokens
+        .iter()
+        .filter_map(|token| match token {
+            Token::Word(word) => {
+                let word = word
+                    .strip_prefix('+')
+                    .or_else(|| word.strip_prefix('-'))
+                    .unwrap_or(word);
+                subject_phrase_word(word)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !phrases.is_empty() && subject_phrase_for_postfilter(input).is_none() {
+        return Err("subject phrases require a positive conjunction");
+    }
     let mut parser = Parser {
         tokens,
         position: 0,
@@ -31,11 +44,39 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
     Ok(filter)
 }
 
-/// Return a phrase only for the one query shape that Find can post-filter
-/// without changing the meaning of surrounding Boolean expressions.
-pub(super) fn standalone_subject_phrase(input: &str) -> Option<String> {
-    let value = input.trim();
-    let (property, value) = value.split_once(':')?;
+/// Find one positive subject phrase in an AND-only expression. The JMAP
+/// subject filter supplies candidates; Find checks word order locally.
+pub(super) fn subject_phrase_for_postfilter(input: &str) -> Option<String> {
+    let tokens = tokenize(input).ok()?;
+    if tokens
+        .iter()
+        .any(|token| !matches!(token, Token::Word(_) | Token::And))
+    {
+        return None;
+    }
+    let mut phrase = None;
+    for token in &tokens {
+        let Token::Word(word) = token else { continue };
+        let subject_word = word.strip_prefix('+').unwrap_or(word);
+        if let Some(value) = subject_phrase_word(subject_word) {
+            if phrase.replace(value).is_some() {
+                return None;
+            }
+        } else if word
+            .strip_prefix('-')
+            .is_some_and(|negative| subject_phrase_word(negative).is_some())
+            || word
+                .split_once(':')
+                .is_some_and(|(property, _)| property.eq_ignore_ascii_case("subject"))
+        {
+            return None;
+        }
+    }
+    phrase
+}
+
+fn subject_phrase_word(word: &str) -> Option<String> {
+    let (property, value) = word.split_once(':')?;
     if !property.eq_ignore_ascii_case("subject")
         || !value.starts_with('"')
         || !value.ends_with('"')
@@ -579,8 +620,17 @@ fn condition(property: &str, value: &str) -> Result<Value, &'static str> {
         }
         return Err("unsupported search kind");
     }
-    // Stalwart 0.16.19's native index does not preserve phrase order.
+    // Stalwart's native index does not preserve phrase order. A positive
+    // subject phrase in an AND-only expression is post-filtered by Find.
     if value.starts_with('"') && value.chars().any(char::is_whitespace) {
+        if property.eq_ignore_ascii_case("subject")
+            && value.ends_with('"')
+            && value.len() >= 4
+            && !value[1..value.len() - 1].contains('"')
+            && !value[1..value.len() - 1].contains('\\')
+        {
+            return Ok(json!({"subject": &value[1..value.len() - 1]}));
+        }
         return Err("phrase search is unavailable");
     }
     match property {
@@ -667,18 +717,35 @@ fn free_text_property(property: &str, value: &str) -> Result<Value, &'static str
 mod tests {
     use super::*;
     #[test]
-    fn standalone_subject_phrases_are_candidates_for_exact_post_filtering() {
+    fn positive_conjunctive_subject_phrases_are_candidates_for_exact_post_filtering() {
         assert_eq!(
-            standalone_subject_phrase(r#"subject:"alpha beta""#),
+            subject_phrase_for_postfilter(r#"subject:"alpha beta""#),
             Some("alpha beta".to_owned())
+        );
+        assert_eq!(
+            subject_phrase_for_postfilter(r#"subject:"alpha beta" AND isread:true"#),
+            Some("alpha beta".to_owned())
+        );
+        assert_eq!(
+            to_filter(r#"subject:"alpha beta" AND isread:true"#).unwrap(),
+            json!({"operator":"AND", "conditions":[
+                {"subject":"alpha beta"}, {"hasKeyword":"$seen"}
+            ]})
         );
         assert_eq!(
             to_filter(r#"subject:"alpha beta""#).unwrap(),
             json!({"subject":"alpha beta"})
         );
-        assert!(standalone_subject_phrase(r#"subject:"alpha beta" AND isread:true"#).is_none());
-        assert!(to_filter(r#"subject:"alpha beta" AND isread:true"#).is_err());
-        assert!(standalone_subject_phrase(r#"text:"alpha beta""#).is_none());
+        for query in [
+            r#"subject:"alpha beta" OR isread:true"#,
+            r#"NOT subject:"alpha beta""#,
+            r#"subject:"alpha beta" subject:gamma"#,
+            r#"subject:"alpha beta" OR subject:gamma"#,
+        ] {
+            assert!(subject_phrase_for_postfilter(query).is_none(), "{query}");
+            assert!(to_filter(query).is_err(), "{query}");
+        }
+        assert!(subject_phrase_for_postfilter(r#"text:"alpha beta""#).is_none());
     }
 
     #[test]

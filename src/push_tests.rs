@@ -13312,6 +13312,36 @@ async fn find_exact_subject_phrase_filters_unordered_index_candidates() {
 }
 
 #[tokio::test]
+async fn find_exact_subject_phrase_preserves_conjunctive_restrictions() {
+    use eas::{airsync as air, find as f};
+    let env = start_env(Opts::default()).await;
+    env.mock.add_mail("inbox", "alpha-beta");
+    env.mock.add_mail("inbox", "beta-alpha");
+    env.mock.add_mail("inbox", "alpha-x-beta");
+    env.mock.set_keyword("alpha-beta", "$seen", true);
+    env.mock.set_keyword("alpha-x-beta", "$seen", true);
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "7dc6ffa0-2aa5-43f6-b441-bdda13785428",
+            r#"subject:"alpha beta" AND isread:true"#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["alpha-beta"]
+    );
+}
+
+#[tokio::test]
 async fn find_scopes_queries_and_rejects_unsupported_inputs() {
     use eas::{airsync as air, find as f};
     let env = start_env(Opts::default()).await;

@@ -121,7 +121,7 @@ pub(super) async fn handle(
     let reply = if request.gal {
         execute_gal(state, auth, device, request).await
     } else {
-        let phrase = query::standalone_subject_phrase(&request.text);
+        let phrase = query::subject_phrase_for_postfilter(&request.text);
         let filter = match query::to_filter(&request.text) {
             Ok(filter) => filter,
             Err(_) => return error_response(state, "2"),
