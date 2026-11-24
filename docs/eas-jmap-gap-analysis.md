@@ -214,7 +214,7 @@ Also completed (`a28032b`): **ActiveSync Task recurrence mapping**. Task
 Recurrence patterns now use the shared EAS↔JSCalendar conversion, including
 the recurrence series start and version-gated `FirstDayOfWeek`. Empty
 Recurrence clears a task series only for 16.0/16.1; unsupported shapes and
-non-empty JMAP recurrence overrides fail closed. Regression suite: 289 passed,
+non-empty JMAP recurrence overrides fail closed. Regression suite: 290 passed,
 73 ignored; clippy with warnings denied, formatting, and diff checks pass.
 Deployed as `deploy-2026-11-24-eas-task-recurrence-a28032b`; homelab commit
 `49fd351`. Image

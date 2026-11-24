@@ -8608,6 +8608,66 @@ mod calendar_update_state_tests {
     }
 
     #[tokio::test]
+    async fn task_create_sends_a_jscalendar_recurrence_rule() {
+        let app = Router::new().route(
+            "/",
+            post(|Json(request): Json<serde_json::Value>| async move {
+                let call = &request["methodCalls"][0];
+                assert_eq!(call[0], "CalendarEvent/set");
+                assert_eq!(call[1]["create"]["t1"]["@type"], "Task");
+                assert_eq!(
+                    call[1]["create"]["t1"]["recurrenceRule"],
+                    serde_json::json!({
+                        "frequency":"weekly", "byDay":[{"day":"mo"},{"day":"we"}], "count":8
+                    })
+                );
+                Json(serde_json::json!({"methodResponses":[[
+                    "CalendarEvent/set", {"created":{"t1":{"id":"task-1"}}}, "0"
+                ]]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CALENDARS:"a"},
+            "apiUrl":url, "downloadUrl":url, "uploadUrl":url, "username":"user", "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let fields = crate::wbxml::eas::TaskFields {
+            recurrence_present: true,
+            recurrence: Some(crate::wbxml::eas::CalendarRecurrence {
+                kind: 1,
+                day_of_week: Some(10),
+                occurrences: Some(8),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            client
+                .save_task(&auth, "calendar", None, &fields)
+                .await
+                .unwrap(),
+            "task-1"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn location_update_rejects_a_changed_calendar_state() {
         let calls = Arc::new(AtomicUsize::new(0));
         let captured = calls.clone();
