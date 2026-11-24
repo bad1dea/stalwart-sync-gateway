@@ -37,7 +37,13 @@ Current prioritized work:
    coverage proves that reversed words and intervening words are excluded.
    Mailbox Find responses include the EAS `Importance` property mapped from
    the JMAP message importance header (0 low, 1 normal, 2 high), with a
-   regression checking all three values.
+   regression checking all three values. Regression suite: 382 passed, 73
+   ignored; strict Clippy, formatting, and diff checks passed. Deployed as
+   `deploy-2026-11-24-eas-find-importance-c79fa3b`; homelab commit `4c2eb86`,
+   image
+   `sha256:150ae046978987f3222b14b3ca3115f0a5cbf8f2ce9a9694e9dbf0bc830d2e17`,
+   started `2026-11-24T19:33:29Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
    GAL Find uses the EAS prefix-string/ANR rule locally across principal
    display names, aliases, and email tokens; multi-token prefixes such as
    `Michael A.` now match `Michael Alexander` despite JMAP's whole-token
