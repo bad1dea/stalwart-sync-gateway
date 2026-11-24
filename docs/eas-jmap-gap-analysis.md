@@ -29,8 +29,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
 3. **Find content coverage.** Add exact local search over remaining supported
    attachment formats and assess resource-bounded scanned-PDF OCR and large
    attachments. Current extraction is bounded and supports EPUB, macro-enabled
-   OOXML, and RFC 822 message attachments; legacy binary Office, scanned PDFs,
-   and payloads above the extraction limit remain outside exact local matching.
+   OOXML, RFC 822 messages, and Outlook `.msg` attachments; legacy binary Word,
+   Excel, and PowerPoint files, scanned PDFs, and payloads above the extraction
+   limit remain outside exact local matching.
 
 1. **BodyPartPreference / BodyPart response path — implemented and deployed.**
    Request parsing and independent Sync option
@@ -376,14 +377,18 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    attachment text extraction](https://www.stalw.art/docs/storage/text-extraction/)). A
    Find now downloads and locally extracts `text/*`, JSON, XML (`+xml`),
    RFC 822 `message/rfc822` and `message/global` attachments (including decoded
-   plain/HTML MIME bodies and embedded-message subjects), text-bearing PDFs,
+   plain/HTML MIME bodies and embedded-message subjects), Outlook
+   `application/vnd.ms-outlook` messages (subject, plain body, and HTML body),
+   text-bearing PDFs,
    EPUB XHTML, OOXML Word/Excel/PowerPoint (including
    macro-enabled variants), and OpenDocument Text, Spreadsheet, and Presentation
    attachments up to 2 MiB for exact text/NEAR
-   checks. RFC 822 decoding is capped at the same 2 MiB extracted-text limit.
-   A mocked 16.1 Find regression exercises quoted-printable EML extraction
-   through download and exact proximity matching. PDF parsing failures and
-   parser panics are contained as non-matches.
+   checks. RFC 822 and Outlook message decoding are capped at the same 2 MiB
+   extracted-text limit; compressed Outlook RTF is not expanded. Mocked 16.1
+   Find regressions exercise quoted-printable EML extraction through download
+   and exact proximity matching, plus exact subject matching against a real
+   OLE Outlook message fixture. PDF parsing failures and parser panics are
+   contained as non-matches.
    Archive entry count and cumulative selected XML expansion are bounded.
    EPUB XHTML chapters use the same archive-entry and expanded-XML limits; a
    mocked HTTP Find regression verifies proximity matching in EPUB text. The
@@ -414,8 +419,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `sha256:6b48329c78265129eae9ab73bb478d51b2465b0198465ffb2881a155edd8261b`,
    with zero restarts and passing runtime health/readiness checks.
    text-property searches broad-scan the selected mailbox so those attachment
-   checks do not depend on JMAP's attachment index setting. Legacy binary
-   Office formats, scanned-PDF OCR, and larger attachment extraction remain unsupported, so
+   checks do not depend on JMAP's attachment index setting. Legacy binary Word,
+   Excel, and PowerPoint formats, scanned-PDF OCR, and larger attachment
+   extraction remain unsupported, so
    attachment-content proximity is still incomplete for those formats. Boolean
    combinations use the existing exact matcher for supported predicates.
    Mocked HTTP end-to-end coverage verifies both a `text:` phrase and NEAR

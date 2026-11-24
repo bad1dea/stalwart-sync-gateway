@@ -494,6 +494,7 @@ fn is_extractable_attachment_type(content_type: &str) -> bool {
                 | "application/json"
                 | "application/xml"
                 | "application/pdf"
+                | "application/vnd.ms-outlook"
                 | "message/rfc822"
                 | "message/global"
         )
@@ -549,6 +550,12 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| extract_rfc822_text(bytes)))
                 .ok()??
         }
+        "application/vnd.ms-outlook" => {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                extract_outlook_msg_text(bytes)
+            }))
+            .ok()??
+        }
         _ if is_extractable_archive_type(&media_type) => {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 extract_archive_text(bytes, &media_type)
@@ -580,6 +587,17 @@ fn extract_rfc822_text(bytes: &[u8]) -> Option<String> {
                 append_find_text(&mut output, &mail_parser::html_to_text(&html))?;
             }
         }
+    }
+    Some(output)
+}
+
+fn extract_outlook_msg_text(bytes: &[u8]) -> Option<String> {
+    let message = msg_parser::Outlook::from_slice(bytes).ok()?;
+    let mut output = String::new();
+    append_find_text(&mut output, &message.subject)?;
+    append_find_text(&mut output, &message.body)?;
+    if !message.html.is_empty() {
+        append_find_text(&mut output, &mail_parser::html_to_text(&message.html))?;
     }
     Some(output)
 }
@@ -2413,6 +2431,7 @@ mod tests {
         assert!(is_extractable_attachment_type("application/xhtml+xml"));
         assert!(is_extractable_attachment_type("application/atom+xml"));
         assert!(is_extractable_attachment_type("application/pdf"));
+        assert!(is_extractable_attachment_type("application/vnd.ms-outlook"));
         assert!(is_extractable_attachment_type("message/rfc822"));
         assert!(is_extractable_attachment_type("message/global"));
         assert!(is_extractable_attachment_type("application/epub+zip"));
@@ -2452,6 +2471,12 @@ mod tests {
         assert!(extracted.contains("alpha subject"));
         assert!(extracted.contains("plain beta"));
         assert!(extracted.contains("html gamma"));
+        // Upstream msg_parser 0.3.6 MIT test fixture, used to exercise an
+        // actual OLE/Outlook message rather than only malformed input.
+        let outlook = include_bytes!("../../tests/fixtures/outlook-ascii.msg");
+        let extracted = extract_find_attachment_text("application/vnd.ms-outlook", outlook)
+            .expect("valid Outlook message should expose its subject");
+        assert!(extracted.contains("creating an outlook message file"));
         let extracted = extract_find_attachment_text(
             "message/global",
             b"From: sender@example.test\r\nSubject: delta\r\n\r\nbody epsilon",

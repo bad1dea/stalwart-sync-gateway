@@ -13823,6 +13823,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     use std::io::Write;
     let env = start_env(Opts::default()).await;
     let eml = b"From: sender@example.test\r\nSubject: message attachment\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nnovember=20oscar in EML".to_vec();
+    let outlook_msg = include_bytes!("../tests/fixtures/outlook-ascii.msg").to_vec();
     let pdf_stream = "BT /F1 12 Tf 72 720 Td (charlie delta in PDF) Tj ET";
     let pdf_objects = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
@@ -13891,6 +13892,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     env.mock.add_mail("inbox", "epub-attachment");
     env.mock.add_mail("inbox", "xlsm-attachment");
     env.mock.add_mail("inbox", "eml-attachment");
+    env.mock.add_mail("inbox", "outlook-msg-attachment");
     env.mock.mail_bodies.lock().unwrap().insert(
         "text-attachment".to_owned(),
         ("unrelated body".to_owned(), false),
@@ -13969,6 +13971,17 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
             "type":"message/rfc822", "size":eml.len()
         })],
     );
+    env.mock.mail_bodies.lock().unwrap().insert(
+        "outlook-msg-attachment".to_owned(),
+        ("unrelated body".to_owned(), false),
+    );
+    env.mock.mail_attachments.lock().unwrap().insert(
+        "outlook-msg-attachment".to_owned(),
+        vec![serde_json::json!({
+            "blobId":"outlook-msg-blob", "name":"message.msg",
+            "type":"application/vnd.ms-outlook", "size":outlook_msg.len()
+        })],
+    );
     env.mock.download_blobs.lock().unwrap().insert(
         "text-blob".to_owned(),
         ("text/plain".to_owned(), b"alpha beta in file".to_vec()),
@@ -14001,6 +14014,10 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         .lock()
         .unwrap()
         .insert("eml-blob".to_owned(), ("message/rfc822".to_owned(), eml));
+    env.mock.download_blobs.lock().unwrap().insert(
+        "outlook-msg-blob".to_owned(),
+        ("application/vnd.ms-outlook".to_owned(), outlook_msg),
+    );
     let mut oversized_text = vec![b'x'; 2 * 1024 * 1024 + 1];
     oversized_text[..10].copy_from_slice(b"alpha beta");
     env.mock.download_blobs.lock().unwrap().insert(
@@ -14126,6 +14143,25 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     assert_eq!(
         eas::find_all_text_after(&doc, air::SERVER_ID),
         vec!["eml-attachment"]
+    );
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "30000000-0000-4000-8000-000000000094",
+            "text:\"creating an outlook message file\"",
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["outlook-msg-attachment"]
     );
 }
 
