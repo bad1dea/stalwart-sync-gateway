@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `c112271` (2026-11-24)
+## Reconciled status for source `main` at `a2d0afe` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -64,6 +64,15 @@ Current prioritized work:
    `0ef4ef0`, image
    `sha256:36be86745690798648bb95a84e477382be222402b86561b484dc637295970604`,
    started `2026-11-24T14:06:28Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
+   formatting, and diff checks passed. Phrase expressions also support the
+   standard `importance:low|normal|high` predicate, including OR alternatives
+   and negated-phrase expressions; JMAP candidate filtering is retained when
+   safe, and importance is checked locally in broad scans. Deployed as
+   `deploy-2026-11-24-eas-kql-phrase-importance-a2d0afe`; homelab commit
+   `3f49a30`, image
+   `sha256:57d4f01f19c17679640abe7fb23b78349c8e7755b72889e1a7c9ec4fb2005fd1`,
+   started `2026-11-24T14:15:22Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
    formatting, and diff checks passed. The standalone negated form
    `NOT subject:"..."` and unary-minus forms such as
