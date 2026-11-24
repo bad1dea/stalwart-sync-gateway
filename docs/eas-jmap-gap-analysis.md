@@ -279,8 +279,9 @@ Current prioritized work:
    coverage checks repeated subject phrases across grouped branches with body
    and read predicates, plus exact end-to-end result totals.
    Negated phrases can also combine with exact single-token string restrictions
-   on subject, body, text, from, to, cc, bcc, and participants; these forms
-   broad-scan the selected mailbox and evaluate each restriction locally. An
+   on subject, body, text, from, to, cc, bcc, and participants, plus attachment
+   filename restrictions; these forms broad-scan the selected mailbox and
+   evaluate each restriction locally. An
    end-to-end Find regression confirms a negated subject phrase and a positive
    single-token subject restriction return the exact result and total.
    Other predicates outside the supported boolean, importance, received, sent,
