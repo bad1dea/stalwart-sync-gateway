@@ -191,15 +191,16 @@ async fn execute(
     let (phrase_match, phrases) = phrase_filter;
     // A negated phrase cannot use JMAP's term filter as its candidate set:
     // the backend does not preserve phrase semantics, and NOT would exclude
-    // messages that do not contain all indexed phrase terms. Scan the scoped
-    // mailbox and decide the negative phrase locally.
-    let query = if matches!(
-        phrase_match,
-        query::PhraseMatch::None | query::PhraseMatch::Expression
-    ) || phrases
-        .iter()
-        .any(|(property, _)| property.starts_with('$'))
-    {
+    // messages that do not contain all indexed phrase terms. Boolean terms,
+    // including negated ones, remain exact JMAP predicates, so retaining the
+    // query preserves a smaller safe candidate set for positive phrase forms.
+    let query = if phrase_match == query::PhraseMatch::None
+        || phrases.iter().any(|(property, _)| {
+            matches!(
+                property.as_str(),
+                "$not$subject" | "$not$body" | "$not$text"
+            )
+        }) {
         json!({})
     } else {
         query
