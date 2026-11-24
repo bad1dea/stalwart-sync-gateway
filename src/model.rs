@@ -50,6 +50,7 @@ pub struct Email {
     pub mailbox_ids: Vec<String>,
     pub subject: String,
     pub received_at: Option<String>,
+    pub size: u64,
     pub keywords: Vec<String>,
     pub from: String,
     pub to: String,

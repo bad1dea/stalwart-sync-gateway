@@ -7124,6 +7124,8 @@ struct EmailObject {
     #[serde(default)]
     received_at: Option<String>,
     #[serde(default)]
+    size: u64,
+    #[serde(default)]
     subject: String,
     // `EmailAddress[]|null` per JMAP (RFC 8621 4.1.2.3): Stalwart sends a
     // literal `null`, not a missing key, when a header (e.g. Cc on an
@@ -7286,6 +7288,7 @@ impl From<EmailObject> for Email {
                 .collect(),
             subject: value.subject,
             received_at: value.received_at,
+            size: value.size,
             keywords: value
                 .keywords
                 .iter()

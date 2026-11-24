@@ -231,6 +231,7 @@ async fn execute(
         "keywords",
         "subject",
         "receivedAt",
+        "size",
         "from",
         "to",
         "cc",
@@ -281,6 +282,7 @@ async fn execute(
                     &email.cc,
                     &email.bcc,
                     email.received_at.as_deref(),
+                    email.size,
                     email.importance,
                     Some(email.read),
                     Some(email.keywords.iter().any(|keyword| keyword == "$flagged")),
@@ -556,6 +558,7 @@ fn email_matches_phrases(
         "",
         "",
         None,
+        0,
         1,
         is_read,
         is_flagged,
@@ -574,6 +577,7 @@ fn email_matches_phrases_with_addresses(
     cc: &str,
     bcc: &str,
     received_at: Option<&str>,
+    size: u64,
     importance: u8,
     is_read: Option<bool>,
     is_flagged: Option<bool>,
@@ -604,6 +608,8 @@ fn email_matches_phrases_with_addresses(
                     importance_matches(importance, phrase)
                 } else if property == "$received" {
                     received_filter_matches(received_at, phrase)?
+                } else if property == "$size" {
+                    size_filter_matches(size, phrase)?
                 } else if boolean_property.is_some() {
                     boolean_match.is_some_and(|value| value == (phrase == "true"))
                 } else {
@@ -639,6 +645,18 @@ fn email_matches_phrases_with_addresses(
                 }
                 if property == "$not$$received" {
                     if !received_filter_matches(received_at, phrase)? {
+                        return Ok(true);
+                    }
+                    continue;
+                }
+                if property == "$size" {
+                    if size_filter_matches(size, phrase)? {
+                        return Ok(true);
+                    }
+                    continue;
+                }
+                if property == "$not$size" {
+                    if !size_filter_matches(size, phrase)? {
                         return Ok(true);
                     }
                     continue;
@@ -707,6 +725,8 @@ fn email_matches_phrases_with_addresses(
                             importance_matches(importance, phrase)
                         } else if property == "$received" {
                             received_filter_matches(received_at, phrase)?
+                        } else if property == "$size" {
+                            size_filter_matches(size, phrase)?
                         } else if let Some(boolean_property) = boolean_property {
                             let value = match boolean_property {
                                 "$isread" => is_read,
@@ -833,6 +853,33 @@ fn received_filter_matches(received_at: Option<&str>, filter: &str) -> anyhow::R
     matches(received_at, &filter)
 }
 
+fn size_filter_matches(size: u64, filter: &str) -> anyhow::Result<bool> {
+    fn matches(size: u64, filter: &serde_json::Value) -> anyhow::Result<bool> {
+        if let Some(operator) = filter.get("operator").and_then(serde_json::Value::as_str) {
+            let conditions = filter
+                .get("conditions")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| anyhow::anyhow!("invalid size filter"))?;
+            let values = conditions
+                .iter()
+                .map(|condition| matches(size, condition))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            return Ok(match operator {
+                "AND" => values.into_iter().all(|value| value),
+                "OR" => values.into_iter().any(|value| value),
+                "NOT" if values.len() == 1 => !values[0],
+                _ => anyhow::bail!("unsupported size filter operator"),
+            });
+        }
+        let min = filter.get("minSize").and_then(serde_json::Value::as_u64);
+        let max = filter.get("maxSize").and_then(serde_json::Value::as_u64);
+        anyhow::ensure!(min.is_some() || max.is_some(), "invalid size filter leaf");
+        Ok(min.is_none_or(|minimum| size >= minimum) && max.is_none_or(|maximum| size < maximum))
+    }
+    let filter: serde_json::Value = serde_json::from_str(filter)?;
+    matches(size, &filter)
+}
+
 fn error_document(status: &str) -> wbxml::Document {
     let mut b = DocumentBuilder::new();
     b.start(f::FIND);
@@ -862,6 +909,51 @@ fn respond(state: &AppState, document: wbxml::Document) -> Response {
 mod tests {
     use super::*;
     use crate::model::{EmailBody, EmailBodyType};
+
+    #[test]
+    fn size_phrase_filters_match_inclusive_and_exclusive_bounds() {
+        let at_threshold = serde_json::json!({"minSize": 100});
+        let before_threshold = serde_json::json!({"maxSize": 100});
+        assert!(size_filter_matches(100, &at_threshold.to_string()).unwrap());
+        assert!(!size_filter_matches(99, &at_threshold.to_string()).unwrap());
+        assert!(size_filter_matches(99, &before_threshold.to_string()).unwrap());
+        assert!(!size_filter_matches(100, &before_threshold.to_string()).unwrap());
+        let phrase = ("$size".to_owned(), at_threshold.to_string());
+        assert!(email_matches_phrases_with_addresses(
+            "",
+            None,
+            "",
+            "",
+            "",
+            "",
+            None,
+            100,
+            1,
+            None,
+            None,
+            None,
+            query::PhraseMatch::All,
+            std::slice::from_ref(&phrase)
+        )
+        .unwrap());
+        assert!(!email_matches_phrases_with_addresses(
+            "",
+            None,
+            "",
+            "",
+            "",
+            "",
+            None,
+            99,
+            1,
+            None,
+            None,
+            None,
+            query::PhraseMatch::All,
+            &[phrase]
+        )
+        .unwrap());
+    }
 
     #[test]
     fn body_and_text_phrase_match_plain_and_html_content() {
@@ -1014,6 +1106,7 @@ mod tests {
             "",
             "",
             None,
+            0,
             2,
             None,
             None,
@@ -1034,6 +1127,7 @@ mod tests {
             "",
             "",
             None,
+            0,
             1,
             None,
             None,
@@ -1054,6 +1148,7 @@ mod tests {
             "",
             "",
             None,
+            0,
             1,
             None,
             None,
@@ -1073,6 +1168,7 @@ mod tests {
             "",
             "",
             None,
+            0,
             2,
             None,
             None,
