@@ -452,6 +452,20 @@ fn condition(property: &str, value: &str) -> Result<Value, &'static str> {
     if property == "received" {
         return received_condition(":", value);
     }
+    if property == "importance" {
+        let value = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .unwrap_or(value)
+            .to_ascii_lowercase();
+        let value = match value.as_str() {
+            "low" => "low",
+            "normal" | "medium" => "normal",
+            "high" => "high",
+            _ => return Err("invalid importance search value"),
+        };
+        return Ok(json!({"header": ["Importance", value]}));
+    }
     // Stalwart 0.16.19's native index does not preserve phrase order.
     if value.starts_with('"') && value.chars().any(char::is_whitespace) {
         return Err("phrase search is unavailable");
@@ -677,6 +691,25 @@ mod tests {
         }
         assert!(to_filter("isread>1").is_err());
         assert!(to_filter("isread=maybe").is_err());
+    }
+
+    #[test]
+    fn importance_property_searches_the_standard_message_header() {
+        for (query, value) in [
+            ("importance:low", "low"),
+            ("importance:normal", "normal"),
+            ("importance:medium", "normal"),
+            ("importance:high", "high"),
+            ("importance:\"HIGH\"", "high"),
+        ] {
+            assert_eq!(
+                to_filter(query).unwrap(),
+                json!({"header": ["Importance", value]}),
+                "{query}"
+            );
+        }
+        assert!(to_filter("importance:urgent").is_err());
+        assert!(to_filter("importance=high").is_err());
     }
 
     #[test]
