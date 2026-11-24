@@ -188,7 +188,12 @@ Current prioritized work:
    client changes. This covers the series-level field; recurrence-exception
    reply timestamps remain a separate gap. Full-suite validation passed
    (322 passed, 73 ignored); strict Clippy, formatting, and diff checks pass.
-   Deployment is pending.
+   Deployed as
+   `deploy-2026-11-24-eas-appointment-reply-time-88a0438`; homelab commit
+   `2460a0b`, image
+   `sha256:1688a49e6fba28c523bc889356e080f13545d6e41c7978bce7a0e7b05aee5b07`,
+   started `2026-11-24T10:34:09Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
 
 Also completed (`b11914b`): **KQL timestamp offset normalization**. RFC3339
 timestamps in `received:` restrictions now resolve to the UTC calendar day
