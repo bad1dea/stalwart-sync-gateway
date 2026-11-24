@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `c336eb1` (2026-11-24)
+## Reconciled status for source `main` at `253ae5a` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -40,17 +40,20 @@ Current prioritized work:
 2. **Remaining recurring series exception edits.** Common event and task
    recurrence rules map to Stalwart's singular JSCalendar `recurrenceRule`.
    EAS 16.0/16.1 occurrence deletes and subject/plain-text body/location/time,
-   all-day, availability, category, and reminder edits now map through
-   `InstanceId` and `recurrenceOverrides`; exclusions and those fields
-   round-trip. Reminder overrides preserve unrelated alerts and support clearing
-   the occurrence reminder. EAS 16.0/16.1 series rule or start/end changes
+   all-day, availability, category, reminder, and attendee-list edits now map
+   through `InstanceId` and `recurrenceOverrides`; exclusions and those fields
+   round-trip. Attendee exceptions replace the occurrence roster while
+   preserving the organizer and participant metadata, and read back status and
+   optionality. Reminder overrides preserve unrelated alerts and support
+   clearing the occurrence reminder. EAS 16.0/16.1 series rule or start/end changes
    clear existing `recurrenceOverrides` in the same state-guarded update.
    Sensitivity is not mapped: RFC 8984 prohibits `privacy` patches inside
    recurrence overrides, so such edits fail closed.
    Start/end edits convert through the parent event's IANA timezone, preserve
    the inherited endpoint when only one is changed, derive the new duration,
-   and reject negative durations. All-day flags are occurrence-specific. Other
-   event fields remain unsupported and fail closed. The EAS Tasks class has no
+   and reject negative durations. All-day flags are occurrence-specific.
+   Sensitivity, attachments, and meeting negotiation metadata remain unsupported
+   and fail closed. The EAS Tasks class has no
    per-instance exception container, so Task exceptions are not an EAS gap.
    Regression tests cover these mappings; the full suite passes (304 passed,
    73 ignored), and Clippy with warnings denied passes. Location support deployed as
@@ -85,6 +88,13 @@ Current prioritized work:
    `sha256:bb2a35dab9b299af820ff0d9a207ef1663a05befda56767091cb820e4fcb93f8`,
    started `2026-11-24T08:47:51Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Its suite passed 306 tests (73 ignored); strict Clippy,
+   formatting, and diff checks passed.
+   Occurrence attendee overrides are deployed as
+   `deploy-2026-11-24-eas-calendar-instance-attendees-253ae5a`; homelab
+   commit `d3b7253`, image
+   `sha256:e2518cc278eeaf6b154383fe7b2e12168c19ae2d5c092013ede37fe94429f10d`,
+   started `2026-11-24T08:58:47Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The suite passed 307 tests (73 ignored); strict Clippy,
    formatting, and diff checks passed.
 3. **Real-client 16.1 certification and rollout.** Production remains pinned
    to a tagged 14.0 build. Forced-version protocol tests do not establish that
