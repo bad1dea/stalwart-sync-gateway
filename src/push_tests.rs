@@ -13374,6 +13374,38 @@ async fn find_rejects_short_gal_queries() {
     assert_eq!(eas::find_text_after(&doc, f::STATUS), Some("2"));
 }
 
+#[tokio::test]
+async fn find_gal_matches_multi_token_anr_prefixes() {
+    use eas::{find as f, gal};
+    let env = start_env(Opts::default()).await;
+    env.mock.identities.lock().unwrap().push(serde_json::json!({
+        "id":"i3", "name":"michael.alexander",
+        "email":"michael.alexander@example.test",
+        "description":"Michael Alexander"
+    }));
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(gal_find_body(
+            "bde444b6-a9b1-4936-b83a-5c6f3e063ec7",
+            "Michael A.",
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_text_after(&doc, gal::DISPLAY_NAME),
+        Some("Michael Alexander")
+    );
+    assert_eq!(
+        eas::find_text_after(&doc, gal::EMAIL_ADDRESS),
+        Some("michael.alexander@example.test")
+    );
+}
+
 fn find_body(id: &str, text: &str, folder: Option<&str>, range: &str) -> Vec<u8> {
     use eas::{airsync as air, find as f};
     let mut b = eas::DocumentBuilder::new();

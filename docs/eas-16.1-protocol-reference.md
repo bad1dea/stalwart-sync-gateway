@@ -120,15 +120,18 @@ Moves one or more items between folders server-side. Implemented
 Search is the older mailbox-content + GAL search command; Find is its
 newer replacement, notably capable of GAL (directory) lookups. Both are
 implemented. Mailbox and GAL Search use JMAP Email/Principal queries; Find
-uses KQL translation for mailbox searches and Principal text queries for
-directory results. The parser supports Boolean groups, size/received,
+uses KQL translation for mailbox searches and locally applies EAS's
+prefix-string ANR match over paged Principal results for directory searches.
+The parser supports Boolean groups, size/received,
 importance and boolean comparisons, property qualifiers, WORDS, ALL, ANY, and
 NONE. Quoted phrase order is enforced locally because Stalwart's native text
 index does not preserve it. Direct `NEAR` and `ONEAR` operators now use exact
 local token-distance matching over complete message text and common address
 fields, including Boolean expressions with supported predicates. `attachment:`
-name searches are matched locally against attachment metadata; searching
-attachment content positions remains unsupported. Find is protocol-version gated to
+name searches are matched locally against attachment metadata; text attachments
+are extracted for exact text/proximity matching when they are text/*, JSON, or
+XML and at most 2 MiB. PDF, Office/OpenDocument, and larger attachment content
+positions remain unsupported. Find is protocol-version gated to
 16.1 and is not advertised while production negotiates only 14.0.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)

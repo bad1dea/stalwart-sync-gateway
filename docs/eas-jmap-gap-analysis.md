@@ -35,6 +35,10 @@ Current prioritized work:
    Stalwart's subject index for candidates and locally enforces case-insensitive
    adjacent word order, including accurate totals and range paging. Regression
    coverage proves that reversed words and intervening words are excluded.
+   GAL Find uses the EAS prefix-string/ANR rule locally across principal
+   display names, aliases, and email tokens; multi-token prefixes such as
+   `Michael A.` now match `Michael Alexander` despite JMAP's whole-token
+   Principal text filter.
    Explicitly ANDed phrases on the same property (for example two distinct
    `subject:"..."` terms) are also exact-filtered together; adjacent repeated
    same-property phrase restrictions without `AND` are exact-filtered as OR
@@ -375,7 +379,7 @@ Current prioritized work:
    Boolean expressions. A mocked end-to-end Find regression checks the
    negated prefix and its boolean OR branch against exact IDs and totals.
    See the [KeyQL wildcard reference](https://learn.microsoft.com/en-us/sharepoint/dev/general-development/keyword-query-language-kql-syntax-reference).
-   Regression suite: 380 passed,
+   Regression suite: 382 passed,
    73 ignored; strict Clippy, formatting, and diff checks passed. The recent
    prefix-negation, compound text-operator, and text-attachment extraction
    additions are source-tested but not deployed or runtime-verified;

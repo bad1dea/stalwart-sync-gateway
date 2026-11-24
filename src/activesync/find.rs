@@ -543,18 +543,17 @@ pub(super) fn matching_principals(
     mut principals: Vec<crate::jmap::client::PrincipalResult>,
     term: &str,
 ) -> Vec<crate::jmap::client::PrincipalResult> {
-    let term = term.to_lowercase();
+    let term = principal_search_tokens(term);
+    if term.is_empty() {
+        return Vec::new();
+    }
     principals.retain(|principal| {
-        let display = principal.display_name.to_lowercase();
-        display.starts_with(&term)
-            || display
-                .split_whitespace()
-                .any(|part| part.starts_with(&term))
-            || principal.alias.to_lowercase().starts_with(&term)
+        principal_field_matches_prefix(&principal.display_name, &term)
+            || principal_field_matches_prefix(&principal.alias, &term)
             || principal
                 .email
                 .as_ref()
-                .is_some_and(|email| email.to_lowercase().starts_with(&term))
+                .is_some_and(|email| principal_field_matches_prefix(email, &term))
     });
     principals.sort_by_key(|principal| {
         (
@@ -564,6 +563,26 @@ pub(super) fn matching_principals(
         )
     });
     principals
+}
+
+fn principal_search_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn principal_field_matches_prefix(field: &str, query: &[String]) -> bool {
+    let words = principal_search_tokens(field);
+    !query.is_empty()
+        && query.len() <= words.len()
+        && words.windows(query.len()).any(|candidate| {
+            candidate
+                .iter()
+                .zip(query)
+                .all(|(candidate, query)| candidate.starts_with(query))
+        })
 }
 
 async fn execute_gal(
@@ -1656,6 +1675,24 @@ fn respond(state: &AppState, document: wbxml::Document) -> Response {
 mod tests {
     use super::*;
     use crate::model::{EmailBody, EmailBodyType};
+
+    #[test]
+    fn gal_anr_matches_prefixes_across_name_and_email_tokens() {
+        let principal = crate::jmap::client::PrincipalResult {
+            id: "person".to_owned(),
+            alias: "michael.alexander".to_owned(),
+            display_name: "Michael Alexander".to_owned(),
+            email: Some("michael.alexander@example.org".to_owned()),
+        };
+        for query in ["Michael A.", "Alex", "alexander@example"] {
+            assert_eq!(
+                matching_principals(vec![principal.clone()], query).len(),
+                1,
+                "{query}"
+            );
+        }
+        assert!(matching_principals(vec![principal], "unrelated").is_empty());
+    }
 
     #[test]
     fn find_paging_identity_includes_the_original_kql_query() {
