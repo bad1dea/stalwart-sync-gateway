@@ -47,6 +47,7 @@ struct Mock {
     es_conns: AtomicUsize,
     counter: AtomicUsize,
     keywords: Mutex<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>,
+    importances: Mutex<std::collections::BTreeMap<String, u8>>,
     extra_folders: Mutex<Vec<String>>,
     /// Ids still returned by Email/query after they left the mailbox
     /// (simulates the listing trailing a move).
@@ -114,6 +115,13 @@ impl Mock {
 
     fn set_read(&self, id: &str, read: bool) {
         self.set_keyword(id, "$seen", read);
+    }
+
+    fn set_importance(&self, id: &str, importance: u8) {
+        self.importances
+            .lock()
+            .unwrap()
+            .insert(id.to_owned(), importance);
     }
 
     fn set_keyword(&self, id: &str, keyword: &str, enabled: bool) {
@@ -593,6 +601,18 @@ async fn mock_api(
                                 keyword_map.get(&id).unwrap_or(&Default::default()),
                                 &m.date_of(&id),
                             );
+                            email["header:Importance:asText"] = serde_json::json!(match m
+                                .importances
+                                .lock()
+                                .unwrap()
+                                .get(&id)
+                                .copied()
+                                .unwrap_or(1)
+                            {
+                                0 => "low",
+                                2 => "high",
+                                _ => "normal",
+                            });
                             email["mailboxIds"] = serde_json::json!(boxes
                                 .iter()
                                 .filter(|(_, items)| items.contains(&id))
@@ -786,6 +806,7 @@ async fn start_mock() -> Arc<Mock> {
         es_conns: AtomicUsize::new(0),
         counter: AtomicUsize::new(1),
         keywords: Mutex::new(Default::default()),
+        importances: Mutex::new(Default::default()),
         extra_folders: Mutex::new(Vec::new()),
         stale_listing: Mutex::new(Vec::new()),
         hidden_folders: Mutex::new(Vec::new()),
@@ -13339,6 +13360,42 @@ async fn find_maps_kql_to_jmap_pages_metadata_and_restarts_changed_searches() {
         .unwrap();
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "4"]);
+}
+
+#[tokio::test]
+async fn find_importance_comparisons_filter_ordered_values_exactly() {
+    use eas::{airsync as air, find as f};
+    let env = start_env(Opts::default()).await;
+    env.mock.remove_mail("inbox", "m1");
+    env.mock.remove_mail("inbox", "m2");
+    for (id, importance) in [("low", 0), ("normal", 1), ("high", 2)] {
+        env.mock.add_mail("inbox", id);
+        env.mock.set_importance(id, importance);
+    }
+    for (index, query, expected) in [
+        (1, "importance>normal", vec!["high"]),
+        (2, "importance<=normal", vec!["low", "normal"]),
+        (3, "NOT importance>normal", vec!["low", "normal"]),
+        (4, "importance>normal OR isread:true", vec!["high"]),
+    ] {
+        let search_id = format!("10000000-0000-4000-8000-{index:012}");
+        let response = env
+            .req("Find", "client")
+            .header("MS-ASProtocolVersion", "16.1")
+            .body(find_body(&search_id, query, None, "0-9"))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(
+            eas::find_text_after(&doc, f::TOTAL),
+            Some(expected.len().to_string()).as_deref(),
+            "{query}"
+        );
+        let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
+        ids.sort();
+        assert_eq!(ids, expected, "{query}");
+    }
 }
 
 #[tokio::test]

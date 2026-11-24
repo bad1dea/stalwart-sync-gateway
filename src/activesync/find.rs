@@ -239,6 +239,7 @@ async fn execute(
         "bcc",
         "preview",
         "attachments",
+        "header:Importance:asText",
     ];
     if phrases
         .iter()
@@ -610,6 +611,8 @@ fn email_matches_phrases_with_addresses(
                 });
                 let matched = if matches!(property, "importance" | "$importance") {
                     importance_matches(importance, phrase)
+                } else if matches!(property, "$importance_cmp" | "importance_cmp") {
+                    importance_comparison_matches(importance, phrase)
                 } else if property == "$received" {
                     received_filter_matches(received_at, phrase)?
                 } else if property == "$sent" {
@@ -639,6 +642,16 @@ fn email_matches_phrases_with_addresses(
                 }
                 if property == "$not$importance" {
                     if !importance_matches(importance, phrase) {
+                        return Ok(true);
+                    }
+                    continue;
+                }
+                if matches!(
+                    property.as_str(),
+                    "$importance_cmp" | "$not$importance_cmp" | "$not$$importance_cmp"
+                ) {
+                    let matched = importance_comparison_matches(importance, phrase);
+                    if matched != property.starts_with("$not$") {
                         return Ok(true);
                     }
                     continue;
@@ -741,6 +754,8 @@ fn email_matches_phrases_with_addresses(
                         };
                         let matched = if matches!(property, "importance" | "$importance") {
                             importance_matches(importance, phrase)
+                        } else if matches!(property, "$importance_cmp" | "importance_cmp") {
+                            importance_comparison_matches(importance, phrase)
                         } else if property == "$received" {
                             received_filter_matches(received_at, phrase)?
                         } else if property == "$sent" {
@@ -837,6 +852,29 @@ fn importance_matches(importance: u8, expected: &str) -> bool {
     }
 }
 
+fn importance_comparison_matches(importance: u8, comparison: &str) -> bool {
+    if importance > 2 {
+        return false;
+    }
+    let Some((operator, expected)) = comparison.split_once(':') else {
+        return false;
+    };
+    let expected = match expected {
+        "low" => 0,
+        "normal" => 1,
+        "high" => 2,
+        _ => return false,
+    };
+    match operator {
+        "<>" => importance != expected,
+        "<" => importance < expected,
+        "<=" => importance <= expected,
+        ">" => importance > expected,
+        ">=" => importance >= expected,
+        _ => false,
+    }
+}
+
 fn received_filter_matches(received_at: Option<&str>, filter: &str) -> anyhow::Result<bool> {
     fn matches(
         received_at: Option<chrono::DateTime<chrono::FixedOffset>>,
@@ -929,6 +967,17 @@ fn respond(state: &AppState, document: wbxml::Document) -> Response {
 mod tests {
     use super::*;
     use crate::model::{EmailBody, EmailBodyType};
+
+    #[test]
+    fn importance_comparisons_follow_low_normal_high_order() {
+        assert!(importance_comparison_matches(0, "<:normal"));
+        assert!(importance_comparison_matches(1, "<=:normal"));
+        assert!(importance_comparison_matches(2, ">:normal"));
+        assert!(importance_comparison_matches(2, ">=:high"));
+        assert!(importance_comparison_matches(0, "<>:high"));
+        assert!(!importance_comparison_matches(1, ">:normal"));
+        assert!(!importance_comparison_matches(2, "<:normal"));
+    }
 
     #[test]
     fn size_phrase_filters_match_inclusive_and_exclusive_bounds() {

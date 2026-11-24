@@ -39,9 +39,13 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
         })
         .collect::<Vec<_>>();
     if !phrases.is_empty() && phrases_for_postfilter(input).is_none() {
-        return Err(
-            "quoted phrases require an AND-only expression with unambiguous property grouping",
-        );
+        return Err("quoted phrases require an expression with unambiguous property grouping");
+    }
+    if needs_broad_importance_negation(&tokens) {
+        if phrases_for_postfilter(input).is_none() {
+            return Err("unsupported negated importance expression");
+        }
+        return Ok(json!({}));
     }
     let mut parser = Parser {
         tokens,
@@ -54,14 +58,41 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
     Ok(filter)
 }
 
+fn needs_broad_importance_negation(tokens: &[Token]) -> bool {
+    let has_ordered_importance = tokens.iter().any(|token| {
+        let Token::Word(word) = token else {
+            return false;
+        };
+        let word = word
+            .strip_prefix('+')
+            .or_else(|| word.strip_prefix('-'))
+            .unwrap_or(word);
+        importance_search_term(word).is_some_and(|(property, value)| {
+            property == "$importance_cmp"
+                && value
+                    .split_once(':')
+                    .is_some_and(|(operator, _)| matches!(operator, "<" | "<=" | ">" | ">="))
+        })
+    });
+    has_ordered_importance
+        && tokens.iter().any(|token| {
+            matches!(token, Token::Not)
+                || matches!(token, Token::Word(word) if word.starts_with('-'))
+        })
+}
+
 pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(String, String)>)> {
     let tokens = tokenize(input).ok()?;
     if let [Token::Not, Token::Word(word)] = tokens.as_slice() {
-        return Some((PhraseMatch::None, vec![search_phrase_word(word)?]));
+        if let Some(phrase) = search_phrase_word(word) {
+            return Some((PhraseMatch::None, vec![phrase]));
+        }
     }
     if let [Token::Word(word)] = tokens.as_slice() {
         if let Some(negative) = word.strip_prefix('-') {
-            return Some((PhraseMatch::None, vec![search_phrase_word(negative)?]));
+            if let Some(phrase) = search_phrase_word(negative) {
+                return Some((PhraseMatch::None, vec![phrase]));
+            }
         }
     }
     if tokens.len() > 1 && tokens.iter().all(|token| matches!(token, Token::Word(_))) {
@@ -116,6 +147,9 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                         .or_else(|| received_search_term(word))
                         .or_else(|| sent_search_term(word))
                         .or_else(|| size_search_term(word))?;
+                    if property == "$importance_cmp" {
+                        phrase_count += 1;
+                    }
                     terms.push((format!("$not{property}"), value));
                 }
             } else {
@@ -142,6 +176,9 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                         .or_else(|| received_search_term(word))
                         .or_else(|| sent_search_term(word))
                         .or_else(|| size_search_term(word))?;
+                    if term.0 == "$importance_cmp" {
+                        phrase_count += 1;
+                    }
                     terms.push(term);
                 }
             }
@@ -713,7 +750,21 @@ fn boolean_search_term(word: &str) -> Option<(String, String)> {
 }
 
 fn importance_search_term(word: &str) -> Option<(String, String)> {
-    let (property, value) = word.strip_prefix('+').unwrap_or(word).split_once(':')?;
+    let word = word.strip_prefix('+').unwrap_or(word);
+    let (property, operator, value) = if let Some(index) = comparison_index(word) {
+        let property = &word[..index];
+        let rest = &word[index..];
+        let width = if rest.starts_with("<>") || rest.starts_with(">=") || rest.starts_with("<=") {
+            2
+        } else {
+            1
+        };
+        let (operator, value) = rest.split_at(width);
+        (property, operator, value)
+    } else {
+        let (property, value) = word.split_once(':')?;
+        (property, ":", value)
+    };
     if !property.eq_ignore_ascii_case("importance") {
         return None;
     }
@@ -728,7 +779,13 @@ fn importance_search_term(word: &str) -> Option<(String, String)> {
         "high" => "high",
         _ => return None,
     };
-    Some(("$importance".to_owned(), value.to_owned()))
+    match operator {
+        ":" | "=" => Some(("$importance".to_owned(), value.to_owned())),
+        "<>" | "<" | "<=" | ">" | ">=" => {
+            Some(("$importance_cmp".to_owned(), format!("{operator}:{value}")))
+        }
+        _ => None,
+    }
 }
 
 fn received_search_term(word: &str) -> Option<(String, String)> {
@@ -1054,6 +1111,23 @@ fn word_condition(word: &str) -> Result<Value, &'static str> {
             received_condition(operator, value)?;
             return Ok(json!({}));
         }
+        if property.eq_ignore_ascii_case("importance") {
+            let (_, comparison) =
+                importance_search_term(word).ok_or("invalid importance comparison")?;
+            let normalized = comparison
+                .split_once(':')
+                .map(|(_, value)| value)
+                .unwrap_or(&comparison);
+            return match operator {
+                "=" => condition("importance", normalized),
+                "<>" => Ok(json!({
+                    "operator":"NOT",
+                    "conditions":[condition("importance", normalized)?]
+                })),
+                "<" | "<=" | ">" | ">=" => Ok(json!({})),
+                _ => Err("invalid importance comparison"),
+            };
+        }
         if is_boolean_property(property) {
             if !matches!(operator, "=" | "<>") {
                 return Err("invalid boolean comparison");
@@ -1342,8 +1416,9 @@ fn condition(property: &str, value: &str) -> Result<Value, &'static str> {
         }
         return Err("unsupported search kind");
     }
-    // Stalwart's native index does not preserve phrase order. Positive
-    // subject/body/text phrases in an AND-only expression are post-filtered.
+    // Stalwart's native index does not preserve phrase order. Supported
+    // subject/body/text phrase expressions are checked locally after querying
+    // a safe candidate set.
     if value.starts_with('"') && value.chars().any(char::is_whitespace) {
         if let Some((phrase_property, phrase)) = search_phrase_word(&format!("{property}:{value}"))
         {
@@ -2067,7 +2142,40 @@ mod tests {
             );
         }
         assert!(to_filter("importance:urgent").is_err());
-        assert!(to_filter("importance=high").is_err());
+        assert_eq!(
+            to_filter("importance=high").unwrap(),
+            json!({"header":["Importance", "high"]})
+        );
+        assert_eq!(
+            to_filter("importance<>high").unwrap(),
+            json!({
+                "operator":"NOT", "conditions":[{"header":["Importance", "high"]}]
+            })
+        );
+        for query in [
+            "importance<normal",
+            "importance<=low",
+            "importance>normal",
+            "importance>=high",
+        ] {
+            assert_eq!(to_filter(query).unwrap(), json!({}), "{query}");
+        }
+        assert_eq!(to_filter("NOT importance>normal").unwrap(), json!({}));
+        assert!(to_filter("NOT (importance>normal)").is_err());
+        assert_eq!(
+            phrases_for_postfilter("importance>=normal"),
+            Some((
+                PhraseMatch::All,
+                vec![("$importance_cmp".to_owned(), ">=:normal".to_owned())]
+            ))
+        );
+        assert_eq!(
+            phrases_for_postfilter("NOT importance>normal"),
+            Some((
+                PhraseMatch::All,
+                vec![("$not$$importance_cmp".to_owned(), ">:normal".to_owned())]
+            ))
+        );
         assert_eq!(
             phrases_for_postfilter(r#"subject:"alpha beta" OR importance:high"#),
             Some((
