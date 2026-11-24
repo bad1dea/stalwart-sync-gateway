@@ -335,11 +335,12 @@ Current prioritized work:
    checks do not depend on JMAP's attachment index setting. PDF, Office,
    OpenDocument, and larger attachment extraction remain unsupported, so
    attachment-content proximity is still incomplete for those formats. Boolean
-   combinations
-   use the existing exact matcher for supported predicates. Regression
-   coverage exercises phrase operands,
-   direction, distance, proximity AND/OR combinations, exact totals, and range
-   paging. Attachment-content positions remain unsupported. `attachment:` terms
+   combinations use the existing exact matcher for supported predicates.
+   Mocked HTTP end-to-end coverage verifies both a `text:` phrase and NEAR
+   against a downloaded text attachment, alongside phrase operands, direction,
+   distance, proximity AND/OR combinations, exact totals, and range paging.
+   Attachment-content positions remain unavailable for unsupported formats
+   and files over the extraction size limit. `attachment:` terms
    and phrases also match contiguous words in attachment filenames with exact
    local post-filtering; trailing `*` performs a final-token prefix match (and
    `attachment:*` matches any non-empty attachment list) per
@@ -360,7 +361,7 @@ Current prioritized work:
    These queries use a scoped mailbox scan and exact local token-prefix
    comparison because JMAP text filters cannot preserve prefix semantics.
    See the [KeyQL wildcard reference](https://learn.microsoft.com/en-us/sharepoint/dev/general-development/keyword-query-language-kql-syntax-reference).
-   Regression suite: 372 passed,
+   Regression suite: 373 passed,
    73 ignored; strict Clippy, formatting, and diff checks passed. The nested
    current proximity and paging changes are not deployed or runtime-verified.
    Phrase matching is case-insensitive and requires adjacent

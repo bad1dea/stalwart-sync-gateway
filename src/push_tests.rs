@@ -70,6 +70,7 @@ struct Mock {
     download_error: AtomicBool,
     mail_structures: Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
     mail_attachments: Mutex<std::collections::BTreeMap<String, Vec<serde_json::Value>>>,
+    download_blobs: Mutex<std::collections::BTreeMap<String, (String, Vec<u8>)>>,
     mail_bodies: Mutex<std::collections::BTreeMap<String, (String, bool)>>,
     body_get_limits: Mutex<Vec<(String, usize)>>,
     body_get_error: AtomicBool,
@@ -717,6 +718,14 @@ async fn mock_download(
     if mock.download_error.load(Ordering::SeqCst) || blob == "missing" {
         return (axum::http::StatusCode::NOT_FOUND, "missing").into_response();
     }
+    if let Some((content_type, data)) = mock.download_blobs.lock().unwrap().get(&blob).cloned() {
+        return (
+            axum::http::StatusCode::OK,
+            [("Content-Type", content_type)],
+            data,
+        )
+            .into_response();
+    }
     let data = if blob == "binary" {
         BLOB_BYTES
     } else {
@@ -829,6 +838,7 @@ async fn start_mock() -> Arc<Mock> {
         download_error: AtomicBool::new(false),
         mail_structures: Mutex::new(Default::default()),
         mail_attachments: Mutex::new(Default::default()),
+        download_blobs: Mutex::new(Default::default()),
         mail_bodies: Mutex::new(Default::default()),
         body_get_limits: Mutex::new(Vec::new()),
         body_get_error: AtomicBool::new(false),
@@ -13705,6 +13715,53 @@ async fn find_attachment_phrase_matches_filename_and_scopes_to_mailbox() {
     let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
     ids.sort();
     assert_eq!(ids, vec!["attachment-match", "attachment-nonmatch"]);
+}
+
+#[tokio::test]
+async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
+    use eas::{airsync as air, find as f};
+    let env = start_env(Opts::default()).await;
+    env.mock.add_mail("inbox", "text-attachment");
+    env.mock.mail_bodies.lock().unwrap().insert(
+        "text-attachment".to_owned(),
+        ("unrelated body".to_owned(), false),
+    );
+    env.mock.mail_attachments.lock().unwrap().insert(
+        "text-attachment".to_owned(),
+        vec![serde_json::json!({
+            "blobId":"text-blob", "name":"notes.txt",
+            "type":"text/plain", "size":10
+        })],
+    );
+    env.mock.download_blobs.lock().unwrap().insert(
+        "text-blob".to_owned(),
+        ("text/plain".to_owned(), b"alpha beta in file".to_vec()),
+    );
+
+    for (index, query) in ["text:\"alpha beta\"", "alpha NEAR(0) beta"]
+        .into_iter()
+        .enumerate()
+    {
+        let response = env
+            .req("Find", "client")
+            .header("MS-ASProtocolVersion", "16.1")
+            .body(find_body(
+                &format!("30000000-0000-4000-8000-{index:012}"),
+                query,
+                None,
+                "0-9",
+            ))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"), "{query}");
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::SERVER_ID),
+            vec!["text-attachment"],
+            "{query}"
+        );
+    }
 }
 
 #[tokio::test]
