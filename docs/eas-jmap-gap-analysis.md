@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `dfca21b` (2026-11-24)
+## Reconciled status for source `main` at `6b14d20` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -242,17 +242,21 @@ Current prioritized work:
    phrase terms is exact-filtered across its alternatives. A phrase may also
    be ORed with `isread`, `isflagged`, `hasattachment(s)`, importance, received,
    sent, and size restrictions. Other mixed OR terms that lack a safe candidate
-   filter or exact local matcher, and ambiguous repeated properties in mixed
-   explicit AND/OR expressions, remain unsupported. Negated phrases combined
+   filter or exact local matcher remain unsupported. Repeated same-property
+   phrases are now accepted in mixed explicit AND/OR expressions when explicit
+   operators separate occurrences; adjacent ambiguous implicit repeats remain
+   rejected. Regression coverage checks repeated subject phrases across grouped
+   branches with body and read predicates, plus exact end-to-end result totals.
+   Negated phrases combined
    with predicates outside the supported boolean, importance, received, sent,
    and size set remain rejected to preserve their Boolean meaning.
    A single positive `body:"multiword phrase"`
    or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
    body and text scans fetch message bodies and reject a truncated body rather
    than return an incomplete match. Implicitly OR-grouped restrictions on a
-   phrase property mixed with explicit operators remain rejected unless the
-   repeated phrases form a parenthesized OR group; those safe groups may now be
-   combined with supported boolean filters.
+   phrase property mixed with explicit operators remain rejected unless
+   explicit AND/OR tokens separate each occurrence, preserving the expression
+   tree's grouping.
    Phrase matching is case-insensitive and requires adjacent
    words in order. Regression tests cover plain, HTML, and RTF bodies,
    subject/body conjunctions, truncation, and unsupported Boolean forms. Full
@@ -437,6 +441,16 @@ Current prioritized work:
    `de8c4a3`, image
    `sha256:b77ae82a99d0ba62cd7c1cf97382f14a06138db639f2dfd691a296aff71de0f7`,
    started `2026-11-24T15:22:13Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
+   Mixed explicit KQL AND/OR expressions may now repeat a phrase property when
+   explicit operators separate occurrences, preserving exact Boolean
+   evaluation; adjacent implicit repeats remain rejected. The full suite
+   passed 339 tests (73 ignored); strict Clippy, formatting, and diff checks
+   passed. Deployed as
+   `deploy-2026-11-24-eas-kql-repeated-property-mixed-6b14d20`; homelab commit
+   `0a41d14`, image
+   `sha256:147b29674bf7bab24abff1f73e83dcbe1db06b7ed9a7bccb0379f8836ee976b2`,
+   started `2026-11-24T15:34:15Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`.
 7. **Online meeting URI fields.** Stalwart 0.16.27's generic JSCalendar
    property handling exposes RFC 8984 `virtualLocations` even though the
