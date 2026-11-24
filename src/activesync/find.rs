@@ -587,10 +587,15 @@ fn decode_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Strin
             .eq_ignore_ascii_case("charset")
             .then(|| value.trim().trim_matches(['"', '\'']))
     });
-    let encoding = charset
+    let (encoding, payload) = charset
         .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
-        .unwrap_or(encoding_rs::UTF_8);
-    let (decoded, _) = encoding.decode_without_bom_handling(bytes);
+        .map(|encoding| (encoding, bytes))
+        .or_else(|| {
+            encoding_rs::Encoding::for_bom(bytes)
+                .map(|(encoding, bom_len)| (encoding, &bytes[bom_len..]))
+        })
+        .unwrap_or((encoding_rs::UTF_8, bytes));
+    let (decoded, _) = encoding.decode_without_bom_handling(payload);
     (decoded.len() <= MAX_FIND_ATTACHMENT_TEXT_BYTES as usize).then(|| decoded.into_owned())
 }
 
@@ -2483,6 +2488,10 @@ mod tests {
         );
         assert_eq!(
             extract_find_attachment_text("text/plain; charset=\"UTF-16LE\"", b"a\0b\0"),
+            Some("ab".to_owned())
+        );
+        assert_eq!(
+            extract_find_attachment_text("text/plain", b"\xff\xfea\0b\0"),
             Some("ab".to_owned())
         );
         assert_eq!(
