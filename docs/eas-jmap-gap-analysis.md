@@ -29,9 +29,10 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
 3. **Find content coverage.** Add exact local search over remaining supported
    attachment formats and assess resource-bounded scanned-PDF OCR and large
    attachments. Current extraction is bounded and supports EPUB, macro-enabled
-   OOXML, RFC 822 messages, and Outlook `.msg` attachments; legacy binary Word,
-   Excel, and PowerPoint files, scanned PDFs, and payloads above the extraction
-   limit remain outside exact local matching.
+   OOXML, RFC 822 messages, Outlook `.msg` attachments, and MIME-declared
+   charsets for text attachments; legacy binary Word, Excel, and PowerPoint
+   files, scanned PDFs, and payloads above the extraction limit remain outside
+   exact local matching.
 
 1. **BodyPartPreference / BodyPart response path — implemented and deployed.**
    Request parsing and independent Sync option
@@ -384,11 +385,14 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    EPUB XHTML, OOXML Word/Excel/PowerPoint (including
    macro-enabled variants), and OpenDocument Text, Spreadsheet, and Presentation
    attachments up to 2 MiB for exact text/NEAR
-   checks. RFC 822 and Outlook message decoding are capped at the same 2 MiB
+   checks. Text attachments honor MIME `charset` parameters, including common
+   legacy single-byte encodings and UTF-16LE, with decoded output capped at
+   2 MiB. RFC 822 and Outlook message decoding are capped at the same 2 MiB
    extracted-text limit; compressed Outlook RTF is not expanded. Mocked 16.1
    Find regressions exercise quoted-printable EML extraction through download
    and exact proximity matching, exact subject matching against a real OLE
-   Outlook message fixture, and `application/problem+json` text extraction.
+   Outlook message fixture, `application/problem+json` extraction, and
+   Windows-1252 and UTF-16LE text decoding.
    PDF parsing failures and parser panics are
    contained as non-matches.
    Archive entry count and cumulative selected XML expansion are bounded.
@@ -409,6 +413,10 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `deploy-2026-11-24-eas-find-json-c86d070`; homelab commit `be4a802`, image
    `sha256:95ead6cd7c7c8d50f43eb6dbeff6fc991d6a2d5a7c2feb94975f991e8c11ab4d`,
    started `2026-11-24T21:09:38Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. MIME charset decoding is deployed as
+   `deploy-2026-11-24-eas-find-charsets-17cec20`; homelab commit `b7210c4`,
+   image `sha256:bbd3cb22b2d0436c66762d217562ae31230c2234cf3ace9f38a963bd126899cb`,
+   started `2026-11-24T21:31:01Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. EPUB
    extraction is deployed as `deploy-2026-11-24-eas-find-epub-55daf09`;
    homelab commit `97d913d`, image
