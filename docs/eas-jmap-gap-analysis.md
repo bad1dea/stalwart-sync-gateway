@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `b981802` (2026-11-24)
+## Reconciled status for source `main` at `0b5503d` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -19,7 +19,9 @@ Current prioritized work:
    still unavailable from the native index. KQL `importance:low|normal|high`
    now maps to the standard `Importance` header filter; invalid values and
    ordered/equality comparisons are rejected because JMAP header matching is
-   text based. Extend coverage only where the backend preserves EAS meaning.
+   text based. Mailbox Find also accepts `kind:email` as already satisfied by
+   its Email-only query; other kinds remain unsupported in this scope. Extend
+   coverage only where the backend preserves EAS meaning.
 2. **Recurring calendar events.** The old 0.16.19 probe found JMAP recurrence
    unsupported. A direct create/read probe against the available Stalwart
    0.16.27 sandbox still rejected `recurrenceRules`; this remains blocked by the
@@ -48,6 +50,20 @@ Deployed as `deploy-2026-11-23-eas-kql-importance-b981802`; homelab commit
 The replacement started at `2026-11-24T05:03:33Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
 continues to advertise EAS 14.0.
+
+Also completed (`0b5503d`): **KQL email kind restriction**. Since mailbox Find
+queries only JMAP Email objects, `kind:email` is satisfied by the mailbox
+search scope and can be combined with other terms without changing the result
+set. Other kinds stay unsupported because they cannot describe items in this
+Email-only search. Regression tests check the no-op condition, composition
+with another condition, and rejection of other kinds and comparisons. Full
+suite: 277 passed, 73 ignored; clippy with warnings denied, formatting, and
+diff checks pass. Deployed as `deploy-2026-11-24-eas-kql-kind-0b5503d`;
+homelab commit `a9816d0`; runtime image
+`sha256:861e8b95b6d7cbf8187d9b7286767747bb0f7ce67f44e471a42224a1c25c1dbc`
+started at `2026-11-24T05:11:06Z` with restart count zero. Mesh `/healthz`
+returned `ok` and `/readyz` returned `ready`. Production continues to
+advertise EAS 14.0.
 
 Audit corrections from the current source: mail Sync Add creates idempotent
 drafts and non-draft Email items with attachment/MIME support;
