@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `f159afe` (2026-11-24)
+## Reconciled status for source `main` at `c112271` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -56,6 +56,14 @@ Current prioritized work:
    `afef4bf`, image
    `sha256:c7b3e83b9b03a5a1f2eaee504bc2c31b9cdddbae177f2e7cc97646110dd854e0`,
    started `2026-11-24T13:59:06Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
+   formatting, and diff checks passed. Quoted phrases now also support `from`,
+   `to`, `cc`, `bcc`, and `participants`, with exact local matching against
+   the returned address fields. Deployed as
+   `deploy-2026-11-24-eas-kql-address-phrases-c112271`; homelab commit
+   `0ef4ef0`, image
+   `sha256:36be86745690798648bb95a84e477382be222402b86561b484dc637295970604`,
+   started `2026-11-24T14:06:28Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
    formatting, and diff checks passed. The standalone negated form
    `NOT subject:"..."` and unary-minus forms such as
@@ -181,8 +189,9 @@ Current prioritized work:
    or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
    body and text scans fetch message bodies and reject a truncated body rather
    than return an incomplete match. Implicitly OR-grouped restrictions on a
-   phrase property mixed with explicit operators remain rejected because
-   property grouping can change Boolean meaning.
+   phrase property mixed with explicit operators remain rejected unless the
+   repeated phrases form a parenthesized OR group; those safe groups may now be
+   combined with supported boolean filters.
    Phrase matching is case-insensitive and requires adjacent
    words in order. Regression tests cover plain, HTML, and RTF bodies,
    subject/body conjunctions, truncation, and unsupported Boolean forms. Full
