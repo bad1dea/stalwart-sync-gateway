@@ -58,6 +58,11 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
     if let [Token::Not, Token::Word(word)] = tokens.as_slice() {
         return Some((PhraseMatch::None, vec![search_phrase_word(word)?]));
     }
+    if let [Token::Word(word)] = tokens.as_slice() {
+        if let Some(negative) = word.strip_prefix('-') {
+            return Some((PhraseMatch::None, vec![search_phrase_word(negative)?]));
+        }
+    }
     if tokens.contains(&Token::Or)
         && tokens
             .iter()
@@ -807,6 +812,13 @@ mod tests {
         assert_eq!(
             to_filter(r#"NOT subject:"alpha beta""#).unwrap(),
             json!({"operator":"NOT", "conditions":[{"subject":"alpha beta"}]})
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"-body:"alpha beta""#),
+            Some((
+                PhraseMatch::None,
+                vec![("body".to_owned(), "alpha beta".to_owned())]
+            ))
         );
         for query in [
             r#"subject:"alpha beta" OR isread:true"#,
