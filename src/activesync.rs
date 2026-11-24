@@ -5870,6 +5870,19 @@ async fn sync_calendar_collection(
             || command.calendar.unsupported_attendees
             || command.calendar.unsupported_categories
             || command.calendar.unsupported_recurrence
+            || (command.calendar.recurrence_present
+                && command.calendar.recurrence.is_none()
+                && !matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1))
+            || (command
+                .calendar
+                .recurrence
+                .as_ref()
+                .and_then(|recurrence| recurrence.first_day_of_week)
+                .is_some()
+                && !matches!(
+                    version,
+                    ProtocolVersion::V14_1 | ProtocolVersion::V16_0 | ProtocolVersion::V16_1
+                ))
             || command.calendar.unsupported_response_type
             || command.calendar.unsupported_sensitivity
         {
@@ -5890,6 +5903,7 @@ async fn sync_calendar_collection(
                 let reservation = if command.calendar.reminder.is_some()
                     || command.calendar.categories.is_some()
                     || command.calendar.sensitivity.is_some()
+                    || command.calendar.recurrence_present
                 {
                     if command.client_id.is_empty()
                         || client_ids.get(&command.client_id) != Some(&1)
@@ -5978,6 +5992,16 @@ async fn sync_calendar_collection(
                                         .verify_calendar_categories(auth, &id, categories)
                                         .await;
                                 }
+                            }
+                            if verified.is_ok() && command.calendar.recurrence_present {
+                                verified = state
+                                    .jmap
+                                    .verify_calendar_recurrence(
+                                        auth,
+                                        &id,
+                                        command.calendar.recurrence.as_ref(),
+                                    )
+                                    .await;
                             }
                             verified.map(|_| id)
                         }
@@ -6089,6 +6113,24 @@ async fn sync_calendar_collection(
             return;
         }
     };
+
+    if !matches!(
+        version,
+        ProtocolVersion::V14_1 | ProtocolVersion::V16_0 | ProtocolVersion::V16_1
+    ) && events.iter().any(|event| {
+        event
+            .recurrence
+            .as_ref()
+            .and_then(|recurrence| recurrence.first_day_of_week)
+            .is_some_and(|first_day| first_day != 1)
+    }) {
+        builder.start(air::COLLECTION);
+        builder.leaf(air::SYNC_KEY, collection.sync_key.clone());
+        builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+        builder.leaf(air::STATUS, "5");
+        builder.end();
+        return;
+    }
 
     let current_by_id: BTreeMap<String, (String, crate::model::CalendarEvent)> = events
         .into_iter()
@@ -6378,6 +6420,42 @@ fn write_calendar_fields(
         builder.end();
     } else if is_change {
         builder.empty_tag(cal::CATEGORIES);
+    }
+    if let Some(recurrence) = &event.recurrence {
+        builder.start(cal::RECURRENCE);
+        builder.leaf(cal::RECURRENCE_TYPE, recurrence.kind.to_string());
+        if let Some(until) = &recurrence.until {
+            builder.leaf(cal::RECURRENCE_UNTIL, until.clone());
+        }
+        if let Some(count) = recurrence.occurrences {
+            builder.leaf(cal::RECURRENCE_OCCURRENCES, count.to_string());
+        }
+        if let Some(interval) = recurrence.interval {
+            builder.leaf(cal::RECURRENCE_INTERVAL, interval.to_string());
+        }
+        if let Some(days) = recurrence.day_of_week {
+            builder.leaf(cal::RECURRENCE_DAY_OF_WEEK, days.to_string());
+        }
+        if let Some(day) = recurrence.day_of_month {
+            builder.leaf(cal::RECURRENCE_DAY_OF_MONTH, day.to_string());
+        }
+        if let Some(week) = recurrence.week_of_month {
+            builder.leaf(cal::RECURRENCE_WEEK_OF_MONTH, week.to_string());
+        }
+        if let Some(month) = recurrence.month_of_year {
+            builder.leaf(cal::RECURRENCE_MONTH_OF_YEAR, month.to_string());
+        }
+        if let Some(first_day) = recurrence.first_day_of_week.filter(|_| {
+            matches!(
+                version,
+                ProtocolVersion::V14_1 | ProtocolVersion::V16_0 | ProtocolVersion::V16_1
+            )
+        }) {
+            builder.leaf(cal::FIRST_DAY_OF_WEEK, first_day.to_string());
+        }
+        builder.end();
+    } else if is_change && matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
+        builder.empty_tag(cal::RECURRENCE);
     }
     if let Some(minutes) = event.reminder_minutes {
         builder.leaf(cal::REMINDER, minutes.to_string());
@@ -7939,6 +8017,40 @@ mod tests {
                     if token.code_page==cal::PAGE && token.token==cal::REMINDER.token && !token.has_content)));
             }
         }
+    }
+
+    #[test]
+    fn calendar_recurrence_is_written_with_eas_fields() {
+        use crate::wbxml::eas::{self, airsync as air, calendar as cal};
+        let event = crate::model::CalendarEvent {
+            recurrence: Some(crate::wbxml::eas::CalendarRecurrence {
+                kind: 1,
+                interval: Some(2),
+                day_of_week: Some(10),
+                occurrences: Some(12),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut builder = eas::DocumentBuilder::new();
+        super::write_calendar_command(&mut builder, air::ADD, &event, ProtocolVersion::V16_1, &[]);
+        let document = builder.finish();
+        assert_eq!(
+            eas::find_text_after(&document, cal::RECURRENCE_TYPE),
+            Some("1")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, cal::RECURRENCE_INTERVAL),
+            Some("2")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, cal::RECURRENCE_DAY_OF_WEEK),
+            Some("10")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, cal::RECURRENCE_OCCURRENCES),
+            Some("12")
+        );
     }
 
     #[test]

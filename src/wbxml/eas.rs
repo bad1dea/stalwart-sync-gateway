@@ -1286,11 +1286,29 @@ pub struct CalendarFields {
     pub unsupported_reminder: bool,
     pub categories: Option<Vec<String>>,
     pub unsupported_categories: bool,
+    pub recurrence_present: bool,
+    pub recurrence: Option<CalendarRecurrence>,
     pub unsupported_recurrence: bool,
     pub unsupported_response_type: bool,
     pub attendees: Vec<AttendeeField>,
     pub attendees_present: bool,
     pub unsupported_attendees: bool,
+}
+
+/// The single recurrence pattern supported by EAS Calendar. Exceptions are
+/// kept separate because they map to JSCalendar `recurrenceOverrides` and need
+/// per-instance edits rather than a change to the series rule.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CalendarRecurrence {
+    pub kind: u8,
+    pub interval: Option<u32>,
+    pub day_of_week: Option<u8>,
+    pub day_of_month: Option<u8>,
+    pub week_of_month: Option<u8>,
+    pub month_of_year: Option<u8>,
+    pub first_day_of_week: Option<u8>,
+    pub occurrences: Option<u32>,
+    pub until: Option<String>,
 }
 
 /// One `calendar:Attendee` from a client Add/Change -- sent when the
@@ -2684,8 +2702,14 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                 {
                     fields.unsupported_response_type = true;
                 }
-                if (same_token(*token, calendar::RECURRENCE)
-                    || same_token(*token, calendar::EXCEPTIONS))
+                if same_token(*token, calendar::RECURRENCE)
+                    && path
+                        .last()
+                        .is_some_and(|parent| same_token(*parent, airsync::APPLICATION_DATA))
+                {
+                    fields.recurrence_present = true;
+                }
+                if same_token(*token, calendar::EXCEPTIONS)
                     && path
                         .last()
                         .is_some_and(|parent| same_token(*parent, airsync::APPLICATION_DATA))
@@ -2965,6 +2989,16 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     }
     fields.unsupported_sensitivity |=
         sensitivity_count > 1 || (sensitivity_count == 1 && fields.sensitivity.is_none());
+    let recurrence_documents = calendar_recurrence_documents(nodes);
+    if recurrence_documents.len() > 1 {
+        fields.unsupported_recurrence = true;
+    } else if let Some(document) = recurrence_documents.first() {
+        match parse_calendar_recurrence(document) {
+            Ok(recurrence) => fields.recurrence = recurrence,
+            Err(()) => fields.unsupported_recurrence = true,
+        }
+    }
+
     fields.unsupported_reminder |= reminder_count > 1;
     fields.unsupported_busy_status |=
         busy_count > 1 || (busy_count == 1 && fields.busy_status.is_none());
@@ -3049,6 +3083,175 @@ fn extract_task_fields(nodes: &[Node]) -> TaskFields {
         || (fields.reminder_set == Some(false) && fields.reminder_time.is_some());
 
     fields
+}
+
+fn calendar_recurrence_documents(nodes: &[Node]) -> Vec<Document> {
+    let mut documents = Vec::new();
+    let mut path: Vec<Token> = Vec::new();
+    let mut index = 0;
+    while index < nodes.len() {
+        if matches!(&nodes[index], Node::Start(token)
+            if same_token(*token, calendar::RECURRENCE)
+                && path.last().is_some_and(|parent| same_token(*parent, airsync::APPLICATION_DATA)))
+        {
+            let start = index;
+            let content = matches!(&nodes[index], Node::Start(token) if token.has_content);
+            index += 1;
+            if content {
+                let mut depth = 1usize;
+                while index < nodes.len() && depth > 0 {
+                    match &nodes[index] {
+                        Node::Start(token) if token.has_content => depth += 1,
+                        Node::End => depth -= 1,
+                        _ => {}
+                    }
+                    index += 1;
+                }
+            }
+            documents.push(Document {
+                nodes: nodes[start..index].to_vec(),
+            });
+            continue;
+        }
+        match &nodes[index] {
+            Node::Start(token) if token.has_content => path.push(*token),
+            Node::End => {
+                path.pop();
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    documents
+}
+
+fn parse_calendar_recurrence(document: &Document) -> Result<Option<CalendarRecurrence>, ()> {
+    if matches!(document.nodes.as_slice(), [Node::Start(token)] if same_token(*token, calendar::RECURRENCE))
+    {
+        return Ok(None);
+    }
+    let mut values = std::collections::BTreeMap::<u8, String>::new();
+    for child in child_elements(document) {
+        let Some(Node::Start(token)) = child.nodes.first() else {
+            return Err(());
+        };
+        if !(matches!(token.token, 0x1c..=0x23) || same_token(*token, calendar::FIRST_DAY_OF_WEEK))
+            || token.code_page != calendar::PAGE
+        {
+            return Err(());
+        }
+        let value = find_text_after(&child, *token).ok_or(())?.to_owned();
+        if values.insert(token.token, value).is_some() {
+            return Err(());
+        }
+    }
+    let number = |token: Token| -> Result<Option<u32>, ()> {
+        values
+            .get(&token.token)
+            .map(|value| value.parse::<u32>().map_err(|_| ()))
+            .transpose()
+    };
+    let kind = number(calendar::RECURRENCE_TYPE)?.ok_or(())?;
+    let kind = u8::try_from(kind).map_err(|_| ())?;
+    if !matches!(kind, 0 | 1 | 2 | 3 | 5 | 6) {
+        return Err(());
+    }
+    let interval = number(calendar::RECURRENCE_INTERVAL)?;
+    let occurrences = number(calendar::RECURRENCE_OCCURRENCES)?;
+    let day_of_week = number(calendar::RECURRENCE_DAY_OF_WEEK)?
+        .map(u8::try_from)
+        .transpose()
+        .map_err(|_| ())?;
+    let day_of_month = number(calendar::RECURRENCE_DAY_OF_MONTH)?
+        .map(u8::try_from)
+        .transpose()
+        .map_err(|_| ())?;
+    let week_of_month = number(calendar::RECURRENCE_WEEK_OF_MONTH)?
+        .map(u8::try_from)
+        .transpose()
+        .map_err(|_| ())?;
+    let month_of_year = number(calendar::RECURRENCE_MONTH_OF_YEAR)?
+        .map(u8::try_from)
+        .transpose()
+        .map_err(|_| ())?;
+    let first_day_of_week = values
+        .get(&calendar::FIRST_DAY_OF_WEEK.token)
+        .map(|value| value.parse::<u8>().map_err(|_| ()))
+        .transpose()?;
+    let until = values.get(&calendar::RECURRENCE_UNTIL.token).cloned();
+    if interval.is_some_and(|value| value == 0 || value > 999)
+        || occurrences.is_some_and(|value| value == 0)
+        || (occurrences.is_some() && until.is_some())
+        || day_of_week.is_some_and(|value| value == 0 || value > 127)
+        || day_of_month.is_some_and(|value| !(1..=31).contains(&value))
+        || week_of_month.is_some_and(|value| !(1..=5).contains(&value))
+        || month_of_year.is_some_and(|value| !(1..=12).contains(&value))
+        || first_day_of_week.is_some_and(|value| value > 6)
+        || until
+            .as_deref()
+            .is_some_and(|value| eas_to_rfc3339(value).is_none())
+    {
+        return Err(());
+    }
+    let recurrence_shape_valid = match kind {
+        0 => day_of_month.is_none() && week_of_month.is_none() && month_of_year.is_none(),
+        1 => {
+            day_of_week.is_some()
+                && day_of_month.is_none()
+                && week_of_month.is_none()
+                && month_of_year.is_none()
+        }
+        2 => {
+            day_of_month.is_some()
+                && day_of_week.is_none()
+                && week_of_month.is_none()
+                && month_of_year.is_none()
+        }
+        3 => {
+            day_of_week.is_some()
+                && week_of_month.is_some()
+                && day_of_month.is_none()
+                && month_of_year.is_none()
+        }
+        5 => {
+            day_of_month.is_some()
+                && month_of_year.is_some()
+                && day_of_week.is_none()
+                && week_of_month.is_none()
+        }
+        6 => {
+            day_of_week.is_some()
+                && week_of_month.is_some()
+                && month_of_year.is_some()
+                && day_of_month.is_none()
+        }
+        _ => false,
+    };
+    if !recurrence_shape_valid {
+        return Err(());
+    }
+    Ok(Some(CalendarRecurrence {
+        kind,
+        interval,
+        day_of_week,
+        day_of_month,
+        week_of_month,
+        month_of_year,
+        first_day_of_week,
+        occurrences,
+        until,
+    }))
+}
+
+fn eas_to_rfc3339(value: &str) -> Option<String> {
+    chrono::NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ")
+        .ok()
+        .map(|date| format!("{}Z", date.format("%Y-%m-%dT%H:%M:%S")))
+        .or_else(|| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .ok()
+                .map(|date| date.with_timezone(&chrono::Utc).to_rfc3339())
+        })
 }
 
 pub fn move_item_requests(document: &Document) -> Vec<MoveItemRequest> {
@@ -3690,14 +3893,44 @@ mod tests {
     }
 
     #[test]
-    fn calendar_recurrence_and_exceptions_are_not_silently_accepted() {
-        for token in [super::calendar::RECURRENCE, super::calendar::EXCEPTIONS] {
-            let mut b = super::DocumentBuilder::new();
-            b.start(super::airsync::APPLICATION_DATA);
-            b.empty_tag(token);
-            b.end();
-            assert!(super::extract_calendar_fields(&b.finish().nodes).unsupported_recurrence);
-        }
+    fn calendar_recurrence_is_parsed_and_exceptions_are_rejected() {
+        let mut empty = super::DocumentBuilder::new();
+        empty.start(super::airsync::APPLICATION_DATA);
+        empty.empty_tag(super::calendar::RECURRENCE);
+        empty.end();
+        let fields = super::extract_calendar_fields(&empty.finish().nodes);
+        assert!(fields.recurrence_present);
+        assert!(fields.recurrence.is_none());
+        assert!(!fields.unsupported_recurrence);
+
+        let mut weekly = super::DocumentBuilder::new();
+        weekly.start(super::airsync::APPLICATION_DATA);
+        weekly.start(super::calendar::RECURRENCE);
+        weekly.leaf(super::calendar::RECURRENCE_TYPE, "1");
+        weekly.leaf(super::calendar::RECURRENCE_INTERVAL, "2");
+        weekly.leaf(super::calendar::RECURRENCE_DAY_OF_WEEK, "10");
+        weekly.leaf(super::calendar::RECURRENCE_OCCURRENCES, "12");
+        weekly.end();
+        weekly.end();
+        let fields = super::extract_calendar_fields(&weekly.finish().nodes);
+        assert!(fields.recurrence_present);
+        assert_eq!(
+            fields.recurrence.unwrap(),
+            super::CalendarRecurrence {
+                kind: 1,
+                interval: Some(2),
+                day_of_week: Some(10),
+                occurrences: Some(12),
+                ..Default::default()
+            }
+        );
+        assert!(!fields.unsupported_recurrence);
+
+        let mut exceptions = super::DocumentBuilder::new();
+        exceptions.start(super::airsync::APPLICATION_DATA);
+        exceptions.empty_tag(super::calendar::EXCEPTIONS);
+        exceptions.end();
+        assert!(super::extract_calendar_fields(&exceptions.finish().nodes).unsupported_recurrence);
     }
 
     #[test]

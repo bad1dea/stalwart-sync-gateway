@@ -43,7 +43,7 @@ inferred.
 | Location | 0x17 | 2.5-14.1 (16.0+ uses AirSyncBase:Location, codepage 17) | ✅ | JSCalendar `locations` (map; `locations["1"].name` for the simple case) | Gateway only emits the codepage-4 form — fine for the versions it advertises (`12.0,12.1,14.0` — all within the 2.5-14.1 window), but would need the AirSyncBase form too if 16.x is ever re-enabled. |
 | MeetingStatus | 0x18 | All | ⛔ | No direct single-field JSCalendar equivalent — inferred from participant roles/`replyTo` presence | MS-ASCAL's `MeetingStatus` (0=appointment, 1=meeting, 3=meeting received as attendee, 5/7=cancelled variants) doesn't map onto one JSCalendar property; would need to be derived from whether `participants` is populated and whose entry is "me." |
 | OrganizerEmail / OrganizerName | 0x19-0x1A | All | ⛔ *(today)* / 🟡 | JSCalendar `participants` entry with role `"owner"`, or a distinct top-level organizer concept in some JSCalendar drafts | Same participants-map mechanism as Attendees above — organizer is just a participant with a specific role, not a separate object. |
-| **Recurrence** (0x1B, container) with **Type** (0x1C), **Until** (0x1D), **Occurrences** (0x1E), **Interval** (0x1F), **DayOfWeek** (0x20), **DayOfMonth** (0x21), **WeekOfMonth** (0x22), **MonthOfYear** (0x23) | 0x1B-0x23 | All | ⛔ **CONFIRMED BLOCKED (2026-08-25)** | JSCalendar `recurrenceRules` — Stalwart doesn't implement it | **The field-by-field mapping this row used to describe as the roadmap's next step is moot for now.** Live-tested directly against the real Stalwart instance: `CalendarEvent/set create` with a `recurrenceRules` array is rejected outright with `notCreated: {type: "invalidProperties", properties: ["recurrenceRules"]}` in every shape tried (minimal `{"frequency":"weekly"}`, with `@type: "RecurrenceRule"`, with `interval`) — the property itself is unrecognized, not validated-and-rejected for its content. `CalendarEvent/get` with `recurrenceRules`/`recurrenceOverrides` explicitly requested on an existing event silently omits both, no error. Same class of finding as `participants` (see Attendees row below) — blocked on Stalwart, not a translation-design question. The MS-ASCAL↔JSCalendar mapping described in the old version of this row (Type↔frequency, DayOfWeek as a Sunday=1..Saturday=64 bitmask, Until/Occurrences↔until/count) is preserved here for whenever Stalwart adds real support, but there's nothing to build against today. |
+| **Recurrence** (0x1B, container) with **Type** (0x1C), **Until** (0x1D), **Occurrences** (0x1E), **Interval** (0x1F), **DayOfWeek** (0x20), **DayOfMonth** (0x21), **WeekOfMonth** (0x22), **MonthOfYear** (0x23) | 0x1B-0x23 | All | ✅ Common rules implemented; exceptions unsupported | Stalwart singular JSCalendar `recurrenceRule` | Maps daily, weekly, monthly, nth-weekday, and yearly EAS rules to the server's singular `recurrenceRule`. August's plural `recurrenceRules` probe was the wrong property name; localhost-only Stalwart 0.16.27 and 1.2.0 create/get probes verified the singular property. Per-instance exceptions (`recurrenceOverrides`) and non-representable patterns are rejected. Implementation: `src/jmap/calendar_recurrence.rs`, EAS parser/writer, JMAP create/update and round-trip verification. |
 | Reminder | 0x24 | All | ⛔ *(today)* / 🟡 | JSCalendar `alerts` (map of alert objects with a `trigger` — typically an `OffsetTrigger` with a signed `ISO 8601` duration relative to `start`) | MS-ASCAL's `Reminder` is a single integer (minutes before start); JSCalendar's `alerts` supports multiple richer alerts — a lossy-in-one-direction mapping (many alerts → one reminder) if ever round-tripped both ways. |
 | Sensitivity | 0x25 | All | ✅ | JSCalendar `privacy` (`public`/`private`/`secret`) | |
 | Subject | 0x26 | All | ✅ | JSCalendar `title` | |
@@ -52,7 +52,7 @@ inferred.
 | AttendeeStatus / AttendeeType | 0x29-0x2A | 12.0+ | ⛔ *(today)* / 🟡 | JSCalendar participant `participationStatus` / `roles` | Part of the same participants-map mechanism as Attendees. |
 | DisallowNewTimeProposal / ResponseRequested / AppointmentReplyTime / ResponseType | 0x33-0x36 | 14.0+ | ⛔ | ❓ unsurveyed | Meeting-negotiation metadata (whether the organizer allows counter-proposals, whether a response was requested/given and when). No obvious single JSCalendar property surveyed this pass. |
 | CalendarType / IsLeapMonth | 0x37-0x38 | 14.0+ | ⛔ | N/A — non-Gregorian calendar systems | Out of scope; JSCalendar is Gregorian-only in its core spec. |
-| FirstDayOfWeek | 0x39 | 14.1+ | ⛔ *(today, and version-gated above this gateway's cap)* | JSCalendar `recurrenceRules[].firstDayOfWeek` | Unreachable at the currently-advertised protocol cap regardless. |
+| FirstDayOfWeek | 0x39 | 14.1+ | ✅ Implemented when negotiated version supports it | JSCalendar `recurrenceRule.firstDayOfWeek` | Parsed/written for 14.1, 16.0, and 16.1; omitted from 14.0. A server-side non-Monday value that cannot be represented to an older client is rejected rather than silently changed. |
 | OnlineMeetingConfLink / OnlineMeetingExternalLink | 0x3A-0x3B | 14.1+ | ⛔ *(today, and version-gated above this gateway's cap)* | ❓ — possibly JSCalendar `links` or a `virtualLocations` property in some drafts | Video-call links. Same version-cap caveat as FirstDayOfWeek. |
 | ClientUid | 0x3C | 16.0+ | ⛔ *(today, and version-gated above this gateway's cap)* | Client-generated dedup id, likely maps to nothing JMAP-side (client-local concern) | Same version-cap caveat. |
 
@@ -151,10 +151,10 @@ before being trusted, same standing caveat as the ConversationId redo.
 
 The codepage's recurrence-field shape (`Type`/`Start`/`Until`/`Occurrences`/
 `Interval`/`DayOfMonth`/`DayOfWeek`/`WeekOfMonth`/`MonthOfYear`/`CalendarType`/
-`IsLeapMonth`/`FirstDayOfWeek`, tokens 0x10-0x26) is scaffolded in `eas.rs` but
-unused, same status as Calendar's own recurrence fields — see that row above:
-confirmed blocked on Stalwart's side (`recurrenceRules` rejected outright),
-not a translation problem to solve here.
+`IsLeapMonth`/`FirstDayOfWeek`, tokens 0x10-0x26) is parsed and validated in
+`eas.rs`. Calendar recurrence support is implemented as described in the row
+above; Task recurrence remains unsupported because task-specific recurrence
+semantics are not mapped.
 
 ## Notes (MS-ASNOTE, WBXML codepage 23)
 

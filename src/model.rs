@@ -339,6 +339,8 @@ pub struct CalendarEvent {
     pub sensitivity: u8,
     pub reminder_minutes: Option<u32>,
     pub categories: Vec<String>,
+    pub recurrence: Option<crate::wbxml::eas::CalendarRecurrence>,
+    pub unsupported_recurrence: bool,
     pub organizer_email: Option<String>,
     pub organizer_name: Option<String>,
     pub attendees: Vec<Attendee>,

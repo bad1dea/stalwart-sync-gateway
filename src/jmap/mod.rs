@@ -1,3 +1,4 @@
+pub mod calendar_recurrence;
 pub mod calendar_reminder;
 pub mod capabilities;
 pub mod client;

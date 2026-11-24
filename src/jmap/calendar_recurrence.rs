@@ -1,0 +1,533 @@
+use crate::wbxml::eas::CalendarRecurrence;
+use anyhow::Context;
+use chrono::TimeZone;
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+const WEEKDAYS: [(&str, u8); 7] = [
+    ("su", 1),
+    ("mo", 2),
+    ("tu", 4),
+    ("we", 8),
+    ("th", 16),
+    ("fr", 32),
+    ("sa", 64),
+];
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NDay {
+    #[serde(rename = "@type")]
+    kind: Option<String>,
+    day: String,
+    nth_of_period: Option<i8>,
+}
+
+pub fn to_jscalendar(value: &CalendarRecurrence, time_zone: Option<&str>) -> anyhow::Result<Value> {
+    let interval = value.interval.unwrap_or(1);
+    anyhow::ensure!((1..=999).contains(&interval), "invalid recurrence interval");
+    let frequency = match value.kind {
+        0 if value.day_of_week.is_some() => "weekly",
+        0 => "daily",
+        1 => "weekly",
+        2 | 3 => "monthly",
+        5 | 6 => "yearly",
+        _ => anyhow::bail!("unsupported recurrence type"),
+    };
+    let mut rule = serde_json::Map::new();
+    rule.insert("frequency".into(), json!(frequency));
+    if interval != 1 {
+        rule.insert("interval".into(), json!(interval));
+    }
+    if let Some(first_day) = value.first_day_of_week {
+        rule.insert("firstDayOfWeek".into(), json!(weekday_name(first_day)?));
+    }
+    if let Some(count) = value.occurrences {
+        anyhow::ensure!(count > 0 && value.until.is_none(), "invalid recurrence end");
+        rule.insert("count".into(), json!(count));
+    }
+    if let Some(until) = value.until.as_deref() {
+        rule.insert("until".into(), json!(eas_until_to_local(until, time_zone)?));
+    }
+
+    match value.kind {
+        0 if value.day_of_week.is_some() => {
+            anyhow::ensure!(
+                value.day_of_month.is_none()
+                    && value.week_of_month.is_none()
+                    && value.month_of_year.is_none(),
+                "unexpected daily-weekday recurrence fields"
+            );
+            rule.insert(
+                "byDay".into(),
+                json!(weekdays(value.day_of_week.unwrap(), None)?),
+            );
+        }
+        0 => anyhow::ensure!(
+            value.day_of_month.is_none()
+                && value.week_of_month.is_none()
+                && value.month_of_year.is_none(),
+            "unexpected daily recurrence fields"
+        ),
+        1 => {
+            anyhow::ensure!(
+                value.day_of_week.is_some(),
+                "weekly recurrence needs DayOfWeek"
+            );
+            anyhow::ensure!(
+                value.day_of_month.is_none()
+                    && value.week_of_month.is_none()
+                    && value.month_of_year.is_none(),
+                "unexpected weekly recurrence fields"
+            );
+            rule.insert(
+                "byDay".into(),
+                json!(weekdays(value.day_of_week.unwrap(), None)?),
+            );
+        }
+        2 => {
+            let day = value
+                .day_of_month
+                .context("monthly recurrence needs DayOfMonth")?;
+            anyhow::ensure!((1..=31).contains(&day), "invalid monthly DayOfMonth");
+            anyhow::ensure!(
+                value.day_of_week.is_none()
+                    && value.week_of_month.is_none()
+                    && value.month_of_year.is_none(),
+                "unexpected monthly recurrence fields"
+            );
+            rule.insert("byMonthDay".into(), json!([day]));
+        }
+        3 => {
+            let week = value
+                .week_of_month
+                .context("nth monthly recurrence needs WeekOfMonth")?;
+            let days = value
+                .day_of_week
+                .context("nth monthly recurrence needs DayOfWeek")?;
+            anyhow::ensure!(
+                value.month_of_year.is_none() && value.day_of_month.is_none(),
+                "unexpected nth monthly recurrence fields"
+            );
+            if days == 127 {
+                rule.insert("byMonthDay".into(), json!([week]));
+            } else {
+                rule.insert("byDay".into(), json!(weekdays(days, None)?));
+                rule.insert("bySetPosition".into(), json!([week_to_position(week)]));
+            }
+        }
+        5 => {
+            let day = value
+                .day_of_month
+                .context("yearly recurrence needs DayOfMonth")?;
+            let month = value
+                .month_of_year
+                .context("yearly recurrence needs MonthOfYear")?;
+            anyhow::ensure!(
+                (1..=31).contains(&day) && (1..=12).contains(&month),
+                "invalid yearly recurrence fields"
+            );
+            anyhow::ensure!(
+                value.day_of_week.is_none() && value.week_of_month.is_none(),
+                "unexpected yearly recurrence fields"
+            );
+            rule.insert("byMonth".into(), json!([month.to_string()]));
+            rule.insert("byMonthDay".into(), json!([day]));
+        }
+        6 => {
+            let month = value
+                .month_of_year
+                .context("nth yearly recurrence needs MonthOfYear")?;
+            let week = value
+                .week_of_month
+                .context("nth yearly recurrence needs WeekOfMonth")?;
+            let days = value
+                .day_of_week
+                .context("nth yearly recurrence needs DayOfWeek")?;
+            anyhow::ensure!(
+                (1..=12).contains(&month) && value.day_of_month.is_none(),
+                "invalid nth yearly recurrence fields"
+            );
+            rule.insert("byMonth".into(), json!([month.to_string()]));
+            if days == 127 {
+                rule.insert("byMonthDay".into(), json!([week]));
+            } else {
+                rule.insert("byDay".into(), json!(weekdays(days, None)?));
+                rule.insert("bySetPosition".into(), json!([week_to_position(week)]));
+            }
+        }
+        _ => unreachable!(),
+    }
+    Ok(Value::Object(rule))
+}
+
+pub fn from_jscalendar(
+    rule: &Value,
+    time_zone: Option<&str>,
+) -> anyhow::Result<CalendarRecurrence> {
+    let object = rule.as_object().context("invalid recurrence rule")?;
+    let allowed = [
+        "@type",
+        "frequency",
+        "interval",
+        "rscale",
+        "skip",
+        "firstDayOfWeek",
+        "byDay",
+        "byMonthDay",
+        "byMonth",
+        "bySetPosition",
+        "count",
+        "until",
+    ];
+    anyhow::ensure!(
+        object.keys().all(|key| allowed.contains(&key.as_str())),
+        "unsupported JSCalendar recurrence property"
+    );
+    anyhow::ensure!(
+        object
+            .get("@type")
+            .and_then(Value::as_str)
+            .is_none_or(|kind| kind == "RecurrenceRule"),
+        "invalid recurrence rule type"
+    );
+    anyhow::ensure!(
+        object
+            .get("rscale")
+            .and_then(Value::as_str)
+            .is_none_or(|v| v == "gregorian"),
+        "unsupported recurrence calendar system"
+    );
+    anyhow::ensure!(
+        object
+            .get("skip")
+            .and_then(Value::as_str)
+            .is_none_or(|v| v == "omit"),
+        "unsupported recurrence skip policy"
+    );
+    let frequency = rule["frequency"]
+        .as_str()
+        .context("recurrence frequency missing")?;
+    let interval = optional_u32(rule, "interval")?;
+    anyhow::ensure!(
+        interval.is_none_or(|value| value > 0),
+        "invalid recurrence interval"
+    );
+    let occurrences = optional_u32(rule, "count")?;
+    anyhow::ensure!(
+        occurrences.is_none_or(|value| value > 0),
+        "invalid recurrence count"
+    );
+    let until = rule["until"]
+        .as_str()
+        .map(|value| local_until_to_eas(value, time_zone))
+        .transpose()?;
+    anyhow::ensure!(
+        occurrences.is_none() || until.is_none(),
+        "recurrence has both count and until"
+    );
+    let first_day_of_week = rule["firstDayOfWeek"]
+        .as_str()
+        .map(weekday_value)
+        .transpose()?;
+    let by_day = nday_array(rule, "byDay")?;
+    let by_month_day = number_array(rule, "byMonthDay")?;
+    let by_month = string_array(rule, "byMonth")?;
+    let by_set_position = number_array(rule, "bySetPosition")?;
+    anyhow::ensure!(
+        by_set_position.len() <= 1,
+        "unsupported recurrence set position"
+    );
+    let set_position = by_set_position
+        .first()
+        .map(|value| i8::try_from(*value))
+        .transpose()
+        .context("invalid recurrence set position")?;
+
+    let (kind, day_of_week, day_of_month, week_of_month, month_of_year) = match frequency {
+        "daily" => {
+            anyhow::ensure!(
+                by_day.is_empty()
+                    && by_month_day.is_empty()
+                    && by_month.is_empty()
+                    && set_position.is_none(),
+                "unsupported daily recurrence rule"
+            );
+            (0, None, None, None, None)
+        }
+        "weekly" => {
+            anyhow::ensure!(
+                by_month_day.is_empty() && by_month.is_empty() && set_position.is_none(),
+                "unsupported weekly recurrence rule"
+            );
+            (1, Some(day_mask(&by_day, false)?), None, None, None)
+        }
+        "monthly"
+            if by_month_day.len() == 1
+                && by_day.is_empty()
+                && by_month.is_empty()
+                && set_position.is_none() =>
+        {
+            let day = u8::try_from(by_month_day[0]).context("invalid monthly day")?;
+            anyhow::ensure!((1..=31).contains(&day), "invalid monthly day");
+            (2, None, Some(day), None, None)
+        }
+        "monthly" if !by_day.is_empty() && by_month_day.is_empty() && by_month.is_empty() => {
+            let week = set_position.context("monthly weekday recurrence needs set position")?;
+            (
+                3,
+                Some(day_mask(&by_day, false)?),
+                None,
+                Some(ordinal_to_week(week)?),
+                None,
+            )
+        }
+        "yearly"
+            if by_month.len() == 1
+                && by_month_day.len() == 1
+                && by_day.is_empty()
+                && set_position.is_none() =>
+        {
+            let month = parse_month(&by_month[0])?;
+            let day = u8::try_from(by_month_day[0]).context("invalid yearly day")?;
+            anyhow::ensure!((1..=31).contains(&day), "invalid yearly recurrence date");
+            (5, None, Some(day), None, Some(month))
+        }
+        "yearly" if by_month.len() == 1 && !by_day.is_empty() && by_month_day.is_empty() => {
+            let month = parse_month(&by_month[0])?;
+            let week = set_position.context("yearly weekday recurrence needs set position")?;
+            (
+                6,
+                Some(day_mask(&by_day, false)?),
+                None,
+                Some(ordinal_to_week(week)?),
+                Some(month),
+            )
+        }
+        _ => anyhow::bail!("unsupported JSCalendar recurrence rule"),
+    };
+    Ok(CalendarRecurrence {
+        kind,
+        interval,
+        day_of_week,
+        day_of_month,
+        week_of_month,
+        month_of_year,
+        first_day_of_week,
+        occurrences,
+        until,
+    })
+}
+
+fn weekdays(mask: u8, ordinal: Option<i8>) -> anyhow::Result<Vec<Value>> {
+    anyhow::ensure!(mask != 0 && mask <= 127, "invalid recurrence weekday mask");
+    Ok(WEEKDAYS
+        .iter()
+        .filter(|(_, bit)| mask & bit != 0)
+        .map(|(day, _)| {
+            let mut value = json!({"day":day});
+            if let Some(n) = ordinal {
+                value["nthOfPeriod"] = json!(n);
+            }
+            value
+        })
+        .collect())
+}
+
+fn day_mask(days: &[NDay], require_ordinal: bool) -> anyhow::Result<u8> {
+    anyhow::ensure!(!days.is_empty(), "recurrence weekdays missing");
+    let mut mask = 0u8;
+    for day in days {
+        anyhow::ensure!(
+            day.kind.as_deref().is_none_or(|kind| kind == "NDay"),
+            "invalid recurrence day type"
+        );
+        anyhow::ensure!(
+            require_ordinal == day.nth_of_period.is_some(),
+            "invalid recurrence weekday ordinal"
+        );
+        if let Some(ordinal) = day.nth_of_period {
+            anyhow::ensure!(ordinal != 0, "invalid recurrence weekday ordinal");
+        }
+        let (_, bit) = WEEKDAYS
+            .iter()
+            .find(|(name, _)| *name == day.day)
+            .context("invalid recurrence weekday")?;
+        anyhow::ensure!(mask & bit == 0, "duplicate recurrence weekday");
+        mask |= bit;
+    }
+    Ok(mask)
+}
+
+fn nday_array(rule: &Value, key: &str) -> anyhow::Result<Vec<NDay>> {
+    rule.get(key)
+        .map(|value| serde_json::from_value(value.clone()).context("invalid recurrence day list"))
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+fn string_array(rule: &Value, key: &str) -> anyhow::Result<Vec<String>> {
+    rule.get(key)
+        .map(|value| {
+            serde_json::from_value(value.clone()).context("invalid recurrence string list")
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+fn number_array(rule: &Value, key: &str) -> anyhow::Result<Vec<i64>> {
+    rule.get(key)
+        .map(|value| {
+            serde_json::from_value(value.clone()).context("invalid recurrence number list")
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+fn optional_u32(rule: &Value, key: &str) -> anyhow::Result<Option<u32>> {
+    rule.get(key)
+        .and_then(Value::as_u64)
+        .map(|value| u32::try_from(value).context("invalid recurrence number"))
+        .transpose()
+}
+fn parse_month(value: &str) -> anyhow::Result<u8> {
+    let month = value.parse::<u8>().context("invalid recurrence month")?;
+    anyhow::ensure!((1..=12).contains(&month), "invalid recurrence month");
+    Ok(month)
+}
+fn week_to_position(week: u8) -> i8 {
+    if week == 5 {
+        -1
+    } else {
+        week as i8
+    }
+}
+fn ordinal_to_week(ordinal: i8) -> anyhow::Result<u8> {
+    match ordinal {
+        -1 => Ok(5),
+        1..=4 => Ok(ordinal as u8),
+        _ => anyhow::bail!("unsupported recurrence ordinal"),
+    }
+}
+fn weekday_name(value: u8) -> anyhow::Result<&'static str> {
+    WEEKDAYS
+        .get(value as usize)
+        .map(|(name, _)| *name)
+        .context("invalid first day of week")
+}
+fn weekday_value(value: &str) -> anyhow::Result<u8> {
+    WEEKDAYS
+        .iter()
+        .position(|(name, _)| *name == value)
+        .and_then(|day| u8::try_from(day).ok())
+        .context("invalid first day of week")
+}
+
+fn eas_until_to_local(value: &str, time_zone: Option<&str>) -> anyhow::Result<String> {
+    let utc = chrono::NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ")
+        .map(|date| date.and_utc())
+        .or_else(|_| {
+            chrono::DateTime::parse_from_rfc3339(value).map(|date| date.with_timezone(&chrono::Utc))
+        })
+        .context("invalid EAS recurrence Until")?;
+    let local = match time_zone {
+        Some(name) => {
+            let zone: chrono_tz::Tz = name.parse().context("invalid calendar time zone")?;
+            utc.with_timezone(&zone).naive_local()
+        }
+        None => utc.naive_utc(),
+    };
+    Ok(local.format("%Y-%m-%dT%H:%M:%S").to_string())
+}
+fn local_until_to_eas(value: &str, time_zone: Option<&str>) -> anyhow::Result<String> {
+    let local = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
+        .context("invalid recurrence until")?;
+    let utc = match time_zone {
+        Some(name) => {
+            let zone: chrono_tz::Tz = name.parse().context("invalid calendar time zone")?;
+            match zone.from_local_datetime(&local) {
+                chrono::LocalResult::Single(value) => value.with_timezone(&chrono::Utc).naive_utc(),
+                chrono::LocalResult::Ambiguous(_, _) | chrono::LocalResult::None => {
+                    anyhow::bail!("recurrence until is ambiguous in its time zone")
+                }
+            }
+        }
+        None => local,
+    };
+    Ok(utc.format("%Y%m%dT%H%M%SZ").to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eas_patterns_map_to_jscalendar_and_back() {
+        for recurrence in [
+            CalendarRecurrence {
+                kind: 0,
+                interval: Some(2),
+                occurrences: Some(10),
+                ..Default::default()
+            },
+            CalendarRecurrence {
+                kind: 1,
+                day_of_week: Some(10),
+                first_day_of_week: Some(1),
+                ..Default::default()
+            },
+            CalendarRecurrence {
+                kind: 2,
+                day_of_month: Some(31),
+                ..Default::default()
+            },
+            CalendarRecurrence {
+                kind: 3,
+                day_of_week: Some(62),
+                week_of_month: Some(2),
+                ..Default::default()
+            },
+            CalendarRecurrence {
+                kind: 5,
+                day_of_month: Some(14),
+                month_of_year: Some(2),
+                until: Some("20270301T000000Z".into()),
+                ..Default::default()
+            },
+            CalendarRecurrence {
+                kind: 6,
+                day_of_week: Some(2),
+                week_of_month: Some(5),
+                month_of_year: Some(11),
+                ..Default::default()
+            },
+        ] {
+            let jscalendar = to_jscalendar(&recurrence, None).unwrap();
+            assert!(jscalendar["@type"].is_null());
+            assert_eq!(from_jscalendar(&jscalendar, None).unwrap(), recurrence);
+        }
+    }
+
+    #[test]
+    fn recurrence_until_translates_between_utc_and_event_local_time() {
+        let recurrence = CalendarRecurrence {
+            kind: 0,
+            until: Some("20261125T170000Z".into()),
+            ..Default::default()
+        };
+        let rule = to_jscalendar(&recurrence, Some("America/Toronto")).unwrap();
+        assert_eq!(rule["until"], "2026-11-25T12:00:00");
+        assert_eq!(
+            from_jscalendar(&rule, Some("America/Toronto")).unwrap(),
+            recurrence
+        );
+    }
+
+    #[test]
+    fn rejects_unrepresentable_jscalendar_rules() {
+        for rule in [
+            json!({"@type":"RecurrenceRule","frequency":"weekly","byDay":[{"@type":"NDay","day":"mo","nthOfPeriod":1}]}),
+            json!({"@type":"RecurrenceRule","frequency":"monthly","byMonthDay":[1,2]}),
+            json!({"@type":"RecurrenceRule","frequency":"yearly","byMonth":["1"],"byDay":[{"@type":"NDay","day":"mo"}]}),
+        ] {
+            assert!(from_jscalendar(&rule, None).is_err(), "{rule}");
+        }
+    }
+}

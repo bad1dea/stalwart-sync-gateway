@@ -2996,6 +2996,8 @@ impl JmapClient {
                     "useDefaultAlerts",
                     "participants",
                     "replyTo",
+                    "recurrenceRule",
+                    "recurrenceOverrides",
                 ]),
                 limit,
             )
@@ -3036,7 +3038,7 @@ impl JmapClient {
             } else {
                 None
             };
-        Ok(items
+        items
             .into_iter()
             .filter(|item| item.kind != "Task")
             .map(|mut item| {
@@ -3058,15 +3060,19 @@ impl JmapClient {
                 CalendarEvent::from(item)
             })
             .map(|mut event| {
+                anyhow::ensure!(
+                    !event.unsupported_recurrence,
+                    "calendar event recurrence cannot be represented by EAS"
+                );
                 event.is_organizer = event
                     .organizer_email
                     .as_deref()
                     .map(|email| email.eq_ignore_ascii_case(auth.username()))
                     .unwrap_or(true);
                 event.response_type = calendar_response_type(&event, auth.username());
-                event
+                Ok(event)
             })
-            .collect())
+            .collect::<anyhow::Result<Vec<_>>>()
     }
 
     pub async fn respond_calendar_event(
@@ -3088,7 +3094,7 @@ impl JmapClient {
         ];
         let response: JmapResponse<serde_json::Value> = self.api_call(auth, &using,
             vec![MethodCall::new("CalendarEvent/get", serde_json::json!({"accountId":account,
-                "ids":[event_id],"properties":["id","@type","calendarIds","participants","replyTo","recurrenceRules","recurrenceOverrides"]}), "get")]).await?;
+                "ids":[event_id],"properties":["id","@type","calendarIds","participants","replyTo","recurrenceRule","recurrenceOverrides"]}), "get")]).await?;
         let result = response
             .method_responses
             .iter()
@@ -3103,9 +3109,7 @@ impl JmapClient {
         if event["@type"] != "Event" || event["calendarIds"][calendar_id] != true {
             return Ok(false);
         }
-        if event["recurrenceRules"]
-            .as_array()
-            .is_some_and(|rules| !rules.is_empty())
+        if !event["recurrenceRule"].is_null()
             || event["recurrenceOverrides"]
                 .as_object()
                 .is_some_and(|overrides| !overrides.is_empty())
@@ -3669,10 +3673,58 @@ impl JmapClient {
         Ok(())
     }
 
-    /// Creates (`id: None`) or updates (`id: Some`) a non-recurring
-    /// calendar event from ActiveSync `CalendarFields`. Recurrence,
-    /// attendees, and reminders are explicitly out of scope, matching
-    /// the read path (`calendar_events_in_calendar`). `start`/`duration`
+    pub async fn verify_calendar_recurrence(
+        &self,
+        auth: &AuthenticatedSession,
+        id: &str,
+        expected: Option<&crate::wbxml::eas::CalendarRecurrence>,
+    ) -> anyhow::Result<()> {
+        let account = auth
+            .session
+            .primary_account_for(capabilities::CALENDARS)
+            .context("JMAP Calendars capability is not available")?;
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
+                vec![MethodCall::new(
+                    "CalendarEvent/get",
+                    serde_json::json!({"accountId":account,"ids":[id],"properties":["id","timeZone","recurrenceRule","recurrenceOverrides"]}),
+                    "verify",
+                )],
+            )
+            .await?;
+        let item = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/get")
+            .and_then(|method| method.1["list"].as_array())
+            .and_then(|items| items.iter().find(|item| item["id"] == id))
+            .context("calendar recurrence verification failed")?;
+        anyhow::ensure!(
+            item.get("recurrenceOverrides")
+                .and_then(serde_json::Value::as_object)
+                .is_none_or(|overrides| overrides.is_empty()),
+            "JMAP returned unsupported recurrence exceptions"
+        );
+        let observed = match item.get("recurrenceRule").filter(|rule| !rule.is_null()) {
+            None => None,
+            Some(rule) => Some(crate::jmap::calendar_recurrence::from_jscalendar(
+                rule,
+                item["timeZone"].as_str(),
+            )?),
+        };
+        anyhow::ensure!(
+            observed.as_ref() == expected,
+            "JMAP did not retain the requested calendar recurrence"
+        );
+        Ok(())
+    }
+
+    /// Creates (`id: None`) or updates (`id: Some`) a calendar event from
+    /// ActiveSync `CalendarFields`. EAS recurrence rules map to a single
+    /// Stalwart's singular JSCalendar `recurrenceRule`; per-instance exceptions remain
+    /// unsupported. `start`/`duration`
     /// deliberately omit `timeZone` and treat the EAS UTC DateTime as a
     /// naive local-looking string -- the SAME convention this codebase's
     /// own read path (`local_to_utc_eas`) already uses for an absent
@@ -3702,12 +3754,14 @@ impl JmapClient {
             serde_json::Value::String("Event".to_owned()),
         );
         let mut update_state = None;
+        let mut recurrence_time_zone = None;
         if let Some(id) = id.filter(|_| {
             fields.reminder.is_some()
                 || fields.location.is_some()
                 || fields.start_time.is_some()
                 || fields.end_time.is_some()
                 || fields.attendees_present
+                || fields.recurrence_present
         }) {
             let response: JmapResponse<serde_json::Value> = self
                 .api_call(
@@ -3718,7 +3772,7 @@ impl JmapClient {
                     ],
                     vec![MethodCall::new(
                         "CalendarEvent/get",
-                        serde_json::json!({"accountId":account_id,"ids":[id],"properties":["id"]}),
+                        serde_json::json!({"accountId":account_id,"ids":[id],"properties":["id","timeZone"]}),
                         "state",
                     )],
                 )
@@ -3734,11 +3788,28 @@ impl JmapClient {
                     .is_some_and(|items| items.iter().any(|item| item["id"] == id)),
                 "calendar event not found"
             );
+            recurrence_time_zone = result.1["list"]
+                .as_array()
+                .and_then(|items| items.iter().find(|item| item["id"] == id))
+                .and_then(|item| item["timeZone"].as_str())
+                .map(str::to_owned);
             update_state = Some(
                 result.1["state"]
                     .as_str()
                     .context("calendar state missing")?
                     .to_owned(),
+            );
+        }
+        if fields.recurrence_present {
+            event.insert(
+                "recurrenceRule".to_owned(),
+                match &fields.recurrence {
+                    Some(recurrence) => crate::jmap::calendar_recurrence::to_jscalendar(
+                        recurrence,
+                        recurrence_time_zone.as_deref(),
+                    )?,
+                    None => serde_json::Value::Null,
+                },
             );
         }
         let mut reminder_changed = false;
@@ -6300,9 +6371,7 @@ fn invitation_event_for_create(
     if organizer.eq_ignore_ascii_case(user) {
         return Ok(None);
     }
-    if event["recurrenceRules"]
-        .as_array()
-        .is_some_and(|rules| !rules.is_empty())
+    if !event["recurrenceRule"].is_null()
         || event["recurrenceOverrides"]
             .as_object()
             .is_some_and(|overrides| !overrides.is_empty())
@@ -7300,6 +7369,10 @@ struct CalendarEventObject {
     participants: Option<BTreeMap<String, ParticipantObject>>,
     #[serde(default)]
     reply_to: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    recurrence_rule: Option<serde_json::Value>,
+    #[serde(default)]
+    recurrence_overrides: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -7369,6 +7442,25 @@ fn simple_geo(value: &str) -> Option<(&str, &str)> {
 
 impl From<CalendarEventObject> for CalendarEvent {
     fn from(value: CalendarEventObject) -> Self {
+        let recurrence_rule = value.recurrence_rule;
+        let recurrence_time_zone = value.time_zone.clone();
+        let recurrence_overrides = value
+            .recurrence_overrides
+            .as_ref()
+            .is_some_and(|overrides| overrides.as_object().is_some_and(|items| !items.is_empty()));
+        let recurrence = (!recurrence_overrides)
+            .then(|| {
+                recurrence_rule.as_ref().and_then(|rule| {
+                    crate::jmap::calendar_recurrence::from_jscalendar(
+                        rule,
+                        recurrence_time_zone.as_deref(),
+                    )
+                    .ok()
+                })
+            })
+            .flatten();
+        let unsupported_recurrence =
+            recurrence_overrides || (recurrence_rule.is_some() && recurrence.is_none());
         let start_utc = value
             .start
             .as_deref()
@@ -7517,6 +7609,8 @@ impl From<CalendarEventObject> for CalendarEvent {
                 .into_iter()
                 .filter_map(|(name, present)| present.then_some(name))
                 .collect(),
+            recurrence,
+            unsupported_recurrence,
             reminder_minutes: value
                 .alerts
                 .as_ref()
@@ -7956,6 +8050,37 @@ mod tests {
     }
 
     #[test]
+    fn calendar_recurrence_rules_round_trip_and_flag_exceptions() {
+        let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
+            "id":"e",
+            "recurrenceRule":{"frequency":"weekly","interval":2,"byDay":[{"day":"mo"},{"day":"we"}],"count":12},
+            "recurrenceOverrides":{}
+        }))
+        .unwrap();
+        let event = crate::model::CalendarEvent::from(object);
+        assert_eq!(
+            event.recurrence,
+            Some(crate::wbxml::eas::CalendarRecurrence {
+                kind: 1,
+                interval: Some(2),
+                day_of_week: Some(10),
+                occurrences: Some(12),
+                ..Default::default()
+            })
+        );
+        assert!(!event.unsupported_recurrence);
+
+        let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
+            "id":"e", "recurrenceRule":{"frequency":"weekly","byDay":[{"day":"mo"}]},
+            "recurrenceOverrides":{"2026-11-25T12:00:00":{"excluded":true}}
+        }))
+        .unwrap();
+        let event = crate::model::CalendarEvent::from(object);
+        assert!(event.unsupported_recurrence);
+        assert!(event.recurrence.is_none());
+    }
+
+    #[test]
     fn calendar_coordinates_require_valid_simple_wgs84_uri() {
         for (coordinates, expected) in [
             ("geo:43.65,-79.38", Some(("43.65", "-79.38"))),
@@ -8355,6 +8480,67 @@ mod calendar_update_state_tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[tokio::test]
+    async fn calendar_create_sends_a_jscalendar_recurrence_rule() {
+        let app = Router::new().route(
+            "/",
+            post(|Json(request): Json<serde_json::Value>| async move {
+                let call = &request["methodCalls"][0];
+                assert_eq!(call[0], "CalendarEvent/set");
+                assert_eq!(
+                    call[1]["create"]["e1"]["recurrenceRule"],
+                    serde_json::json!({
+                        "frequency":"weekly", "interval":2,
+                        "byDay":[{"day":"mo"},{"day":"we"}], "count":12
+                    })
+                );
+                Json(serde_json::json!({"methodResponses":[[
+                    "CalendarEvent/set", {"created":{"e1":{"id":"event-1"}}}, "0"
+                ]]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CALENDARS:"a"},
+            "apiUrl":url, "downloadUrl":url, "uploadUrl":url, "username":"user", "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let fields = crate::wbxml::eas::CalendarFields {
+            recurrence_present: true,
+            recurrence: Some(crate::wbxml::eas::CalendarRecurrence {
+                kind: 1,
+                interval: Some(2),
+                day_of_week: Some(10),
+                occurrences: Some(12),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            client
+                .save_calendar_event(&auth, "calendar", None, None, &fields)
+                .await
+                .unwrap(),
+            "event-1"
+        );
+        server.abort();
+    }
 
     #[tokio::test]
     async fn location_update_rejects_a_changed_calendar_state() {
