@@ -309,7 +309,7 @@ async fn fetch_item(
                     }
                     builder.leaf(air::CLASS, "Tasks");
                     builder.start(ops::PROPERTIES);
-                    write_task_fields(builder, &task, &fetch.body_preferences, false);
+                    write_task_fields(builder, &task, &fetch.body_preferences, version, false);
                     builder.end();
                 }
                 None => builder.leaf(ops::STATUS, "6"),

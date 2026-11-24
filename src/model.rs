@@ -384,6 +384,7 @@ pub struct Task {
     pub start_local: Option<String>,
     pub due: Option<String>,
     pub due_local: Option<String>,
+    pub recurrence: Option<crate::wbxml::eas::CalendarRecurrence>,
 }
 
 /// `id` is the note's permanent stable id (see jmap/notes.rs), never the

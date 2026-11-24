@@ -2994,6 +2994,8 @@ impl JmapClient {
                     "keywords",
                     "alerts",
                     "useDefaultAlerts",
+                    "recurrenceRule",
+                    "recurrenceOverrides",
                     "participants",
                     "replyTo",
                     "recurrenceRule",
@@ -4540,11 +4542,11 @@ impl JmapClient {
                 limit,
             )
             .await?;
-        Ok(items
+        items
             .into_iter()
             .filter(|item| item.kind == "Task")
-            .map(Task::from)
-            .collect())
+            .map(try_task_from_object)
+            .collect()
     }
 
     pub async fn searchable_tasks_in_calendar(
@@ -4566,7 +4568,8 @@ impl JmapClient {
             .into_iter()
             .filter(|item| item["@type"] == "Task")
             .map(|item| {
-                let task = Task::from(serde_json::from_value::<TaskObject>(item.clone())?);
+                let task =
+                    try_task_from_object(serde_json::from_value::<TaskObject>(item.clone())?)?;
                 Ok((task, item))
             })
             .collect()
@@ -4594,6 +4597,10 @@ impl JmapClient {
             "unsupported task categories"
         );
         anyhow::ensure!(!fields.unsupported_reminder, "unsupported task reminder");
+        anyhow::ensure!(
+            !fields.unsupported_recurrence,
+            "unsupported task recurrence"
+        );
         let mut task = serde_json::Map::new();
         if let Some(body) = &fields.body {
             task.insert("description".to_owned(), serde_json::json!(body));
@@ -4636,7 +4643,8 @@ impl JmapClient {
             || fields.start_date.is_some()
             || fields.utc_start_date.is_some()
             || fields.reminder_set.is_some()
-            || fields.reminder_time.is_some();
+            || fields.reminder_time.is_some()
+            || fields.recurrence_present;
         let mut timezone = None;
         let mut current_alerts = serde_json::Value::Null;
         let mut use_default_alerts = false;
@@ -4681,6 +4689,22 @@ impl JmapClient {
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
             use_default_alerts = item["useDefaultAlerts"].as_bool().unwrap_or(false);
+        }
+        if fields.recurrence_present {
+            match fields.recurrence.as_ref() {
+                Some(recurrence) => {
+                    task.insert(
+                        "recurrenceRule".to_owned(),
+                        crate::jmap::calendar_recurrence::to_jscalendar(
+                            recurrence,
+                            timezone.as_deref(),
+                        )?,
+                    );
+                }
+                None => {
+                    task.insert("recurrenceRule".to_owned(), serde_json::Value::Null);
+                }
+            }
         }
         if fields.due_date.is_some()
             || fields.utc_due_date.is_some()
@@ -7659,72 +7683,89 @@ struct TaskObject {
     alerts: Option<serde_json::Value>,
     #[serde(default, rename = "useDefaultAlerts")]
     use_default_alerts: bool,
+    #[serde(default, rename = "recurrenceRule")]
+    recurrence_rule: Option<serde_json::Value>,
+    #[serde(default, rename = "recurrenceOverrides")]
+    recurrence_overrides: Option<serde_json::Value>,
     #[serde(rename = "@type", default)]
     kind: String,
 }
 
-impl From<TaskObject> for Task {
-    fn from(value: TaskObject) -> Self {
-        Self {
-            id: value.id,
-            title: value.title,
-            description: value.description.map(|description| EmailBody {
-                body_type: if value.description_content_type.as_deref() == Some("text/html") {
-                    EmailBodyType::Html
-                } else {
-                    EmailBodyType::Plain
-                },
-                value: description,
-                is_truncated: false,
-            }),
-            completed: value.progress.as_deref() == Some("completed"),
-            date_completed: (value.progress.as_deref() == Some("completed"))
-                .then(|| {
-                    value
-                        .progress_updated
-                        .as_deref()
-                        .and_then(utc_iso_to_eas_datetime)
-                })
-                .flatten(),
-            importance: jmap_task_priority_to_eas(value.priority),
-            sensitivity: jmap_task_sensitivity_to_eas(value.privacy.as_deref()),
-            categories: value
-                .keywords
-                .into_iter()
-                .filter_map(|(category, enabled)| enabled.then_some(category))
-                .collect(),
-            reminder_time: (!value.use_default_alerts)
-                .then(|| {
-                    value
-                        .alerts
-                        .as_ref()
-                        .and_then(crate::jmap::task_reminder::read_reminder)
-                })
-                .flatten(),
-            start: value.start.as_deref().and_then(|start| {
-                if value
-                    .time_zone
-                    .as_deref()
-                    .is_some_and(|zone| zone.parse::<chrono_tz::Tz>().is_err())
-                {
-                    return None;
-                }
-                local_to_utc_eas(start, value.time_zone.as_deref())
-            }),
-            start_local: value.start.as_deref().and_then(local_to_utc_eas_no_tz),
-            due: value.due.as_deref().and_then(|due| {
-                if value
-                    .time_zone
-                    .as_deref()
-                    .is_some_and(|zone| zone.parse::<chrono_tz::Tz>().is_err())
-                {
-                    return None;
-                }
-                local_to_utc_eas(due, value.time_zone.as_deref())
-            }),
-            due_local: value.due.as_deref().and_then(local_to_utc_eas_no_tz),
-        }
+fn try_task_from_object(value: TaskObject) -> anyhow::Result<Task> {
+    if let Some(overrides) = value.recurrence_overrides.as_ref() {
+        anyhow::ensure!(
+            overrides.as_object().is_none_or(serde_json::Map::is_empty),
+            "task recurrence exceptions are unsupported"
+        );
     }
+    let recurrence = value
+        .recurrence_rule
+        .as_ref()
+        .filter(|rule| !rule.is_null())
+        .map(|rule| {
+            crate::jmap::calendar_recurrence::from_jscalendar(rule, value.time_zone.as_deref())
+        })
+        .transpose()?;
+    Ok(Task {
+        id: value.id,
+        title: value.title,
+        description: value.description.map(|description| EmailBody {
+            body_type: if value.description_content_type.as_deref() == Some("text/html") {
+                EmailBodyType::Html
+            } else {
+                EmailBodyType::Plain
+            },
+            value: description,
+            is_truncated: false,
+        }),
+        completed: value.progress.as_deref() == Some("completed"),
+        date_completed: (value.progress.as_deref() == Some("completed"))
+            .then(|| {
+                value
+                    .progress_updated
+                    .as_deref()
+                    .and_then(utc_iso_to_eas_datetime)
+            })
+            .flatten(),
+        importance: jmap_task_priority_to_eas(value.priority),
+        sensitivity: jmap_task_sensitivity_to_eas(value.privacy.as_deref()),
+        categories: value
+            .keywords
+            .into_iter()
+            .filter_map(|(category, enabled)| enabled.then_some(category))
+            .collect(),
+        reminder_time: (!value.use_default_alerts)
+            .then(|| {
+                value
+                    .alerts
+                    .as_ref()
+                    .and_then(crate::jmap::task_reminder::read_reminder)
+            })
+            .flatten(),
+        start: value.start.as_deref().and_then(|start| {
+            if value
+                .time_zone
+                .as_deref()
+                .is_some_and(|zone| zone.parse::<chrono_tz::Tz>().is_err())
+            {
+                return None;
+            }
+            local_to_utc_eas(start, value.time_zone.as_deref())
+        }),
+        start_local: value.start.as_deref().and_then(local_to_utc_eas_no_tz),
+        due: value.due.as_deref().and_then(|due| {
+            if value
+                .time_zone
+                .as_deref()
+                .is_some_and(|zone| zone.parse::<chrono_tz::Tz>().is_err())
+            {
+                return None;
+            }
+            local_to_utc_eas(due, value.time_zone.as_deref())
+        }),
+        due_local: value.due.as_deref().and_then(local_to_utc_eas_no_tz),
+        recurrence,
+    })
 }
 
 fn eas_importance_to_jmap(importance: &str) -> Option<u8> {
@@ -8014,7 +8055,7 @@ mod tests {
             "alerts": {"a":{"@type":"Alert","trigger":{"@type":"AbsoluteTrigger","when":"2026-11-20T11:45:00-05:00"}}}
         }))
         .unwrap();
-        let task = crate::model::Task::from(task);
+        let task = super::try_task_from_object(task).unwrap();
         assert_eq!(
             task.date_completed.as_deref(),
             Some("2026-11-20T16:45:00.000Z")
@@ -8033,7 +8074,31 @@ mod tests {
             "progressUpdated": "2026-11-20T16:45:00Z"
         }))
         .unwrap();
-        assert_eq!(crate::model::Task::from(task).date_completed, None);
+        assert_eq!(
+            super::try_task_from_object(task).unwrap().date_completed,
+            None
+        );
+    }
+
+    #[test]
+    fn task_recurrence_is_read_from_jscalendar_and_exceptions_fail_closed() {
+        let task: super::TaskObject = serde_json::from_value(serde_json::json!({
+            "id":"t", "@type":"Task",
+            "recurrenceRule":{"frequency":"weekly","byDay":[{"day":"mo"},{"day":"we"}],"count":8}
+        }))
+        .unwrap();
+        let task = super::try_task_from_object(task).unwrap();
+        assert_eq!(task.recurrence.as_ref().unwrap().kind, 1);
+        assert_eq!(task.recurrence.as_ref().unwrap().day_of_week, Some(10));
+        assert_eq!(task.recurrence.as_ref().unwrap().occurrences, Some(8));
+
+        let task: super::TaskObject = serde_json::from_value(serde_json::json!({
+            "id":"t", "@type":"Task",
+            "recurrenceRule":{"frequency":"weekly","byDay":[{"day":"mo"}]},
+            "recurrenceOverrides":{"2026-11-25T09:00:00":{"excluded":true}}
+        }))
+        .unwrap();
+        assert!(super::try_task_from_object(task).is_err());
     }
 
     #[test]

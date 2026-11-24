@@ -1292,6 +1292,7 @@ async fn search_inner(
                                     .as_ref()
                                     .map(|pref| pref.requests.as_slice())
                                     .unwrap_or_default(),
+                                version,
                                 false,
                             );
                             builder.end();
@@ -3033,8 +3034,16 @@ async fn sync_mail(
                 )
                 .await;
             } else {
-                sync_tasks_collection(state, auth, &mut builder, user, device_id, &collection)
-                    .await;
+                sync_tasks_collection(
+                    state,
+                    auth,
+                    &mut builder,
+                    user,
+                    device_id,
+                    &collection,
+                    version,
+                )
+                .await;
             }
             let nodes = builder.nodes_since(mark);
             let reply = wbxml::Document {
@@ -5816,9 +5825,9 @@ fn write_contact_address_fields(
 /// Handles one Calendar collection's Sync round-trip end to end, same
 /// contract and hash-diff shape as `sync_contacts_collection` (see that
 /// function's own doc for the full pattern description -- this is a
-/// direct copy of it onto Calendar). No recurrence, attendee, or
-/// reminder support -- single (non-recurring) events only, matching the
-/// read path's existing field set. `CalendarEvent/set` supports
+/// direct copy of it onto Calendar). Recurrence, attendee, and reminder
+/// fields are handled by this collection's supported paths.
+/// `CalendarEvent/set` supports
 /// in-place `update` (confirmed live -- see `save_calendar_event`'s doc),
 /// so like Contacts, the JMAP id is a stable ServerId across edits.
 async fn sync_calendar_collection(
@@ -6532,8 +6541,33 @@ async fn sync_tasks_collection(
     user: &str,
     device_id: &str,
     collection: &wbxml::eas::SyncCollectionRequest,
+    version: ProtocolVersion,
 ) {
     use wbxml::eas::airsync as air;
+
+    if collection.commands.iter().any(|command| {
+        command.task.unsupported_recurrence
+            || (command.task.recurrence_present
+                && command.task.recurrence.is_none()
+                && !matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1))
+            || (command
+                .task
+                .recurrence
+                .as_ref()
+                .and_then(|recurrence| recurrence.first_day_of_week)
+                .is_some()
+                && !matches!(
+                    version,
+                    ProtocolVersion::V14_1 | ProtocolVersion::V16_0 | ProtocolVersion::V16_1
+                ))
+    }) {
+        builder.start(air::COLLECTION);
+        builder.leaf(air::SYNC_KEY, collection.sync_key.clone());
+        builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+        builder.leaf(air::STATUS, "5");
+        builder.end();
+        return;
+    }
 
     let calendar_id = collection
         .collection_id
@@ -6638,6 +6672,23 @@ async fn sync_tasks_collection(
         }
     };
 
+    if !matches!(
+        version,
+        ProtocolVersion::V14_1 | ProtocolVersion::V16_0 | ProtocolVersion::V16_1
+    ) && tasks.iter().any(|task| {
+        task.recurrence
+            .as_ref()
+            .and_then(|recurrence| recurrence.first_day_of_week)
+            .is_some_and(|first_day| first_day != 1)
+    }) {
+        builder.start(air::COLLECTION);
+        builder.leaf(air::SYNC_KEY, collection.sync_key.clone());
+        builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
+        builder.leaf(air::STATUS, "5");
+        builder.end();
+        return;
+    }
+
     let current_by_id: BTreeMap<String, (String, crate::model::Task)> = tasks
         .into_iter()
         .map(|task| (task.id.clone(), (task_hash(&task), task)))
@@ -6734,12 +6785,24 @@ async fn sync_tasks_collection(
         builder.start(air::COMMANDS);
         for id in &to_add {
             if let Some((_, task)) = current_by_id.get(id) {
-                write_task_command(builder, air::ADD, task, &collection.body_preferences);
+                write_task_command(
+                    builder,
+                    air::ADD,
+                    task,
+                    &collection.body_preferences,
+                    version,
+                );
             }
         }
         for id in &to_change {
             if let Some((_, task)) = current_by_id.get(id) {
-                write_task_command(builder, air::CHANGE, task, &collection.body_preferences);
+                write_task_command(
+                    builder,
+                    air::CHANGE,
+                    task,
+                    &collection.body_preferences,
+                    version,
+                );
             }
         }
         for id in &to_remove {
@@ -6771,6 +6834,7 @@ fn task_hash(task: &crate::model::Task) -> String {
     task.start_local.hash(&mut hasher);
     task.due.hash(&mut hasher);
     task.due_local.hash(&mut hasher);
+    task.recurrence.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -6790,6 +6854,7 @@ fn write_task_command(
     tag: wbxml::token::Token,
     task: &crate::model::Task,
     requests: &[RequestedBodyPreference],
+    version: ProtocolVersion,
 ) {
     use wbxml::eas::airsync as air;
 
@@ -6800,6 +6865,7 @@ fn write_task_command(
         builder,
         task,
         requests,
+        version,
         tag.code_page == air::PAGE && tag.token == air::CHANGE.token,
     );
     builder.end();
@@ -6810,6 +6876,7 @@ fn write_task_fields(
     builder: &mut wbxml::eas::DocumentBuilder,
     task: &crate::model::Task,
     requests: &[RequestedBodyPreference],
+    version: ProtocolVersion,
     is_change: bool,
 ) {
     use wbxml::eas::{airsync_base as base, tasks};
@@ -6890,6 +6957,45 @@ fn write_task_fields(
     ) {
         builder.leaf(tasks::DUE_DATE, local);
         builder.leaf(tasks::UTC_DUE_DATE, utc);
+    }
+    if let Some(recurrence) = &task.recurrence {
+        builder.start(tasks::RECURRENCE);
+        if let Some(series_start) = task.start.as_deref().and_then(format_due) {
+            builder.leaf(tasks::START, series_start);
+        }
+        builder.leaf(tasks::TYPE, recurrence.kind.to_string());
+        if let Some(until) = &recurrence.until {
+            builder.leaf(tasks::UNTIL, until.clone());
+        }
+        if let Some(count) = recurrence.occurrences {
+            builder.leaf(tasks::OCCURRENCES, count.to_string());
+        }
+        if let Some(interval) = recurrence.interval {
+            builder.leaf(tasks::INTERVAL, interval.to_string());
+        }
+        if let Some(days) = recurrence.day_of_week {
+            builder.leaf(tasks::DAY_OF_WEEK, days.to_string());
+        }
+        if let Some(day) = recurrence.day_of_month {
+            builder.leaf(tasks::DAY_OF_MONTH, day.to_string());
+        }
+        if let Some(week) = recurrence.week_of_month {
+            builder.leaf(tasks::WEEK_OF_MONTH, week.to_string());
+        }
+        if let Some(month) = recurrence.month_of_year {
+            builder.leaf(tasks::MONTH_OF_YEAR, month.to_string());
+        }
+        if let Some(first_day) = recurrence.first_day_of_week.filter(|_| {
+            matches!(
+                version,
+                ProtocolVersion::V14_1 | ProtocolVersion::V16_0 | ProtocolVersion::V16_1
+            )
+        }) {
+            builder.leaf(tasks::FIRST_DAY_OF_WEEK, first_day.to_string());
+        }
+        builder.end();
+    } else if is_change && matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
+        builder.empty_tag(tasks::RECURRENCE);
     }
 }
 
@@ -8050,6 +8156,46 @@ mod tests {
         assert_eq!(
             eas::find_text_after(&document, cal::RECURRENCE_OCCURRENCES),
             Some("12")
+        );
+    }
+
+    #[test]
+    fn task_recurrence_is_written_with_tasks_codepage_fields() {
+        use crate::wbxml::eas::{self, airsync as air, tasks};
+        let task = crate::model::Task {
+            id: "task-1".to_owned(),
+            title: "Weekly task".to_owned(),
+            description: None,
+            completed: false,
+            date_completed: None,
+            importance: None,
+            sensitivity: 0,
+            categories: Vec::new(),
+            reminder_time: None,
+            start: Some("20261124T090000Z".to_owned()),
+            start_local: Some("20261124T090000Z".to_owned()),
+            due: None,
+            due_local: None,
+            recurrence: Some(crate::wbxml::eas::CalendarRecurrence {
+                kind: 1,
+                interval: Some(2),
+                day_of_week: Some(10),
+                occurrences: Some(8),
+                ..Default::default()
+            }),
+        };
+        let mut builder = eas::DocumentBuilder::new();
+        super::write_task_command(&mut builder, air::ADD, &task, &[], ProtocolVersion::V16_1);
+        let document = builder.finish();
+        assert_eq!(eas::find_text_after(&document, tasks::TYPE), Some("1"));
+        assert_eq!(eas::find_text_after(&document, tasks::INTERVAL), Some("2"));
+        assert_eq!(
+            eas::find_text_after(&document, tasks::DAY_OF_WEEK),
+            Some("10")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, tasks::OCCURRENCES),
+            Some("8")
         );
     }
 
