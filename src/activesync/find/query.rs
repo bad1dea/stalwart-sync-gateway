@@ -477,8 +477,19 @@ fn received_condition_at(
                         .date()
                 }
             } else {
-                chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
-                    .map_err(|_| "invalid received date")?
+                if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+                    date
+                } else if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%m/%d/%Y") {
+                    date
+                } else {
+                    let (month, day) = value.split_once('/').ok_or("invalid received date")?;
+                    chrono::NaiveDate::from_ymd_opt(
+                        today.year(),
+                        month.parse().map_err(|_| "invalid received date")?,
+                        day.parse().map_err(|_| "invalid received date")?,
+                    )
+                    .ok_or("invalid received date")?
+                }
             };
             (day, day.succ_opt().ok_or("date out of range")?)
         }
@@ -921,6 +932,23 @@ mod tests {
                 "{value}"
             );
         }
+    }
+
+    #[test]
+    fn received_dates_accept_kql_year_and_current_year_numeric_forms() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 24).unwrap();
+        let expected = json!({"operator":"AND", "conditions":[
+            {"operator":"NOT", "conditions":[{"before":"2026-11-24T00:00:00Z"}]},
+            {"before":"2026-11-25T00:00:00Z"}
+        ]});
+        for value in ["11/24/2026", "11/24"] {
+            assert_eq!(
+                received_condition_at(":", value, today).unwrap(),
+                expected,
+                "{value}"
+            );
+        }
+        assert!(received_condition_at(":", "13/40/2026", today).is_err());
     }
 
     #[test]
