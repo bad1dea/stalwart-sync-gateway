@@ -4461,6 +4461,7 @@ impl JmapClient {
                     "progressUpdated",
                     "start",
                     "priority",
+                    "privacy",
                     "keywords",
                     "alerts",
                     "useDefaultAlerts",
@@ -4547,6 +4548,11 @@ impl JmapClient {
         if let Some(importance) = fields.importance.as_deref() {
             let priority = eas_importance_to_jmap(importance).context("invalid task importance")?;
             task.insert("priority".to_owned(), serde_json::json!(priority));
+        }
+        if let Some(sensitivity) = fields.sensitivity.as_deref() {
+            let privacy =
+                eas_task_sensitivity_to_jmap(sensitivity).context("invalid task sensitivity")?;
+            task.insert("privacy".to_owned(), serde_json::json!(privacy));
         }
         if let Some(categories) = &fields.categories {
             let keywords: std::collections::BTreeMap<_, _> =
@@ -7552,6 +7558,8 @@ struct TaskObject {
     #[serde(default)]
     priority: Option<u8>,
     #[serde(default)]
+    privacy: Option<String>,
+    #[serde(default)]
     keywords: std::collections::BTreeMap<String, bool>,
     #[serde(default)]
     alerts: Option<serde_json::Value>,
@@ -7585,6 +7593,7 @@ impl From<TaskObject> for Task {
                 })
                 .flatten(),
             importance: jmap_task_priority_to_eas(value.priority),
+            sensitivity: jmap_task_sensitivity_to_eas(value.privacy.as_deref()),
             categories: value
                 .keywords
                 .into_iter()
@@ -7630,6 +7639,23 @@ fn eas_importance_to_jmap(importance: &str) -> Option<u8> {
         "1" => Some(5),
         "2" => Some(1),
         _ => None,
+    }
+}
+
+fn eas_task_sensitivity_to_jmap(sensitivity: &str) -> Option<&'static str> {
+    match sensitivity {
+        "0" => Some("public"),
+        "1" | "2" => Some("private"),
+        "3" => Some("secret"),
+        _ => None,
+    }
+}
+
+fn jmap_task_sensitivity_to_eas(privacy: Option<&str>) -> u8 {
+    match privacy {
+        None | Some("public") => 0,
+        Some("secret") => 3,
+        Some("private") | Some(_) => 2,
     }
 }
 
@@ -7869,12 +7895,27 @@ mod tests {
     }
 
     #[test]
+    fn task_sensitivity_maps_to_jscalendar_privacy_levels() {
+        assert_eq!(super::eas_task_sensitivity_to_jmap("0"), Some("public"));
+        assert_eq!(super::eas_task_sensitivity_to_jmap("1"), Some("private"));
+        assert_eq!(super::eas_task_sensitivity_to_jmap("2"), Some("private"));
+        assert_eq!(super::eas_task_sensitivity_to_jmap("3"), Some("secret"));
+        assert_eq!(super::eas_task_sensitivity_to_jmap("4"), None);
+        assert_eq!(super::jmap_task_sensitivity_to_eas(None), 0);
+        assert_eq!(super::jmap_task_sensitivity_to_eas(Some("public")), 0);
+        assert_eq!(super::jmap_task_sensitivity_to_eas(Some("private")), 2);
+        assert_eq!(super::jmap_task_sensitivity_to_eas(Some("secret")), 3);
+        assert_eq!(super::jmap_task_sensitivity_to_eas(Some("vendor")), 2);
+    }
+
+    #[test]
     fn task_completion_time_round_trips_as_eas_datetime() {
         let task: super::TaskObject = serde_json::from_value(serde_json::json!({
             "id": "t", "@type": "Task", "progress": "completed",
             "progressUpdated": "2026-11-20T11:45:00-05:00",
             "start": "2026-11-20T11:30:00",
             "priority": 1,
+            "privacy": "secret",
             "keywords": {"Work": true, "Hidden": false},
             "alerts": {"a":{"@type":"Alert","trigger":{"@type":"AbsoluteTrigger","when":"2026-11-20T11:45:00-05:00"}}}
         }))
@@ -7886,6 +7927,7 @@ mod tests {
         );
         assert_eq!(task.start.as_deref(), Some("20261120T113000Z"));
         assert_eq!(task.importance, Some(2));
+        assert_eq!(task.sensitivity, 3);
         assert_eq!(task.categories, vec!["Work"]);
         assert_eq!(
             task.reminder_time.as_deref(),

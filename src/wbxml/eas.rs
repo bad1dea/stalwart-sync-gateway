@@ -1323,6 +1323,7 @@ pub struct TaskFields {
     pub complete: Option<bool>,
     pub date_completed: Option<String>,
     pub importance: Option<String>,
+    pub sensitivity: Option<String>,
     pub categories: Option<Vec<String>>,
     pub unsupported_categories: bool,
     pub reminder_set: Option<bool>,
@@ -3015,6 +3016,8 @@ fn extract_task_fields(nodes: &[Node]) -> TaskFields {
                     fields.date_completed = Some(text.clone());
                 } else if same_token(top, tasks::IMPORTANCE) {
                     fields.importance = Some(text.clone());
+                } else if same_token(top, tasks::SENSITIVITY) {
+                    fields.sensitivity = Some(text.clone());
                 } else if same_token(top, tasks::REMINDER_SET) {
                     reminder_set_count += 1;
                     fields.reminder_set = match text.as_str() {
@@ -3491,6 +3494,7 @@ mod tests {
         builder.leaf(tasks::SUBJECT, "Renew passport");
         builder.leaf(tasks::COMPLETE, "0");
         builder.leaf(tasks::IMPORTANCE, "2");
+        builder.leaf(tasks::SENSITIVITY, "3");
         builder.leaf(tasks::REMINDER_SET, "1");
         builder.leaf(tasks::REMINDER_TIME, "2026-09-03T09:00:00.000Z");
         builder.start(tasks::CATEGORIES);
@@ -3519,6 +3523,7 @@ mod tests {
         assert_eq!(command.task.subject.as_deref(), Some("Renew passport"));
         assert_eq!(command.task.complete, Some(false));
         assert_eq!(command.task.importance.as_deref(), Some("2"));
+        assert_eq!(command.task.sensitivity.as_deref(), Some("3"));
         assert_eq!(command.task.reminder_set, Some(true));
         assert_eq!(
             command.task.reminder_time.as_deref(),

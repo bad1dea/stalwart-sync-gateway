@@ -14095,6 +14095,7 @@ async fn task_description_changes_are_synced() {
         task["progressUpdated"] = serde_json::json!("2026-11-20T16:45:00Z");
         task["start"] = serde_json::json!("2026-11-20T08:30:00");
         task["priority"] = serde_json::json!(9);
+        task["privacy"] = serde_json::json!("secret");
         task["keywords"] = serde_json::json!({"Work": true});
         task["alerts"] = serde_json::json!({"due":{"@type":"Alert","trigger":{"@type":"AbsoluteTrigger","when":"2026-11-20T16:00:00Z"}}});
     }
@@ -14117,6 +14118,7 @@ async fn task_description_changes_are_synced() {
         Some("2026-11-20T08:30:00.000Z")
     );
     assert_eq!(eas::find_text_after(&update, tasks::IMPORTANCE), Some("0"));
+    assert_eq!(eas::find_text_after(&update, tasks::SENSITIVITY), Some("3"));
     assert_eq!(eas::find_text_after(&update, tasks::CATEGORY), Some("Work"));
     assert_eq!(
         eas::find_text_after(&update, tasks::REMINDER_SET),
@@ -14148,6 +14150,7 @@ async fn task_completion_date_changes_are_saved() {
     b.start(air::APPLICATION_DATA);
     b.leaf(tasks::COMPLETE, "1");
     b.leaf(tasks::IMPORTANCE, "2");
+    b.leaf(tasks::SENSITIVITY, "3");
     b.leaf(tasks::REMINDER_SET, "1");
     b.leaf(tasks::REMINDER_TIME, "2026-11-22T08:00:00.000Z");
     b.start(tasks::CATEGORIES);
@@ -14182,6 +14185,7 @@ async fn task_completion_date_changes_are_saved() {
     assert_eq!(task["progress"], "completed");
     assert_eq!(task["progressUpdated"], "2026-11-20T16:45:00Z");
     assert_eq!(task["priority"], 1);
+    assert_eq!(task["privacy"], "secret");
     assert_eq!(task["keywords"], serde_json::json!({"Work": true}));
     assert_eq!(task["start"], "2026-11-21T08:00:00");
     assert_eq!(task["useDefaultAlerts"], false);

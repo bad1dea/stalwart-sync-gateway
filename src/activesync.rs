@@ -6686,6 +6686,7 @@ fn task_hash(task: &crate::model::Task) -> String {
     task.completed.hash(&mut hasher);
     task.date_completed.hash(&mut hasher);
     task.importance.hash(&mut hasher);
+    task.sensitivity.hash(&mut hasher);
     task.categories.hash(&mut hasher);
     task.reminder_time.hash(&mut hasher);
     task.start.hash(&mut hasher);
@@ -6759,6 +6760,7 @@ fn write_task_fields(
         }
     }
     builder.leaf(tasks::COMPLETE, if task.completed { "1" } else { "0" });
+    builder.leaf(tasks::SENSITIVITY, task.sensitivity.to_string());
     builder.leaf(
         tasks::REMINDER_SET,
         if task.reminder_time.is_some() {
