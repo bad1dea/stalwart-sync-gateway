@@ -3743,6 +3743,43 @@ mod tests {
     use crate::wbxml::encode_document;
 
     #[test]
+    fn codepage_numbers_match_the_ms_aswbxml_namespace_table() {
+        assert_eq!(
+            [
+                airsync::PAGE,
+                contacts::PAGE,
+                email::PAGE,
+                calendar::PAGE,
+                move_items::PAGE,
+                get_item_estimate::PAGE,
+                folder_hierarchy::PAGE,
+                meeting_response::PAGE,
+                tasks::PAGE,
+                resolve_recipients::PAGE,
+                validate_cert::PAGE,
+                contacts2::PAGE,
+                ping::PAGE,
+                provision::PAGE,
+                search::PAGE,
+                gal::PAGE,
+                airsync_base::PAGE,
+                settings::PAGE,
+                document_library::PAGE,
+                item_operations::PAGE,
+                compose_mail::PAGE,
+                email2::PAGE,
+                notes::PAGE,
+                rights_management::PAGE,
+                find::PAGE,
+            ],
+            [
+                0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25,
+            ]
+        );
+    }
+
+    #[test]
     fn empty_tag_encodes_a_bare_content_less_byte_with_no_matching_end() {
         // Real bug, confirmed live via idevicesyslog: encoding Oof's
         // AppliesToInternal as start()+end() (content bit set, closed

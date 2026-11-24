@@ -176,34 +176,44 @@ remains separate from handler coverage.
 
 ## WBXML codepages (MS-ASWBXML)
 
-Each EAS XML namespace maps to a numeric WBXML codepage, listed
-individually on Microsoft Learn (fetched a sample this session — Code
-Page 0 = AirSync, Code Page 2 = Email, Code Page 4 = Calendar, Code Page
-17 = AirSyncBase — matches this gateway's own `src/wbxml/eas.rs` constants
-exactly for the pages checked). The intro/overview page itself does not
-carry the full page-number table in one place (checked live — it's a
-one-paragraph purpose statement, the table is spread across per-codepage
-subpages), so the **full 0–24-ish page list with exact numbers for every
-page (Notes, RightsManagement, FindP2P, etc.) is [unverified this
-session]** — this gateway's own `src/wbxml/eas.rs` module (built up over
-this whole debugging saga, cross-checked field-by-field against z-push's
-PHP `wbxmldefs.php` table, which is itself sourced from this same MS-ASWBXML
-spec) is the more reliable reference to consult first; treat it as
-higher-confidence than re-deriving codepage numbers from scratch.
+Microsoft's [MS-ASWBXML namespace table](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-aswbxml/2e57ccd4-cf38-45a0-bb11-95304bd1180d)
+lists the complete mapping. The gateway's module constants match every
+implemented page, checked together by
+`codepage_numbers_match_the_ms_aswbxml_namespace_table` in
+`src/wbxml/eas.rs`:
 
-Known from this gateway's own verified history:
-- Codepage 0 = AirSync, 2 = Email, 4 = Calendar, 5 = Move, 6 =
-  GetItemEstimate, 7 = FolderHierarchy, 13 = Ping, 14 = Provision, 17 =
-  AirSyncBase, 18 = Settings, 20 = ItemOperations, 21 = ComposeMail
-  (SendMail/SmartReply/SmartForward) — all directly read from
-  `src/wbxml/eas.rs`'s `pub const PAGE: u8 = N` lines this session.
-- Notes' own codepage number was **not** independently re-verified this
-  session (Notes sync is implemented via the Email-backed workaround in
-  `src/jmap/notes.rs`, which reuses Email's own WBXML shape rather than a
-  dedicated Notes codepage's fields) — if a native EAS Notes codepage
-  (MS-ASNOTE-backed field set) is ever wanted instead of the Email-hack,
-  that page number needs pulling from a fetched MS-ASWBXML subpage before
-  use, same discipline as everything else in this doc.
+| Page | Namespace |
+|---:|---|
+| 0 | AirSync |
+| 1 | Contacts |
+| 2 | Email |
+| 3 | AirNotify (no longer used; no module) |
+| 4 | Calendar |
+| 5 | Move |
+| 6 | GetItemEstimate |
+| 7 | FolderHierarchy |
+| 8 | MeetingResponse |
+| 9 | Tasks |
+| 10 | ResolveRecipients |
+| 11 | ValidateCert |
+| 12 | Contacts2 |
+| 13 | Ping |
+| 14 | Provision |
+| 15 | Search |
+| 16 | GAL |
+| 17 | AirSyncBase |
+| 18 | Settings |
+| 19 | DocumentLibrary |
+| 20 | ItemOperations |
+| 21 | ComposeMail |
+| 22 | Email2 |
+| 23 | Notes |
+| 24 | RightsManagement |
+| 25 | Find |
+
+The Notes namespace has a confirmed codepage number, but this gateway uses
+its Email-backed Notes workaround in `src/jmap/notes.rs`; it does not emit
+native MS-ASNOTE fields.
 
 ## Protocol version gating (14.0 vs 12.x vs 16.x)
 
@@ -231,8 +241,6 @@ session's fixes were, not against spec-reading alone.
 
 ## Remaining verification items
 
-- Full WBXML codepage number table (all ~24 pages) — pull from
-  Microsoft Learn's per-codepage subpages, not re-derived.
 - KQL proximity — direct `NEAR`/`ONEAR` and Boolean combinations with supported
   predicates now exact-filter full message text and common address fields,
   using the default distance of eight or an explicit distance. `attachment:`
