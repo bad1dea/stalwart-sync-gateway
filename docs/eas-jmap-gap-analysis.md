@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `253ae5a` (2026-11-24)
+## Reconciled status for source `main` at `e989c62` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -52,8 +52,11 @@ Current prioritized work:
    Start/end edits convert through the parent event's IANA timezone, preserve
    the inherited endpoint when only one is changed, derive the new duration,
    and reject negative durations. All-day flags are occurrence-specific.
-   Sensitivity, attachments, and meeting negotiation metadata remain unsupported
-   and fail closed. The EAS Tasks class has no
+   Sensitivity, attachments, and the remaining meeting-negotiation fields
+   (counter-proposal permission and reply timestamp) remain unsupported and
+   fail closed. ResponseRequested maps to the JSCalendar participant
+   `expectReply` value when all invitees share one setting; mixed settings are
+   omitted because EAS exposes a single boolean. The EAS Tasks class has no
    per-instance exception container, so Task exceptions are not an EAS gap.
    Regression tests cover these mappings; the full suite passes (304 passed,
    73 ignored), and Clippy with warnings denied passes. Location support deployed as
@@ -95,6 +98,13 @@ Current prioritized work:
    `sha256:e2518cc278eeaf6b154383fe7b2e12168c19ae2d5c092013ede37fe94429f10d`,
    started `2026-11-24T08:58:47Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. The suite passed 307 tests (73 ignored); strict Clippy,
+   formatting, and diff checks passed. ResponseRequested now maps to uniform
+   attendee `expectReply` settings and is deployed as
+   `deploy-2026-11-24-eas-calendar-response-requested-e989c62`; homelab commit
+   `61b6a67`, image
+   `sha256:f14c1c672260d6fcb07bb3af41e926a6e762405dce884ca2db1b977b7c1a4efc`,
+   started `2026-11-24T09:11:12Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The suite passed 310 tests (73 ignored); strict Clippy,
    formatting, and diff checks passed.
 3. **Real-client 16.1 certification and rollout.** Production remains pinned
    to a tagged 14.0 build. Forced-version protocol tests do not establish that
