@@ -500,8 +500,19 @@ fn is_extractable_archive_type(media_type: &str) -> bool {
         media_type,
         "application/epub+zip"
             | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            | "application/vnd.openxmlformats-officedocument.wordprocessingml.template"
+            | "application/vnd.ms-word.document.macroenabled.12"
+            | "application/vnd.ms-word.template.macroenabled.12"
             | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            | "application/vnd.openxmlformats-officedocument.spreadsheetml.template"
+            | "application/vnd.ms-excel.sheet.macroenabled.12"
+            | "application/vnd.ms-excel.template.macroenabled.12"
             | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            | "application/vnd.openxmlformats-officedocument.presentationml.slideshow"
+            | "application/vnd.openxmlformats-officedocument.presentationml.template"
+            | "application/vnd.ms-powerpoint.presentation.macroenabled.12"
+            | "application/vnd.ms-powerpoint.slideshow.macroenabled.12"
+            | "application/vnd.ms-powerpoint.template.macroenabled.12"
             | "application/vnd.oasis.opendocument.text"
             | "application/vnd.oasis.opendocument.spreadsheet"
             | "application/vnd.oasis.opendocument.presentation"
@@ -551,18 +562,29 @@ fn extract_archive_text(bytes: &[u8], media_type: &str) -> Option<String> {
         return None;
     }
     let wanted = |name: &str| match media_type {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        | "application/vnd.openxmlformats-officedocument.wordprocessingml.template"
+        | "application/vnd.ms-word.document.macroenabled.12"
+        | "application/vnd.ms-word.template.macroenabled.12" => {
             name == "word/document.xml"
                 || name == "word/footnotes.xml"
                 || name == "word/endnotes.xml"
                 || (name.starts_with("word/header") && name.ends_with(".xml"))
                 || (name.starts_with("word/footer") && name.ends_with(".xml"))
         }
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        | "application/vnd.openxmlformats-officedocument.spreadsheetml.template"
+        | "application/vnd.ms-excel.sheet.macroenabled.12"
+        | "application/vnd.ms-excel.template.macroenabled.12" => {
             name == "xl/sharedStrings.xml"
                 || (name.starts_with("xl/worksheets/") && name.ends_with(".xml"))
         }
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        | "application/vnd.openxmlformats-officedocument.presentationml.slideshow"
+        | "application/vnd.openxmlformats-officedocument.presentationml.template"
+        | "application/vnd.ms-powerpoint.presentation.macroenabled.12"
+        | "application/vnd.ms-powerpoint.slideshow.macroenabled.12"
+        | "application/vnd.ms-powerpoint.template.macroenabled.12" => {
             (name.starts_with("ppt/slides/slide") || name.starts_with("ppt/notesSlides/notesSlide"))
                 && name.ends_with(".xml")
         }
@@ -2263,6 +2285,15 @@ mod tests {
         assert!(is_extractable_attachment_type("application/epub+zip"));
         assert!(is_extractable_attachment_type(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ));
+        assert!(is_extractable_attachment_type(
+            "application/vnd.ms-word.document.macroEnabled.12"
+        ));
+        assert!(is_extractable_attachment_type(
+            "application/vnd.ms-excel.sheet.macroEnabled.12"
+        ));
+        assert!(is_extractable_attachment_type(
+            "application/vnd.ms-powerpoint.presentation.macroEnabled.12"
         ));
         assert!(is_extractable_attachment_type(
             "application/vnd.oasis.opendocument.text"

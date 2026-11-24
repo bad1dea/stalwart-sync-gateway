@@ -353,14 +353,18 @@ Current prioritized work:
    configurable size/decompression limits and partial-index cases ([Stalwart
    attachment text extraction](https://www.stalw.art/docs/storage/text-extraction/)). A
    Find now downloads and locally extracts `text/*`, JSON, XML (`+xml`),
-   text-bearing PDFs, EPUB XHTML, OOXML Word/Excel/PowerPoint, and OpenDocument Text,
-   Spreadsheet, and Presentation attachments up to 2 MiB for exact text/NEAR
+   text-bearing PDFs, EPUB XHTML, OOXML Word/Excel/PowerPoint (including
+   macro-enabled variants), and OpenDocument Text, Spreadsheet, and Presentation
+   attachments up to 2 MiB for exact text/NEAR
    checks. PDF parsing failures and parser panics are contained as non-matches.
    Archive entry count and cumulative selected XML expansion are bounded.
    EPUB XHTML chapters use the same archive-entry and expanded-XML limits; a
    mocked HTTP Find regression verifies proximity matching in EPUB text. The
-   full suite passes 383 tests (73 ignored), strict Clippy passes, and the
-   feature is deployed as `deploy-2026-11-24-eas-find-epub-55daf09`;
+   macro-enabled OOXML types use the same restricted document parts; a mocked
+   Find regression covers an `.xlsm` attachment. The current full suite passes
+   383 tests (73 ignored), with strict Clippy and format checks passing. The
+   macro-enabled variants await deployment.
+   EPUB feature is deployed as `deploy-2026-11-24-eas-find-epub-55daf09`;
    homelab commit `97d913d`, image
    `sha256:8aa204bddf21960de0338ff595f81ce66564bf5c4015940521b5fa15730e6b23`,
    started `2026-11-24T19:54:28Z`, restart count zero, `/healthz` `ok`, and

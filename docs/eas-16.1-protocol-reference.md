@@ -130,8 +130,9 @@ local token-distance matching over complete message text and common address
 fields, including Boolean expressions with supported predicates. Trailing `*`
 prefixes on proximity terms are matched against token starts. `attachment:`
 name searches are matched locally against attachment metadata. Text, JSON, XML,
-text-bearing PDF, EPUB XHTML, OOXML Word/Excel/PowerPoint, and OpenDocument
-Text/Spreadsheet/Presentation attachments are extracted for exact text/proximity matching up to
+text-bearing PDF, EPUB XHTML, OOXML Word/Excel/PowerPoint (including
+macro-enabled variants), and OpenDocument Text/Spreadsheet/Presentation
+attachments are extracted for exact text/proximity matching up to
 2 MiB, with bounded archive expansion. Legacy binary Office formats, scanned-PDF
 OCR, and larger attachment content remain unsupported. These extraction changes
 are source-tested and deployed; real-client validation remains open. Find is
