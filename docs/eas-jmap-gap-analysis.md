@@ -26,7 +26,7 @@ Current prioritized work:
    retained for attachment records; it is not a selector in the
    `BodyPartPreference` schema and is not required to answer these requests.
    The current deployment tag
-   `deploy-2026-11-24-eas-find-epub-55daf09` includes this path; the
+   `deploy-2026-11-24-eas-find-office-macro-6050b9f` includes this path; the
    container is healthy and ready, while real-client 16.1 behavior remains
    unverified. Sources:
    Microsoft [MS-ASCON Elements](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascon/605bd946-0750-4d9b-b04c-8be28badfa8e),
@@ -362,12 +362,16 @@ Current prioritized work:
    mocked HTTP Find regression verifies proximity matching in EPUB text. The
    macro-enabled OOXML types use the same restricted document parts; a mocked
    Find regression covers an `.xlsm` attachment. The current full suite passes
-   383 tests (73 ignored), with strict Clippy and format checks passing. The
-   macro-enabled variants await deployment.
-   EPUB feature is deployed as `deploy-2026-11-24-eas-find-epub-55daf09`;
+   383 tests (73 ignored), with strict Clippy and format checks passing. EPUB
+   extraction is deployed as `deploy-2026-11-24-eas-find-epub-55daf09`;
    homelab commit `97d913d`, image
    `sha256:8aa204bddf21960de0338ff595f81ce66564bf5c4015940521b5fa15730e6b23`,
    started `2026-11-24T19:54:28Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Macro-enabled OOXML extraction is deployed as
+   `deploy-2026-11-24-eas-find-office-macro-6050b9f`; homelab commit
+   `284dced`, image
+   `sha256:c6d40e2a1d3e32d6e6be684c0d86571cb385c08cf19de32938c8f42b5d1dd63a`,
+   started `2026-11-24T19:59:42Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`.
    HTML/RTF conversion and XML element/entity/CDATA handling are covered as
    well. The downloader enforces the cap from the actual body size even if
