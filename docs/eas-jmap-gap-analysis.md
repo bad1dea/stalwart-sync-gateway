@@ -417,7 +417,12 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    allocation; oversized coordinates fail closed. A real `.xls` fixture and a
    malicious full-grid Dimensions declaration are covered by unit tests, and
    an end-to-end 16.1 Find regression checks exact NEAR matching on workbook
-   cells. Archive entry count and cumulative selected XML expansion are bounded.
+   cells. Deployed as `deploy-2026-11-24-eas-find-xls-docker-39ae56e`; homelab
+   commit `ed20db3`, image
+   `sha256:cb9c0c0b70332bc87b2bdc158251eb9ae112282becec68927bf19d6a4932de6b`,
+   started `2026-11-24T22:40:09Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Archive entry count and cumulative selected XML expansion
+   are bounded.
    EPUB XHTML chapters use the same archive-entry and expanded-XML limits; a
    mocked HTTP Find regression verifies proximity matching in EPUB text. The
    macro-enabled OOXML types use the same restricted document parts; a mocked
