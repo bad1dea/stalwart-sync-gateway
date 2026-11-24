@@ -188,8 +188,17 @@ async fn execute(
     } else {
         json!({"operator":"OR", "conditions":scope.iter().map(|id| json!({"inMailbox":id})).collect::<Vec<_>>()})
     };
-    let filter = json!({"operator":"AND", "conditions":[query, folder_filter]});
     let (phrase_match, phrases) = phrase_filter;
+    // A negated phrase cannot use JMAP's term filter as its candidate set:
+    // the backend does not preserve phrase semantics, and NOT would exclude
+    // messages that do not contain all indexed phrase terms. Scan the scoped
+    // mailbox and decide the one standalone negative phrase locally.
+    let query = if phrase_match == query::PhraseMatch::None {
+        json!({})
+    } else {
+        query
+    };
+    let filter = json!({"operator":"AND", "conditions":[query, folder_filter]});
     let user = auth.username();
     let device = device.device_id.as_deref().unwrap_or("unknown");
     let now = chrono::Utc::now().timestamp();
@@ -534,6 +543,14 @@ fn email_matches_phrases(
             }
             Ok(false)
         }
+        query::PhraseMatch::None => {
+            for (property, phrase) in phrases {
+                if email_matches_phrase(subject, body, property, phrase)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
     }
 }
 
@@ -657,6 +674,20 @@ mod tests {
                 ("subject".to_owned(), "alpha beta".to_owned()),
                 ("subject".to_owned(), "gamma delta".to_owned())
             ]
+        )
+        .unwrap());
+        assert!(email_matches_phrases(
+            "Unrelated subject",
+            None,
+            query::PhraseMatch::None,
+            &[("subject".to_owned(), "alpha beta".to_owned())]
+        )
+        .unwrap());
+        assert!(!email_matches_phrases(
+            "Alpha beta subject",
+            None,
+            query::PhraseMatch::None,
+            &[("subject".to_owned(), "alpha beta".to_owned())]
         )
         .unwrap());
         assert!(email_matches_phrases(

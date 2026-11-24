@@ -19,6 +19,7 @@ enum Token {
 pub(super) enum PhraseMatch {
     All,
     Any,
+    None,
 }
 
 pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
@@ -54,6 +55,9 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
 
 pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(String, String)>)> {
     let tokens = tokenize(input).ok()?;
+    if let [Token::Not, Token::Word(word)] = tokens.as_slice() {
+        return Some((PhraseMatch::None, vec![search_phrase_word(word)?]));
+    }
     if tokens.contains(&Token::Or)
         && tokens
             .iter()
@@ -793,9 +797,19 @@ mod tests {
             to_filter(r#"subject:"alpha beta""#).unwrap(),
             json!({"subject":"alpha beta"})
         );
+        assert_eq!(
+            phrases_for_postfilter(r#"NOT subject:"alpha beta""#),
+            Some((
+                PhraseMatch::None,
+                vec![("subject".to_owned(), "alpha beta".to_owned())]
+            ))
+        );
+        assert_eq!(
+            to_filter(r#"NOT subject:"alpha beta""#).unwrap(),
+            json!({"operator":"NOT", "conditions":[{"subject":"alpha beta"}]})
+        );
         for query in [
             r#"subject:"alpha beta" OR isread:true"#,
-            r#"NOT subject:"alpha beta""#,
             r#"subject:"alpha beta" subject:gamma"#,
             r#"subject:"alpha beta" OR subject:gamma"#,
         ] {
@@ -829,7 +843,6 @@ mod tests {
         );
         for query in [
             r#"body:"alpha beta" OR isread:true"#,
-            r#"NOT body:"alpha beta""#,
             r#"body:"alpha beta" body:gamma"#,
             r#"text:"alpha beta" text:gamma"#,
         ] {
@@ -894,6 +907,7 @@ mod tests {
         );
         assert!(phrases_for_postfilter(r#"subject:"alpha beta" OR isread:true"#).is_none());
         assert!(to_filter(r#"subject:"alpha beta" OR isread:true"#).is_err());
+        assert!(phrases_for_postfilter(r#"NOT subject:"alpha beta" AND isread:true"#).is_none());
     }
 
     #[test]

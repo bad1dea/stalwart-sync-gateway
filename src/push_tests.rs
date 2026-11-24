@@ -13342,6 +13342,53 @@ async fn find_exact_subject_phrase_preserves_conjunctive_restrictions() {
 }
 
 #[tokio::test]
+async fn find_repeated_and_negated_subject_phrases_are_exact() {
+    use eas::{airsync as air, find as f};
+    let env = start_env(Opts::default()).await;
+    env.mock.add_mail("inbox", "alpha beta gamma delta");
+    env.mock.add_mail("inbox", "alpha beta only");
+    env.mock.add_mail("inbox", "unrelated subject");
+    let sid = "7dc6ffa0-2aa5-43f6-b441-bdda13785428";
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            sid,
+            r#"subject:"alpha beta" AND subject:"gamma delta""#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["alpha beta gamma delta"]
+    );
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "70af5030-5134-4fec-9d74-d818e1817a64",
+            r#"NOT subject:"alpha beta""#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("3"));
+    let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
+    ids.sort();
+    assert_eq!(ids, vec!["m1", "m2", "unrelated subject"]);
+}
+
+#[tokio::test]
 async fn find_scopes_queries_and_rejects_unsupported_inputs() {
     use eas::{airsync as air, find as f};
     let env = start_env(Opts::default()).await;
