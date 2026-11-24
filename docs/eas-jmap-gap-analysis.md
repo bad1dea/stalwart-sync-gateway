@@ -416,7 +416,13 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    charset parameter is absent; XML text also honors its encoding declaration.
    CSV, NDJSON, YAML, and TOML application MIME aliases use this same bounded
    decoding path; mocked 16.1 Find verifies exact proximity matching in a
-   downloaded YAML attachment.
+   downloaded YAML attachment. The full suite passes 399 tests (74 ignored);
+   strict Clippy, format, and diff checks pass. Deployed as
+   `deploy-2026-11-24-eas-find-structured-text-77eb734`; homelab commit
+   `6ddcb84`, image
+   `sha256:eff95709a9c233b86b10c153d77f1149db25f0e0cfffee0c4449f693136f36e5`,
+   started `2026-11-24T23:50:05Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
    Extracted and normalized text output is capped at 2 MiB, including bounded
    streaming output from the PDF parser and XML entity/CDATA decoding. RFC 822 and
    Outlook message decoding are capped at the same 2 MiB extracted-text limit;
