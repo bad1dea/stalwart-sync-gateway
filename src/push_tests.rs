@@ -14622,6 +14622,49 @@ async fn unscoped_and_mixed_searches_page_across_classes() {
 }
 
 #[tokio::test]
+async fn search_processes_multiple_store_queries_independently() {
+    use eas::{airsync as air, search as srch};
+    let env = start_env(Opts::default()).await;
+    let mut request = eas::DocumentBuilder::new();
+    request.start(srch::SEARCH);
+    for term in ["m1", "m2"] {
+        request.start(srch::STORE);
+        request.leaf(srch::NAME, "Mailbox");
+        request.start(srch::QUERY);
+        request.start(srch::AND);
+        request.leaf(air::CLASS, "Email");
+        request.leaf(srch::FREE_TEXT, term);
+        request.end();
+        request.end();
+        request.start(srch::OPTIONS);
+        request.leaf(srch::RANGE, "0-9");
+        request.end();
+        request.end();
+    }
+    request.end();
+
+    let response = env
+        .req("Search", "multi-store")
+        .body(wbxml::encode_document(&request.finish()))
+        .send()
+        .await
+        .unwrap();
+    let document = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        eas::find_all_text_after(&document, srch::STATUS),
+        vec!["1", "1", "1"]
+    );
+    assert_eq!(
+        eas::find_all_text_after(&document, srch::TOTAL),
+        vec!["1", "1"]
+    );
+    assert_eq!(
+        eas::find_all_text_after(&document, srch::LONG_ID),
+        vec!["m1", "m2"]
+    );
+}
+
+#[tokio::test]
 async fn mixed_search_does_not_return_partial_results_when_a_class_changes() {
     use eas::{airsync as air, search as srch};
     let env = start_env(Opts::default()).await;

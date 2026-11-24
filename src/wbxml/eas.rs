@@ -1574,12 +1574,9 @@ pub struct SearchOrTerms {
     pub received_before: Option<String>,
 }
 
-/// Parses a `Search` request. Real devices send exactly one `Store` per
-/// request (the schema technically allows `maxOccurs="unbounded"`, but
-/// no real client is known to search multiple stores in one call, same
-/// scoping call this codebase already makes elsewhere for similarly
-/// theoretical multi-occurrence request shapes) -- `find_text_after`
-/// naturally picks up the first (only) occurrence of each element.
+/// Parses one `Search` store. The command handler splits requests containing
+/// multiple Store elements before calling this parser; `find_text_after`
+/// then resolves each field within that single-store document.
 pub fn search_request(document: &Document) -> Option<SearchRequest> {
     let store_name = find_text_after(document, search::NAME)?.to_owned();
     let (classes, unsupported_class_query) = search_classes(document);

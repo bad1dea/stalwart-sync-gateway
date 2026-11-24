@@ -17,6 +17,75 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+pub(super) async fn handle_multiple_stores(
+    state: &AppState,
+    auth: &AuthenticatedSession,
+    document: &Document,
+    version: ProtocolVersion,
+    command: &str,
+) -> Option<Response> {
+    let stores: Vec<_> = eas::child_elements(document)
+        .into_iter()
+        .filter(|child| is(child, srch::STORE))
+        .collect();
+    if stores.len() <= 1 {
+        return None;
+    }
+
+    let mut builder = DocumentBuilder::new();
+    builder.start(srch::SEARCH);
+    builder.leaf(srch::STATUS, "1");
+    builder.start(srch::RESPONSE);
+    for store in stores {
+        let mut request = DocumentBuilder::new();
+        request.start(srch::SEARCH);
+        request.extend(store.nodes);
+        request.end();
+        let response = Box::pin(super::search_inner(
+            state,
+            auth,
+            &request.finish(),
+            version,
+            command,
+            false,
+        ))
+        .await;
+        let response_store = async {
+            anyhow::ensure!(response.status() == StatusCode::OK, "search store failed");
+            let body = to_bytes(response.into_body(), usize::MAX).await?;
+            let decoded = wbxml::decode_document(&body)?;
+            let response = eas::child_elements(&decoded)
+                .into_iter()
+                .find(|child| is(child, srch::RESPONSE))
+                .context("search response missing")?;
+            eas::child_elements(&response)
+                .into_iter()
+                .find(|child| is(child, srch::STORE))
+                .context("search store missing")
+        }
+        .await;
+        match response_store {
+            Ok(store) => builder.extend(store.nodes),
+            Err(error) => {
+                tracing::warn!(%error, "multi-store search failed");
+                builder.start(srch::STORE);
+                builder.leaf(srch::STATUS, "3");
+                builder.end();
+            }
+        }
+    }
+    builder.end();
+    builder.end();
+    Some(
+        (
+            StatusCode::OK,
+            [("Content-Type", "application/vnd.ms-sync.wbxml")],
+            wbxml::encode_document(&builder.finish()),
+        )
+            .into_response(),
+    )
+}
+
 fn is(document: &Document, expected: Token) -> bool {
     matches!(document.nodes.first(), Some(Node::Start(token)) if token.code_page == expected.code_page && token.token == expected.token)
 }

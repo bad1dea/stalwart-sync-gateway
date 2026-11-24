@@ -955,6 +955,14 @@ async fn search_inner(
 ) -> Response {
     use wbxml::eas::{airsync as air, gal, search as srch};
 
+    if !internal {
+        if let Some(response) =
+            search_multi::handle_multiple_stores(state, auth, document, version, command).await
+        {
+            return response;
+        }
+    }
+
     let Some(request) = wbxml::eas::search_request(document) else {
         state
             .metrics
