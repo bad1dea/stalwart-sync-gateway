@@ -12,8 +12,8 @@ handling. Check the current Rust implementation before treating any older
 
 Current prioritized work:
 
-1. **BodyPartPreference / BodyPart response path — implemented in source,
-   deployment pending.** Request parsing and independent Sync option
+1. **BodyPartPreference / BodyPart response path — implemented and deployed.**
+   Request parsing and independent Sync option
    persistence are implemented. Sync and Search now prepare and emit a
    separate `AirSyncBase:BodyPart` using the requested type, truncation,
    AllOrNone, and preview settings. ItemOperations fetches do the same for
@@ -25,7 +25,10 @@ Current prioritized work:
    and 16.1. The saved `Email.bodyStructure` `partId` mapping (`cd0119b`) is
    retained for attachment records; it is not a selector in the
    `BodyPartPreference` schema and is not required to answer these requests.
-   Source tests pass; deployment/runtime verification remains open. Sources:
+   The current deployment tag
+   `deploy-2026-11-24-eas-find-importance-c79fa3b` includes this path; the
+   container is healthy and ready, while real-client 16.1 behavior remains
+   unverified. Sources:
    Microsoft [MS-ASCON Elements](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascon/605bd946-0750-4d9b-b04c-8be28badfa8e),
    [MS-ASAIRS Appendix A](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asairs/fbbc1af9-5a71-4925-aca8-60a95339c722),
    [MS-ASCMD ItemOperations Properties](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/b6b1551a-f841-4bac-967c-a3328af78229),
