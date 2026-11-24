@@ -5894,6 +5894,13 @@ async fn sync_calendar_collection(
                 ))
             || command.calendar.unsupported_response_type
             || command.calendar.unsupported_sensitivity
+            || command.calendar.unsupported_client_uid
+            || (command.calendar.client_uid.is_some()
+                && !matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1))
+            || (command.calendar.client_uid.is_some()
+                && command.kind != wbxml::eas::SyncClientCommandKind::Add)
+            || (command.calendar.uid_present
+                && matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1))
         {
             match command.kind {
                 wbxml::eas::SyncClientCommandKind::Add => {
@@ -5913,6 +5920,7 @@ async fn sync_calendar_collection(
                     || command.calendar.categories.is_some()
                     || command.calendar.sensitivity.is_some()
                     || command.calendar.recurrence_present
+                    || command.calendar.client_uid.is_some()
                 {
                     if command.client_id.is_empty()
                         || client_ids.get(&command.client_id) != Some(&1)
@@ -5920,12 +5928,12 @@ async fn sync_calendar_collection(
                         add_responses.push((command.client_id.clone(), None, "6"));
                         continue;
                     }
-                    let identity = serde_json::to_vec(&(
+                    let identity = calendar_add_replay_identity(
                         device_id,
                         &collection.collection_id,
                         &command.client_id,
-                    ))
-                    .expect("serializing calendar add identity");
+                        command.calendar.client_uid.as_deref(),
+                    );
                     let item_id =
                         uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &identity).to_string();
                     let content = uuid::Uuid::new_v5(
@@ -6280,6 +6288,18 @@ async fn sync_calendar_collection(
     }
 
     builder.end();
+}
+
+fn calendar_add_replay_identity(
+    device_id: &str,
+    collection_id: &str,
+    client_id: &str,
+    client_uid: Option<&str>,
+) -> Vec<u8> {
+    let key = client_uid
+        .map(|uid| ("clientUid", uid))
+        .unwrap_or(("clientId", client_id));
+    serde_json::to_vec(&(device_id, collection_id, key)).expect("serializing calendar add identity")
 }
 
 /// Same purpose as `contact_hash`/`jmap::notes::note_hash`.
@@ -8156,6 +8176,36 @@ mod tests {
         assert_eq!(
             eas::find_text_after(&document, cal::RECURRENCE_OCCURRENCES),
             Some("12")
+        );
+    }
+
+    #[test]
+    fn calendar_client_uid_stabilizes_add_replay_identity() {
+        let first = super::calendar_add_replay_identity(
+            "device-a",
+            "calendar-a",
+            "client-id-one",
+            Some("client-uid-stable"),
+        );
+        let retry_with_new_client_id = super::calendar_add_replay_identity(
+            "device-a",
+            "calendar-a",
+            "client-id-two",
+            Some("client-uid-stable"),
+        );
+        assert_eq!(first, retry_with_new_client_id);
+        assert_ne!(
+            first,
+            super::calendar_add_replay_identity("device-a", "calendar-a", "client-id-one", None,)
+        );
+        assert_ne!(
+            first,
+            super::calendar_add_replay_identity(
+                "device-b",
+                "calendar-a",
+                "client-id-one",
+                Some("client-uid-stable"),
+            )
         );
     }
 

@@ -1289,6 +1289,9 @@ pub struct CalendarFields {
     pub recurrence_present: bool,
     pub recurrence: Option<CalendarRecurrence>,
     pub unsupported_recurrence: bool,
+    pub client_uid: Option<String>,
+    pub unsupported_client_uid: bool,
+    pub uid_present: bool,
     pub unsupported_response_type: bool,
     pub attendees: Vec<AttendeeField>,
     pub attendees_present: bool,
@@ -2691,12 +2694,25 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     let mut sensitivity_text = String::new();
     let mut reminder_count = 0;
     let mut reminder_text = String::new();
+    let mut client_uid_count = 0;
+    let mut uid_count = 0;
     let mut latitude: Option<String> = None;
     let mut longitude: Option<String> = None;
 
     for node in nodes {
         match node {
             Node::Start(token) => {
+                if path
+                    .last()
+                    .is_some_and(|parent| same_token(*parent, airsync::APPLICATION_DATA))
+                {
+                    if same_token(*token, calendar::CLIENT_UID) {
+                        client_uid_count += 1;
+                    }
+                    if same_token(*token, calendar::UID) {
+                        uid_count += 1;
+                    }
+                }
                 if same_token(*token, calendar::RESPONSE_TYPE)
                     && path
                         .last()
@@ -2872,6 +2888,11 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                     }
                 } else if same_token(top, calendar::SUBJECT) {
                     fields.subject = Some(text.clone());
+                } else if same_token(top, calendar::CLIENT_UID)
+                    && path.len() >= 2
+                    && same_token(path[path.len() - 2], airsync::APPLICATION_DATA)
+                {
+                    fields.client_uid = Some(text.clone());
                 } else if same_token(top, calendar::LOCATION)
                     || (same_token(top, airsync_base::DISPLAY_NAME)
                         && path.iter().any(|t| same_token(*t, airsync_base::LOCATION)))
@@ -2991,6 +3012,13 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     }
     fields.unsupported_sensitivity |=
         sensitivity_count > 1 || (sensitivity_count == 1 && fields.sensitivity.is_none());
+    fields.uid_present = uid_count > 0;
+    fields.unsupported_client_uid = client_uid_count > 1
+        || (client_uid_count == 1
+            && fields
+                .client_uid
+                .as_ref()
+                .is_none_or(|value| value.is_empty() || value.chars().count() > 300));
     let recurrence_documents = calendar_recurrence_documents(nodes);
     if recurrence_documents.len() > 1 {
         fields.unsupported_recurrence = true;
@@ -4114,6 +4142,30 @@ mod tests {
         exceptions.empty_tag(super::calendar::EXCEPTIONS);
         exceptions.end();
         assert!(super::extract_calendar_fields(&exceptions.finish().nodes).unsupported_recurrence);
+    }
+
+    #[test]
+    fn calendar_client_uid_is_validated_and_legacy_uid_is_detected() {
+        let mut builder = super::DocumentBuilder::new();
+        builder.start(super::airsync::APPLICATION_DATA);
+        builder.leaf(super::calendar::CLIENT_UID, "client-retry-42");
+        let fields = super::extract_calendar_fields(&builder.finish().nodes);
+        assert_eq!(fields.client_uid.as_deref(), Some("client-retry-42"));
+        assert!(!fields.unsupported_client_uid);
+        assert!(!fields.uid_present);
+
+        let mut legacy = super::DocumentBuilder::new();
+        legacy.start(super::airsync::APPLICATION_DATA);
+        legacy.leaf(super::calendar::UID, "legacy-uid");
+        let fields = super::extract_calendar_fields(&legacy.finish().nodes);
+        assert!(fields.uid_present);
+
+        let mut invalid = super::DocumentBuilder::new();
+        invalid.start(super::airsync::APPLICATION_DATA);
+        invalid.leaf(super::calendar::CLIENT_UID, "duplicate");
+        invalid.leaf(super::calendar::CLIENT_UID, "duplicate");
+        let fields = super::extract_calendar_fields(&invalid.finish().nodes);
+        assert!(fields.unsupported_client_uid);
     }
 
     #[test]
