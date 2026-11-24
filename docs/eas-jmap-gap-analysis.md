@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `0b53db8` (2026-11-24)
+## Reconciled status for source `main` at `47d9b33` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -30,7 +30,7 @@ Current prioritized work:
    supported for `isread`, `isflagged`, and `hasattachment(s)` values, with
    exact local evaluation of both branches. Multiple boolean alternatives
    may accompany positive phrase terms in a flat OR expression, including
-   unary-minus negated boolean alternatives; implicit
+   unary-minus and explicit `NOT` boolean alternatives; implicit
    AND/OR precedence remains rejected. Regression coverage checks read,
    flagged, multiple boolean branches, and multiple phrase branches while
    excluding reversed phrase candidates. Deployed as
@@ -38,7 +38,15 @@ Current prioritized work:
    `b681fae`, image
    `sha256:9effefda5525d695bfb3e561cc4759d479e42df8910a340d2574adbd960c62cc`,
    started `2026-11-24T12:43:36Z`, restart count zero, `/healthz` `ok`, and
-   `/readyz` `ready`. Compound phrase AND NOT phrase (including unary-minus
+   `/readyz` `ready`. Explicit `NOT isread:true` and equivalent boolean
+   restrictions are accepted as exact phrase-OR alternatives. Deployed as
+   `deploy-2026-11-24-eas-kql-not-boolean-or-47d9b33`; homelab commit
+   `c691d81`, image
+   `sha256:f3bb37414b903c7c3bb78e87e6fcb83ddda3f9fb40e4153df8a3d10c41788b4b`,
+   started `2026-11-24T12:58:40Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
+   formatting, and diff checks passed. Compound phrase AND NOT phrase
+   (including unary-minus
    negation) is deployed as
    `deploy-2026-11-24-eas-kql-negated-phrase-grouping-0b53db8`; homelab commit
    `ab695ba`, image
