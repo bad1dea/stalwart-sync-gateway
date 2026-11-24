@@ -12,11 +12,13 @@ handling. Check the current Rust implementation before treating any older
 
 Current prioritized work:
 
-1. **Find/KQL parity.** The handler deliberately rejects query forms that
-   Stalwart 0.16.19 indexes incorrectly, including multiword exact phrases.
-   A fresh 0.16.27 probe confirms quoted `"alpha beta"` and `"beta alpha"`
-   both match a message containing `alpha beta`; exact phrase semantics are
-   still unavailable from the native index. KQL `importance:low|normal|high`
+1. **Find/KQL parity.** Standalone `subject:"multiword phrase"` now uses
+   Stalwart's subject index for candidates and locally enforces case-insensitive
+   adjacent word order, including accurate totals and range paging. Regression
+   coverage proves that reversed words and intervening words are excluded.
+   Multiword phrases in body/text or compound Boolean expressions remain
+   rejected because those scopes cannot yet be post-filtered without changing
+   query meaning. KQL `importance:low|normal|high`
    now maps to the standard `Importance` header filter; invalid values and
    ordered/equality comparisons are rejected because JMAP header matching is
    text based. Mailbox Find also accepts `kind:email` as already satisfied by

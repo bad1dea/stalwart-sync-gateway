@@ -16,6 +16,9 @@ enum Token {
 }
 
 pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
+    if let Some(phrase) = standalone_subject_phrase(input) {
+        return Ok(json!({"subject": phrase}));
+    }
     let tokens = tokenize(input)?;
     let mut parser = Parser {
         tokens,
@@ -26,6 +29,36 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
         return Err("unexpected search token");
     }
     Ok(filter)
+}
+
+/// Return a phrase only for the one query shape that Find can post-filter
+/// without changing the meaning of surrounding Boolean expressions.
+pub(super) fn standalone_subject_phrase(input: &str) -> Option<String> {
+    let value = input.trim();
+    let (property, value) = value.split_once(':')?;
+    if !property.eq_ignore_ascii_case("subject")
+        || !value.starts_with('"')
+        || !value.ends_with('"')
+        || value.len() < 4
+        || value[1..value.len() - 1].contains('"')
+        || value[1..value.len() - 1].contains('\\')
+    {
+        return None;
+    }
+    let phrase = &value[1..value.len() - 1];
+    (phrase.split_whitespace().count() > 1).then(|| phrase.to_owned())
+}
+
+pub(super) fn subject_has_phrase(subject: &str, phrase: &str) -> bool {
+    let words = |text: &str| {
+        text.split(|ch: char| !ch.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>()
+    };
+    let subject = words(subject);
+    let phrase = words(phrase);
+    !phrase.is_empty() && subject.windows(phrase.len()).any(|window| window == phrase)
 }
 
 fn tokenize(input: &str) -> Result<Vec<Token>, &'static str> {
@@ -634,6 +667,28 @@ fn free_text_property(property: &str, value: &str) -> Result<Value, &'static str
 mod tests {
     use super::*;
     #[test]
+    fn standalone_subject_phrases_are_candidates_for_exact_post_filtering() {
+        assert_eq!(
+            standalone_subject_phrase(r#"subject:"alpha beta""#),
+            Some("alpha beta".to_owned())
+        );
+        assert_eq!(
+            to_filter(r#"subject:"alpha beta""#).unwrap(),
+            json!({"subject":"alpha beta"})
+        );
+        assert!(standalone_subject_phrase(r#"subject:"alpha beta" AND isread:true"#).is_none());
+        assert!(to_filter(r#"subject:"alpha beta" AND isread:true"#).is_err());
+        assert!(standalone_subject_phrase(r#"text:"alpha beta""#).is_none());
+    }
+
+    #[test]
+    fn exact_subject_phrase_requires_adjacent_words_without_case_sensitivity() {
+        assert!(subject_has_phrase("Re: Alpha, BETA! Update", "alpha beta"));
+        assert!(!subject_has_phrase("Beta Alpha", "alpha beta"));
+        assert!(!subject_has_phrase("Alpha unrelated Beta", "alpha beta"));
+    }
+
+    #[test]
     fn translates_property_restrictions_and_boolean_precedence() {
         assert_eq!(
             to_filter("subject: mobile").unwrap(),
@@ -988,13 +1043,16 @@ mod tests {
             "a)",
             "sent:2026-01-01",
             "foo*",
-            "subject:\"hello world\"",
             "\"hello world\"",
             "a NEAR b",
             "subject:\"unfinished",
         ] {
             assert!(to_filter(query).is_err(), "{query}");
         }
+        assert_eq!(
+            to_filter("subject:\"hello world\"").unwrap(),
+            json!({"subject":"hello world"})
+        );
         assert_eq!(to_filter("from:").unwrap(), json!({"text":"from:"}));
         assert!(to_filter(&format!("{}a{}", "(".repeat(40), ")".repeat(40))).is_err());
     }

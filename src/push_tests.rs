@@ -226,7 +226,16 @@ fn matches_mail_filter(m: &Mock, id: &str, filter: &serde_json::Value) -> bool {
                 .unwrap()
                 .get(value.as_str().unwrap())
                 .is_some_and(|ids| ids.iter().any(|item| item == id)),
-            "text" | "subject" => format!("subject {id}").contains(value.as_str().unwrap()),
+            "text" => format!("subject {id}").contains(value.as_str().unwrap()),
+            "subject" => {
+                let subject = format!("subject {id}").to_lowercase();
+                value
+                    .as_str()
+                    .unwrap()
+                    .to_lowercase()
+                    .split_whitespace()
+                    .all(|term| subject.contains(term))
+            }
             "body" => "body".contains(value.as_str().unwrap()),
             "from" => "a@x.test".contains(value.as_str().unwrap()),
             "to" | "cc" | "bcc" => false,
@@ -13257,6 +13266,34 @@ async fn find_maps_kql_to_jmap_pages_metadata_and_restarts_changed_searches() {
         .unwrap();
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "4"]);
+}
+
+#[tokio::test]
+async fn find_exact_subject_phrase_filters_unordered_index_candidates() {
+    use eas::{airsync as air, find as f};
+    let env = start_env(Opts::default()).await;
+    env.mock.add_mail("inbox", "alpha-beta");
+    env.mock.add_mail("inbox", "beta-alpha");
+    env.mock.add_mail("inbox", "alpha-x-beta");
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "7dc6ffa0-2aa5-43f6-b441-bdda13785428",
+            r#"subject:"alpha beta""#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["alpha-beta"]
+    );
 }
 
 #[tokio::test]

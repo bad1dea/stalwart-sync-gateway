@@ -121,11 +121,12 @@ pub(super) async fn handle(
     let reply = if request.gal {
         execute_gal(state, auth, device, request).await
     } else {
+        let phrase = query::standalone_subject_phrase(&request.text);
         let filter = match query::to_filter(&request.text) {
             Ok(filter) => filter,
             Err(_) => return error_response(state, "2"),
         };
-        execute(state, auth, device, request, filter).await
+        execute(state, auth, device, request, filter, phrase).await
     };
     match reply {
         Ok(reply) => respond(state, reply),
@@ -142,6 +143,7 @@ async fn execute(
     device: &EasQuery,
     request: Request,
     query: Value,
+    subject_phrase: Option<String>,
 ) -> anyhow::Result<wbxml::Document> {
     let collections = state.jmap.collections(auth).await?;
     let mailboxes: Vec<_> = collections
@@ -198,28 +200,77 @@ async fn execute(
     {
         return Ok(restart_document());
     }
-    let page = state
-        .jmap
-        .query_emails(
-            auth,
-            filter.clone(),
-            request.start as i64,
-            request.end - request.start + 1,
-            &[
-                "id",
-                "mailboxIds",
-                "keywords",
-                "subject",
-                "receivedAt",
-                "from",
-                "to",
-                "cc",
-                "bcc",
-                "preview",
-                "attachments",
-            ],
-        )
-        .await?;
+    let properties = &[
+        "id",
+        "mailboxIds",
+        "keywords",
+        "subject",
+        "receivedAt",
+        "from",
+        "to",
+        "cc",
+        "bcc",
+        "preview",
+        "attachments",
+    ];
+    let page = if let Some(phrase) = subject_phrase {
+        let mut position = 0usize;
+        let mut matched = 0usize;
+        let mut selected = Vec::new();
+        let mut query_state = None;
+        let mut candidate_total = None;
+        loop {
+            let candidate = state
+                .jmap
+                .query_emails(auth, filter.clone(), position as i64, 100, properties)
+                .await?;
+            if let Some(total) = candidate_total {
+                anyhow::ensure!(
+                    candidate.total == total,
+                    "Find candidate total changed while filtering exact phrase"
+                );
+            } else {
+                candidate_total = Some(candidate.total);
+            }
+            if let Some(state) = &query_state {
+                anyhow::ensure!(
+                    candidate.query_state.as_ref() == Some(state),
+                    "Find query changed while filtering exact phrase"
+                );
+            } else {
+                query_state = candidate.query_state.clone();
+            }
+            let count = candidate.emails.len();
+            for email in candidate.emails {
+                if query::subject_has_phrase(&email.subject, &phrase) {
+                    if (request.start..=request.end).contains(&matched) {
+                        selected.push(email);
+                    }
+                    matched += 1;
+                }
+            }
+            position += count;
+            if count == 0 || position as u64 >= candidate_total.unwrap_or_default() {
+                break;
+            }
+        }
+        crate::jmap::client::EmailSearchPage {
+            emails: selected,
+            total: matched as u64,
+            query_state,
+        }
+    } else {
+        state
+            .jmap
+            .query_emails(
+                auth,
+                filter.clone(),
+                request.start as i64,
+                request.end - request.start + 1,
+                properties,
+            )
+            .await?
+    };
     let query_state = page
         .query_state
         .ok_or_else(|| anyhow::anyhow!("Email/query omitted queryState"))?;
