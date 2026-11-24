@@ -62,9 +62,9 @@ Current prioritized work:
    the inherited endpoint when only one is changed, derive the new duration,
    and reject negative durations. All-day flags are occurrence-specific.
    Sensitivity and DisallowNewTimeProposal remain unsupported and fail closed.
-   Top-level AppointmentReplyTime is now mapped from the authenticated
-   participant's unique `scheduleUpdated` value; per-exception reply timestamps
-   remain unsupported. Read-only
+   Top-level and recurring-exception AppointmentReplyTime values are mapped
+   from the authenticated participant's unique `scheduleUpdated` value.
+   Read-only
    linked attachments on recurring exceptions now map from JSCalendar enclosure
    links and are fetched from the Calendars account; EAS 16.0/16.1 only. EAS
    forbids Attachment elements in client command requests, so this is intentionally
@@ -185,15 +185,14 @@ Current prioritized work:
    timestamp of that participant's latest response (RFC 8984). The gateway
    now maps it only when exactly one attendee matches the authenticated user,
    normalizes it to EAS compact UTC, and rejects the response-only field in
-   client changes. This covers the series-level field; recurrence-exception
-   reply timestamps remain a separate gap. Full-suite validation passed
-   (322 passed, 73 ignored); strict Clippy, formatting, and diff checks pass.
-   Deployed as
-   `deploy-2026-11-24-eas-appointment-reply-time-88a0438`; homelab commit
-   `2460a0b`, image
-   `sha256:1688a49e6fba28c523bc889356e080f13545d6e41c7978bce7a0e7b05aee5b07`,
-   started `2026-11-24T10:34:09Z`, restart count zero, `/healthz` `ok`, and
-   `/readyz` `ready`.
+   client changes. Recurring exceptions use their effective attendee override
+   and emit the timestamp as an Exception child. Focused regressions cover
+   unique-user selection, UTC normalization, occurrence overrides, response
+   serialization, and inbound rejection. The series-level mapping was first
+   deployed as `deploy-2026-11-24-eas-appointment-reply-time-88a0438`; this
+   release extends it to recurring exceptions. Full suite: 324 passed, 73
+   ignored; strict Clippy, formatting, and diff checks pass. Deployment is
+   pending.
 
 Also completed (`b11914b`): **KQL timestamp offset normalization**. RFC3339
 timestamps in `received:` restrictions now resolve to the UTC calendar day

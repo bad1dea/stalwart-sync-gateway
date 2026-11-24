@@ -6489,6 +6489,7 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
         exception.reminder_minutes.hash(&mut hasher);
         exception.online_meeting_conf_link.hash(&mut hasher);
         exception.online_meeting_external_link.hash(&mut hasher);
+        exception.appointment_reply_time.hash(&mut hasher);
         if let Some(description) = &exception.description {
             description.body_type.eas_value().hash(&mut hasher);
             description.value.hash(&mut hasher);
@@ -6864,6 +6865,17 @@ fn write_calendar_fields(
                     }
                     if let Some(link) = &exception.online_meeting_external_link {
                         builder.leaf(cal::ONLINE_MEETING_EXTERNAL_LINK, link.clone());
+                    }
+                }
+                if matches!(
+                    version,
+                    ProtocolVersion::V14_0
+                        | ProtocolVersion::V14_1
+                        | ProtocolVersion::V16_0
+                        | ProtocolVersion::V16_1
+                ) {
+                    if let Some(reply_time) = &exception.appointment_reply_time {
+                        builder.leaf(cal::APPOINTMENT_REPLY_TIME, reply_time.clone());
                     }
                 }
                 if let Some(attendees) = &exception.attendees {
@@ -9405,6 +9417,35 @@ mod tests {
         assert_ne!(
             super::calendar_event_hash(&event),
             super::calendar_event_hash(&empty)
+        );
+    }
+
+    #[test]
+    fn recurring_exception_reply_time_is_written_as_exception_child() {
+        use crate::wbxml::eas::{self, airsync as air, calendar as cal};
+        let event = crate::model::CalendarEvent {
+            recurrence: Some(crate::wbxml::eas::CalendarRecurrence {
+                kind: 1,
+                ..Default::default()
+            }),
+            recurrence_exceptions: vec![crate::model::CalendarEventException {
+                instance_id: "20261124T100000Z".into(),
+                appointment_reply_time: Some("20261124T173456Z".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut builder = eas::DocumentBuilder::new();
+        super::write_calendar_command(
+            &mut builder,
+            air::CHANGE,
+            &event,
+            ProtocolVersion::V14_0,
+            &[],
+        );
+        assert_eq!(
+            eas::find_text_after(&builder.finish(), cal::APPOINTMENT_REPLY_TIME),
+            Some("20261124T173456Z")
         );
     }
 

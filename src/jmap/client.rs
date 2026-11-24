@@ -3084,11 +3084,7 @@ impl JmapClient {
                         }
                     }
                 }
-                let appointment_reply_time =
-                    calendar_appointment_reply_time(item.participants.as_ref(), auth.username());
-                let mut event = CalendarEvent::from(item);
-                event.appointment_reply_time = appointment_reply_time;
-                event
+                calendar_event_from(item, Some(auth.username()))
             })
             .map(|mut event| {
                 anyhow::ensure!(
@@ -8050,15 +8046,29 @@ fn simple_geo(value: &str) -> Option<(&str, &str)> {
     Some((latitude, longitude))
 }
 
+struct CalendarExceptionContext<'a> {
+    base_alerts: Option<&'a serde_json::Value>,
+    base_participants: Option<&'a BTreeMap<String, ParticipantObject>>,
+    base_links: Option<&'a BTreeMap<String, serde_json::Value>>,
+    base_virtual_locations: Option<&'a BTreeMap<String, serde_json::Value>>,
+    current_user: Option<&'a str>,
+    timezone: Option<&'a str>,
+    event_duration: Option<&'a str>,
+}
+
 fn calendar_recurrence_exceptions(
     overrides: Option<&serde_json::Value>,
-    base_alerts: Option<&serde_json::Value>,
-    base_participants: Option<&BTreeMap<String, ParticipantObject>>,
-    base_links: Option<&BTreeMap<String, serde_json::Value>>,
-    base_virtual_locations: Option<&BTreeMap<String, serde_json::Value>>,
-    timezone: Option<&str>,
-    event_duration: Option<&str>,
+    context: CalendarExceptionContext<'_>,
 ) -> anyhow::Result<Vec<crate::model::CalendarEventException>> {
+    let CalendarExceptionContext {
+        base_alerts,
+        base_participants,
+        base_links,
+        base_virtual_locations,
+        current_user,
+        timezone,
+        event_duration,
+    } = context;
     let Some(overrides) = overrides else {
         return Ok(Vec::new());
     };
@@ -8241,13 +8251,15 @@ fn calendar_recurrence_exceptions(
             let has_participant_patch = patch
                 .keys()
                 .any(|key| key == "participants" || key.starts_with("participants/"));
-            let attendees = if has_participant_patch {
-                Some(calendar_recurrence_exception_attendees(
+            let (attendees, appointment_reply_time) = if has_participant_patch {
+                let (attendees, reply_time) = calendar_recurrence_exception_attendees(
                     base_participants,
                     patch,
-                )?)
+                    current_user,
+                )?;
+                (Some(attendees), reply_time)
             } else {
-                None
+                (None, None)
             };
             let has_link_patch = patch
                 .keys()
@@ -8296,6 +8308,7 @@ fn calendar_recurrence_exceptions(
                 description,
                 online_meeting_conf_link,
                 online_meeting_external_link,
+                appointment_reply_time,
             })
         })
         .collect()
@@ -8411,7 +8424,8 @@ fn calendar_online_meeting_links(
 fn calendar_recurrence_exception_attendees(
     base: Option<&BTreeMap<String, ParticipantObject>>,
     override_patch: &serde_json::Map<String, serde_json::Value>,
-) -> anyhow::Result<Vec<crate::model::Attendee>> {
+    current_user: Option<&str>,
+) -> anyhow::Result<(Vec<crate::model::Attendee>, Option<String>)> {
     fn unescape(token: &str) -> anyhow::Result<String> {
         let mut result = String::new();
         let mut chars = token.chars();
@@ -8447,6 +8461,12 @@ fn calendar_recurrence_exception_attendees(
             }
             if let Some(status) = &participant.participation_status {
                 value.insert("participationStatus".to_owned(), serde_json::json!(status));
+            }
+            if let Some(schedule_updated) = &participant.schedule_updated {
+                value.insert(
+                    "scheduleUpdated".to_owned(),
+                    serde_json::json!(schedule_updated),
+                );
             }
             participants.insert(id.clone(), serde_json::Value::Object(value));
         }
@@ -8503,7 +8523,13 @@ fn calendar_recurrence_exception_attendees(
         }
     }
 
-    participants
+    let appointment_reply_time = current_user.and_then(|user| {
+        let typed: BTreeMap<String, ParticipantObject> =
+            serde_json::from_value(serde_json::Value::Object(participants.clone())).ok()?;
+        calendar_appointment_reply_time(Some(&typed), user)
+    });
+
+    let attendees = participants
         .into_values()
         .filter_map(|value| {
             let roles = value.get("roles")?.as_object()?;
@@ -8542,7 +8568,8 @@ fn calendar_recurrence_exception_attendees(
                 optional: roles.get("optional").and_then(serde_json::Value::as_bool) == Some(true),
             })
         })
-        .collect()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok((attendees, appointment_reply_time))
 }
 
 fn calendar_recurrence_exception_attachments(
@@ -8720,212 +8747,221 @@ fn merge_calendar_alert_patch(
 
 impl From<CalendarEventObject> for CalendarEvent {
     fn from(value: CalendarEventObject) -> Self {
-        let response_requested = value
-            .participants
-            .as_ref()
-            .and_then(calendar_response_requested);
-        let recurrence_rule = value.recurrence_rule;
-        let recurrence_time_zone = value.time_zone.clone();
-        let recurrence_exceptions = calendar_recurrence_exceptions(
-            value.recurrence_overrides.as_ref(),
-            value.alerts.as_ref(),
-            value.participants.as_ref(),
-            value.links.as_ref(),
-            value.virtual_locations.as_ref(),
-            recurrence_time_zone.as_deref(),
-            value.duration.as_deref(),
-        );
-        let recurrence_overrides_unsupported = recurrence_exceptions.is_err();
-        let recurrence_exceptions = recurrence_exceptions.unwrap_or_default();
-        let exception_uid_missing = !recurrence_exceptions.is_empty() && value.uid.is_none();
-        let exception_without_rule = !recurrence_exceptions.is_empty()
-            && recurrence_rule
-                .as_ref()
-                .is_none_or(serde_json::Value::is_null);
-        let recurrence = (!recurrence_overrides_unsupported)
-            .then(|| {
-                recurrence_rule.as_ref().and_then(|rule| {
-                    crate::jmap::calendar_recurrence::from_jscalendar(
-                        rule,
-                        recurrence_time_zone.as_deref(),
-                    )
-                    .ok()
-                })
-            })
-            .flatten();
-        let unsupported_recurrence = recurrence_overrides_unsupported
-            || exception_uid_missing
-            || exception_without_rule
-            || (recurrence_rule.is_some() && recurrence.is_none());
-        let start_utc = value
-            .start
-            .as_deref()
-            .and_then(|start| local_to_utc_eas(start, value.time_zone.as_deref()));
-        let end_utc = value.start.as_deref().and_then(|start| {
-            calendar_end_utc(
-                start,
-                value.time_zone.as_deref(),
-                value.duration.as_deref().unwrap_or("PT0S"),
-            )
-        });
-        let selected_location = value.locations.as_ref().and_then(|locations| {
-            locations
-                .values()
-                .find(|location| location.name.is_some())
-                .or_else(|| {
-                    locations
-                        .values()
-                        .find(|location| location.coordinates.is_some())
-                })
-        });
-        let location = selected_location.and_then(|location| location.name.clone());
-        let location_coordinates = selected_location
-            .and_then(|location| simple_geo(location.coordinates.as_deref()?))
-            .map(|(latitude, longitude)| (latitude.to_owned(), longitude.to_owned()));
-        let (online_meeting_conf_link, online_meeting_external_link) =
-            calendar_online_meeting_links(value.virtual_locations.as_ref());
+        calendar_event_from(value, None)
+    }
+}
 
-        let participants: Vec<_> = value
-            .participants
-            .into_iter()
-            .flatten()
-            .map(|(_, participant)| participant)
-            .collect();
-        let reply_address = value
-            .reply_to
+fn calendar_event_from(value: CalendarEventObject, current_user: Option<&str>) -> CalendarEvent {
+    let appointment_reply_time = current_user
+        .and_then(|user| calendar_appointment_reply_time(value.participants.as_ref(), user));
+    let response_requested = value
+        .participants
+        .as_ref()
+        .and_then(calendar_response_requested);
+    let recurrence_rule = value.recurrence_rule;
+    let recurrence_time_zone = value.time_zone.clone();
+    let recurrence_exceptions = calendar_recurrence_exceptions(
+        value.recurrence_overrides.as_ref(),
+        CalendarExceptionContext {
+            base_alerts: value.alerts.as_ref(),
+            base_participants: value.participants.as_ref(),
+            base_links: value.links.as_ref(),
+            base_virtual_locations: value.virtual_locations.as_ref(),
+            current_user,
+            timezone: recurrence_time_zone.as_deref(),
+            event_duration: value.duration.as_deref(),
+        },
+    );
+    let recurrence_overrides_unsupported = recurrence_exceptions.is_err();
+    let recurrence_exceptions = recurrence_exceptions.unwrap_or_default();
+    let exception_uid_missing = !recurrence_exceptions.is_empty() && value.uid.is_none();
+    let exception_without_rule = !recurrence_exceptions.is_empty()
+        && recurrence_rule
             .as_ref()
-            .and_then(|reply| reply.get("imip"))
-            .and_then(|uri| {
-                uri.get(..7)
-                    .filter(|prefix| prefix.eq_ignore_ascii_case("mailto:"))?;
-                uri.get(7..)
-            });
-        let has_owner = participants
-            .iter()
-            .any(|participant| participant.roles.get("owner") == Some(&true));
-        let reply_matches: Vec<_> = participants
-            .iter()
-            .enumerate()
-            .filter(|(_, participant)| {
-                (!has_owner || participant.roles.get("owner") == Some(&true))
-                    && participant
-                        .email
-                        .as_deref()
-                        .zip(reply_address)
-                        .is_some_and(|(email, reply)| email.eq_ignore_ascii_case(reply))
+            .is_none_or(serde_json::Value::is_null);
+    let recurrence = (!recurrence_overrides_unsupported)
+        .then(|| {
+            recurrence_rule.as_ref().and_then(|rule| {
+                crate::jmap::calendar_recurrence::from_jscalendar(
+                    rule,
+                    recurrence_time_zone.as_deref(),
+                )
+                .ok()
             })
-            .map(|(index, _)| index)
-            .collect();
-        let owners: Vec<_> = participants
-            .iter()
-            .enumerate()
-            .filter(|(_, participant)| participant.roles.get("owner") == Some(&true))
-            .map(|(index, _)| index)
-            .collect();
-        let organizer = match reply_matches.as_slice() {
-            [index] => Some(*index),
-            [] => match owners.as_slice() {
-                [index] => Some(*index),
-                _ => None,
-            },
-            _ => None,
-        };
-        let mut organizer_email = None;
-        let mut organizer_name = None;
-        let mut attendees = Vec::new();
-        for (index, participant) in participants.into_iter().enumerate() {
-            let Some(email) = participant.email else {
-                continue;
-            };
-            if Some(index) == organizer {
-                organizer_email = Some(email);
-                organizer_name = participant.name;
-            } else {
-                attendees.push(crate::model::Attendee {
-                    email,
-                    name: participant.name,
-                    participation_status: participant.participation_status,
-                    optional: participant.roles.get("optional").copied().unwrap_or(false),
-                });
-            }
-        }
+        })
+        .flatten();
+    let unsupported_recurrence = recurrence_overrides_unsupported
+        || exception_uid_missing
+        || exception_without_rule
+        || (recurrence_rule.is_some() && recurrence.is_none());
+    let start_utc = value
+        .start
+        .as_deref()
+        .and_then(|start| local_to_utc_eas(start, value.time_zone.as_deref()));
+    let end_utc = value.start.as_deref().and_then(|start| {
+        calendar_end_utc(
+            start,
+            value.time_zone.as_deref(),
+            value.duration.as_deref().unwrap_or("PT0S"),
+        )
+    });
+    let selected_location = value.locations.as_ref().and_then(|locations| {
+        locations
+            .values()
+            .find(|location| location.name.is_some())
+            .or_else(|| {
+                locations
+                    .values()
+                    .find(|location| location.coordinates.is_some())
+            })
+    });
+    let location = selected_location.and_then(|location| location.name.clone());
+    let location_coordinates = selected_location
+        .and_then(|location| simple_geo(location.coordinates.as_deref()?))
+        .map(|(latitude, longitude)| (latitude.to_owned(), longitude.to_owned()));
+    let (online_meeting_conf_link, online_meeting_external_link) =
+        calendar_online_meeting_links(value.virtual_locations.as_ref());
 
-        Self {
-            id: value.id,
-            uid: value.uid,
-            calendar_ids: Vec::new(),
-            title: value.title,
-            updated_utc: value
-                .updated
-                .as_deref()
-                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                .map(|date| {
-                    date.with_timezone(&chrono::Utc)
-                        .format("%Y%m%dT%H%M%SZ")
-                        .to_string()
-                }),
-            description: value.description.map(|description| {
-                let content_type = value
-                    .description_content_type
+    let participants: Vec<_> = value
+        .participants
+        .into_iter()
+        .flatten()
+        .map(|(_, participant)| participant)
+        .collect();
+    let reply_address = value
+        .reply_to
+        .as_ref()
+        .and_then(|reply| reply.get("imip"))
+        .and_then(|uri| {
+            uri.get(..7)
+                .filter(|prefix| prefix.eq_ignore_ascii_case("mailto:"))?;
+            uri.get(7..)
+        });
+    let has_owner = participants
+        .iter()
+        .any(|participant| participant.roles.get("owner") == Some(&true));
+    let reply_matches: Vec<_> = participants
+        .iter()
+        .enumerate()
+        .filter(|(_, participant)| {
+            (!has_owner || participant.roles.get("owner") == Some(&true))
+                && participant
+                    .email
                     .as_deref()
-                    .unwrap_or("text/plain")
-                    .split(';')
-                    .next()
-                    .unwrap_or("")
-                    .trim();
-                let body_type = if content_type.eq_ignore_ascii_case("text/html") {
-                    EmailBodyType::Html
-                } else {
-                    EmailBodyType::Plain
-                };
-                EmailBody {
-                    body_type,
-                    value: description,
-                    is_truncated: false,
-                }
-            }),
-            location,
-            location_coordinates,
-            start_utc,
-            end_utc,
-            time_zone: value.time_zone,
-            all_day: value.show_without_time,
-            busy_status: Some(match value.free_busy_status.as_deref() {
-                Some("free") => 0,
-                Some("x-eas-tentative") => 1,
-                Some("x-eas-out-of-office") => 3,
-                Some("x-eas-working-elsewhere") => 4,
-                _ => 2,
-            }),
-            sensitivity: match value.privacy.as_deref() {
-                None | Some("public") => 0,
-                Some("private") => 2,
-                _ => 3,
-            },
-            categories: value
-                .keywords
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|(name, present)| present.then_some(name))
-                .collect(),
-            recurrence,
-            recurrence_exceptions,
-            unsupported_recurrence,
-            reminder_minutes: value
-                .alerts
-                .as_ref()
-                .and_then(crate::jmap::calendar_reminder::read_reminder),
-            organizer_email,
-            organizer_name,
-            attendees,
-            is_organizer: false,
-            cancelled: value.status.as_deref() == Some("cancelled"),
-            response_type: None,
-            response_requested,
-            appointment_reply_time: None,
-            online_meeting_conf_link,
-            online_meeting_external_link,
+                    .zip(reply_address)
+                    .is_some_and(|(email, reply)| email.eq_ignore_ascii_case(reply))
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let owners: Vec<_> = participants
+        .iter()
+        .enumerate()
+        .filter(|(_, participant)| participant.roles.get("owner") == Some(&true))
+        .map(|(index, _)| index)
+        .collect();
+    let organizer = match reply_matches.as_slice() {
+        [index] => Some(*index),
+        [] => match owners.as_slice() {
+            [index] => Some(*index),
+            _ => None,
+        },
+        _ => None,
+    };
+    let mut organizer_email = None;
+    let mut organizer_name = None;
+    let mut attendees = Vec::new();
+    for (index, participant) in participants.into_iter().enumerate() {
+        let Some(email) = participant.email else {
+            continue;
+        };
+        if Some(index) == organizer {
+            organizer_email = Some(email);
+            organizer_name = participant.name;
+        } else {
+            attendees.push(crate::model::Attendee {
+                email,
+                name: participant.name,
+                participation_status: participant.participation_status,
+                optional: participant.roles.get("optional").copied().unwrap_or(false),
+            });
         }
+    }
+
+    CalendarEvent {
+        id: value.id,
+        uid: value.uid,
+        calendar_ids: Vec::new(),
+        title: value.title,
+        updated_utc: value
+            .updated
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|date| {
+                date.with_timezone(&chrono::Utc)
+                    .format("%Y%m%dT%H%M%SZ")
+                    .to_string()
+            }),
+        description: value.description.map(|description| {
+            let content_type = value
+                .description_content_type
+                .as_deref()
+                .unwrap_or("text/plain")
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim();
+            let body_type = if content_type.eq_ignore_ascii_case("text/html") {
+                EmailBodyType::Html
+            } else {
+                EmailBodyType::Plain
+            };
+            EmailBody {
+                body_type,
+                value: description,
+                is_truncated: false,
+            }
+        }),
+        location,
+        location_coordinates,
+        start_utc,
+        end_utc,
+        time_zone: value.time_zone,
+        all_day: value.show_without_time,
+        busy_status: Some(match value.free_busy_status.as_deref() {
+            Some("free") => 0,
+            Some("x-eas-tentative") => 1,
+            Some("x-eas-out-of-office") => 3,
+            Some("x-eas-working-elsewhere") => 4,
+            _ => 2,
+        }),
+        sensitivity: match value.privacy.as_deref() {
+            None | Some("public") => 0,
+            Some("private") => 2,
+            _ => 3,
+        },
+        categories: value
+            .keywords
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(name, present)| present.then_some(name))
+            .collect(),
+        recurrence,
+        recurrence_exceptions,
+        unsupported_recurrence,
+        reminder_minutes: value
+            .alerts
+            .as_ref()
+            .and_then(crate::jmap::calendar_reminder::read_reminder),
+        organizer_email,
+        organizer_name,
+        attendees,
+        is_organizer: false,
+        cancelled: value.status.as_deref() == Some("cancelled"),
+        response_type: None,
+        response_requested,
+        appointment_reply_time,
+        online_meeting_conf_link,
+        online_meeting_external_link,
     }
 }
 
@@ -9346,6 +9382,22 @@ mod tests {
             super::calendar_appointment_reply_time(Some(&ambiguous), "guest@example.test"),
             None
         );
+        let event: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
+            "id":"event",
+            "participants": {
+                "guest": {
+                    "email":"guest@example.test", "roles":{"attendee":true},
+                    "scheduleUpdated":"2026-11-24T12:34:56-05:00"
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            super::calendar_event_from(event, Some("guest@example.test"))
+                .appointment_reply_time
+                .as_deref(),
+            Some("20261124T173456Z")
+        );
     }
 
     #[test]
@@ -9385,12 +9437,15 @@ mod tests {
         });
         let exceptions = super::calendar_recurrence_exceptions(
             Some(&overrides),
-            None,
-            None,
-            None,
-            Some(&base),
-            Some("Etc/UTC"),
-            Some("PT1H"),
+            super::CalendarExceptionContext {
+                base_alerts: None,
+                base_participants: None,
+                base_links: None,
+                base_virtual_locations: Some(&base),
+                current_user: None,
+                timezone: Some("Etc/UTC"),
+                event_duration: Some("PT1H"),
+            },
         )
         .unwrap();
         assert_eq!(exceptions.len(), 1);
@@ -9402,6 +9457,43 @@ mod tests {
             exceptions[0].online_meeting_external_link.as_deref(),
             Some("")
         );
+    }
+
+    #[test]
+    fn calendar_exception_reply_time_uses_authenticated_participant_override() {
+        let participants: std::collections::BTreeMap<String, super::ParticipantObject> =
+            serde_json::from_value(serde_json::json!({
+                "owner": {"email":"owner@example.test", "roles":{"owner":true}},
+                "guest": {
+                    "email":"guest@example.test", "roles":{"attendee":true},
+                    "participationStatus":"accepted",
+                    "scheduleUpdated":"2026-11-23T00:00:00Z"
+                }
+            }))
+            .unwrap();
+        let overrides = serde_json::json!({
+            "2026-11-24T10:00:00": {
+                "participants/guest/scheduleUpdated":"2026-11-24T12:34:56-05:00"
+            }
+        });
+        let exceptions = super::calendar_recurrence_exceptions(
+            Some(&overrides),
+            super::CalendarExceptionContext {
+                base_alerts: None,
+                base_participants: Some(&participants),
+                base_links: None,
+                base_virtual_locations: None,
+                current_user: Some("guest@example.test"),
+                timezone: Some("Etc/UTC"),
+                event_duration: Some("PT1H"),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            exceptions[0].appointment_reply_time.as_deref(),
+            Some("20261124T173456Z")
+        );
+        assert_eq!(exceptions[0].attendees.as_ref().unwrap().len(), 1);
     }
 
     #[test]

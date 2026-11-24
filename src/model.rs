@@ -390,6 +390,7 @@ pub struct CalendarEventException {
     pub description: Option<EmailBody>,
     pub online_meeting_conf_link: Option<String>,
     pub online_meeting_external_link: Option<String>,
+    pub appointment_reply_time: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
