@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `1cce6dc` (2026-11-24)
+## Reconciled status for source `main` at `e241abb` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -97,6 +97,14 @@ Current prioritized work:
    commit `6e9f9fd`, image
    `sha256:a30a2cbdbbc32a96a0db093b11afcc3ec7d6fe107a0e0b3aa4d13fb80dfaf947`,
    started `2026-11-24T14:33:12Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
+   formatting, and diff checks passed. `received` date restrictions may also
+   appear as phrase-expression alternatives; exact local evaluation uses the
+   same normalized UTC JMAP filter as candidate selection. Deployed as
+   `deploy-2026-11-24-eas-kql-phrase-received-date-e241abb`; homelab commit
+   `c43adf0`, image
+   `sha256:851a5a222f30126cb785210650169954930290164378fcdf89876f255cf43b6e`,
+   started `2026-11-24T14:41:36Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
    formatting, and diff checks passed. The standalone negated form
    `NOT subject:"..."` and unary-minus forms such as
