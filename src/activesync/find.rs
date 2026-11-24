@@ -497,6 +497,7 @@ fn is_extractable_attachment_type(content_type: &str) -> bool {
                 | "application/pdf"
                 | "application/vnd.ms-outlook"
                 | "application/vnd.ms-excel"
+                | "application/vnd.ms-powerpoint"
                 | "message/rfc822"
                 | "message/global"
         )
@@ -554,6 +555,12 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
         "application/vnd.ms-excel" => {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 extract_legacy_xls_text(bytes)
+            }))
+            .ok()??
+        }
+        "application/vnd.ms-powerpoint" => {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                extract_legacy_ppt_text(bytes)
             }))
             .ok()??
         }
@@ -880,6 +887,38 @@ fn extract_legacy_xls_text(bytes: &[u8]) -> Option<String> {
         }
     }
     Some(output)
+}
+
+fn extract_legacy_ppt_text(bytes: &[u8]) -> Option<String> {
+    // PPT is a compound-file container. Keep each parser limit at or below the
+    // already enforced attachment cap so a small hostile file cannot cause a
+    // large stream, persist table, or parsed text allocation.
+    let max_bytes = MAX_FIND_ATTACHMENT_TEXT_BYTES as usize;
+    let limits = duke_slides::ParseLimits {
+        max_input_bytes: max_bytes,
+        max_entries: 2_048,
+        max_entry_bytes: max_bytes,
+        max_total_uncompressed_bytes: max_bytes,
+        max_xml_depth: 128,
+        max_xml_nodes: 250_000,
+        max_xml_attributes: 250_000,
+        max_xml_text_bytes: max_bytes,
+        max_xml_attribute_bytes: max_bytes,
+    };
+    let presentation = duke_slides::parse_presentation(bytes, &limits).ok()?;
+    let mut text = presentation.body_text();
+    if text.len() > max_bytes {
+        return None;
+    }
+    for slide in &presentation.slides {
+        for note in &slide.notes {
+            append_find_text(&mut text, &note.text)?;
+        }
+        for comment in &slide.comments {
+            append_find_text(&mut text, &comment.text)?;
+        }
+    }
+    Some(text)
 }
 
 pub(super) fn matching_principals(
@@ -2858,6 +2897,46 @@ mod tests {
         assert_eq!(
             extract_find_attachment_text("application/vnd.ms-excel", &expanded),
             Some("aa bb aa bb 88 bb".to_owned())
+        );
+    }
+
+    #[test]
+    fn legacy_ppt_find_extracts_slide_text_with_bounded_limits() {
+        use std::io::{Cursor, Write};
+
+        fn record(version: u16, record_type: u16, payload: &[u8]) -> Vec<u8> {
+            let mut bytes = Vec::with_capacity(payload.len() + 8);
+            bytes.extend_from_slice(&version.to_le_bytes());
+            bytes.extend_from_slice(&record_type.to_le_bytes());
+            bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(payload);
+            bytes
+        }
+
+        let text: Vec<u8> = "Legacy powerpoint phrase"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let slide_text = record(0, 4000, &text);
+        let slide = record(0x000f, 1006, &slide_text);
+        let mut compound = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+        compound
+            .create_stream("/PowerPoint Document")
+            .unwrap()
+            .write_all(&slide)
+            .unwrap();
+        let bytes = compound.into_inner().into_inner();
+
+        assert!(is_extractable_attachment_type(
+            "application/vnd.ms-powerpoint"
+        ));
+        assert_eq!(
+            extract_find_attachment_text("application/vnd.ms-powerpoint", &bytes),
+            Some("Legacy powerpoint phrase".to_owned())
+        );
+        assert!(
+            extract_legacy_ppt_text(&vec![0; MAX_FIND_ATTACHMENT_TEXT_BYTES as usize + 1])
+                .is_none()
         );
     }
 

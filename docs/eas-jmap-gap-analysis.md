@@ -38,12 +38,13 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    advertise 14.0 until this pass succeeds.
 3. **Find content coverage.** Add exact local search over remaining supported
    attachment formats and assess resource-bounded scanned-PDF OCR and large
-   attachments. Current extraction is bounded and supports legacy `.xls`, EPUB,
-   macro-enabled OOXML, RFC 822 messages, Outlook `.msg` attachments, and
+   attachments. Current extraction is bounded and supports legacy `.xls` and
+   `.ppt`, EPUB, macro-enabled OOXML, RFC 822 messages, Outlook `.msg`
+   attachments, and
    Word, Excel, and PowerPoint package comment text, plus MIME-declared charsets
    for text attachments and XML declaration encodings;
-   legacy binary Word and PowerPoint files, scanned PDFs, and payloads above
-   the extraction limit remain outside exact local matching.
+   legacy binary Word files, scanned PDFs, and payloads above the extraction
+   limit remain outside exact local matching.
 
 1. **BodyPartPreference / BodyPart response path — implemented and deployed.**
    Request parsing and independent Sync option
@@ -395,8 +396,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    text-bearing PDFs,
    EPUB XHTML, OOXML Word/Excel/PowerPoint (including
    macro-enabled variants), and OpenDocument Text, Spreadsheet, and Presentation
-   attachments up to 2 MiB for exact text/NEAR checks. Legacy `.xls` is also
-   supported with bounded worksheet allocation. Text attachments honor MIME
+   attachments up to 2 MiB for exact text/NEAR checks. Legacy `.xls` and `.ppt`
+   are also supported with bounded workbook allocation and CFB stream parsing.
+   Text attachments honor MIME
    `charset` parameters, including common
    legacy single-byte encodings and UTF-16LE, with BOM detection when the
    charset parameter is absent; XML text also honors its encoding declaration.
@@ -416,7 +418,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    reached, and normalization avoids a per-word temporary allocation. Regression
    coverage checks exact-limit XML and normalization, plus rejection above the
    limit. OOXML comment extraction is checked with archive fixtures and an
-   end-to-end Word comment proximity search. The full suite passes 396 tests
+   end-to-end Word comment proximity search. The full suite passes 397 tests
    (74 ignored); strict Clippy, format,
    and diff checks pass.
    Legacy `.xls` attachments are parsed with a vendored Calamine patch that
@@ -435,6 +437,11 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `sha256:ecfe6bd9f465b98eacbc759745296a93dc78175d3e57f2bf46fbd19e03a8271e`,
    started `2026-11-24T22:47:01Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`.
+   Legacy binary PowerPoint slides, notes, and comments are extracted with
+   `duke-slides` using limits for input bytes, CFB entries, stream bytes, record
+   depth, and retained text. Unit coverage checks a generated legacy OLE PPT,
+   an oversized input, and a mocked 16.1 Find proximity query. This extraction
+   remains subject to the 2 MiB attachment limit.
    EPUB XHTML chapters use the same archive-entry and expanded-XML limits; a
    mocked HTTP Find regression verifies proximity matching in EPUB text. The
    macro-enabled OOXML types use the same bounded document-part selection; a

@@ -14089,6 +14089,29 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     let eml = b"From: sender@example.test\r\nSubject: message attachment\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nnovember=20oscar in EML".to_vec();
     let outlook_msg = include_bytes!("../tests/fixtures/outlook-ascii.msg").to_vec();
     let legacy_xls = include_bytes!("../tests/fixtures/legacy-xls.xls").to_vec();
+    let legacy_ppt = {
+        fn record(version: u16, record_type: u16, payload: &[u8]) -> Vec<u8> {
+            let mut bytes = Vec::with_capacity(payload.len() + 8);
+            bytes.extend_from_slice(&version.to_le_bytes());
+            bytes.extend_from_slice(&record_type.to_le_bytes());
+            bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(payload);
+            bytes
+        }
+        let text: Vec<u8> = "lima mike in old PowerPoint"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let text = record(0, 4000, &text);
+        let slide = record(0x000f, 1006, &text);
+        let mut compound = cfb::CompoundFile::create(std::io::Cursor::new(Vec::new())).unwrap();
+        compound
+            .create_stream("/PowerPoint Document")
+            .unwrap()
+            .write_all(&slide)
+            .unwrap();
+        compound.into_inner().into_inner()
+    };
     let pdf_stream = "BT /F1 12 Tf 72 720 Td (charlie delta in PDF) Tj ET";
     let pdf_objects = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
@@ -14166,6 +14189,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     env.mock.add_mail("inbox", "epub-attachment");
     env.mock.add_mail("inbox", "xlsm-attachment");
     env.mock.add_mail("inbox", "xls-attachment");
+    env.mock.add_mail("inbox", "ppt-attachment");
     env.mock.add_mail("inbox", "eml-attachment");
     env.mock.add_mail("inbox", "outlook-msg-attachment");
     env.mock.mail_bodies.lock().unwrap().insert(
@@ -14247,6 +14271,17 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         })],
     );
     env.mock.mail_bodies.lock().unwrap().insert(
+        "ppt-attachment".to_owned(),
+        ("unrelated body".to_owned(), false),
+    );
+    env.mock.mail_attachments.lock().unwrap().insert(
+        "ppt-attachment".to_owned(),
+        vec![serde_json::json!({
+            "blobId":"ppt-blob", "name":"legacy.ppt",
+            "type":"application/vnd.ms-powerpoint", "size":legacy_ppt.len()
+        })],
+    );
+    env.mock.mail_bodies.lock().unwrap().insert(
         "eml-attachment".to_owned(),
         ("unrelated body".to_owned(), false),
     );
@@ -14298,6 +14333,10 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     env.mock.download_blobs.lock().unwrap().insert(
         "xls-blob".to_owned(),
         ("application/vnd.ms-excel".to_owned(), legacy_xls),
+    );
+    env.mock.download_blobs.lock().unwrap().insert(
+        "ppt-blob".to_owned(),
+        ("application/vnd.ms-powerpoint".to_owned(), legacy_ppt),
     );
     env.mock
         .download_blobs
@@ -14357,6 +14396,25 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     assert_eq!(
         eas::find_all_text_after(&doc, air::SERVER_ID),
         vec!["pdf-attachment"]
+    );
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "30000000-0000-4000-8000-000000000095",
+            "lima NEAR(0) mike",
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["ppt-attachment"]
     );
 
     let response = env
