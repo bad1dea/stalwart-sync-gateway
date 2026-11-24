@@ -114,6 +114,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                     let (property, value) = boolean_search_term(word)
                         .or_else(|| importance_search_term(word))
                         .or_else(|| received_search_term(word))
+                        .or_else(|| sent_search_term(word))
                         .or_else(|| size_search_term(word))?;
                     terms.push((format!("$not{property}"), value));
                 }
@@ -131,6 +132,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                         let (property, value) = boolean_search_term(negative)
                             .or_else(|| importance_search_term(negative))
                             .or_else(|| received_search_term(negative))
+                            .or_else(|| sent_search_term(negative))
                             .or_else(|| size_search_term(negative))?;
                         terms.push((format!("$not{property}"), value));
                     }
@@ -138,6 +140,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                     let term = boolean_search_term(word)
                         .or_else(|| importance_search_term(word))
                         .or_else(|| received_search_term(word))
+                        .or_else(|| sent_search_term(word))
                         .or_else(|| size_search_term(word))?;
                     terms.push(term);
                 }
@@ -184,7 +187,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
             | Token::Left
             | Token::Right
             | Token::Comma => false,
-            Token::Not => !matches!(tokens.get(index + 1), Some(Token::Word(word)) if boolean_search_term(word).is_some() || importance_search_term(word).is_some() || received_search_term(word).is_some() || size_search_term(word).is_some() || search_phrase_word(word).is_some()),
+            Token::Not => !matches!(tokens.get(index + 1), Some(Token::Word(word)) if boolean_search_term(word).is_some() || importance_search_term(word).is_some() || received_search_term(word).is_some() || sent_search_term(word).is_some() || size_search_term(word).is_some() || search_phrase_word(word).is_some()),
             _ => true,
         })
     {
@@ -210,6 +213,8 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                 .or_else(|| word.strip_prefix('-').and_then(importance_search_term));
             let received = received_search_term(word)
                 .or_else(|| word.strip_prefix('-').and_then(received_search_term));
+            let sent = sent_search_term(word)
+                .or_else(|| word.strip_prefix('-').and_then(sent_search_term));
             let size = size_search_term(word)
                 .or_else(|| word.strip_prefix('-').and_then(size_search_term));
             let negated_boolean =
@@ -218,6 +223,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                 && boolean.is_none()
                 && importance.is_none()
                 && received.is_none()
+                && sent.is_none()
                 && size.is_none()
                 && !negated_boolean
             {
@@ -247,6 +253,10 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                 continue;
             }
             if let Some((property, value)) = received_search_term(word) {
+                phrases.push((format!("$not${property}"), value));
+                continue;
+            }
+            if let Some((property, value)) = sent_search_term(word) {
                 phrases.push((format!("$not${property}"), value));
                 continue;
             }
@@ -307,6 +317,10 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                 phrases.push((format!("$not${property}"), value));
                 continue;
             }
+            if let Some((property, value)) = sent_search_term(negative) {
+                phrases.push((format!("$not${property}"), value));
+                continue;
+            }
         }
         if let Some((property, value)) = boolean_search_term(word) {
             phrases.push((property, value));
@@ -317,6 +331,10 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
             continue;
         }
         if let Some((property, value)) = received_search_term(word) {
+            phrases.push((property, value));
+            continue;
+        }
+        if let Some((property, value)) = sent_search_term(word) {
             phrases.push((property, value));
             continue;
         }
@@ -467,6 +485,7 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                 let (property, value) = boolean_search_term(word)
                     .or_else(|| importance_search_term(word))
                     .or_else(|| received_search_term(word))
+                    .or_else(|| sent_search_term(word))
                     .or_else(|| size_search_term(word))?;
                 if !properties.insert(property.clone()) {
                     return None;
@@ -489,6 +508,7 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                     let (property, value) = boolean_search_term(negative)
                         .or_else(|| importance_search_term(negative))
                         .or_else(|| received_search_term(negative))
+                        .or_else(|| sent_search_term(negative))
                         .or_else(|| size_search_term(negative))?;
                     if !properties.insert(property.clone()) {
                         return None;
@@ -513,6 +533,7 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                     let term = boolean_search_term(word)
                         .or_else(|| importance_search_term(word))
                         .or_else(|| received_search_term(word))
+                        .or_else(|| sent_search_term(word))
                         .or_else(|| size_search_term(word))?;
                     if !properties.insert(term.0.clone()) {
                         return None;
@@ -740,6 +761,29 @@ fn received_search_term(word: &str) -> Option<(String, String)> {
     }
     let filter = received_condition(operator, value).ok()?;
     Some(("$received".to_owned(), serde_json::to_string(&filter).ok()?))
+}
+
+fn sent_search_term(word: &str) -> Option<(String, String)> {
+    let word = word.strip_prefix('+').unwrap_or(word);
+    let (property, operator, value) = if let Some(index) = comparison_index(word) {
+        let property = &word[..index];
+        let rest = &word[index..];
+        let width = if rest.starts_with(">=") || rest.starts_with("<=") || rest.starts_with("<>") {
+            2
+        } else {
+            1
+        };
+        let (operator, value) = rest.split_at(width);
+        (property, operator, value)
+    } else {
+        let (property, value) = word.split_once(':')?;
+        (property, ":", value)
+    };
+    if !property.eq_ignore_ascii_case("sent") {
+        return None;
+    }
+    let filter = received_condition(operator, value).ok()?;
+    Some(("$sent".to_owned(), serde_json::to_string(&filter).ok()?))
 }
 
 fn size_search_term(word: &str) -> Option<(String, String)> {
@@ -1015,6 +1059,10 @@ fn word_condition(word: &str) -> Result<Value, &'static str> {
         if property.eq_ignore_ascii_case("received") {
             return received_condition(operator, value);
         }
+        if property.eq_ignore_ascii_case("sent") {
+            received_condition(operator, value)?;
+            return Ok(json!({}));
+        }
         if is_boolean_property(property) {
             if !matches!(operator, "=" | "<>") {
                 return Err("invalid boolean comparison");
@@ -1038,7 +1086,12 @@ fn word_condition(word: &str) -> Result<Value, &'static str> {
             // makes `name:` an ordinary text token.
             return condition("text", word);
         }
-        condition(&property.to_ascii_lowercase(), value)
+        if property.eq_ignore_ascii_case("sent") {
+            received_condition(":", value)?;
+            Ok(json!({}))
+        } else {
+            condition(&property.to_ascii_lowercase(), value)
+        }
     } else {
         condition("text", word)
     }
@@ -2159,7 +2212,8 @@ mod tests {
             to_filter("received:2024-03-01").unwrap()
         );
         assert!(to_filter("received:2026-02-30").is_err());
-        assert!(to_filter("sent:2026-01-01").is_err());
+        assert_eq!(to_filter("sent:2026-01-01").unwrap(), json!({}));
+        assert!(to_filter("sent:2026-02-30").is_err());
         assert!(to_filter(r#"received:"this month""#).is_ok());
     }
 
@@ -2207,6 +2261,25 @@ mod tests {
                 ]
             ))
         );
+    }
+
+    #[test]
+    fn sent_date_restrictions_use_local_sent_at_filtering() {
+        let sent = sent_search_term("sent:2026-02-28").unwrap();
+        assert_eq!(sent.0, "$sent");
+        assert_eq!(to_filter("sent:2026-02-28").unwrap(), json!({}));
+        assert_eq!(
+            phrases_for_postfilter("sent:2026-02-28"),
+            Some((PhraseMatch::All, vec![sent.clone()]))
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" OR sent:2026-02-28"#),
+            Some((
+                PhraseMatch::Any,
+                vec![("subject".to_owned(), "alpha beta".to_owned()), sent]
+            ))
+        );
+        assert!(to_filter("sent:2026-02-30").is_err());
     }
 
     #[test]
@@ -2274,7 +2347,7 @@ mod tests {
             "a OR",
             "(a",
             "a)",
-            "sent:2026-01-01",
+            "sent:2026-02-30",
             "foo*",
             "\"hello world\"",
             "a NEAR b",

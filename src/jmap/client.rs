@@ -7124,6 +7124,8 @@ struct EmailObject {
     #[serde(default)]
     received_at: Option<String>,
     #[serde(default)]
+    sent_at: Option<String>,
+    #[serde(default)]
     size: u64,
     #[serde(default)]
     subject: String,
@@ -7288,6 +7290,7 @@ impl From<EmailObject> for Email {
                 .collect(),
             subject: value.subject,
             received_at: value.received_at,
+            sent_at: value.sent_at,
             size: value.size,
             keywords: value
                 .keywords
@@ -10133,6 +10136,18 @@ mod tests {
         assert_eq!(body.value, "complete");
         assert!(!body.is_truncated);
         assert!(email.body_values["p"].value.is_empty());
+    }
+
+    #[test]
+    fn jmap_sent_at_is_preserved_for_find_postfiltering() {
+        let email: crate::model::Email =
+            serde_json::from_value::<super::EmailObject>(serde_json::json!({
+            "id":"sent-date",
+            "sentAt":"2026-02-28T12:34:56Z"
+            }))
+            .unwrap()
+            .into();
+        assert_eq!(email.sent_at.as_deref(), Some("2026-02-28T12:34:56Z"));
     }
 
     #[test]

@@ -231,6 +231,7 @@ async fn execute(
         "keywords",
         "subject",
         "receivedAt",
+        "sentAt",
         "size",
         "from",
         "to",
@@ -282,6 +283,7 @@ async fn execute(
                     &email.cc,
                     &email.bcc,
                     email.received_at.as_deref(),
+                    email.sent_at.as_deref(),
                     email.size,
                     email.importance,
                     Some(email.read),
@@ -558,6 +560,7 @@ fn email_matches_phrases(
         "",
         "",
         None,
+        None,
         0,
         1,
         is_read,
@@ -577,6 +580,7 @@ fn email_matches_phrases_with_addresses(
     cc: &str,
     bcc: &str,
     received_at: Option<&str>,
+    sent_at: Option<&str>,
     size: u64,
     importance: u8,
     is_read: Option<bool>,
@@ -608,6 +612,8 @@ fn email_matches_phrases_with_addresses(
                     importance_matches(importance, phrase)
                 } else if property == "$received" {
                     received_filter_matches(received_at, phrase)?
+                } else if property == "$sent" {
+                    received_filter_matches(sent_at, phrase)?
                 } else if matches!(property, "$size" | "size") {
                     size_filter_matches(size, phrase)?
                 } else if boolean_property.is_some() {
@@ -645,6 +651,18 @@ fn email_matches_phrases_with_addresses(
                 }
                 if property == "$not$$received" {
                     if !received_filter_matches(received_at, phrase)? {
+                        return Ok(true);
+                    }
+                    continue;
+                }
+                if property == "$sent" {
+                    if received_filter_matches(sent_at, phrase)? {
+                        return Ok(true);
+                    }
+                    continue;
+                }
+                if property == "$not$$sent" {
+                    if !received_filter_matches(sent_at, phrase)? {
                         return Ok(true);
                     }
                     continue;
@@ -725,6 +743,8 @@ fn email_matches_phrases_with_addresses(
                             importance_matches(importance, phrase)
                         } else if property == "$received" {
                             received_filter_matches(received_at, phrase)?
+                        } else if property == "$sent" {
+                            received_filter_matches(sent_at, phrase)?
                         } else if matches!(property, "$size" | "size") {
                             size_filter_matches(size, phrase)?
                         } else if let Some(boolean_property) = boolean_property {
@@ -927,6 +947,7 @@ mod tests {
             "",
             "",
             None,
+            None,
             100,
             1,
             None,
@@ -943,6 +964,7 @@ mod tests {
             "",
             "",
             "",
+            None,
             None,
             99,
             1,
@@ -966,6 +988,7 @@ mod tests {
             "",
             "",
             None,
+            None,
             99,
             1,
             None,
@@ -983,6 +1006,7 @@ mod tests {
             "",
             "",
             None,
+            None,
             100,
             1,
             None,
@@ -992,6 +1016,38 @@ mod tests {
             &negated_size,
         )
         .unwrap());
+    }
+
+    #[test]
+    fn sent_date_phrase_matching_uses_sent_at_in_utc() {
+        let phrase = (
+            "$sent".to_owned(),
+            r#"{"operator":"AND","conditions":[{"operator":"NOT","conditions":[{"before":"2026-02-28T00:00:00Z"}]},{"before":"2026-03-01T00:00:00Z"}]}"#.to_owned(),
+        );
+        let matches = |sent_at| {
+            email_matches_phrases_with_addresses(
+                "",
+                None,
+                "",
+                "",
+                "",
+                "",
+                None,
+                sent_at,
+                0,
+                1,
+                None,
+                None,
+                None,
+                query::PhraseMatch::All,
+                std::slice::from_ref(&phrase),
+            )
+            .unwrap()
+        };
+        assert!(matches(Some("2026-02-28T12:00:00Z")));
+        assert!(!matches(Some("2026-02-27T23:59:59Z")));
+        assert!(!matches(Some("2026-03-01T00:00:00Z")));
+        assert!(!matches(None));
     }
 
     #[test]
@@ -1145,6 +1201,7 @@ mod tests {
             "",
             "",
             None,
+            None,
             0,
             2,
             None,
@@ -1165,6 +1222,7 @@ mod tests {
             "",
             "",
             "",
+            None,
             None,
             0,
             1,
@@ -1187,6 +1245,7 @@ mod tests {
             "",
             "",
             None,
+            None,
             0,
             1,
             None,
@@ -1206,6 +1265,7 @@ mod tests {
             "",
             "",
             "",
+            None,
             None,
             0,
             2,

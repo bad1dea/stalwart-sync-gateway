@@ -192,7 +192,7 @@ fn email_json(
         "id": id, "blobId": format!("b-{id}"), "threadId": format!("t-{id}"),
         "mailboxIds": { mailbox: true },
         "keywords": keywords.iter().map(|keyword| (keyword.clone(), true)).collect::<std::collections::BTreeMap<_, _>>(),
-        "receivedAt": received_at, "subject": format!("subject {id}"),
+        "receivedAt": received_at, "sentAt": received_at, "subject": format!("subject {id}"),
         "from": [{"name": "A", "email": "a@x.test"}], "to": null, "cc": null,
         "textBody": [{"partId": "1"}], "htmlBody": [],
         "bodyValues": { "1": { "value": "body" } }, "attachments": []
@@ -13790,6 +13790,13 @@ async fn find_scopes_queries_and_rejects_unsupported_inputs() {
             vec!["m1"],
         ),
         (
+            "sent:today",
+            Some("inbox"),
+            "0-9",
+            vec!["1", "1"],
+            vec!["m2", "m1"],
+        ),
+        (
             "subject:archived",
             Some("other"),
             "0-9",
@@ -13803,7 +13810,7 @@ async fn find_scopes_queries_and_rejects_unsupported_inputs() {
             vec!["1", "1"],
             vec![],
         ),
-        ("sent:2020-01-01", None, "0-9", vec!["2"], vec![]),
+        ("sent:2020-01-01", None, "0-9", vec!["1", "1"], vec![]),
         ("subject:subject", Some("missing"), "0-9", vec!["3"], vec![]),
         ("subject:subject", None, "8-2", vec!["2"], vec![]),
         ("subject:subject", None, "1-2", vec!["1", "4"], vec![]),
