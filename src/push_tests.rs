@@ -13635,6 +13635,25 @@ async fn find_attachment_phrase_matches_filename_and_scopes_to_mailbox() {
         eas::find_all_text_after(&doc, air::SERVER_ID),
         vec!["attachment-match"]
     );
+
+    env.mock.set_read("attachment-nonmatch", true);
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "30000000-0000-4000-8000-000000000002",
+            "attachment:\"annual report.pdf\" OR isread:true",
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("2"));
+    let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
+    ids.sort();
+    assert_eq!(ids, vec!["attachment-match", "attachment-nonmatch"]);
 }
 
 #[tokio::test]
