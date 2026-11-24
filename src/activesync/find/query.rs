@@ -145,7 +145,12 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         .iter()
         .enumerate()
         .any(|(index, token)| match token {
-            Token::Word(_) | Token::And => false,
+            Token::Word(_)
+            | Token::And
+            | Token::Words
+            | Token::Left
+            | Token::Right
+            | Token::Comma => false,
             Token::Not => !matches!(tokens.get(index + 1), Some(Token::Word(word)) if boolean_search_term(word).is_some() || search_phrase_word(word).is_some()),
             _ => true,
         })
@@ -1165,6 +1170,20 @@ mod tests {
             to_filter(r#"subject:"alpha beta" AND isread:true"#).unwrap(),
             json!({"operator":"AND", "conditions":[
                 {"subject":"alpha beta"}, {"hasKeyword":"$seen"}
+            ]})
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" AND WORDS(alpha beta)"#),
+            Some((
+                PhraseMatch::All,
+                vec![("subject".to_owned(), "alpha beta".to_owned())]
+            ))
+        );
+        assert_eq!(
+            to_filter(r#"subject:"alpha beta" AND WORDS(alpha beta)"#).unwrap(),
+            json!({"operator":"AND", "conditions":[
+                {"subject":"alpha beta"},
+                {"operator":"OR", "conditions":[{"text":"alpha"}, {"text":"beta"}]}
             ]})
         );
         assert_eq!(
