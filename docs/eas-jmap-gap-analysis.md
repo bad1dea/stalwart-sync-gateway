@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `69bc376` (2026-11-24)
+## Reconciled status for source `main` at `d725eae` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -17,9 +17,15 @@ Current prioritized work:
    adjacent word order, including accurate totals and range paging. Regression
    coverage proves that reversed words and intervening words are excluded.
    Explicitly ANDed phrases on the same property (for example two distinct
-   `subject:"..."` terms) are also exact-filtered together; adjacent
-   repeated-property restrictions without `AND` remain rejected because
-   MS-KQL groups those restrictions with OR. The standalone negated form
+   `subject:"..."` terms) are also exact-filtered together; adjacent repeated
+   same-property phrase restrictions without `AND` are exact-filtered as OR
+   groups, matching MS-KQL grouping. Deployed as
+   `deploy-2026-11-24-eas-kql-same-property-phrase-or-d725eae`; homelab commit
+   `2e8cf77`, image
+   `sha256:b95951125b4ba0a0209ff365cca0c006ec57ac3f696c10d54653f1b2776903e0`,
+   started `2026-11-24T13:24:32Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
+   formatting, and diff checks passed. The standalone negated form
    `NOT subject:"..."` and unary-minus forms such as
    `-body:"..."` are exact-filtered over the scoped mailbox. Positive phrase
    AND negated boolean restrictions (`NOT isread:true` or `-isflagged:true`)
@@ -128,9 +134,10 @@ Current prioritized work:
    order, totals, and range paging. An OR expression made only of positive
    phrase terms is exact-filtered across its alternatives. A phrase may also
    be ORed with `isread`, `isflagged`, or `hasattachment(s)` boolean
-   restrictions. Other mixed OR terms, repeated-property implicit groups, and
-   negated phrases combined with non-phrase predicates remain rejected because
-   local evaluation cannot yet preserve their Boolean meaning.
+   restrictions. Other mixed OR terms, implicit repeated-property groups that
+   combine phrases with other restrictions, and negated phrases combined with
+   non-phrase predicates remain rejected because local evaluation cannot yet
+   preserve their Boolean meaning.
    A single positive `body:"multiword phrase"`
    or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
    body and text scans fetch message bodies and reject a truncated body rather
