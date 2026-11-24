@@ -5857,7 +5857,9 @@ fn calendar_instance_change_supported(fields: &wbxml::eas::CalendarFields) -> bo
         && fields.client_uid.is_none()
         && !fields.unsupported_client_uid
         && !fields.uid_present
+        && fields.response_requested.is_none()
         && !fields.unsupported_response_type
+        && !fields.unsupported_response_requested
         && !fields.unsupported_attendees
         && !fields.unsupported_body
         && fields.body_type.is_none_or(|body_type| body_type == 1)
@@ -5953,6 +5955,7 @@ async fn sync_calendar_collection(
                     ProtocolVersion::V14_1 | ProtocolVersion::V16_0 | ProtocolVersion::V16_1
                 ))
             || command.calendar.unsupported_response_type
+            || command.calendar.unsupported_response_requested
             || command.calendar.unsupported_sensitivity
             || command.calendar.unsupported_client_uid
             || (command.calendar.client_uid.is_some()
@@ -6428,6 +6431,7 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     event.is_organizer.hash(&mut hasher);
     event.cancelled.hash(&mut hasher);
     event.response_type.hash(&mut hasher);
+    event.response_requested.hash(&mut hasher);
     event.attendees.hash(&mut hasher);
     for exception in &event.recurrence_exceptions {
         exception.instance_id.hash(&mut hasher);
@@ -6773,6 +6777,20 @@ fn write_calendar_fields(
     }
     if let Some(response) = event.response_type {
         builder.leaf(cal::RESPONSE_TYPE, response.to_string());
+    }
+    if matches!(
+        version,
+        ProtocolVersion::V14_0
+            | ProtocolVersion::V14_1
+            | ProtocolVersion::V16_0
+            | ProtocolVersion::V16_1
+    ) {
+        if let Some(response_requested) = event.response_requested {
+            builder.leaf(
+                cal::RESPONSE_REQUESTED,
+                if response_requested { "1" } else { "0" },
+            );
+        }
     }
 }
 
@@ -9048,6 +9066,31 @@ mod tests {
             &builder.finish(),
             cal::RESPONSE_TYPE
         ));
+        let mut builder = DocumentBuilder::new();
+        event.response_requested = Some(false);
+        super::write_calendar_command(
+            &mut builder,
+            air::CHANGE,
+            &event,
+            super::ProtocolVersion::V16_1,
+            &[],
+        );
+        assert_eq!(
+            crate::wbxml::eas::find_text_after(&builder.finish(), cal::RESPONSE_REQUESTED),
+            Some("0")
+        );
+        let mut builder = DocumentBuilder::new();
+        super::write_calendar_command(
+            &mut builder,
+            air::CHANGE,
+            &event,
+            super::ProtocolVersion::V14_0,
+            &[],
+        );
+        assert_eq!(
+            crate::wbxml::eas::find_text_after(&builder.finish(), cal::RESPONSE_REQUESTED),
+            Some("0")
+        );
         event.response_type = Some(3);
         let mut builder = DocumentBuilder::new();
         super::write_calendar_command(

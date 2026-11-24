@@ -1298,6 +1298,8 @@ pub struct CalendarFields {
     pub unsupported_client_uid: bool,
     pub uid_present: bool,
     pub unsupported_response_type: bool,
+    pub response_requested: Option<bool>,
+    pub unsupported_response_requested: bool,
     pub attendees: Vec<AttendeeField>,
     pub attendees_present: bool,
     pub unsupported_attendees: bool,
@@ -2709,6 +2711,8 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     let mut reminder_text = String::new();
     let mut client_uid_count = 0;
     let mut uid_count = 0;
+    let mut response_requested_count = 0;
+    let mut response_requested_text = String::new();
     let mut latitude: Option<String> = None;
     let mut longitude: Option<String> = None;
 
@@ -2732,6 +2736,17 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                         .is_some_and(|parent| same_token(*parent, airsync::APPLICATION_DATA))
                 {
                     fields.unsupported_response_type = true;
+                }
+                if same_token(*token, calendar::RESPONSE_REQUESTED)
+                    && path
+                        .last()
+                        .is_some_and(|parent| same_token(*parent, airsync::APPLICATION_DATA))
+                {
+                    response_requested_count += 1;
+                    response_requested_text.clear();
+                    if !token.has_content {
+                        fields.unsupported_response_requested = true;
+                    }
                 }
                 if same_token(*token, calendar::RECURRENCE)
                     && path
@@ -2951,6 +2966,11 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                     sensitivity_text.push_str(text);
                 } else if same_token(top, calendar::ALL_DAY_EVENT) {
                     fields.all_day_event = Some(text != "0");
+                } else if same_token(top, calendar::RESPONSE_REQUESTED)
+                    && path.len() >= 2
+                    && same_token(path[path.len() - 2], airsync::APPLICATION_DATA)
+                {
+                    response_requested_text.push_str(text);
                 }
             }
             Node::End => {
@@ -2970,6 +2990,16 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                     fields.sensitivity = sensitivity_text.parse::<u8>().ok();
                     if !matches!(fields.sensitivity, Some(0 | 2)) {
                         fields.unsupported_sensitivity = true;
+                    }
+                }
+                if path.len() >= 2
+                    && same_token(path[path.len() - 1], calendar::RESPONSE_REQUESTED)
+                    && same_token(path[path.len() - 2], airsync::APPLICATION_DATA)
+                {
+                    match response_requested_text.as_str() {
+                        "0" => fields.response_requested = Some(false),
+                        "1" => fields.response_requested = Some(true),
+                        _ => fields.unsupported_response_requested = true,
                     }
                 }
                 if path.len() >= 2
@@ -3032,6 +3062,8 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     }
     fields.unsupported_sensitivity |=
         sensitivity_count > 1 || (sensitivity_count == 1 && fields.sensitivity.is_none());
+    fields.unsupported_response_requested |= response_requested_count > 1
+        || (response_requested_count == 1 && fields.response_requested.is_none());
     fields.uid_present = uid_count > 0;
     fields.unsupported_client_uid = client_uid_count > 1
         || (client_uid_count == 1
@@ -4150,6 +4182,28 @@ mod tests {
         b.leaf(super::calendar::RESPONSE_TYPE, "3");
         b.end();
         assert!(super::extract_calendar_fields(&b.finish().nodes).unsupported_response_type);
+    }
+
+    #[test]
+    fn calendar_response_requested_accepts_one_boolean_and_rejects_ambiguous_values() {
+        fn parse(values: &[&str]) -> super::CalendarFields {
+            let mut builder = super::DocumentBuilder::new();
+            builder.start(super::airsync::APPLICATION_DATA);
+            for value in values {
+                builder.leaf(super::calendar::RESPONSE_REQUESTED, *value);
+            }
+            builder.end();
+            super::extract_calendar_fields(&builder.finish().nodes)
+        }
+
+        assert_eq!(parse(&["0"]).response_requested, Some(false));
+        assert_eq!(parse(&["1"]).response_requested, Some(true));
+        assert!(!parse(&["0"]).unsupported_response_requested);
+        assert!(!parse(&["1"]).unsupported_response_requested);
+        assert!(!parse(&[]).unsupported_response_requested);
+        for values in [&["2"][..], &["true"], &[""], &["0", "1"]] {
+            assert!(parse(values).unsupported_response_requested);
+        }
     }
 
     #[test]

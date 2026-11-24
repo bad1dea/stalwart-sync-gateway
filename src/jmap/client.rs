@@ -3766,6 +3766,7 @@ impl JmapClient {
                 || fields.start_time.is_some()
                 || fields.end_time.is_some()
                 || fields.attendees_present
+                || fields.response_requested.is_some()
                 || fields.recurrence_present
         }) {
             let response: JmapResponse<serde_json::Value> = self
@@ -4190,6 +4191,12 @@ impl JmapClient {
                 let patch_key =
                     format!("participants/{}", key.replace('~', "~0").replace('/', "~1"));
                 if let Some(attendee) = remaining.remove(&email.to_lowercase()) {
+                    if let Some(response_requested) = fields.response_requested {
+                        changes.insert(
+                            format!("{patch_key}/expectReply"),
+                            serde_json::Value::Bool(response_requested),
+                        );
+                    }
                     if let Some(name) = &attendee.name {
                         changes.insert(format!("{patch_key}/name"), serde_json::json!(name));
                     }
@@ -4238,7 +4245,8 @@ impl JmapClient {
                 let mut participant = serde_json::json!({
                     "@type":"Participant", "email":attendee.email,
                     "calendarAddress":format!("mailto:{}", attendee.email),
-                    "roles":roles, "participationStatus":participation_status, "expectReply":true,
+                    "roles":roles, "participationStatus":participation_status,
+                    "expectReply":fields.response_requested.unwrap_or(true),
                     "sendTo":{"imip":format!("mailto:{}", attendee.email)}
                 });
                 if let Some(name) = &attendee.name {
@@ -4264,6 +4272,43 @@ impl JmapClient {
                     "participants".to_owned(),
                     serde_json::Value::Object(new_participants),
                 );
+            }
+        }
+        if !fields.attendees_present {
+            if let (Some(id), Some(response_requested)) = (id, fields.response_requested) {
+                let response: JmapResponse<serde_json::Value> = self
+                .api_call(
+                    auth,
+                    &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
+                    vec![MethodCall::new(
+                        "CalendarEvent/get",
+                        serde_json::json!({"accountId":account_id,"ids":[id],"properties":["id","participants"]}),
+                        "response-requested",
+                    )],
+                )
+                .await?;
+                let object = response
+                    .method_responses
+                    .iter()
+                    .find(|method| method.0 == "CalendarEvent/get")
+                    .and_then(|method| method.1["list"].as_array())
+                    .and_then(|list| list.iter().find(|object| object["id"] == id))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("CalendarEvent/get omitted the event being edited")
+                    })?;
+                if let Some(participants) = object["participants"].as_object() {
+                    for (key, participant) in participants {
+                        if participant["roles"]["attendee"] == true
+                            && participant["roles"]["owner"] != true
+                        {
+                            let key = key.replace('~', "~0").replace('/', "~1");
+                            event.insert(
+                                format!("participants/{key}/expectReply"),
+                                serde_json::Value::Bool(response_requested),
+                            );
+                        }
+                    }
+                }
             }
         }
         if !fields.attendees.is_empty() && id.is_none() {
@@ -4315,7 +4360,7 @@ impl JmapClient {
                     "calendarAddress": format!("mailto:{}", attendee.email),
                     "roles": roles,
                     "participationStatus": participation_status,
-                    "expectReply": true,
+                    "expectReply": fields.response_requested.unwrap_or(true),
                     "sendTo": {"imip": format!("mailto:{}", attendee.email)}
                 });
                 if let Some(name) = &attendee.name {
@@ -7846,6 +7891,22 @@ struct ParticipantObject {
     roles: BTreeMap<String, bool>,
     #[serde(default)]
     participation_status: Option<String>,
+    #[serde(default)]
+    expect_reply: Option<bool>,
+}
+
+fn calendar_response_requested(participants: &BTreeMap<String, ParticipantObject>) -> Option<bool> {
+    let mut attendee_preferences = participants
+        .values()
+        .filter(|participant| {
+            participant.roles.get("attendee") == Some(&true)
+                && participant.roles.get("owner") != Some(&true)
+        })
+        .map(|participant| participant.expect_reply.unwrap_or(false));
+    let first = attendee_preferences.next()?;
+    attendee_preferences
+        .all(|preference| preference == first)
+        .then_some(first)
 }
 
 fn calendar_response_type(event: &CalendarEvent, user: &str) -> Option<u8> {
@@ -8310,6 +8371,10 @@ fn merge_calendar_alert_patch(
 
 impl From<CalendarEventObject> for CalendarEvent {
     fn from(value: CalendarEventObject) -> Self {
+        let response_requested = value
+            .participants
+            .as_ref()
+            .and_then(calendar_response_requested);
         let recurrence_rule = value.recurrence_rule;
         let recurrence_time_zone = value.time_zone.clone();
         let recurrence_exceptions = calendar_recurrence_exceptions(
@@ -8502,6 +8567,7 @@ impl From<CalendarEventObject> for CalendarEvent {
             is_organizer: false,
             cancelled: value.status.as_deref() == Some("cancelled"),
             response_type: None,
+            response_requested,
         }
     }
 }
@@ -9332,6 +9398,42 @@ mod tests {
     }
 
     #[test]
+    fn calendar_response_requested_requires_a_uniform_attendee_preference() {
+        for (participants, expected) in [
+            (
+                serde_json::json!({
+                    "owner":{"email":"owner@example.test","roles":{"owner":true},"expectReply":true},
+                    "a":{"email":"a@example.test","roles":{"attendee":true},"expectReply":true},
+                    "b":{"email":"b@example.test","roles":{"attendee":true},"expectReply":true}
+                }),
+                Some(true),
+            ),
+            (
+                serde_json::json!({
+                    "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                    "a":{"email":"a@example.test","roles":{"attendee":true},"expectReply":false}
+                }),
+                Some(false),
+            ),
+            (
+                serde_json::json!({
+                    "a":{"email":"a@example.test","roles":{"attendee":true},"expectReply":true},
+                    "b":{"email":"b@example.test","roles":{"attendee":true},"expectReply":false}
+                }),
+                None,
+            ),
+            (
+                serde_json::json!({"owner":{"email":"owner@example.test","roles":{"owner":true}}}),
+                None,
+            ),
+        ] {
+            let participants: std::collections::BTreeMap<String, super::ParticipantObject> =
+                serde_json::from_value(participants).unwrap();
+            assert_eq!(super::calendar_response_requested(&participants), expected);
+        }
+    }
+
+    #[test]
     fn calendar_privacy_maps_unknown_values_conservatively() {
         for (privacy, expected) in [
             (None, 0),
@@ -9574,7 +9676,7 @@ mod calendar_update_state_tests {
     };
 
     #[tokio::test]
-    async fn calendar_create_sends_a_jscalendar_recurrence_rule() {
+    async fn calendar_create_maps_recurrence_and_response_requested() {
         let app = Router::new().route(
             "/",
             post(|Json(request): Json<serde_json::Value>| async move {
@@ -9586,6 +9688,10 @@ mod calendar_update_state_tests {
                         "frequency":"weekly", "interval":2,
                         "byDay":[{"day":"mo"},{"day":"we"}], "count":12
                     })
+                );
+                assert_eq!(
+                    call[1]["create"]["e1"]["participants"]["att0"]["expectReply"],
+                    false
                 );
                 Json(serde_json::json!({"methodResponses":[[
                     "CalendarEvent/set", {"created":{"e1":{"id":"event-1"}}}, "0"
@@ -9622,6 +9728,11 @@ mod calendar_update_state_tests {
                 occurrences: Some(12),
                 ..Default::default()
             }),
+            response_requested: Some(false),
+            attendees: vec![crate::wbxml::eas::AttendeeField {
+                email: "guest@example.test".to_owned(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
         assert_eq!(
@@ -9631,6 +9742,83 @@ mod calendar_update_state_tests {
                 .unwrap(),
             "event-1"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn calendar_response_requested_updates_existing_attendees_only() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = requests.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(request): Json<serde_json::Value>| {
+                let request_count = request_count.clone();
+                async move {
+                    let call = &request["methodCalls"][0];
+                    match request_count.fetch_add(1, Ordering::SeqCst) {
+                        0 => {
+                            assert_eq!(call[0], "CalendarEvent/get");
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/get", {"state":"state-1","list":[{"id":"event-1","timeZone":"UTC"}]}, "state"
+                            ]]}))
+                        }
+                        1 => {
+                            assert_eq!(call[0], "CalendarEvent/get");
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/get", {"list":[{"id":"event-1","participants":{
+                                    "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                                    "guest":{"email":"guest@example.test","roles":{"attendee":true}}
+                                }}]}, "response-requested"
+                            ]]}))
+                        }
+                        2 => {
+                            assert_eq!(call[0], "CalendarEvent/set");
+                            assert_eq!(call[1]["ifInState"], "state-1");
+                            let update = &call[1]["update"]["event-1"];
+                            assert_eq!(update["participants/guest/expectReply"], false);
+                            assert!(update.get("participants/owner/expectReply").is_none());
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/set", {"updated":{"event-1":null}}, "0"
+                            ]]}))
+                        }
+                        _ => panic!("unexpected extra JMAP request"),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CALENDARS:"a"},
+            "apiUrl":url, "downloadUrl":url, "uploadUrl":url, "username":"user", "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let fields = crate::wbxml::eas::CalendarFields {
+            response_requested: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(
+            client
+                .save_calendar_event(&auth, "calendar", Some("event-1"), None, &fields, false)
+                .await
+                .unwrap(),
+            "event-1"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
         server.abort();
     }
 

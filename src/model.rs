@@ -354,6 +354,8 @@ pub struct CalendarEvent {
     pub is_organizer: bool,
     pub cancelled: bool,
     pub response_type: Option<u8>,
+    /// Uniform attendee `expectReply` value when all attendees agree.
+    pub response_requested: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
