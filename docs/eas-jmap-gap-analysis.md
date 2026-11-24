@@ -295,7 +295,20 @@ Current prioritized work:
    left-to-right associativity; nested proximity groups on the right are
    rejected because they are not evaluated as a free-text operand. Proximity
    matching also evaluates attachment filenames;
-   attachment payload text remains unindexed locally. Boolean combinations
+   attachment payload text remains unindexed locally. Stalwart's JMAP `text`
+   filter can search extracted attachment text only when `attachment` is
+   enabled in the Search object's `indexEmailFields`; its `body` filter
+   deliberately excludes attachments. JMAP's aggregate `text` match does not
+   identify which field matched, so it cannot by itself implement KQL's
+   attachment-only restriction without false positives from the message body
+   or headers. Stalwart documents extraction for text/plain, text/html, common
+   Office/OpenDocument formats, EPUB, RTF, and PDF, with configurable size and
+   decompression limits and partial-index cases ([Stalwart attachment text
+   extraction](https://www.stalw.art/docs/storage/text-extraction/)). A
+   correct gateway feature therefore needs an exact attachment-content source
+   or extractor and must account for server indexing configuration and
+   truncation; no such local
+   content path is implemented yet. Boolean combinations
    use the existing exact matcher for supported predicates. Regression
    coverage exercises phrase operands,
    direction, distance, proximity AND/OR combinations, exact totals, and range
