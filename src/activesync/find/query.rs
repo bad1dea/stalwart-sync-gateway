@@ -631,21 +631,12 @@ fn register_expression_phrase(
     position: usize,
 ) -> bool {
     if let Some(previous) = phrase_positions.get(property).copied() {
-        let depth_at = |index: usize| {
-            tokens[..index]
-                .iter()
-                .fold(0isize, |depth, token| match token {
-                    Token::Left => depth + 1,
-                    Token::Right => depth - 1,
-                    _ => depth,
-                })
-        };
-        let depth = depth_at(previous);
-        if depth == 0
-            || depth != depth_at(position)
-            || !tokens[previous + 1..position]
-                .iter()
-                .all(|token| matches!(token, Token::Or | Token::Word(_) | Token::Not))
+        // Identical-property terms are implicitly OR-grouped only when no
+        // explicit Boolean operator separates them. Once AND/OR is present,
+        // the expression parser and local evaluator preserve that structure.
+        if !tokens[previous + 1..position]
+            .iter()
+            .any(|token| matches!(token, Token::And | Token::Or))
         {
             return false;
         }
@@ -1689,6 +1680,29 @@ mod tests {
                     ("$op$and".to_owned(), String::new())
                 ]
             ))
+        );
+        let repeated_mixed = r#"(subject:"alpha beta" AND body:"gamma delta") OR (subject:"epsilon zeta" AND isread:true)"#;
+        assert_eq!(
+            phrases_for_postfilter(repeated_mixed),
+            Some((
+                PhraseMatch::Expression,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("body".to_owned(), "gamma delta".to_owned()),
+                    ("$op$and".to_owned(), String::new()),
+                    ("subject".to_owned(), "epsilon zeta".to_owned()),
+                    ("$isread".to_owned(), "true".to_owned()),
+                    ("$op$and".to_owned(), String::new()),
+                    ("$op$or".to_owned(), String::new())
+                ]
+            ))
+        );
+        assert_eq!(
+            to_filter(repeated_mixed).unwrap(),
+            json!({"operator":"OR", "conditions":[
+                {"operator":"AND", "conditions":[{"subject":"alpha beta"}, {"body":"gamma delta"}]},
+                {"operator":"AND", "conditions":[{"subject":"epsilon zeta"}, {"hasKeyword":"$seen"}]}
+            ]})
         );
         for query in [
             r#"subject:"alpha beta" subject:gamma"#,

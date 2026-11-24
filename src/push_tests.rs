@@ -13438,6 +13438,26 @@ async fn find_repeated_and_negated_subject_phrases_are_exact() {
         vec!["alpha beta gamma delta"]
     );
 
+    env.mock.add_mail("inbox", "epsilon zeta");
+    env.mock.set_keyword("epsilon zeta", "$seen", true);
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "3f3f01c2-f6db-4d78-a201-a4c12a8be2a4",
+            r#"(subject:"alpha beta" AND subject:"gamma delta") OR (subject:"epsilon zeta" AND isread:true)"#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("2"));
+    let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
+    ids.sort();
+    assert_eq!(ids, vec!["alpha beta gamma delta", "epsilon zeta"]);
+
     let response = env
         .req("Find", "client")
         .header("MS-ASProtocolVersion", "16.1")
@@ -13589,10 +13609,10 @@ async fn find_repeated_and_negated_subject_phrases_are_exact() {
         .await
         .unwrap();
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
-    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("3"));
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("4"));
     let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
     ids.sort();
-    assert_eq!(ids, vec!["m1", "m2", "unrelated subject"]);
+    assert_eq!(ids, vec!["epsilon zeta", "m1", "m2", "unrelated subject"]);
 
     env.mock.add_mail("inbox", "gamma delta only");
     let response = env
@@ -13608,13 +13628,14 @@ async fn find_repeated_and_negated_subject_phrases_are_exact() {
         .await
         .unwrap();
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
-    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("5"));
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("6"));
     let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
     ids.sort();
     assert_eq!(
         ids,
         vec![
             "alpha beta gamma delta",
+            "epsilon zeta",
             "gamma delta only",
             "m1",
             "m2",
