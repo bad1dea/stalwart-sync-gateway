@@ -467,6 +467,13 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `deploy-2026-11-24-eas-find-doc-0001c24`; homelab commit `81e0d7a`, image
    `sha256:362e0ab3b9f8cf783641c22be87d5a4f4f6e8ab3f26cceb8ceedf1219c189ecc`,
    started `2026-11-24T23:19:04Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The attachment download cap was then raised to 4 MiB
+   while retaining the 2 MiB extracted-text cap. A mocked 16.1 Find regression
+   searches a DOCX package above 2 MiB, and checks that a 4 MiB + 1 attachment
+   is skipped before blob download. Deployed as
+   `deploy-2026-11-24-eas-find-4mb-f0dd1ac`; homelab commit `cc074c9`, image
+   `sha256:d535105047f2ce2ebe1b22d4ad9ae43618bc67fb8052ba2700544e9ffbfbf860`,
+   started `2026-11-24T23:41:01Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`.
    EPUB XHTML chapters use the same archive-entry and expanded-XML limits; a
    mocked HTTP Find regression verifies proximity matching in EPUB text. The
