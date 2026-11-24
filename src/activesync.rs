@@ -5894,6 +5894,7 @@ fn calendar_instance_change_supported(fields: &wbxml::eas::CalendarFields) -> bo
         && !fields.unsupported_response_requested
         && !fields.unsupported_online_meeting
         && !fields.unsupported_appointment_reply_time
+        && !fields.unsupported_disallow_new_time_proposal
         && !fields.unsupported_attendees
         && !fields.unsupported_body
         && fields.body_type.is_none_or(|body_type| body_type == 1)
@@ -5992,6 +5993,7 @@ async fn sync_calendar_collection(
             || command.calendar.unsupported_response_requested
             || command.calendar.unsupported_online_meeting
             || command.calendar.unsupported_appointment_reply_time
+            || command.calendar.unsupported_disallow_new_time_proposal
             || command.calendar.unsupported_sensitivity
             || command.calendar.unsupported_client_uid
             || (command.calendar.client_uid.is_some()
@@ -6470,6 +6472,7 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     event.response_type.hash(&mut hasher);
     event.response_requested.hash(&mut hasher);
     event.appointment_reply_time.hash(&mut hasher);
+    event.disallow_new_time_proposal.hash(&mut hasher);
     event.online_meeting_conf_link.hash(&mut hasher);
     event.online_meeting_external_link.hash(&mut hasher);
     event.attendees.hash(&mut hasher);
@@ -6768,6 +6771,20 @@ fn write_calendar_fields(
         }
         if let Some(link) = &event.online_meeting_external_link {
             builder.leaf(cal::ONLINE_MEETING_EXTERNAL_LINK, link.clone());
+        }
+    }
+    if matches!(
+        version,
+        ProtocolVersion::V14_0
+            | ProtocolVersion::V14_1
+            | ProtocolVersion::V16_0
+            | ProtocolVersion::V16_1
+    ) {
+        if let Some(disallow) = event.disallow_new_time_proposal {
+            builder.leaf(
+                cal::DISALLOW_NEW_TIME_PROPOSAL,
+                if disallow { "1" } else { "0" },
+            );
         }
     }
     if matches!(
@@ -9447,6 +9464,34 @@ mod tests {
             eas::find_text_after(&builder.finish(), cal::APPOINTMENT_REPLY_TIME),
             Some("20261124T173456Z")
         );
+    }
+
+    #[test]
+    fn disallow_new_time_proposal_is_versioned_and_triggers_changes() {
+        use crate::wbxml::eas::{self, airsync as air, calendar as cal};
+        let event = crate::model::CalendarEvent {
+            disallow_new_time_proposal: Some(true),
+            ..Default::default()
+        };
+        let mut different = event.clone();
+        different.disallow_new_time_proposal = Some(false);
+        assert_ne!(
+            super::calendar_event_hash(&event),
+            super::calendar_event_hash(&different)
+        );
+        for version in [
+            ProtocolVersion::V14_0,
+            ProtocolVersion::V14_1,
+            ProtocolVersion::V16_0,
+            ProtocolVersion::V16_1,
+        ] {
+            let mut builder = eas::DocumentBuilder::new();
+            super::write_calendar_command(&mut builder, air::CHANGE, &event, version, &[]);
+            assert_eq!(
+                eas::find_text_after(&builder.finish(), cal::DISALLOW_NEW_TIME_PROPOSAL),
+                Some("1")
+            );
+        }
     }
 
     #[test]

@@ -362,6 +362,8 @@ pub struct CalendarEvent {
     pub response_requested: Option<bool>,
     /// The authenticated attendee's most recent meeting response time.
     pub appointment_reply_time: Option<String>,
+    /// Read-only Microsoft iCalendar counter-proposal preference.
+    pub disallow_new_time_proposal: Option<bool>,
     /// Read-only online meeting URIs exposed by JSCalendar virtualLocations.
     pub online_meeting_conf_link: Option<String>,
     pub online_meeting_external_link: Option<String>,

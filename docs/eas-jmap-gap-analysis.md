@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `9c4fc8e` (2026-11-24)
+## Reconciled status for source `main` at `9c4fc8e` (2026-11-24; reconciliation in progress)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -61,7 +61,11 @@ Current prioritized work:
    Start/end edits convert through the parent event's IANA timezone, preserve
    the inherited endpoint when only one is changed, derive the new duration,
    and reject negative durations. All-day flags are occurrence-specific.
-   Sensitivity and DisallowNewTimeProposal remain unsupported and fail closed.
+   Sensitivity is not mapped inside recurrence overrides because RFC 8984
+   prohibits `privacy` patches there. DisallowNewTimeProposal is read-only and
+   maps Stalwart's retained `X-MICROSOFT-DISALLOW-COUNTER` iCalendar property;
+   client writes fail closed because JSCalendar has no standard property for
+   this Exchange setting.
    Top-level and recurring-exception AppointmentReplyTime values are mapped
    from the authenticated participant's unique `scheduleUpdated` value.
    Read-only
@@ -197,6 +201,16 @@ Current prioritized work:
    `sha256:c143eb523362032a77c28d19c7bc526b898737a1e4d48013aa0cd118f781875d`,
    started `2026-11-24T10:44:28Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`.
+9. **DisallowNewTimeProposal.** Stalwart/Calcard retains unrecognized
+   iCalendar properties in the `iCalendar.properties` extension. When the
+   `X-MICROSOFT-DISALLOW-COUNTER` boolean is present, EAS now emits its value
+   for protocol 14.0 and newer. Ambiguous duplicates and malformed values are
+   omitted. Client changes fail closed because JSCalendar has no equivalent
+   standard property and writing the Microsoft extension has not been
+   verified through Stalwart's storage conversion. Regression tests cover
+   read conversion, versioned response serialization, hash changes, and
+   request rejection. Full suite: 327 passed, 73 ignored; strict Clippy,
+   formatting, and diff checks pass. Deployment is pending.
 
 Also completed (`b11914b`): **KQL timestamp offset normalization**. RFC3339
 timestamps in `received:` restrictions now resolve to the UTC calendar day

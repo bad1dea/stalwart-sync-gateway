@@ -1304,6 +1304,8 @@ pub struct CalendarFields {
     pub unsupported_online_meeting: bool,
     /// AppointmentReplyTime is response-only per MS-ASCAL.
     pub unsupported_appointment_reply_time: bool,
+    /// DisallowNewTimeProposal is currently read-only in this gateway.
+    pub unsupported_disallow_new_time_proposal: bool,
     pub attendees: Vec<AttendeeField>,
     pub attendees_present: bool,
     pub unsupported_attendees: bool,
@@ -2760,6 +2762,13 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                         .any(|parent| same_token(*parent, airsync::APPLICATION_DATA))
                 {
                     fields.unsupported_appointment_reply_time = true;
+                }
+                if same_token(*token, calendar::DISALLOW_NEW_TIME_PROPOSAL)
+                    && path
+                        .iter()
+                        .any(|parent| same_token(*parent, airsync::APPLICATION_DATA))
+                {
+                    fields.unsupported_disallow_new_time_proposal = true;
                 }
                 if same_token(*token, calendar::RESPONSE_REQUESTED)
                     && path
@@ -4254,6 +4263,18 @@ mod tests {
         assert!(
             super::extract_calendar_fields(&builder.finish().nodes)
                 .unsupported_appointment_reply_time
+        );
+    }
+
+    #[test]
+    fn disallow_new_time_proposal_is_rejected_in_client_changes() {
+        let mut builder = super::DocumentBuilder::new();
+        builder.start(super::airsync::APPLICATION_DATA);
+        builder.leaf(super::calendar::DISALLOW_NEW_TIME_PROPOSAL, "1");
+        builder.end();
+        assert!(
+            super::extract_calendar_fields(&builder.finish().nodes)
+                .unsupported_disallow_new_time_proposal
         );
     }
 

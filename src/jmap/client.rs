@@ -3025,6 +3025,7 @@ impl JmapClient {
                     "replyTo",
                     "links",
                     "virtualLocations",
+                    "iCalendar",
                 ]),
                 limit,
             )
@@ -7935,6 +7936,31 @@ struct CalendarEventObject {
     links: Option<BTreeMap<String, serde_json::Value>>,
     #[serde(default)]
     virtual_locations: Option<BTreeMap<String, serde_json::Value>>,
+    #[serde(default)]
+    i_calendar: Option<serde_json::Value>,
+}
+
+fn calendar_disallow_new_time_proposal(icalendar: Option<&serde_json::Value>) -> Option<bool> {
+    let properties = icalendar?.get("properties")?.as_array()?;
+    let mut matches = properties.iter().filter(|property| {
+        property
+            .as_array()
+            .and_then(|property| property.first())
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case("x-microsoft-disallow-counter"))
+    });
+    let property = matches.next()?.as_array()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    let value = property.get(3)?;
+    value
+        .as_bool()
+        .or_else(|| match value.as_str()?.to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -8754,6 +8780,7 @@ impl From<CalendarEventObject> for CalendarEvent {
 fn calendar_event_from(value: CalendarEventObject, current_user: Option<&str>) -> CalendarEvent {
     let appointment_reply_time = current_user
         .and_then(|user| calendar_appointment_reply_time(value.participants.as_ref(), user));
+    let disallow_new_time_proposal = calendar_disallow_new_time_proposal(value.i_calendar.as_ref());
     let response_requested = value
         .participants
         .as_ref()
@@ -8960,6 +8987,7 @@ fn calendar_event_from(value: CalendarEventObject, current_user: Option<&str>) -
         response_type: None,
         response_requested,
         appointment_reply_time,
+        disallow_new_time_proposal,
         online_meeting_conf_link,
         online_meeting_external_link,
     }
@@ -9345,6 +9373,42 @@ impl From<CalendarObject> for Collection {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn microsoft_disallow_counter_property_maps_to_eas_flag() {
+        let icalendar = serde_json::json!({
+            "properties": [
+                ["x-microsoft-disallow-counter", {}, "boolean", true]
+            ]
+        });
+        assert_eq!(
+            super::calendar_disallow_new_time_proposal(Some(&icalendar)),
+            Some(true)
+        );
+        let event: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
+            "id":"event", "iCalendar": icalendar
+        }))
+        .unwrap();
+        assert_eq!(
+            super::calendar_event_from(event, None).disallow_new_time_proposal,
+            Some(true)
+        );
+        assert_eq!(
+            super::calendar_disallow_new_time_proposal(Some(&serde_json::json!({
+                "properties": [["X-MICROSOFT-DISALLOW-COUNTER", {}, "boolean", false]]
+            }))),
+            Some(false)
+        );
+        assert_eq!(
+            super::calendar_disallow_new_time_proposal(Some(&serde_json::json!({
+                "properties": [
+                    ["X-MICROSOFT-DISALLOW-COUNTER", {}, "boolean", true],
+                    ["X-MICROSOFT-DISALLOW-COUNTER", {}, "boolean", false]
+                ]
+            }))),
+            None
+        );
+    }
+
     #[test]
     fn appointment_reply_time_uses_only_the_unique_authenticated_attendee() {
         let participants: std::collections::BTreeMap<String, super::ParticipantObject> =
