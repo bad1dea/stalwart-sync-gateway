@@ -618,7 +618,15 @@ fn search_phrase_word(word: &str) -> Option<(String, String)> {
 
 fn boolean_search_term(word: &str) -> Option<(String, String)> {
     let word = word.strip_prefix('+').unwrap_or(word);
-    let (property, value) = word.split_once(':').or_else(|| word.split_once('='))?;
+    let (property, operator, value) = if let Some((property, value)) = word.split_once(':') {
+        (property, ":", value)
+    } else if let Some((property, value)) = word.split_once("<>") {
+        (property, "<>", value)
+    } else if let Some((property, value)) = word.split_once('=') {
+        (property, "=", value)
+    } else {
+        return None;
+    };
     let property = property.to_ascii_lowercase();
     let enabled = match value.to_ascii_lowercase().as_str() {
         "true" | "yes" | "1" => "true",
@@ -635,7 +643,14 @@ fn boolean_search_term(word: &str) -> Option<(String, String)> {
         } else {
             property.as_str()
         };
-        (format!("${property}"), enabled.to_owned())
+        (
+            if operator == "<>" {
+                format!("$not${property}")
+            } else {
+                format!("${property}")
+            },
+            enabled.to_owned(),
+        )
     })
 }
 
@@ -1332,6 +1347,16 @@ mod tests {
                 vec![
                     ("subject".to_owned(), "alpha beta".to_owned()),
                     ("$isread".to_owned(), "true".to_owned())
+                ]
+            ))
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" OR isread<>false"#),
+            Some((
+                PhraseMatch::Any,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$not$isread".to_owned(), "false".to_owned())
                 ]
             ))
         );
