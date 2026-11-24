@@ -2197,6 +2197,16 @@ mod tests {
                 ]
             ))
         );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" AND NOT size>=100"#),
+            Some((
+                PhraseMatch::All,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$not$size".to_owned(), json!({"minSize":100}).to_string())
+                ]
+            ))
+        );
     }
 
     #[test]

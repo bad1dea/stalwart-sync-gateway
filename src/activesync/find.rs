@@ -608,7 +608,7 @@ fn email_matches_phrases_with_addresses(
                     importance_matches(importance, phrase)
                 } else if property == "$received" {
                     received_filter_matches(received_at, phrase)?
-                } else if property == "$size" {
+                } else if matches!(property, "$size" | "size") {
                     size_filter_matches(size, phrase)?
                 } else if boolean_property.is_some() {
                     boolean_match.is_some_and(|value| value == (phrase == "true"))
@@ -725,7 +725,7 @@ fn email_matches_phrases_with_addresses(
                             importance_matches(importance, phrase)
                         } else if property == "$received" {
                             received_filter_matches(received_at, phrase)?
-                        } else if property == "$size" {
+                        } else if matches!(property, "$size" | "size") {
                             size_filter_matches(size, phrase)?
                         } else if let Some(boolean_property) = boolean_property {
                             let value = match boolean_property {
@@ -951,6 +951,45 @@ mod tests {
             None,
             query::PhraseMatch::All,
             &[phrase]
+        )
+        .unwrap());
+        let negated_size = vec![
+            ("subject".to_owned(), "never matches".to_owned()),
+            ("$not$size".to_owned(), at_threshold.to_string()),
+            ("$op$or".to_owned(), String::new()),
+        ];
+        assert!(email_matches_phrases_with_addresses(
+            "other",
+            None,
+            "",
+            "",
+            "",
+            "",
+            None,
+            99,
+            1,
+            None,
+            None,
+            None,
+            query::PhraseMatch::Expression,
+            &negated_size,
+        )
+        .unwrap());
+        assert!(!email_matches_phrases_with_addresses(
+            "other",
+            None,
+            "",
+            "",
+            "",
+            "",
+            None,
+            100,
+            1,
+            None,
+            None,
+            None,
+            query::PhraseMatch::Expression,
+            &negated_size,
         )
         .unwrap());
     }
