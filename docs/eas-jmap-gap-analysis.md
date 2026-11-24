@@ -20,6 +20,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    and `Recurrence/Start` was rejected when those starts agreed; the parser
    now accepts matching values and rejects conflicts. `Complete` now accepts
    only 0 or 1, duplicate values fail, and Task Add requires `Complete`.
+   Task `Occurrences` is limited to its MS-ASTASK `unsignedByte` range, with
+   255 accepted and 256 rejected before a JMAP write.
    Mocked Sync regressions cover recurring Add/Fetch and invalid or missing
    Complete without a JMAP write. Next verify create/get and recurrence
    against real Stalwart, then on a client.
@@ -964,6 +966,17 @@ homelab commit `e5f6987`, image
 started `2026-11-24T20:20:42Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. Real Stalwart and real-client Task recurrence verification
 remains open.
+
+Task recurrence parsing also enforces MS-ASTASK's narrower `Occurrences`
+type: values through 255 are accepted, while 256 and larger are rejected even
+though the shared Calendar recurrence parser uses a wider representation.
+Regression cases cover the 255/256 boundary. The full suite passes 394 tests
+(73 ignored); strict Clippy, formatting, and diff checks pass. See the
+[MS-ASTASK schema](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-astask/c16a3dcb-de5b-4de9-9026-232654d0628d). Deployed as
+`deploy-2026-11-24-eas-task-occurrences-8e555b2`; homelab commit `b24a4a4`,
+image `sha256:f1d8259fce691e8828305a74f5bdf7420a0574f2e14efbe063b7c3270dd47b2c`,
+started `2026-11-24T21:47:42Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`.
 
 Also completed: **Task Complete validation**. MS-ASTASK requires `Complete`
 to be present and equal to 0 or 1. Task Add without it, invalid values, and
