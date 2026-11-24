@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `9c4fc8e` (2026-11-24; reconciliation in progress)
+## Reconciled status for source `main` at `06b7292` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -20,7 +20,21 @@ Current prioritized work:
    candidate filtering preserves the remaining restrictions and local phrase
    checking preserves result order, totals, and range paging. Phrase use in
    OR/NOT expressions remains rejected because filtering candidates there can
-   change Boolean meaning. Multiword phrases in body/text remain unavailable.
+   change Boolean meaning. A single positive `body:"multiword phrase"` or
+   `text:"multiword phrase"` is also exact-filtered locally after JMAP returns
+   indexed candidates; body and text scans fetch message bodies and reject a
+   truncated body rather than return an incomplete exact-match result. Multiple
+   phrases, multiple restrictions on the phrase's property, and OR/NOT forms
+   remain rejected. Phrase matching is case-insensitive and requires adjacent
+   words in order. Regression tests cover plain, HTML, and RTF bodies, subject
+   or body text matching, truncation, and unsupported Boolean forms. Full
+   suite: 330 passed, 73 ignored; strict Clippy, formatting, and diff checks
+   passed. Deployed as
+   `deploy-2026-11-24-eas-kql-body-text-phrases-06b7292`; homelab commit
+   `ee54715`, image
+   `sha256:22d72a3eccdb0063926874fc4a88d477c0ca9b4535d2ff5efe7fd4f5f90ab642`,
+   started `2026-11-24T11:07:15Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
    Regression coverage includes reversed/intervening words and a phrase
    combined with `isread:true`. Deployed as
    `deploy-2026-11-24-eas-find-subject-phrase-and-e8e0243`; homelab commit
@@ -210,7 +224,12 @@ Current prioritized work:
    verified through Stalwart's storage conversion. Regression tests cover
    read conversion, versioned response serialization, hash changes, and
    request rejection. Full suite: 327 passed, 73 ignored; strict Clippy,
-   formatting, and diff checks pass. Deployment is pending.
+   formatting, and diff checks pass. Deployed as
+   `deploy-2026-11-24-eas-disallow-new-time-proposal-c01b548`; homelab commit
+   `5a2f1de`, image
+   `sha256:26b6d582f7f89b745a51cc2493f959723fc51d1ddb69739626d7168160597d37`,
+   started `2026-11-24T10:56:01Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
 
 Also completed (`b11914b`): **KQL timestamp offset normalization**. RFC3339
 timestamps in `received:` restrictions now resolve to the UTC calendar day
