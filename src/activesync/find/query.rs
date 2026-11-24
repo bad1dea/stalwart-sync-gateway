@@ -33,15 +33,10 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
         return Ok(json!({}));
     }
     let tokens = tokenize(input)?;
-    let has_prefix_term = tokens
-        .iter()
-        .any(|token| matches!(token, Token::Word(word) if prefix_search_term(word).is_some()));
-    if has_prefix_term
-        && ((tokens.len() == 1
-            && matches!(&tokens[0], Token::Word(word) if prefix_search_term(word).is_some()))
-            || flat_phrase_boolean_expression(&tokens).is_some())
-        && phrases_for_postfilter(input).is_some()
-    {
+    let has_prefix_term = tokens.iter().any(|token| {
+        matches!(token, Token::Word(word) if prefix_search_term(word.strip_prefix('+').or_else(|| word.strip_prefix('-')).unwrap_or(word)).is_some())
+    });
+    if has_prefix_term && phrases_for_postfilter(input).is_some() {
         return Ok(json!({}));
     }
     if tokens.first() == Some(&Token::Words)
@@ -287,6 +282,10 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                     terms.push((format!("$not${property}"), value));
                     phrase_count += 1;
                     has_negated_phrase = true;
+                } else if let Some((property, value)) = qualified_prefix_search_term(word) {
+                    terms.push((format!("$not${property}"), value));
+                    phrase_count += 1;
+                    has_negated_phrase = true;
                 } else {
                     let (property, value) = boolean_search_term(word)
                         .or_else(|| importance_search_term(word))
@@ -305,6 +304,10 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                     phrase_count += 1;
                 } else if let Some(negative) = word.strip_prefix('-') {
                     if let Some((property, value)) = search_phrase_word(negative) {
+                        terms.push((format!("$not${property}"), value));
+                        phrase_count += 1;
+                        has_negated_phrase = true;
+                    } else if let Some((property, value)) = qualified_prefix_search_term(negative) {
                         terms.push((format!("$not${property}"), value));
                         phrase_count += 1;
                         has_negated_phrase = true;
@@ -359,7 +362,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
     }
     if tokens.contains(&Token::Or)
         && tokens.iter().any(|token| {
-            matches!(token, Token::Word(word) if search_phrase_word(word.strip_prefix('+').or_else(|| word.strip_prefix('-')).unwrap_or(word)).is_some() || prefix_search_term(word).is_some())
+            matches!(token, Token::Word(word) if search_phrase_word(word.strip_prefix('+').or_else(|| word.strip_prefix('-')).unwrap_or(word)).is_some() || prefix_search_term(word.strip_prefix('+').or_else(|| word.strip_prefix('-')).unwrap_or(word)).is_some())
         })
     {
         return flat_phrase_boolean_expression(&tokens)
@@ -383,9 +386,9 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
     }
     let has_negated_phrase = tokens.iter().enumerate().any(|(index, token)| {
         matches!(token, Token::Not)
-            && matches!(tokens.get(index + 1), Some(Token::Word(word)) if search_phrase_word(word).is_some())
+            && matches!(tokens.get(index + 1), Some(Token::Word(word)) if search_phrase_word(word).is_some() || qualified_prefix_search_term(word).is_some())
     }) || tokens.iter().any(|token| {
-        matches!(token, Token::Word(word) if word.strip_prefix('-').is_some_and(|word| search_phrase_word(word).is_some()))
+        matches!(token, Token::Word(word) if word.strip_prefix('-').is_some_and(|word| search_phrase_word(word).is_some() || qualified_prefix_search_term(word).is_some()))
     });
     if has_negated_phrase {
         for (index, token) in tokens.iter().enumerate() {
@@ -397,6 +400,13 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
             )
             .or_else(|| {
                 simple_search_property_word(
+                    word.strip_prefix('+')
+                        .or_else(|| word.strip_prefix('-'))
+                        .unwrap_or(word),
+                )
+            })
+            .or_else(|| {
+                qualified_prefix_search_term(
                     word.strip_prefix('+')
                         .or_else(|| word.strip_prefix('-'))
                         .unwrap_or(word),
@@ -443,7 +453,9 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                 phrases.push((format!("$not${property}"), value));
                 continue;
             }
-            if let Some((property, value)) = simple_search_property_word(word) {
+            if let Some((property, value)) =
+                simple_search_property_word(word).or_else(|| qualified_prefix_search_term(word))
+            {
                 if let Some(previous) = phrase_positions.get(&property).copied() {
                     if !tokens[previous + 1..index].contains(&Token::And) {
                         return None;
@@ -485,7 +497,9 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                 phrases.push((format!("$not${property}"), value));
                 continue;
             }
-            if let Some((property, value)) = simple_search_property_word(negative) {
+            if let Some((property, value)) = simple_search_property_word(negative)
+                .or_else(|| qualified_prefix_search_term(negative))
+            {
                 if let Some(previous) = phrase_positions.get(&property).copied() {
                     if !tokens[previous + 1..index].contains(&Token::And) {
                         return None;
@@ -576,6 +590,43 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
             }
         }
     }
+    if tokens.iter().enumerate().any(|(index, token)| {
+        let Token::Word(word) = token else {
+            return false;
+        };
+        let in_words_arguments = tokens[..index]
+            .iter()
+            .rposition(|token| matches!(token, Token::Words))
+            .is_some_and(|words_index| {
+                !tokens[words_index + 1..index]
+                    .iter()
+                    .any(|token| matches!(token, Token::Right))
+            });
+        if in_words_arguments {
+            return false;
+        }
+        let term = word
+            .strip_prefix('+')
+            .or_else(|| word.strip_prefix('-'))
+            .unwrap_or(word);
+        search_phrase_word(term).is_none()
+            && simple_search_property_word(term).is_none()
+            && prefix_search_term(term).is_none()
+            && boolean_search_term(term).is_none()
+            && importance_search_term(term).is_none()
+            && received_search_term(term).is_none()
+            && sent_search_term(term).is_none()
+            && size_search_term(term).is_none()
+    }) {
+        return None;
+    }
+    if tokens.iter().any(|token| {
+        matches!(token, Token::Word(word) if !word.contains(':') && prefix_search_term(word).is_some())
+    }) && tokens.iter().any(|token| {
+        matches!(token, Token::Word(word) if search_phrase_word(word).is_some() || simple_search_property_word(word).is_some())
+    }) {
+        return None;
+    }
     if phrases.is_empty() {
         return None;
     }
@@ -592,6 +643,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                         .unwrap_or(word);
                     search_phrase_word(value)
                         .or_else(|| simple_search_property_word(value))
+                        .or_else(|| qualified_prefix_search_term(value))
                         .is_none()
                 }
             {
@@ -944,8 +996,9 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                 if word.starts_with(['+', '-']) {
                     return None;
                 }
-                if let Some((property, value)) =
-                    search_phrase_word(word).or_else(|| simple_search_property_word(word))
+                if let Some((property, value)) = search_phrase_word(word)
+                    .or_else(|| simple_search_property_word(word))
+                    .or_else(|| qualified_prefix_search_term(word))
                 {
                     if !register_expression_phrase(
                         tokens,
@@ -970,8 +1023,9 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                     output.push((format!("$not{property}"), value));
                 }
             } else if let Some(negative) = word.strip_prefix('-') {
-                if let Some((property, value)) =
-                    search_phrase_word(negative).or_else(|| simple_search_property_word(negative))
+                if let Some((property, value)) = search_phrase_word(negative)
+                    .or_else(|| simple_search_property_word(negative))
+                    .or_else(|| qualified_prefix_search_term(negative))
                 {
                     if !register_expression_phrase(
                         tokens,
@@ -997,8 +1051,9 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                 }
             } else {
                 let positive = word.strip_prefix('+').unwrap_or(word);
-                if let Some(phrase) =
-                    search_phrase_word(positive).or_else(|| simple_search_property_word(positive))
+                if let Some(phrase) = search_phrase_word(positive)
+                    .or_else(|| simple_search_property_word(positive))
+                    .or_else(|| qualified_prefix_search_term(positive))
                 {
                     if !register_expression_phrase(
                         tokens,
@@ -1311,6 +1366,11 @@ fn prefix_search_term(word: &str) -> Option<(String, String)> {
         return None;
     }
     Some((property, value.to_owned()))
+}
+
+fn qualified_prefix_search_term(word: &str) -> Option<(String, String)> {
+    word.split_once(':')?;
+    prefix_search_term(word)
 }
 
 fn boolean_search_term(word: &str) -> Option<(String, String)> {
@@ -2965,6 +3025,23 @@ mod tests {
             );
             assert!(phrases_for_postfilter(input).is_some(), "{input}");
             assert_eq!(to_filter(input).unwrap(), json!({}), "{input}");
+        }
+        for input in ["-subject:serv*", "NOT subject:serv*"] {
+            assert_eq!(to_filter(input).unwrap(), json!({}), "{input}");
+            let (kind, terms) = phrases_for_postfilter(input).unwrap();
+            assert_eq!(kind, PhraseMatch::All, "{input}");
+            assert_eq!(terms, vec![("$not$subject".to_owned(), "serv*".to_owned())]);
+        }
+        for input in [
+            "-subject:serv* OR isread:true",
+            "NOT subject:serv* OR isread:true",
+        ] {
+            assert!(flat_phrase_boolean_expression(&tokenize(input).unwrap()).is_some());
+            assert_eq!(
+                phrases_for_postfilter(input).unwrap().0,
+                PhraseMatch::Expression
+            );
+            assert_eq!(to_filter(input).unwrap(), json!({}));
         }
     }
 

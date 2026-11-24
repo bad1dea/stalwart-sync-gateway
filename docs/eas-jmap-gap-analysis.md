@@ -359,11 +359,17 @@ Current prioritized work:
    prefix operator, including supported AND/OR combinations with boolean
    predicates. Quoted property phrases can use it on the final phrase token.
    These queries use a scoped mailbox scan and exact local token-prefix
-   comparison because JMAP text filters cannot preserve prefix semantics.
+   comparison because JMAP text filters cannot preserve prefix semantics. A
+   property-qualified prefix can also be negated with `NOT` or unary minus and
+   is checked exactly during the same scoped scan, including supported mixed
+   Boolean expressions. A mocked end-to-end Find regression checks the
+   negated prefix and its boolean OR branch against exact IDs and totals.
    See the [KeyQL wildcard reference](https://learn.microsoft.com/en-us/sharepoint/dev/general-development/keyword-query-language-kql-syntax-reference).
-   Regression suite: 373 passed,
-   73 ignored; strict Clippy, formatting, and diff checks passed. The nested
-   current proximity and paging changes are not deployed or runtime-verified.
+   Regression suite: 376 passed,
+   73 ignored; strict Clippy, formatting, and diff checks passed. The recent
+   prefix-negation and text-attachment extraction additions are source-tested
+   but not deployed or runtime-verified; real-client 16.1 certification remains
+   open.
    Phrase matching is case-insensitive and requires adjacent
    words in order. Regression tests cover plain, HTML, and RTF bodies,
    subject/body conjunctions, truncation, and unsupported Boolean forms. Full

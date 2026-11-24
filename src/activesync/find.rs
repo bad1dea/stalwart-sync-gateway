@@ -2153,6 +2153,50 @@ mod tests {
     }
 
     #[test]
+    fn kql_negated_prefix_excludes_only_matching_word_prefixes() {
+        for input in ["-subject:serv*", "NOT subject:serv*"] {
+            let (kind, terms) = query::phrases_for_postfilter(input).unwrap();
+            assert!(
+                !email_matches_phrases("Server outage", None, None, None, None, kind, &terms,)
+                    .unwrap()
+            );
+            assert!(
+                email_matches_phrases("Observe outage", None, None, None, None, kind, &terms,)
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn kql_negated_prefix_preserves_boolean_or_semantics() {
+        let (kind, terms) = query::phrases_for_postfilter("-subject:serv* OR isread:true").unwrap();
+        assert!(
+            email_matches_phrases("Server outage", None, Some(true), None, None, kind, &terms,)
+                .unwrap()
+        );
+        assert!(!email_matches_phrases(
+            "Server outage",
+            None,
+            Some(false),
+            None,
+            None,
+            kind,
+            &terms,
+        )
+        .unwrap());
+        assert!(email_matches_phrases(
+            "Observe outage",
+            None,
+            Some(false),
+            None,
+            None,
+            kind,
+            &terms,
+        )
+        .unwrap());
+    }
+
+    #[test]
     fn kql_prefix_queries_keep_boolean_and_or_meaning() {
         let (and_kind, and_terms) =
             query::phrases_for_postfilter("subject:serv* AND isread:true").unwrap();

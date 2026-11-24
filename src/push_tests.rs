@@ -14276,6 +14276,33 @@ async fn find_phrase_or_boolean_state_uses_both_exact_branches() {
 }
 
 #[tokio::test]
+async fn find_negated_prefix_keeps_local_boolean_or_semantics() {
+    use eas::{airsync as air, find as f};
+    let env = start_env(Opts::default()).await;
+    env.mock.add_mail("inbox", "Server outage");
+    env.mock.add_mail("inbox", "Observe outage");
+    env.mock.set_keyword("m2", "$seen", true);
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "f57ce742-d10c-421b-af04-1426e5b52c32",
+            "-subject:serv* OR isread:true",
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("3"));
+    let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
+    ids.sort();
+    assert_eq!(ids, vec!["Observe outage", "m1", "m2"]);
+}
+
+#[tokio::test]
 async fn find_scopes_queries_and_rejects_unsupported_inputs() {
     use eas::{airsync as air, find as f};
     let env = start_env(Opts::default()).await;
