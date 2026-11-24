@@ -12,6 +12,21 @@ handling. Check the current Rust implementation before treating any older
 
 Current prioritized work:
 
+Remaining 16.1 readiness backlog (ordered by runtime impact):
+
+1. **Task protocol parity.** Audit Sync/ItemOperations field order against
+   MS-ASTASK, then verify create/get round trips and recurrence against
+   Stalwart JMAP. This is the next implementation target; production remains
+   gated on real-client verification.
+2. **Real-client 16.1 validation.** Exercise negotiation, Tasks, BodyPart,
+   Find, and enabled Oof on the isolated test bridge. Production continues to
+   advertise 14.0 until this pass succeeds.
+3. **Find content coverage.** Add exact local search over remaining supported
+   attachment formats and assess resource-bounded scanned-PDF OCR and large
+   attachments. Current extraction is bounded and supports EPUB and macro-
+   enabled OOXML, but legacy binary Office, scanned PDFs, and payloads above
+   the extraction limit remain outside exact local matching.
+
 1. **BodyPartPreference / BodyPart response path — implemented and deployed.**
    Request parsing and independent Sync option
    persistence are implemented. Sync and Search now prepare and emit a
@@ -26,9 +41,11 @@ Current prioritized work:
    retained for attachment records; it is not a selector in the
    `BodyPartPreference` schema and is not required to answer these requests.
    The current deployment tag
-   `deploy-2026-11-24-eas-find-office-macro-6050b9f` includes this path; the
-   container is healthy and ready, while real-client 16.1 behavior remains
-   unverified. Sources:
+   `deploy-2026-11-24-eas-kql-property-presence-338f10a` includes this path;
+   deployed with homelab commit `6107c09`, image
+   `sha256:fbebbdab42bb34790b64edfe6b452e486c71ebfac1c040cc0f2424238452a6dc`,
+   started `2026-11-24T20:09:07Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Real-client 16.1 behavior remains unverified. Sources:
    Microsoft [MS-ASCON Elements](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascon/605bd946-0750-4d9b-b04c-8be28badfa8e),
    [MS-ASAIRS Appendix A](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asairs/fbbc1af9-5a71-4925-aca8-60a95339c722),
    [MS-ASCMD ItemOperations Properties](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/b6b1551a-f841-4bac-967c-a3328af78229),
@@ -423,7 +440,11 @@ Current prioritized work:
    truncated bodies fail closed when the result cannot be known. Unit and HTTP
    Find regressions cover the positive and negated forms. The full suite passes
    386 tests (73 ignored); strict Clippy, formatting, and diff checks pass.
-   Deployment verification follows.
+   Deployed as `deploy-2026-11-24-eas-kql-property-presence-338f10a`;
+   homelab commit `6107c09`, image
+   `sha256:fbebbdab42bb34790b64edfe6b452e486c71ebfac1c040cc0f2424238452a6dc`,
+   started `2026-11-24T20:09:07Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
    These queries use a scoped mailbox scan and exact local token-prefix
    comparison because JMAP text filters cannot preserve prefix semantics. A
    property-qualified prefix can also be negated with `NOT` or unary minus and
