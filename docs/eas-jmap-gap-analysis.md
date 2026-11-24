@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `ef6f5e9` (2026-11-23)
+## Reconciled status for source `main` at `6325c68` (2026-11-23)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -250,6 +250,21 @@ warnings denied, formatting, and diff checks pass. Deployed as
 Compose produced image
 `sha256:bee5f6682599dff81913383e2bf3b21981d05742af656e42b3ae87e39559d369`.
 The replacement started at `2026-11-24T04:17:59Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
+continues to advertise EAS 14.0.
+
+Also completed (`6325c68`): **EAS Task sensitivity**. EAS Normal maps to
+JSCalendar `privacy=public`; Personal and Private map to `private`; Confidential
+maps to `secret`. Reading a private task returns EAS Private because JSCalendar
+does not distinguish EAS Personal from Private. This follows the privacy
+levels in [RFC 8984](https://www.rfc-editor.org/rfc/rfc8984.html) and
+regression coverage checks all supported mappings, invalid EAS values, and a
+client task Change. Full suite: 275 passed, 73 ignored; clippy with warnings
+denied, formatting, and diff checks pass. Deployed as
+`deploy-2026-11-23-eas-task-sensitivity-6325c68`; homelab commit `8e1b3df`.
+Compose produced image
+`sha256:976cd012343bd1d9c9f9963808e214637a87017ffba440e2d2934651154b1dca`.
+The replacement started at `2026-11-24T04:55:49Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
 continues to advertise EAS 14.0.
 
