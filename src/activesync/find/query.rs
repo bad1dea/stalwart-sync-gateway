@@ -470,7 +470,7 @@ fn received_condition_at(
         _ => {
             let day = if value.len() > 10 {
                 if let Ok(date) = chrono::DateTime::parse_from_rfc3339(value) {
-                    date.date_naive()
+                    date.with_timezone(&chrono::Utc).date_naive()
                 } else {
                     chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
                         .map_err(|_| "invalid received date")?
@@ -907,6 +907,14 @@ mod tests {
         assert_eq!(
             to_filter("received:2026-02-28T15:45:00Z").unwrap(),
             to_filter("received:2026-02-28").unwrap()
+        );
+        assert_eq!(
+            to_filter("received:2024-03-01T00:30:00+02:00").unwrap(),
+            to_filter("received:2024-02-29").unwrap()
+        );
+        assert_eq!(
+            to_filter("received:2024-02-29T23:30:00-02:00").unwrap(),
+            to_filter("received:2024-03-01").unwrap()
         );
         assert!(to_filter("received:2026-02-30").is_err());
         assert!(to_filter("sent:2026-01-01").is_err());

@@ -24,12 +24,18 @@ Current prioritized work:
    Received-date restrictions also support `tomorrow`, `last week`, `next
    month`, the `past month` alias, and weekday names for the current week;
    numeric `MM/DD/YYYY` and current-year `MM/DD` dates are also accepted.
-   Relative weeks use Monday boundaries in UTC. Extend coverage only where the
-   backend preserves EAS meaning.
-2. **Recurring calendar events.** The old 0.16.19 probe found JMAP recurrence
-   unsupported. A direct create/read probe against the available Stalwart
-   0.16.27 sandbox still rejected `recurrenceRules`; this remains blocked by the
-   backend and needs rechecking after a backend upgrade.
+   Relative weeks use Monday boundaries in UTC. ISO date-time restrictions
+   with explicit offsets normalize to their UTC calendar day before
+   constructing the filter. Extend coverage only where the backend preserves
+   EAS meaning.
+2. **Recurring calendar events.** A localhost-only Stalwart 1.2.0 sandbox
+   (released 2026-11-23) accepted, returned, and then destroyed a throwaway
+   weekly `recurrenceRules` event through JMAP. This removes the old backend
+   blocker for newer Stalwart versions. The gateway still rejects EAS
+   recurrence fields, and production remains on Stalwart 0.16.27, which
+   rejected this property. Implement EAS↔JSCalendar recurrence mapping with
+   compatibility for the deployed backend; do not upgrade production in place
+   because Stalwart 1.0 introduced a database-layout migration.
 3. **Real-client 16.1 certification and rollout.** Production remains pinned
    to a tagged 14.0 build. Forced-version protocol tests do not establish that
    iOS/Outlook negotiate or behave correctly against an advertised 16.1 build.
@@ -40,6 +46,13 @@ Current prioritized work:
    ValidateCert, MeetingResponse, and ItemOperations fetches for mail, contacts,
    calendars, tasks, notes, and attachment blobs are implemented. Enterprise
    IRM remains out of scope for the personal-account gateway.
+
+Also completed (`pending`): **KQL timestamp offset normalization**. RFC3339
+timestamps in `received:` restrictions now resolve to the UTC calendar day
+before translation into JMAP date boundaries. Regression tests cover offsets
+crossing a UTC day boundary in both directions. Full suite: 280 passed, 73
+ignored; clippy with warnings denied and formatting checks pass. Deployment
+details will be recorded after rollout.
 
 Also completed (`b981802`): **KQL message importance restriction**. Find now
 maps `importance:low`, `importance:normal`/`medium`, and `importance:high` to
