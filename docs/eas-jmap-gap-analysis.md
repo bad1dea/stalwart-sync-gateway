@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `0f5d869` (2026-11-24)
+## Reconciled status for source `main` at `9c4fc8e` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -191,8 +191,12 @@ Current prioritized work:
    serialization, and inbound rejection. The series-level mapping was first
    deployed as `deploy-2026-11-24-eas-appointment-reply-time-88a0438`; this
    release extends it to recurring exceptions. Full suite: 324 passed, 73
-   ignored; strict Clippy, formatting, and diff checks pass. Deployment is
-   pending.
+   ignored; strict Clippy, formatting, and diff checks pass. Deployed as
+   `deploy-2026-11-24-eas-recurring-appointment-reply-time-9c4fc8e`;
+   homelab commit `d4909f5`, image
+   `sha256:c143eb523362032a77c28d19c7bc526b898737a1e4d48013aa0cd118f781875d`,
+   started `2026-11-24T10:44:28Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
 
 Also completed (`b11914b`): **KQL timestamp offset normalization**. RFC3339
 timestamps in `received:` restrictions now resolve to the UTC calendar day
