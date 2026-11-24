@@ -4705,7 +4705,9 @@ impl JmapClient {
                 && !fields.unsupported_response_type
                 && !fields.unsupported_attendees
                 && !fields.unsupported_body
-                && fields.body_type.is_none_or(|body_type| body_type == 1),
+                && fields
+                    .body_type
+                    .is_none_or(|body_type| matches!(body_type, 1 | 2)),
             "unsupported per-instance calendar fields"
         );
         let account_id = auth
@@ -4884,6 +4886,14 @@ impl JmapClient {
             patch.insert(
                 format!("recurrenceOverrides/{key}/description"),
                 serde_json::json!(body),
+            );
+            patch.insert(
+                format!("recurrenceOverrides/{key}/descriptionContentType"),
+                serde_json::json!(if fields.body_type == Some(2) {
+                    "text/html"
+                } else {
+                    "text/plain"
+                }),
             );
         }
         if let Some(start) = fields.start_time.as_deref() {
@@ -8142,7 +8152,8 @@ fn calendar_recurrence_exceptions(
                         || key.starts_with("links/")
                         || key.starts_with("virtualLocations/")
                 }),
-                "unsupported recurrence exception fields"
+                "unsupported recurrence exception fields: {:?}",
+                patch.keys().collect::<Vec<_>>()
             );
             let title = patch
                 .get("title")
@@ -8163,8 +8174,10 @@ fn calendar_recurrence_exceptions(
                 .map(|value| value.as_str().context("invalid exception description type"))
                 .transpose()?;
             anyhow::ensure!(
-                description_content_type
-                    .is_none_or(|content_type| { content_type.eq_ignore_ascii_case("text/plain") }),
+                description_content_type.is_none_or(|content_type| {
+                    content_type.eq_ignore_ascii_case("text/plain")
+                        || content_type.eq_ignore_ascii_case("text/html")
+                }),
                 "unsupported exception description type"
             );
             anyhow::ensure!(
@@ -8172,7 +8185,13 @@ fn calendar_recurrence_exceptions(
                 "exception description type has no description"
             );
             let description = description.map(|value| crate::model::EmailBody {
-                body_type: crate::model::EmailBodyType::Plain,
+                body_type: if description_content_type
+                    .is_some_and(|content_type| content_type.eq_ignore_ascii_case("text/html"))
+                {
+                    crate::model::EmailBodyType::Html
+                } else {
+                    crate::model::EmailBodyType::Plain
+                },
                 value: value.to_owned(),
                 is_truncated: false,
             });
@@ -9835,12 +9854,31 @@ mod tests {
         );
 
         let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
-            "id":"e", "recurrenceOverrides":{"2026-11-25T12:00:00":{
+            "id":"e", "uid":"series-uid", "timeZone":"America/Toronto",
+            "recurrenceRule":{"frequency":"weekly","byDay":[{"day":"we"}]},
+            "recurrenceOverrides":{"2026-11-25T12:00:00":{
                 "description":"HTML", "descriptionContentType":"text/html"
             }}
         }))
         .unwrap();
-        assert!(crate::model::CalendarEvent::from(object).unsupported_recurrence);
+        let event = crate::model::CalendarEvent::from(object);
+        assert!(!event.unsupported_recurrence);
+        assert_eq!(
+            event.recurrence_exceptions[0]
+                .description
+                .as_ref()
+                .unwrap()
+                .body_type,
+            crate::model::EmailBodyType::Html
+        );
+        assert_eq!(
+            event.recurrence_exceptions[0]
+                .description
+                .as_ref()
+                .unwrap()
+                .value,
+            "HTML"
+        );
     }
 
     #[test]
@@ -10672,6 +10710,10 @@ mod calendar_update_state_tests {
                                 "Body"
                             );
                             assert_eq!(
+                                patch["recurrenceOverrides/2026-11-15T10:00:00/descriptionContentType"],
+                                "text/html"
+                            );
+                            assert_eq!(
                                 patch["recurrenceOverrides/2026-11-15T10:00:00/locations"],
                                 serde_json::json!({"loc1":{"name":"New room", "coordinates":"geo:43.65,-79.38"}})
                             );
@@ -10717,7 +10759,7 @@ mod calendar_update_state_tests {
         let fields = crate::wbxml::eas::CalendarFields {
             subject: Some("New title".to_owned()),
             body: Some("Body".to_owned()),
-            body_type: Some(1),
+            body_type: Some(2),
             location: Some("New room".to_owned()),
             location_coordinates: Some(("43.65".to_owned(), "-79.38".to_owned())),
             start_time: Some("20261115T180000Z".to_owned()),
