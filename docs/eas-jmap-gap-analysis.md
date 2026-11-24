@@ -329,9 +329,12 @@ Current prioritized work:
    text/html, common Office/OpenDocument formats, EPUB, RTF, and PDF, with
    configurable size/decompression limits and partial-index cases ([Stalwart
    attachment text extraction](https://www.stalw.art/docs/storage/text-extraction/)). A
-   correct gateway feature needs an exact attachment-content source or
-   extractor and must account for server indexing configuration and
-   truncation; no such local content path is implemented yet. Boolean
+   Find now downloads and locally extracts direct `text/plain`, `text/html`,
+   and `text/rtf` attachment blobs up to 2 MiB for exact text/NEAR checks;
+   text-property searches broad-scan the selected mailbox so those attachment
+   checks do not depend on JMAP's attachment index setting. PDF, Office,
+   OpenDocument, and larger attachment extraction remain unsupported, so
+   attachment-content proximity is still incomplete for those formats. Boolean
    combinations
    use the existing exact matcher for supported predicates. Regression
    coverage exercises phrase operands,
@@ -357,7 +360,7 @@ Current prioritized work:
    These queries use a scoped mailbox scan and exact local token-prefix
    comparison because JMAP text filters cannot preserve prefix semantics.
    See the [KeyQL wildcard reference](https://learn.microsoft.com/en-us/sharepoint/dev/general-development/keyword-query-language-kql-syntax-reference).
-   Regression suite: 371 passed,
+   Regression suite: 372 passed,
    73 ignored; strict Clippy, formatting, and diff checks passed. The nested
    current proximity and paging changes are not deployed or runtime-verified.
    Phrase matching is case-insensitive and requires adjacent

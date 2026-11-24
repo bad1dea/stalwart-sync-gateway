@@ -243,6 +243,9 @@ pub struct EmailAttachment {
     pub content_id: Option<String>,
     pub content_location: Option<String>,
     pub inline: bool,
+    /// Locally extracted text when a Find operation needs exact full-text
+    /// matching for a directly text-based attachment.
+    pub extracted_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

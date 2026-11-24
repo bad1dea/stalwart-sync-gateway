@@ -7283,6 +7283,7 @@ impl From<EmailObject> for Email {
                 content_id: attachment.cid,
                 content_location: attachment.location,
                 inline: attachment.disposition.as_deref() == Some("inline"),
+                extracted_text: None,
             })
             .collect();
         let is_draft = value.keywords.get("$draft").copied().unwrap_or(false);

@@ -108,6 +108,7 @@ fn same_search(session: &SearchState, filter: &Value, search_text: &str) -> bool
     session.filter == *filter && session.search_text == search_text
 }
 const SEARCHES: &str = "__find__";
+const MAX_FIND_ATTACHMENT_TEXT_BYTES: u64 = 2 * 1024 * 1024;
 
 pub(super) async fn handle(
     state: &AppState,
@@ -194,12 +195,22 @@ async fn execute(
         json!({"operator":"OR", "conditions":scope.iter().map(|id| json!({"inMailbox":id})).collect::<Vec<_>>()})
     };
     let (phrase_match, phrases) = phrase_filter;
+    let search_attachment_text = matches!(
+        phrase_match,
+        query::PhraseMatch::Near { .. } | query::PhraseMatch::Onear { .. }
+    ) || phrases.iter().any(|(property, _)| {
+        matches!(property.as_str(), "text" | "$not$text")
+            || property.starts_with("$proximity-")
+            || property.starts_with("$op$near:")
+            || property.starts_with("$op$onear:")
+    });
     // A negated phrase cannot use JMAP's term filter as its candidate set:
     // the backend does not preserve phrase semantics, and NOT would exclude
     // messages that do not contain all indexed phrase terms. Boolean terms,
     // including negated ones, remain exact JMAP predicates, so retaining the
     // query preserves a smaller safe candidate set for positive phrase forms.
     let query = if phrase_match == query::PhraseMatch::None
+        || search_attachment_text
         || matches!(
             phrase_match,
             query::PhraseMatch::Near { .. } | query::PhraseMatch::Onear { .. }
@@ -286,7 +297,28 @@ async fn execute(
                 query_state = candidate.query_state.clone();
             }
             let count = candidate.emails.len();
-            for email in candidate.emails {
+            for mut email in candidate.emails {
+                if search_attachment_text {
+                    for attachment in &mut email.attachments {
+                        if attachment.extracted_text.is_some()
+                            || attachment.size > MAX_FIND_ATTACHMENT_TEXT_BYTES
+                            || !is_extractable_attachment_type(&attachment.content_type)
+                        {
+                            continue;
+                        }
+                        let (bytes, downloaded_type) = state
+                            .jmap
+                            .download_blob_with_type(auth, &attachment.blob_id, &attachment.name)
+                            .await?;
+                        let content_type = if downloaded_type == "application/octet-stream" {
+                            &attachment.content_type
+                        } else {
+                            &downloaded_type
+                        };
+                        attachment.extracted_text =
+                            extract_find_attachment_text(content_type, &bytes);
+                    }
+                }
                 if email_matches_phrases_with_addresses_and_attachments(
                     &email.subject,
                     email.body.as_ref(),
@@ -429,6 +461,36 @@ async fn execute(
     b.end();
     b.end();
     Ok(b.finish())
+}
+
+fn is_extractable_attachment_type(content_type: &str) -> bool {
+    matches!(
+        content_type
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "text/plain" | "text/html" | "text/rtf" | "application/rtf"
+    )
+}
+
+fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<String> {
+    let text = match content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "text/plain" => String::from_utf8_lossy(bytes).into_owned(),
+        "text/html" => super::strip_html_tags(&String::from_utf8_lossy(bytes).replace('>', "> ")),
+        "text/rtf" | "application/rtf" => super::rtf_to_plain_text(&String::from_utf8_lossy(bytes)),
+        _ => return None,
+    };
+    Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 pub(super) fn matching_principals(
@@ -1176,6 +1238,11 @@ fn proximity_chain_matches_email(
         });
     }
     fields.extend(attachments.iter().map(|attachment| attachment.name.clone()));
+    fields.extend(
+        attachments
+            .iter()
+            .filter_map(|attachment| attachment.extracted_text.clone()),
+    );
     for field in fields {
         let words = proximity_words(&field);
         if !evaluate_proximity_chain(&words, chain)?.is_empty() {
@@ -1217,6 +1284,11 @@ fn proximity_operand_matches_email(
         });
     }
     fields.extend(attachments.iter().map(|attachment| attachment.name.clone()));
+    fields.extend(
+        attachments
+            .iter()
+            .filter_map(|attachment| attachment.extracted_text.clone()),
+    );
     for field in fields {
         if !evaluate_proximity_operand(&proximity_words(&field), operand)?.is_empty() {
             return Ok(true);
@@ -1373,6 +1445,14 @@ fn email_matches_phrase_with_attachments(
     if property == "text"
         && [from, to, cc, bcc]
             .into_iter()
+            .any(|value| query::subject_has_phrase(value, phrase))
+    {
+        return Ok(true);
+    }
+    if property == "text"
+        && attachments
+            .iter()
+            .filter_map(|attachment| attachment.extracted_text.as_deref())
             .any(|value| query::subject_has_phrase(value, phrase))
     {
         return Ok(true);
@@ -1984,6 +2064,62 @@ mod tests {
     }
 
     #[test]
+    fn find_extracts_text_attachments_for_exact_search_matching() {
+        assert_eq!(
+            extract_find_attachment_text("text/plain; charset=utf-8", b"alpha beta"),
+            Some("alpha beta".to_owned())
+        );
+        assert_eq!(
+            extract_find_attachment_text("text/html", b"<p>alpha</p><p>beta</p>"),
+            Some("alpha beta".to_owned())
+        );
+        assert_eq!(
+            extract_find_attachment_text("application/pdf", b"alpha beta"),
+            None
+        );
+
+        let attachment = crate::model::EmailAttachment {
+            blob_id: "text-blob".to_owned(),
+            part_id: None,
+            name: "notes.txt".to_owned(),
+            content_type: "text/plain".to_owned(),
+            size: 10,
+            content_id: None,
+            content_location: None,
+            inline: false,
+            extracted_text: Some("Alpha beta in attachment".to_owned()),
+        };
+        assert!(email_matches_phrase_with_attachments(
+            "Unrelated subject",
+            None,
+            "",
+            "",
+            "",
+            "",
+            std::slice::from_ref(&attachment),
+            "text",
+            "alpha beta",
+        )
+        .unwrap());
+        assert!(proximity_matches_email(
+            "Unrelated subject",
+            None,
+            "",
+            "",
+            "",
+            "",
+            &[attachment],
+            false,
+            0,
+            &[
+                ("left".to_owned(), "alpha".to_owned()),
+                ("right".to_owned(), "beta".to_owned())
+            ],
+        )
+        .unwrap());
+    }
+
+    #[test]
     fn kql_prefix_queries_match_only_word_prefixes() {
         let (kind, terms) = query::phrases_for_postfilter("subject:serv*").unwrap();
         assert!(
@@ -2284,6 +2420,7 @@ mod tests {
             content_id: None,
             content_location: None,
             inline: false,
+            extracted_text: None,
         }];
         assert!(email_matches_phrases_with_addresses_and_attachments(
             "Unrelated subject",
@@ -2380,6 +2517,7 @@ mod tests {
             content_id: None,
             content_location: None,
             inline: false,
+            extracted_text: None,
         }];
         let matches = |subject: &str, attachments: &[crate::model::EmailAttachment]| {
             email_matches_phrases_with_addresses_and_attachments(
