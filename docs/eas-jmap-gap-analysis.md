@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `7e5bec5` (2026-11-24)
+## Reconciled status for source `main` at `d99b3a3` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -30,10 +30,10 @@ Current prioritized work:
    EAS meaning.
 2. **Remaining recurring series exception edits.** Common event and task
    recurrence rules map to Stalwart's singular JSCalendar `recurrenceRule`.
-   Deleting an event occurrence now writes and syncs an excluded
-   `recurrenceOverrides` entry via EAS 16.0/16.1 `InstanceId`; excluded
-   occurrences also round-trip to legacy EAS exception fields. Per-instance
-   field changes and Task exceptions remain unsupported and fail closed.
+   EAS 16.0/16.1 occurrence deletes and subject/plain-text body edits now map
+   through `InstanceId` and `recurrenceOverrides`; exclusions and those two
+   fields round-trip. Per-instance time/location/other field changes and Task
+   exceptions remain unsupported and fail closed.
 3. **Real-client 16.1 certification and rollout.** Production remains pinned
    to a tagged 14.0 build. Forced-version protocol tests do not establish that
    iOS/Outlook negotiate or behave correctly against an advertised 16.1 build.
@@ -248,6 +248,22 @@ formatting, and diff checks pass. Deployed as
 The container started at `2026-11-24T07:24:27Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production still
 advertises EAS 14.0.
+
+Also completed (`d99b3a3`): **EAS 16.0/16.1 recurrence subject and body edits**.
+Sync Change with `InstanceId` can patch an occurrence's subject and plain-text
+body without changing the parent series. The JMAP update is guarded with
+`ifInState`; returned overrides map into EAS exception responses. Time,
+location, HTML body, and other occurrence fields remain rejected until their
+mapping can preserve all stored values. Tests cover the request patch, local
+key conversion, read/write field mapping, and rejection of unsupported shapes.
+Full suite: 300 passed, 73 ignored; clippy with warnings denied, formatting,
+and diff checks pass. Deployed as
+`deploy-2026-11-24-eas-calendar-instance-fields-d99b3a3`; homelab commit
+`871807d`. The forced Compose build produced image
+`sha256:e3b348225ec6e9be9d3f21211823025f9d6cff4862fae011adbf0f778fbadead`.
+The container started at `2026-11-24T07:39:50Z` with restart count zero; mesh
+`/healthz` returned `ok` and `/readyz` returned `ready`. Production continues
+to advertise EAS 14.0.
 
 Also completed (`2febaa0`): **EAS 16 Calendar ClientUid deduplication**.
 Calendar Sync Add accepts the optional `ClientUid` for 16.0 and 16.1, validates
@@ -798,8 +814,8 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Sync: Contacts (read) | **Done** | `ContactCard/query`+`/get` (JSContact, RFC 9553) | Confirmed live against a real card. |
 | Sync: Contacts (write: add/edit/delete) | **Done** (`deploy-2026-08-25s`, addresses `deploy-2026-11-22-eas-contact-addresses-0e8a071`, categories `deploy-2026-11-22-eas-contact-categories-79585fc`, names `deploy-2026-11-22-eas-contact-name-parts-c3f4378` and `deploy-2026-11-22-eas-contact-name-prefix-c48ee61c`, dates `deploy-2026-11-22-eas-contact-dates-5f03d66`, department `deploy-2026-11-22-eas-contact-department-6708d25`, secondary phones `deploy-2026-11-22-eas-contact-secondary-phones-6c3d00d`, fax/pager `deploy-2026-11-22-eas-contact-fax-pager-9e7ab32`, car/radio `deploy-2026-11-22-eas-contact-car-radio-60e5eca`, assistant phone `deploy-2026-11-22-eas-contact-assistant-phone-0a89e0a`, phonetic names `deploy-2026-11-22-eas-contact-yomi-name-1a55270` and `deploy-2026-11-22-eas-contact-yomi-company-4860c47`, office location `deploy-2026-11-22-eas-contact-office-location-64d7a8e`, webpage `deploy-2026-11-22-eas-contact-web-page-d97a2d2`, business fax `deploy-2026-11-22-eas-contact-business-fax-78425f9`) | `ContactCard/set` | `sync_contacts_collection` handles Add/Change/Delete and hash diff. Contact names and phonetic names, birthdays/anniversaries, emails, home/business primary and secondary lines, fax/pager/car/radio/assistant numbers, web pages, organization/title/department, office location, business/home/other postal address components, and categories map to JSContact. Partial address, name, organization, phone, link, and anniversary edits preserve untouched components under a JMAP state guard; empty fields clear components. |
 | Sync: Calendar (read) | **Done** | `CalendarEvent/query`+`/get` (JSCalendar, draft-ietf-calext-jscalendarbis superseding RFC 8984) | Confirmed live against a real event; recurrence is now mapped where supported. |
-| Sync: Calendar (write: add/edit/delete) | **Done** (`deploy-2026-08-25t`; recurrence `deploy-2026-11-24-eas-calendar-recurrence-bea1387`; occurrence exclusions `deploy-2026-11-24-eas-calendar-instance-exclusions-7e5bec5`) | `CalendarEvent/set` | `save_calendar_event`/`destroy_calendar_event` handle lifecycle and supported recurrence rules. EAS 16.0/16.1 occurrence deletes use `recurrenceOverrides`; per-instance field edits remain unsupported. |
-| Sync: Calendar recurrence (RRULE) | **Done (`deploy-2026-11-24-eas-calendar-recurrence-bea1387`; exclusions `deploy-2026-11-24-eas-calendar-instance-exclusions-7e5bec5`)** | Stalwart singular JSCalendar `recurrenceRule` and `recurrenceOverrides` | Common EAS daily, weekly, monthly, nth-weekday, and yearly rules map both ways. Excluded occurrences map to EAS exception responses. Per-instance field overrides and non-representable patterns remain unsupported. |
+| Sync: Calendar (write: add/edit/delete) | **Done** (`deploy-2026-08-25t`; recurrence `deploy-2026-11-24-eas-calendar-recurrence-bea1387`; instance fields `deploy-2026-11-24-eas-calendar-instance-fields-d99b3a3`) | `CalendarEvent/set` | `save_calendar_event`/`destroy_calendar_event` handle lifecycle and supported recurrence rules. EAS 16.0/16.1 occurrence deletes and subject/plain-text body changes use `recurrenceOverrides`; other per-instance fields remain unsupported. |
+| Sync: Calendar recurrence (RRULE) | **Done** (`deploy-2026-11-24-eas-calendar-recurrence-bea1387`; instance support `deploy-2026-11-24-eas-calendar-instance-fields-d99b3a3`) | Stalwart singular JSCalendar `recurrenceRule` and `recurrenceOverrides` | Common EAS daily, weekly, monthly, nth-weekday, and yearly rules map both ways. Exclusions and supported subject/plain-text body overrides round-trip. Other per-instance fields and non-representable patterns remain unsupported. |
 | Sync: Tasks | **Done, two-way (`deploy-2026-08-26i`); recurrence mapping (`deploy-2026-11-24-eas-task-recurrence-a28032b`) | `CalendarEvent` with `@type: "Task"` — confirmed live, not a separate JMAP object | Existing Add/Change/Delete lifecycle is live-verified over WBXML. Common EAS recurrence patterns map through the shared JSCalendar `recurrenceRule` conversion; local regressions cover WBXML parse/write and JMAP Task-object conversion. Task-specific Stalwart create/get and real-client recurrence behavior remain unverified. Per-instance recurrence overrides are rejected. The Task field order still needs real-device verification. |
 | Sync: Notes | **Done, two-way** | Email-backed synthetic-message workaround (`src/jmap/notes.rs`) | The most structurally interesting piece of this whole gateway — see that file's module doc. Full Add/Change/Delete supported. |
 | FolderSync | **Done, incremental** | `Mailbox/get`, `AddressBook/get`, `Calendar/get` | Key 0 sends a full Adds snapshot; subsequent keys diff per-device collection fingerprints into Adds/Updates/Deletes. Unknown keys return Status 9. |
