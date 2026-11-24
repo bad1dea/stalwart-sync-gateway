@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `7f07cd4` (2026-11-24)
+## Reconciled status for source `main` at `276413d` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -40,15 +40,18 @@ Current prioritized work:
 2. **Remaining recurring series exception edits.** Common event and task
    recurrence rules map to Stalwart's singular JSCalendar `recurrenceRule`.
    EAS 16.0/16.1 occurrence deletes and subject/plain-text body/location/time,
-   all-day, availability, sensitivity, and category edits now map through
+   all-day, availability, category, and reminder edits now map through
    `InstanceId` and `recurrenceOverrides`; exclusions and those fields
-   round-trip. Start/end edits convert through the parent
-   event's IANA timezone, preserve the inherited endpoint when only one is
-   changed, derive the new duration, and reject negative durations. All-day
-   flags are occurrence-specific. Other fields and Task exceptions remain
-   unsupported and fail closed. Regression tests cover these mappings; the
-   full suite passes (303 passed, 73 ignored), and Clippy with warnings denied
-   passes. Location support deployed as
+   round-trip. Reminder overrides preserve unrelated alerts and support clearing
+   the occurrence reminder. Sensitivity is not mapped: RFC 8984 prohibits
+   `privacy` patches inside recurrence overrides, so such edits fail closed.
+   Start/end edits convert through the parent event's IANA timezone, preserve
+   the inherited endpoint when only one is changed, derive the new duration,
+   and reject negative durations. All-day flags are occurrence-specific. Other
+   event fields remain unsupported and fail closed. The EAS Tasks class has no
+   per-instance exception container, so Task exceptions are not an EAS gap.
+   Regression tests cover these mappings; the full suite passes (304 passed,
+   73 ignored), and Clippy with warnings denied passes. Location support deployed as
    `deploy-2026-11-24-eas-calendar-instance-location-fb4eb72`; homelab commit
    `8e9e20d`. The forced Compose build produced image
    `sha256:42a88cd789681e1743bd1c7f5368e87f61559a0072e8b74cae236236b5eeb277`.
@@ -58,14 +61,23 @@ Current prioritized work:
    homelab commit `c53e767`. The forced Compose build produced image
    `sha256:dd5981dbf3696e21b935a5e7cb292adfa67a8a4d2707329535a15b81f7ef70df`.
    The container started at `2026-11-24T08:17:03Z` with restart count zero;
-   `/healthz` returned `ok` and `/readyz` returned `ready`. Availability,
-   sensitivity, and category overrides are deployed as
-   `deploy-2026-11-24-eas-calendar-instance-metadata-7f07cd4`; homelab commit
+   `/healthz` returned `ok` and `/readyz` returned `ready`. Availability and
+   category overrides are deployed as
+   `deploy-2026-11-24-eas-calendar-instance-metadata-7f07cd4`; that source tag
+   also included a `privacy` override, which this newer standards correction
+   removes. Homelab commit
    `74169dc`. The forced Compose build produced image
    `sha256:dd5981dbf3696e21b935a5e7cb292adfa67a8a4d2707329535a15b81f7ef70df`.
    The container started at `2026-11-24T08:17:03Z` with restart count zero;
-   `/healthz` returned `ok` and `/readyz` returned `ready`. Regression suite: 303
-   passed, 73 ignored; strict Clippy passed.
+   `/healthz` returned `ok` and `/readyz` returned `ready`. Regression suite at
+   that release: 303 passed, 73 ignored; strict Clippy passed. Reminder overrides
+   and the standards correction for unsupported sensitivity are now deployed as
+   `deploy-2026-11-24-eas-calendar-instance-reminder-276413d`; deployment
+   verification: homelab commit `21b831f`; image
+   `sha256:84d723522d1591ee5ff6d2f084e41a3d84b33b597f91963816f51cf64d9dc961`;
+   started `2026-11-24T08:40:13Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The suite passed 304 tests (73 ignored); strict Clippy,
+   formatting, and diff checks passed.
 3. **Real-client 16.1 certification and rollout.** Production remains pinned
    to a tagged 14.0 build. Forced-version protocol tests do not establish that
    iOS/Outlook negotiate or behave correctly against an advertised 16.1 build.
@@ -976,7 +988,8 @@ read/reply/send, plus calendar/contacts/notes sync.
    tested the wrong property for Stalwart. Fresh localhost-only probes found
    that Stalwart 0.16.27 and 1.2.0 accept and return singular `recurrenceRule`.
    The gateway now implements common EAS recurrence mappings and excluded
-   event occurrences. Per-instance field overrides, Task exceptions, and
+   event occurrences. Sensitivity and other unsupported event overrides fail
+   closed; Tasks have no per-instance exception container in MS-ASTASK, and
    patterns that cannot be represented safely remain unsupported. See the
    current reconciliation above and `src/jmap/calendar_recurrence.rs`.
 6. ✅ **DONE (`deploy-2026-08-26i`) — Tasks.** The "structurally hard, no
