@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `c960f05` (2026-11-24)
+## Reconciled status for source `main` at `d5de354` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -22,8 +22,9 @@ Current prioritized work:
    text based. Mailbox Find also accepts `kind:email` as already satisfied by
    its Email-only query; other kinds remain unsupported in this scope.
    Received-date restrictions also support `tomorrow`, `last week`, `next
-   month`, and the `past month` alias; relative weeks use Monday boundaries in
-   UTC. Extend coverage only where the backend preserves EAS meaning.
+   month`, the `past month` alias, and weekday names for the current week;
+   relative weeks use Monday boundaries in UTC. Extend coverage only where the
+   backend preserves EAS meaning.
 2. **Recurring calendar events.** The old 0.16.19 probe found JMAP recurrence
    unsupported. A direct create/read probe against the available Stalwart
    0.16.27 sandbox still rejected `recurrenceRules`; this remains blocked by the
@@ -79,6 +80,18 @@ formatting, and diff checks pass. Deployed as
 Compose built image
 `sha256:172c3bfb43aaf613377bbc66f29c037d52c0fc7dbd069ef48c50f11486f3c50a`.
 The replacement started at `2026-11-24T05:17:50Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
+continues to advertise EAS 14.0.
+
+Also completed (`d5de354`): **KQL received weekday restrictions**. English
+weekday values now match that day within the current Monday-based week, with
+case-insensitive parsing. Tests pin the date and verify Monday, Tuesday, and
+Sunday boundaries. Full suite: 279 passed, 73 ignored; clippy with warnings
+denied, formatting, and diff checks pass. Deployment as
+`deploy-2026-11-24-eas-kql-weekdays-d5de354` completed through homelab commit
+`43f2d15`. Compose built image
+`sha256:aed78ce179af9be148752613cc420d3f0f55c7ad255fb28a93594f1af805ccb9`.
+The replacement started at `2026-11-24T05:22:44Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
 continues to advertise EAS 14.0.
 
