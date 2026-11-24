@@ -685,6 +685,8 @@ fn extract_archive_text(bytes: &[u8], media_type: &str) -> Option<String> {
             name == "word/document.xml"
                 || name == "word/footnotes.xml"
                 || name == "word/endnotes.xml"
+                || name == "word/comments.xml"
+                || name == "word/glossary/document.xml"
                 || (name.starts_with("word/header") && name.ends_with(".xml"))
                 || (name.starts_with("word/footer") && name.ends_with(".xml"))
         }
@@ -694,6 +696,8 @@ fn extract_archive_text(bytes: &[u8], media_type: &str) -> Option<String> {
         | "application/vnd.ms-excel.template.macroenabled.12" => {
             name == "xl/sharedStrings.xml"
                 || (name.starts_with("xl/worksheets/") && name.ends_with(".xml"))
+                || (name.starts_with("xl/comments") && name.ends_with(".xml"))
+                || (name.starts_with("xl/threadedComments/") && name.ends_with(".xml"))
         }
         "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         | "application/vnd.openxmlformats-officedocument.presentationml.slideshow"
@@ -701,7 +705,9 @@ fn extract_archive_text(bytes: &[u8], media_type: &str) -> Option<String> {
         | "application/vnd.ms-powerpoint.presentation.macroenabled.12"
         | "application/vnd.ms-powerpoint.slideshow.macroenabled.12"
         | "application/vnd.ms-powerpoint.template.macroenabled.12" => {
-            (name.starts_with("ppt/slides/slide") || name.starts_with("ppt/notesSlides/notesSlide"))
+            (name.starts_with("ppt/slides/slide")
+                || name.starts_with("ppt/notesSlides/notesSlide")
+                || name.starts_with("ppt/comments/comment"))
                 && name.ends_with(".xml")
         }
         "application/vnd.oasis.opendocument.text"
@@ -2710,6 +2716,45 @@ mod tests {
                 &docx
             ),
             Some("alpha beta".to_owned())
+        );
+        let docx_with_comments = test_office_archive(&[
+            (
+                "word/document.xml",
+                b"<w:document><w:t>body text</w:t></w:document>",
+            ),
+            (
+                "word/comments.xml",
+                b"<w:comments><w:t>comment text</w:t></w:comments>",
+            ),
+        ]);
+        assert_eq!(
+            extract_find_attachment_text(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                &docx_with_comments
+            ),
+            Some("body text comment text".to_owned())
+        );
+        let xlsx_with_comments = test_office_archive(&[(
+            "xl/comments1.xml",
+            b"<comments><comment><text>cell comment</text></comment></comments>",
+        )]);
+        assert_eq!(
+            extract_find_attachment_text(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                &xlsx_with_comments
+            ),
+            Some("cell comment".to_owned())
+        );
+        let pptx_with_comments = test_office_archive(&[(
+            "ppt/comments/comment1.xml",
+            b"<comments><cm><text>slide comment</text></cm></comments>",
+        )]);
+        assert_eq!(
+            extract_find_attachment_text(
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                &pptx_with_comments
+            ),
+            Some("slide comment".to_owned())
         );
         let odt = test_office_archive(&[(
             "content.xml",

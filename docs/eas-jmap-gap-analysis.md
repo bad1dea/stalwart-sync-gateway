@@ -38,7 +38,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    attachment formats and assess resource-bounded scanned-PDF OCR and large
    attachments. Current extraction is bounded and supports legacy `.xls`, EPUB,
    macro-enabled OOXML, RFC 822 messages, Outlook `.msg` attachments, and
-   MIME-declared charsets for text attachments and XML declaration encodings;
+   Word, Excel, and PowerPoint package comment text, plus MIME-declared charsets
+   for text attachments and XML declaration encodings;
    legacy binary Word and PowerPoint files, scanned PDFs, and payloads above
    the extraction limit remain outside exact local matching.
 
@@ -400,7 +401,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    Extracted and normalized text output is capped at 2 MiB, including bounded
    streaming output from the PDF parser and XML entity/CDATA decoding. RFC 822 and
    Outlook message decoding are capped at the same 2 MiB extracted-text limit;
-   compressed Outlook RTF is not expanded. Mocked 16.1
+   compressed Outlook RTF is not expanded. OOXML extraction includes Word
+   comments and glossary text, Excel comments, and PowerPoint comments within
+   the same bounded XML budget. Mocked 16.1
    Find regressions exercise quoted-printable EML extraction through download
    and exact proximity matching, exact subject matching against a real OLE
    Outlook message fixture, `application/problem+json` extraction, Windows-1252
@@ -410,7 +413,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    non-matches. XML output is stopped as soon as its decoded text limit is
    reached, and normalization avoids a per-word temporary allocation. Regression
    coverage checks exact-limit XML and normalization, plus rejection above the
-   limit. The full suite passes 396 tests (73 ignored); strict Clippy, format,
+   limit. OOXML comment extraction is checked with archive fixtures and an
+   end-to-end Word comment proximity search. The full suite passes 396 tests
+   (73 ignored); strict Clippy, format,
    and diff checks pass.
    Legacy `.xls` attachments are parsed with a vendored Calamine patch that
    caps dense worksheet and formula ranges at 250,000 total cells before range
@@ -425,8 +430,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    are bounded.
    EPUB XHTML chapters use the same archive-entry and expanded-XML limits; a
    mocked HTTP Find regression verifies proximity matching in EPUB text. The
-   macro-enabled OOXML types use the same restricted document parts; a mocked
-   Find regression covers an `.xlsm` attachment. RFC
+   macro-enabled OOXML types use the same bounded document-part selection; a
+   mocked Find regression covers an `.xlsm` attachment. RFC
    822 extraction is deployed as `deploy-2026-11-24-eas-find-rfc822-e5c4f0f`;
    homelab commit `1aff02a`, image
    `sha256:8b763e9e24545d2b8779f54f816ec792c0d758ccca38db9bb807626e80d05d33`,

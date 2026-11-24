@@ -14008,6 +14008,15 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     docx_archive
         .write_all(b"<w:document><w:p><w:t>echo</w:t><w:t>foxtrot in DOCX</w:t></w:p></w:document>")
         .unwrap();
+    docx_archive
+        .start_file(
+            "word/comments.xml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+    docx_archive
+        .write_all(b"<w:comments><w:comment><w:t>golf hotel in a Word comment</w:t></w:comment></w:comments>")
+        .unwrap();
     let docx = docx_archive.finish().unwrap().into_inner();
     let mut epub_archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     epub_archive
@@ -14237,6 +14246,25 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         .body(find_body(
             "30000000-0000-4000-8000-000000000098",
             "echo NEAR(0) foxtrot",
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["docx-attachment"]
+    );
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "30000000-0000-4000-8000-000000000092",
+            "golf NEAR(0) hotel",
             None,
             "0-9",
         ))
