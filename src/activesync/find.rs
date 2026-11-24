@@ -1967,6 +1967,20 @@ mod tests {
             !email_matches_phrases("Beta alpha subject", None, None, None, None, kind, &terms,)
                 .unwrap()
         );
+
+        let (kind, terms) = query::phrases_for_postfilter(r#"WORDS(serv*, "alpha beta")"#).unwrap();
+        assert!(
+            email_matches_phrases("Service request", None, None, None, None, kind, &terms,)
+                .unwrap()
+        );
+        assert!(
+            email_matches_phrases("Alpha beta request", None, None, None, None, kind, &terms,)
+                .unwrap()
+        );
+        assert!(
+            !email_matches_phrases("Observe request", None, None, None, None, kind, &terms,)
+                .unwrap()
+        );
     }
 
     #[test]

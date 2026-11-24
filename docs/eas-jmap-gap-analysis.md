@@ -348,7 +348,9 @@ Current prioritized work:
    of JMAP text terms and the local matcher enforces the quoted phrase's word
    order and adjacency. As with proximity, exact local matching cannot inspect
    extracted attachment payload text; that indexing limitation remains open.
-   See [MS-SEARCH Synonyms](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-search/3e8338e0-d5fe-4a9f-ada9-85bc292d4c1a).
+   `WORDS(...)` also accepts trailing-prefix terms and phrases; its synonym
+   alternatives are locally OR-matched with the same exact prefix/phrase rules.
+   See [MS-SEARCH Synonyms](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-search/3e8338e0-d5fe-4a9f-ada9-85bc292d4c1a) and the [KeyQL wildcard reference](https://learn.microsoft.com/en-us/sharepoint/dev/general-development/keyword-query-language-kql-syntax-reference).
    Free-text and supported string-property terms now accept KQL's trailing `*`
    prefix operator, including supported AND/OR combinations with boolean
    predicates. Quoted property phrases can use it on the final phrase token.

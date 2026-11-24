@@ -44,6 +44,14 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
     {
         return Ok(json!({}));
     }
+    if tokens.first() == Some(&Token::Words)
+        && tokens
+            .iter()
+            .any(|token| matches!(token, Token::Word(word) if word.contains('*')))
+        && phrases_for_postfilter(input).is_some()
+    {
+        return Ok(json!({}));
+    }
     if tokens
         .iter()
         .any(|token| matches!(token, Token::Near(_) | Token::Onear(_)))
@@ -147,6 +155,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         position += 1;
         let mut terms = Vec::new();
         let mut has_phrase = false;
+        let mut has_prefix = false;
         loop {
             let Token::Word(word) = tokens.get(position)? else {
                 return None;
@@ -159,11 +168,33 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                 && !word[1..word.len() - 1].contains(['"', '\\'])
             {
                 let phrase = &word[1..word.len() - 1];
-                if phrase.trim().is_empty() {
+                if phrase.trim().is_empty()
+                    || (phrase.contains(['*', '?'])
+                        && (phrase.contains('?')
+                            || !phrase.ends_with('*')
+                            || phrase[..phrase.len() - 1].contains('*')))
+                {
                     return None;
                 }
                 has_phrase |= phrase.split_whitespace().count() > 1;
+                has_prefix |= phrase.ends_with('*');
                 phrase
+            } else if let Some((property, prefix)) = prefix_search_term(word) {
+                if property != "text" {
+                    return None;
+                }
+                has_prefix = true;
+                terms.push((property, prefix));
+                match tokens.get(position) {
+                    Some(Token::Comma) => position += 1,
+                    Some(Token::Word(_)) => {}
+                    Some(Token::Right) => {
+                        position += 1;
+                        break;
+                    }
+                    _ => return None,
+                }
+                continue;
             } else if !word.is_empty()
                 && !word.contains(['"', '\\', ':', '*', '?'])
                 && comparison_index(word).is_none()
@@ -184,7 +215,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                 _ => return None,
             }
         }
-        if position != tokens.len() || terms.is_empty() || !has_phrase {
+        if position != tokens.len() || terms.is_empty() || !(has_phrase || has_prefix) {
             return None;
         }
         return Some((PhraseMatch::Any, terms));
@@ -2898,6 +2929,18 @@ mod tests {
             ))
         );
         assert!(phrases_for_postfilter("WORDS(\"two words\", other) OR cat").is_none());
+        assert_eq!(to_filter("WORDS(serv*, \"two words\")").unwrap(), json!({}));
+        assert_eq!(
+            phrases_for_postfilter("WORDS(serv*, \"two words\")"),
+            Some((
+                PhraseMatch::Any,
+                vec![
+                    ("text".to_owned(), "serv*".to_owned()),
+                    ("text".to_owned(), "two words".to_owned()),
+                ]
+            ))
+        );
+        assert!(to_filter("WORDS(serv**, other)").is_err());
     }
 
     #[test]
