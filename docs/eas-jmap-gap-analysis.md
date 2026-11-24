@@ -440,6 +440,11 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `deploy-2026-11-24-eas-find-xml-encoding-d3562d0`; homelab commit `fdc24ad`,
    image `sha256:03d6ecbe63bf63feac91ecf9375599ea33b750c6c4e54b05a5e4b0f3c7986328`,
    started `2026-11-24T22:12:57Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Bounded Find output for PDF extraction, XML decoding,
+   and normalization is deployed as
+   `deploy-2026-11-24-eas-find-output-bounds-89458dc`; homelab commit `81bcebc`,
+   image `sha256:83597d0280f41620ef9d52370fe093a038705c00b6fa860cad897d9cf3f7de3f`,
+   started `2026-11-24T22:23:53Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. EPUB
    extraction is deployed as `deploy-2026-11-24-eas-find-epub-55daf09`;
    homelab commit `97d913d`, image
