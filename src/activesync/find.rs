@@ -799,6 +799,30 @@ fn email_matches_phrases_with_addresses_and_attachments(
             let mut values = Vec::new();
             for (property, phrase) in phrases {
                 match property.as_str() {
+                    "$op$proximity-or" => {
+                        let right = proximity_operand_from_value(
+                            values
+                                .pop()
+                                .ok_or_else(|| anyhow::anyhow!("invalid proximity expression"))?,
+                        )?;
+                        let left = proximity_operand_from_value(
+                            values
+                                .pop()
+                                .ok_or_else(|| anyhow::anyhow!("invalid proximity expression"))?,
+                        )?;
+                        let mut alternatives = Vec::new();
+                        match left {
+                            ProximityOperand::Any(items) => alternatives.extend(items),
+                            item => alternatives.push(item),
+                        }
+                        match right {
+                            ProximityOperand::Any(items) => alternatives.extend(items),
+                            item => alternatives.push(item),
+                        }
+                        values.push(ExpressionValue::ProximityGroup(ProximityOperand::Any(
+                            alternatives,
+                        )));
+                    }
                     "$op$and" | "$op$or" => {
                         let right = match values
                             .pop()
@@ -815,6 +839,18 @@ fn email_matches_phrases_with_addresses_and_attachments(
                                     bcc,
                                     attachments,
                                     &chain,
+                                )?
+                            }
+                            ExpressionValue::ProximityGroup(operand) => {
+                                proximity_operand_matches_email(
+                                    subject,
+                                    body,
+                                    from,
+                                    to,
+                                    cc,
+                                    bcc,
+                                    attachments,
+                                    &operand,
                                 )?
                             }
                             _ => anyhow::bail!("invalid phrase expression"),
@@ -834,6 +870,18 @@ fn email_matches_phrases_with_addresses_and_attachments(
                                     bcc,
                                     attachments,
                                     &chain,
+                                )?
+                            }
+                            ExpressionValue::ProximityGroup(operand) => {
+                                proximity_operand_matches_email(
+                                    subject,
+                                    body,
+                                    from,
+                                    to,
+                                    cc,
+                                    bcc,
+                                    attachments,
+                                    &operand,
                                 )?
                             }
                             _ => anyhow::bail!("invalid phrase expression"),
@@ -935,6 +983,16 @@ fn email_matches_phrases_with_addresses_and_attachments(
                     attachments,
                     &chain,
                 ),
+                Some(ExpressionValue::ProximityGroup(operand)) => proximity_operand_matches_email(
+                    subject,
+                    body,
+                    from,
+                    to,
+                    cc,
+                    bcc,
+                    attachments,
+                    &operand,
+                ),
                 _ => anyhow::bail!("invalid phrase expression"),
             }
         }
@@ -968,12 +1026,23 @@ fn email_matches_phrases_with_addresses_and_attachments(
 enum ExpressionValue {
     Boolean(bool),
     ProximityTerm(String),
+    ProximityGroup(ProximityOperand),
     ProximityChain(ProximityChain),
 }
 
 enum ProximityOperand {
     Term(String),
+    Any(Vec<ProximityOperand>),
     Chain(Box<ProximityChain>),
+}
+
+fn proximity_operand_from_value(value: ExpressionValue) -> anyhow::Result<ProximityOperand> {
+    match value {
+        ExpressionValue::ProximityTerm(term) => Ok(ProximityOperand::Term(term)),
+        ExpressionValue::ProximityGroup(operand) => Ok(operand),
+        ExpressionValue::ProximityChain(chain) => Ok(ProximityOperand::Chain(Box::new(chain))),
+        _ => anyhow::bail!("invalid proximity expression"),
+    }
 }
 
 struct ProximityChain {
@@ -989,14 +1058,9 @@ fn proximity_chain_from_values(
     ordered: bool,
     max_words: usize,
 ) -> anyhow::Result<ProximityChain> {
-    let into_operand = |value| match value {
-        ExpressionValue::ProximityTerm(term) => Ok(ProximityOperand::Term(term)),
-        ExpressionValue::ProximityChain(chain) => Ok(ProximityOperand::Chain(Box::new(chain))),
-        _ => anyhow::bail!("invalid proximity expression"),
-    };
     Ok(ProximityChain {
-        left: into_operand(left)?,
-        right: into_operand(right)?,
+        left: proximity_operand_from_value(left)?,
+        right: proximity_operand_from_value(right)?,
         ordered,
         max_words,
     })
@@ -1080,6 +1144,46 @@ fn proximity_chain_matches_email(
     Ok(false)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn proximity_operand_matches_email(
+    subject: &str,
+    body: Option<&crate::model::EmailBody>,
+    from: &str,
+    to: &str,
+    cc: &str,
+    bcc: &str,
+    attachments: &[crate::model::EmailAttachment],
+    operand: &ProximityOperand,
+) -> anyhow::Result<bool> {
+    let mut fields = vec![
+        subject.to_owned(),
+        from.to_owned(),
+        to.to_owned(),
+        cc.to_owned(),
+        bcc.to_owned(),
+    ];
+    if let Some(body) = body {
+        anyhow::ensure!(
+            !body.is_truncated,
+            "Find cannot exact-match proximity in a truncated message body"
+        );
+        fields.push(match body.body_type {
+            crate::model::EmailBodyType::Plain => body.value.clone(),
+            crate::model::EmailBodyType::Html => {
+                super::strip_html_tags(&body.value.replace('>', "> "))
+            }
+            crate::model::EmailBodyType::Rtf => super::rtf_to_plain_text(&body.value),
+        });
+    }
+    fields.extend(attachments.iter().map(|attachment| attachment.name.clone()));
+    for field in fields {
+        if !evaluate_proximity_operand(&proximity_words(&field), operand)?.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn evaluate_proximity_operand(
     words: &[String],
     operand: &ProximityOperand,
@@ -1099,6 +1203,17 @@ fn evaluate_proximity_operand(
                 .collect())
         }
         ProximityOperand::Chain(chain) => evaluate_proximity_chain(words, chain),
+        ProximityOperand::Any(alternatives) => {
+            let mut spans = std::collections::BTreeSet::new();
+            for alternative in alternatives {
+                spans.extend(evaluate_proximity_operand(words, alternative)?);
+                anyhow::ensure!(
+                    spans.len() <= 100_000,
+                    "proximity expression produces too many matching spans"
+                );
+            }
+            Ok(spans)
+        }
     }
 }
 
@@ -2002,6 +2117,20 @@ mod tests {
             &terms,
         )
         .unwrap());
+    }
+
+    #[test]
+    fn proximity_accepts_parenthesized_or_alternatives_as_operands() {
+        let (kind, terms) = query::phrases_for_postfilter("cat NEAR(0) (cat OR dog)").unwrap();
+        assert!(email_matches_phrases("cat", None, None, None, None, kind, &terms).unwrap());
+
+        let (kind, terms) = query::phrases_for_postfilter("alpha ONEAR(0) (dog OR beta)").unwrap();
+        assert!(
+            email_matches_phrases("alpha beta", None, None, None, None, kind, &terms,).unwrap()
+        );
+        assert!(
+            !email_matches_phrases("beta alpha", None, None, None, None, kind, &terms,).unwrap()
+        );
     }
 
     #[test]

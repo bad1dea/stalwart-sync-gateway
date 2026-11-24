@@ -7,6 +7,7 @@ enum Token {
     Right,
     And,
     Or,
+    ProximityOr,
     Near(usize),
     Onear(usize),
     Not,
@@ -605,13 +606,135 @@ fn implicit_phrase_boolean_groups(tokens: &[Token]) -> Option<Vec<(String, Strin
     Some(output)
 }
 
+fn proximity_operand_tokens(
+    tokens: &[Token],
+) -> (
+    std::collections::HashSet<usize>,
+    std::collections::HashSet<usize>,
+) {
+    fn matching_open(tokens: &[Token], close: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        for index in (0..=close).rev() {
+            match &tokens[index] {
+                Token::Right => depth += 1,
+                Token::Left => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    fn matching_close(tokens: &[Token], open: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        for (index, token) in tokens.iter().enumerate().skip(open) {
+            match token {
+                Token::Left => depth += 1,
+                Token::Right => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    fn mark_group(
+        tokens: &[Token],
+        open: usize,
+        close: usize,
+        terms: &mut std::collections::HashSet<usize>,
+        ors: &mut std::collections::HashSet<usize>,
+    ) {
+        let range = open + 1..close;
+        if !tokens[range.clone()].iter().all(|token| {
+            matches!(
+                token,
+                Token::Word(_)
+                    | Token::Or
+                    | Token::Near(_)
+                    | Token::Onear(_)
+                    | Token::Left
+                    | Token::Right
+            )
+        }) {
+            return;
+        }
+        for index in range {
+            match tokens[index] {
+                Token::Word(_) => {
+                    terms.insert(index);
+                }
+                Token::Or => {
+                    ors.insert(index);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut terms = std::collections::HashSet::new();
+    let mut ors = std::collections::HashSet::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if !matches!(token, Token::Near(_) | Token::Onear(_)) {
+            continue;
+        }
+        if index > 0 {
+            match &tokens[index - 1] {
+                Token::Word(_) => {
+                    terms.insert(index - 1);
+                }
+                Token::Right => {
+                    if let Some(open) = matching_open(tokens, index - 1) {
+                        mark_group(tokens, open, index - 1, &mut terms, &mut ors);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if index + 1 < tokens.len() {
+            match &tokens[index + 1] {
+                Token::Word(_) => {
+                    terms.insert(index + 1);
+                }
+                Token::Left => {
+                    if let Some(close) = matching_close(tokens, index + 1) {
+                        mark_group(tokens, index + 1, close, &mut terms, &mut ors);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (terms, ors)
+}
+
 fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, String)>> {
+    let (proximity_terms, proximity_ors) = proximity_operand_tokens(tokens);
+    let tokens = tokens
+        .iter()
+        .enumerate()
+        .map(|(index, token)| {
+            if proximity_ors.contains(&index) && *token == Token::Or {
+                Token::ProximityOr
+            } else {
+                token.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let tokens = tokens.as_slice();
     if tokens.iter().any(|token| {
         !matches!(
             token,
             Token::Word(_)
                 | Token::And
                 | Token::Or
+                | Token::ProximityOr
                 | Token::Near(_)
                 | Token::Onear(_)
                 | Token::Not
@@ -643,9 +766,10 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
             let Token::Word(word) = tokens.get(position)? else {
                 return None;
             };
-            let proximity_operand = tokens
-                .get(position.wrapping_sub(1))
-                .is_some_and(|token| matches!(token, Token::Near(_) | Token::Onear(_)))
+            let proximity_operand = proximity_terms.contains(&position)
+                || tokens
+                    .get(position.wrapping_sub(1))
+                    .is_some_and(|token| matches!(token, Token::Near(_) | Token::Onear(_)))
                 || matches!(
                     tokens.get(position + 1),
                     Some(Token::Near(_) | Token::Onear(_))
@@ -744,7 +868,7 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
             }
             if !matches!(
                 operator,
-                Token::And | Token::Or | Token::Near(_) | Token::Onear(_)
+                Token::And | Token::Or | Token::ProximityOr | Token::Near(_) | Token::Onear(_)
             ) {
                 if matches!(operator, Token::Word(_) | Token::Not | Token::Left) {
                     operators.push((Token::And, true));
@@ -759,6 +883,7 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                 let precedence = |operator: &Token, implicit: bool| match (operator, implicit) {
                     (Token::And, true) => 0,
                     (Token::Or, false) => 1,
+                    (Token::ProximityOr, false) => 1,
                     (Token::And, false) => 2,
                     (Token::Near(_) | Token::Onear(_), _) => 3,
                     _ => -1,
@@ -797,17 +922,35 @@ fn valid_proximity_rpn(expression: &[(String, String)]) -> bool {
     enum Kind {
         Boolean,
         Term,
+        ProximityGroup,
         Chain,
     }
     let mut stack = Vec::new();
     for (operator, _) in expression {
         if operator == "$proximity-term" {
             stack.push(Kind::Term);
-        } else if operator.starts_with("$op$near:") || operator.starts_with("$op$onear:") {
-            if !matches!(stack.pop(), Some(Kind::Term | Kind::Chain)) {
+        } else if operator == "$op$proximity-or" {
+            if !matches!(
+                stack.pop(),
+                Some(Kind::Term | Kind::ProximityGroup | Kind::Chain)
+            ) || !matches!(
+                stack.pop(),
+                Some(Kind::Term | Kind::ProximityGroup | Kind::Chain)
+            ) {
                 return false;
             }
-            if !matches!(stack.pop(), Some(Kind::Term | Kind::Chain)) {
+            stack.push(Kind::ProximityGroup);
+        } else if operator.starts_with("$op$near:") || operator.starts_with("$op$onear:") {
+            if !matches!(
+                stack.pop(),
+                Some(Kind::Term | Kind::ProximityGroup | Kind::Chain)
+            ) {
+                return false;
+            }
+            if !matches!(
+                stack.pop(),
+                Some(Kind::Term | Kind::ProximityGroup | Kind::Chain)
+            ) {
                 return false;
             }
             stack.push(Kind::Chain);
@@ -829,6 +972,7 @@ fn expression_operator(operator: &Token) -> Option<(String, String)> {
     let name = match operator {
         Token::And => "$op$and".to_owned(),
         Token::Or => "$op$or".to_owned(),
+        Token::ProximityOr => "$op$proximity-or".to_owned(),
         Token::Near(distance) => format!("$op$near:{distance}"),
         Token::Onear(distance) => format!("$op$onear:{distance}"),
         _ => return None,
@@ -2828,6 +2972,19 @@ mod tests {
         assert_eq!(
             to_filter("alpha NEAR (beta NEAR gamma)").unwrap(),
             json!({})
+        );
+        assert_eq!(
+            phrases_for_postfilter("cat NEAR(0) (cat OR dog)"),
+            Some((
+                PhraseMatch::Expression,
+                vec![
+                    ("$proximity-term".to_owned(), "cat".to_owned()),
+                    ("$proximity-term".to_owned(), "cat".to_owned()),
+                    ("$proximity-term".to_owned(), "dog".to_owned()),
+                    ("$op$proximity-or".to_owned(), String::new()),
+                    ("$op$near:0".to_owned(), String::new()),
+                ],
+            ))
         );
     }
 
