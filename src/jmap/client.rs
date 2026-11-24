@@ -4573,7 +4573,7 @@ impl JmapClient {
     }
 
     /// Updates EAS 16.x occurrence fields with a lossless JSCalendar
-    /// override representation (subject, body, and location).
+    /// override representation.
     pub async fn save_calendar_event_instance(
         &self,
         auth: &AuthenticatedSession,
@@ -4585,11 +4585,11 @@ impl JmapClient {
             (fields.subject.is_some()
                 || fields.body.is_some()
                 || fields.location.is_some()
-                || fields.location_coordinates.is_some())
+                || fields.location_coordinates.is_some()
+                || fields.start_time.is_some()
+                || fields.end_time.is_some()
+                || fields.all_day_event.is_some())
                 && !fields.unsupported_location
-                && fields.start_time.is_none()
-                && fields.end_time.is_none()
-                && fields.all_day_event.is_none()
                 && fields.busy_status.is_none()
                 && !fields.unsupported_busy_status
                 && fields.sensitivity.is_none()
@@ -4659,6 +4659,39 @@ impl JmapClient {
             patch.insert(
                 format!("recurrenceOverrides/{key}/description"),
                 serde_json::json!(body),
+            );
+        }
+        if let Some(start) = fields.start_time.as_deref() {
+            let local = eas_to_calendar_local(start, event["timeZone"].as_str())
+                .context("calendar instance start cannot be represented in its time zone")?;
+            patch.insert(
+                format!("recurrenceOverrides/{key}/start"),
+                serde_json::json!(local.format("%Y-%m-%dT%H:%M:%S").to_string()),
+            );
+        }
+        if let Some(end) = fields.end_time.as_deref() {
+            let start_utc = if let Some(start) = fields.start_time.as_deref() {
+                chrono::NaiveDateTime::parse_from_str(start, "%Y%m%dT%H%M%SZ")?
+            } else {
+                let current_start = event["recurrenceOverrides"][&key]["start"]
+                    .as_str()
+                    .unwrap_or(&key);
+                let compact = local_to_utc_eas(current_start, event["timeZone"].as_str())
+                    .context("calendar instance start cannot be represented in its time zone")?;
+                chrono::NaiveDateTime::parse_from_str(&compact, "%Y%m%dT%H%M%SZ")?
+            };
+            let end_utc = chrono::NaiveDateTime::parse_from_str(end, "%Y%m%dT%H%M%SZ")?;
+            let seconds = end_utc.signed_duration_since(start_utc).num_seconds();
+            anyhow::ensure!(seconds >= 0, "calendar instance end precedes start");
+            patch.insert(
+                format!("recurrenceOverrides/{key}/duration"),
+                serde_json::json!(format!("PT{seconds}S")),
+            );
+        }
+        if let Some(all_day) = fields.all_day_event {
+            patch.insert(
+                format!("recurrenceOverrides/{key}/showWithoutTime"),
+                serde_json::Value::Bool(all_day),
             );
         }
         if fields.location.is_some() || fields.location_coordinates.is_some() {
@@ -7680,6 +7713,7 @@ fn simple_geo(value: &str) -> Option<(&str, &str)> {
 fn calendar_recurrence_exceptions(
     overrides: Option<&serde_json::Value>,
     timezone: Option<&str>,
+    event_duration: Option<&str>,
 ) -> anyhow::Result<Vec<crate::model::CalendarEventException>> {
     let Some(overrides) = overrides else {
         return Ok(Vec::new());
@@ -7710,7 +7744,13 @@ fn calendar_recurrence_exceptions(
                 patch.keys().all(|key| {
                     matches!(
                         key.as_str(),
-                        "title" | "description" | "descriptionContentType" | "locations"
+                        "title"
+                            | "description"
+                            | "descriptionContentType"
+                            | "locations"
+                            | "start"
+                            | "duration"
+                            | "showWithoutTime"
                     )
                 }),
                 "unsupported recurrence exception fields"
@@ -7776,12 +7816,43 @@ fn calendar_recurrence_exceptions(
                     }
                 }
             };
+            let start_local = patch
+                .get("start")
+                .map(|value| value.as_str().context("invalid exception start"))
+                .transpose()?;
+            let duration = patch
+                .get("duration")
+                .map(|value| value.as_str().context("invalid exception duration"))
+                .transpose()?;
+            let start_utc = start_local
+                .map(|start| local_to_utc_eas(start, timezone).context("invalid exception start"))
+                .transpose()?;
+            let end_utc = if start_local.is_some() || duration.is_some() {
+                let start = start_local.unwrap_or(local_start);
+                Some(
+                    calendar_end_utc(
+                        start,
+                        timezone,
+                        duration.or(event_duration).unwrap_or("PT0S"),
+                    )
+                    .context("invalid exception end")?,
+                )
+            } else {
+                None
+            };
+            let all_day = patch
+                .get("showWithoutTime")
+                .map(|value| value.as_bool().context("invalid exception all-day flag"))
+                .transpose()?;
             Ok(crate::model::CalendarEventException {
                 instance_id,
                 deleted: false,
                 title,
                 location,
                 location_coordinates,
+                start_utc,
+                end_utc,
+                all_day,
                 description,
             })
         })
@@ -7795,6 +7866,7 @@ impl From<CalendarEventObject> for CalendarEvent {
         let recurrence_exceptions = calendar_recurrence_exceptions(
             value.recurrence_overrides.as_ref(),
             recurrence_time_zone.as_deref(),
+            value.duration.as_deref(),
         );
         let recurrence_overrides_unsupported = recurrence_exceptions.is_err();
         let recurrence_exceptions = recurrence_exceptions.unwrap_or_default();
@@ -8515,6 +8587,7 @@ mod tests {
             "id":"e", "recurrenceRule":{"frequency":"weekly","byDay":[{"day":"mo"}]},
             "uid":"series-uid", "timeZone":"America/Toronto",
             "recurrenceOverrides":{"2026-11-25T12:00:00":{
+                "start":"2026-11-25T13:00:00", "duration":"PT3600S", "showWithoutTime":true,
                 "title":"Changed occurrence", "description":"Exception body",
                 "descriptionContentType":"text/plain",
                 "locations":{"room":{"name":"Changed room", "coordinates":"geo:43.65,-79.38"}}
@@ -8542,13 +8615,28 @@ mod tests {
             event.recurrence_exceptions[0].location_coordinates,
             Some(("43.65".to_owned(), "-79.38".to_owned()))
         );
+        assert_eq!(
+            event.recurrence_exceptions[0].start_utc.as_deref(),
+            Some("20261125T180000Z")
+        );
+        assert_eq!(
+            event.recurrence_exceptions[0].end_utc.as_deref(),
+            Some("20261125T190000Z")
+        );
+        assert_eq!(event.recurrence_exceptions[0].all_day, Some(true));
 
         let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
             "id":"e", "recurrenceRule":{"frequency":"weekly","byDay":[{"day":"mo"}]},
+            "uid":"series-uid", "timeZone":"America/Toronto",
             "recurrenceOverrides":{"2026-11-25T12:00:00":{"start":"2026-11-25T13:00:00"}}
         }))
         .unwrap();
-        assert!(crate::model::CalendarEvent::from(object).unsupported_recurrence);
+        let event = crate::model::CalendarEvent::from(object);
+        assert!(!event.unsupported_recurrence);
+        assert_eq!(
+            event.recurrence_exceptions[0].start_utc.as_deref(),
+            Some("20261125T180000Z")
+        );
 
         let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
             "id":"e", "recurrenceOverrides":{"2026-11-25T12:00:00":{
@@ -9106,7 +9194,7 @@ mod calendar_update_state_tests {
     }
 
     #[tokio::test]
-    async fn calendar_instance_change_patches_subject_body_and_location() {
+    async fn calendar_instance_change_patches_supported_exception_fields() {
         let requests = Arc::new(AtomicUsize::new(0));
         let request_count = requests.clone();
         let app = Router::new().route(
@@ -9139,6 +9227,9 @@ mod calendar_update_state_tests {
                                 patch["recurrenceOverrides/2026-11-15T10:00:00/locations"],
                                 serde_json::json!({"loc1":{"name":"New room", "coordinates":"geo:43.65,-79.38"}})
                             );
+                            assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/start"], "2026-11-15T13:00:00");
+                            assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/duration"], "PT3600S");
+                            assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/showWithoutTime"], true);
                             Json(serde_json::json!({"methodResponses":[[
                                 "CalendarEvent/set", {"updated":{"event-2":null}}, "instance-change"
                             ]]}))
@@ -9175,6 +9266,9 @@ mod calendar_update_state_tests {
             body_type: Some(1),
             location: Some("New room".to_owned()),
             location_coordinates: Some(("43.65".to_owned(), "-79.38".to_owned())),
+            start_time: Some("20261115T180000Z".to_owned()),
+            end_time: Some("20261115T190000Z".to_owned()),
+            all_day_event: Some(true),
             ..Default::default()
         };
         client

@@ -5837,11 +5837,11 @@ fn calendar_instance_change_supported(fields: &wbxml::eas::CalendarFields) -> bo
     (fields.subject.is_some()
         || fields.body.is_some()
         || fields.location.is_some()
-        || fields.location_coordinates.is_some())
+        || fields.location_coordinates.is_some()
+        || fields.start_time.is_some()
+        || fields.end_time.is_some()
+        || fields.all_day_event.is_some())
         && !fields.unsupported_location
-        && fields.start_time.is_none()
-        && fields.end_time.is_none()
-        && fields.all_day_event.is_none()
         && fields.busy_status.is_none()
         && !fields.unsupported_busy_status
         && fields.sensitivity.is_none()
@@ -6419,6 +6419,9 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
         exception.title.hash(&mut hasher);
         exception.location.hash(&mut hasher);
         exception.location_coordinates.hash(&mut hasher);
+        exception.start_utc.hash(&mut hasher);
+        exception.end_utc.hash(&mut hasher);
+        exception.all_day.hash(&mut hasher);
         if let Some(description) = &exception.description {
             description.body_type.eas_value().hash(&mut hasher);
             description.value.hash(&mut hasher);
@@ -6603,6 +6606,15 @@ fn write_calendar_fields(
             if exception.deleted {
                 builder.leaf(cal::DELETED, "1");
             } else {
+                if let Some(start) = &exception.start_utc {
+                    builder.leaf(cal::START_TIME, start.clone());
+                }
+                if let Some(end) = &exception.end_utc {
+                    builder.leaf(cal::END_TIME, end.clone());
+                }
+                if let Some(all_day) = exception.all_day {
+                    builder.leaf(cal::ALL_DAY_EVENT, if all_day { "1" } else { "0" });
+                }
                 if let Some(title) = &exception.title {
                     builder.leaf(cal::SUBJECT, title.clone());
                 }
@@ -8414,6 +8426,9 @@ mod tests {
                 title: Some("Changed occurrence".to_owned()),
                 location: Some("Changed room".to_owned()),
                 location_coordinates: Some(("43.65".to_owned(), "-79.38".to_owned())),
+                start_utc: Some("20261125T180000Z".to_owned()),
+                end_utc: Some("20261125T190000Z".to_owned()),
+                all_day: Some(true),
                 description: Some(crate::model::EmailBody {
                     body_type: crate::model::EmailBodyType::Plain,
                     value: "Changed body".to_owned(),
@@ -8449,18 +8464,29 @@ mod tests {
             eas::find_text_after(&document, base::LONGITUDE),
             Some("-79.38")
         );
+        assert_eq!(
+            eas::find_text_after(&document, cal::START_TIME),
+            Some("20261125T180000Z")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, cal::END_TIME),
+            Some("20261125T190000Z")
+        );
+        assert!(eas::find_all_text_after(&document, cal::ALL_DAY_EVENT)
+            .iter()
+            .any(|value| value == "1"));
         assert!(!eas::contains_token(&document, cal::DELETED));
     }
 
     #[test]
-    fn occurrence_change_gate_rejects_unimplemented_field_shapes() {
+    fn occurrence_change_gate_accepts_supported_fields_and_rejects_unimplemented_shapes() {
         let mut fields = crate::wbxml::eas::CalendarFields {
             subject: Some("Occurrence".to_owned()),
             ..Default::default()
         };
         assert!(super::calendar_instance_change_supported(&fields));
         fields.start_time = Some("20261125T170000Z".to_owned());
-        assert!(!super::calendar_instance_change_supported(&fields));
+        assert!(super::calendar_instance_change_supported(&fields));
         fields.start_time = None;
         fields.body = Some("body".to_owned());
         fields.body_type = Some(3);

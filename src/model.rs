@@ -364,6 +364,9 @@ pub struct CalendarEventException {
     pub title: Option<String>,
     pub location: Option<String>,
     pub location_coordinates: Option<(String, String)>,
+    pub start_utc: Option<String>,
+    pub end_utc: Option<String>,
+    pub all_day: Option<bool>,
     pub description: Option<EmailBody>,
 }
 
