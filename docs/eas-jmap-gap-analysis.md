@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `ea4467e` (2026-11-24)
+## Reconciled status for source `main` at `216f34d` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -119,17 +119,29 @@ Current prioritized work:
    formatting, and diff checks passed. The exception link patch supports full map
    replacement and individual nested changes; external URL-only enclosures are
    deliberately not downloaded.
-3. **Real-client 16.1 certification and rollout.** Production remains pinned
+3. **Calendar Timezone.** Calendar reads now preserve the JSCalendar IANA
+   `timeZone` and serialize the MS-ASDTYPE 172-byte `TIME_ZONE_INFORMATION`
+   structure for EAS, including recurring standard/daylight transition rules
+   derived for the event year. Fixed-offset zones emit zero transition dates;
+   invalid zones are omitted. Deployed as
+   `deploy-2026-11-24-eas-calendar-timezone-216f34d`; homelab commit
+   `14e4f16`, image
+   `sha256:90a883352233af51d4f489e5df94f6eb6a0f2119cd30c60701736bedd4455748`,
+   started `2026-11-24T09:37:57Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The suite passed 312 tests (73 ignored); strict Clippy,
+   formatting, and diff checks passed. Binary-layout regressions cover Toronto
+   daylight transitions and fixed UTC.
+4. **Real-client 16.1 certification and rollout.** Production remains pinned
    to a tagged 14.0 build. Forced-version protocol tests do not establish that
    iOS/Outlook negotiate or behave correctly against an advertised 16.1 build.
    Keep 16.1 unadvertised until the implementation and a fresh device pass are
    complete.
-4. **Legacy/low-priority commands and operations.** Mail Sync Add now creates
+5. **Legacy/low-priority commands and operations.** Mail Sync Add now creates
    drafts and non-draft Email items in the requested Mailbox. ResolveRecipients,
    ValidateCert, MeetingResponse, and ItemOperations fetches for mail, contacts,
    calendars, tasks, notes, and attachment blobs are implemented. Enterprise
    IRM remains out of scope for the personal-account gateway.
-5. **Online meeting URI fields.** EAS defines `OnlineMeetingConfLink` and
+6. **Online meeting URI fields.** EAS defines `OnlineMeetingConfLink` and
    `OnlineMeetingExternalLink` from 14.1, but the deployed Stalwart 0.16.27
    CalendarEvent implementation has no `virtualLocations` property. The
    JSCalendar-standard mapping cannot be enabled until the backend exposes a

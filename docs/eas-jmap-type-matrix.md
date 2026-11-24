@@ -6,7 +6,7 @@ cited below is transcribed directly from [MS-ASWBXML] v20250520 (fetched as a PD
 from `officeprotocoldoc.z19.web.core.windows.net`), section 2.1.2.1's per-codepage
 tables — the same primary source used to scaffold the corresponding `pub mod`
 blocks in `src/wbxml/eas.rs`. Current implementation status is read fresh from that
-file and `src/activesync.rs` at commit `ea4467e`, not carried over from memory.
+file and `src/activesync.rs` at commit `216f34d`, not carried over from memory.
 
 **Verdict key:** ✅ Implemented · 🟡 Possible via JMAP, not built · ⛔ No JMAP
 equivalent · ❓ Needs live verification.
@@ -31,7 +31,7 @@ inferred.
 
 | Field | Token | Min. version | Status | JMAP (JSCalendar / RFC 8984, superseded by jscalendarbis) mechanism | Notes |
 |---|---|---|---|---|---|
-| Timezone | 0x05 | All | ⛔ *(today)* / 🟡 | `start` is local time + a separate IANA `timeZone` property (or absent = UTC) | The gateway already does real IANA-timezone-aware UTC conversion for `start_utc`/`end_utc` (`local_to_utc_eas` in `jmap/client.rs`, DST-tested) — the *conversion logic* exists, it just never emits the MS-ASCAL `Timezone` element (a binary-encoded `TIME_ZONE_INFORMATION` struct, not a plain string) back to the device. |
+| Timezone | 0x05 | All | ✅ (`deploy-2026-11-24-eas-calendar-timezone-216f34d`) | JSCalendar IANA `timeZone` → MS-ASDTYPE `TIME_ZONE_INFORMATION` | Emits the 172-byte structure as Base64, with the event-year recurring DST transition rules; fixed-offset zones use zero dates. Invalid or missing IANA zones are omitted. The event year is taken from the UTC start time, with the current UTC year as fallback. |
 | AllDayEvent | 0x06 | All | ✅ | JSCalendar `showWithoutTime` | |
 | Attendees / Attendee / Email / Name | 0x07-0x0A | All | ✅ two-way (`deploy-2026-08-26l`) | JSCalendar `participants` and `replyTo` | Each participant carries its email, name, role, optional flag, and participation status; organizer derives from role `owner`. |
 | Body / BodyTruncated | 0x0B-0x0C | 2.5 only (12.0+ uses AirSyncBase:Body, codepage 17) | ✅ description sync | JSCalendar `description` + `descriptionContentType` | AirSyncBase Body preferences select plain or HTML content; truncation is reported according to the requested preference. |
