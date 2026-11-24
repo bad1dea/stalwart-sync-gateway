@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `2290936` (2026-11-24)
+## Reconciled status for source `main` at `c07ded1` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -22,8 +22,14 @@ Current prioritized work:
    MS-KQL groups those restrictions with OR. The standalone negated form
    `NOT subject:"..."` and unary-minus forms such as
    `-body:"..."` are exact-filtered over the scoped mailbox; mixed negation
-   expressions remain rejected. Regression coverage confirms matching and
-   non-matching cases. The initial standalone NOT support was deployed as
+   expressions remain rejected. A positive phrase OR `isread:true/false` is
+   also supported through exact local evaluation. Regression coverage checks
+   both branches and excludes reversed phrase candidates. Deployed as
+   `deploy-2026-11-24-eas-kql-phrase-read-or-c07ded1`; homelab commit
+   `3a88b30`, image
+   `sha256:fcca8355ec570fe7af2214c196470b4864688d720699809024611e19b7852ca4`,
+   started `2026-11-24T12:10:15Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The initial standalone NOT support was deployed as
    `deploy-2026-11-24-eas-kql-negative-phrase-26627d7`; homelab commit
    `1a0de67`, image
    `sha256:51ec7da6f0293dfd841016ed06aa75e1d9f37bd03b5244190e42b046526d3670`,
@@ -43,19 +49,20 @@ Current prioritized work:
    distinct properties (for example subject plus body) are exact-filtered
    together; candidate filtering preserves the other restrictions, result
    order, totals, and range paging. An OR expression made only of positive
-   phrase terms is also exact-filtered across its alternatives. Mixed
-   phrase/non-phrase OR branches, mixed AND/OR precedence, and NOT forms remain
-   rejected because the candidate filter could change their Boolean meaning.
+   phrase terms is exact-filtered across its alternatives. A phrase may also
+   be ORed with `isread:true` or `isread:false`; other mixed OR terms, mixed
+   AND/OR precedence, and compound NOT forms remain rejected because the
+   candidate filter could change their Boolean meaning.
    A single positive `body:"multiword phrase"`
    or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
    body and text scans fetch message bodies and reject a truncated body rather
    than return an incomplete match. Implicitly OR-grouped restrictions on a
-   phrase property and mixed or NOT phrase expressions remain rejected because
-   property grouping or candidate filtering could change Boolean meaning. Phrase matching
-   is case-insensitive and requires adjacent words in order. Regression tests
-   cover plain, HTML, and RTF bodies, subject/body conjunctions, truncation, and
-   unsupported Boolean forms. Full
-   suite: 330 passed, 73 ignored; strict Clippy, formatting, and diff checks
+   phrase property and unsupported mixed or compound NOT expressions remain
+   rejected because property grouping or candidate filtering could change
+   Boolean meaning. Phrase matching is case-insensitive and requires adjacent
+   words in order. Regression tests cover plain, HTML, and RTF bodies,
+   subject/body conjunctions, truncation, and unsupported Boolean forms. Full
+   suite: 332 passed, 73 ignored; strict Clippy, formatting, and diff checks
    passed. Deployed as
    `deploy-2026-11-24-eas-kql-phrase-or-05bbe4b`; homelab commit
    `4de6cf1`, image
