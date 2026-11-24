@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `2febaa0` (2026-11-24)
+## Reconciled status for source `main` at `5f3547a` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -43,6 +43,14 @@ Current prioritized work:
    ValidateCert, MeetingResponse, and ItemOperations fetches for mail, contacts,
    calendars, tasks, notes, and attachment blobs are implemented. Enterprise
    IRM remains out of scope for the personal-account gateway.
+5. **Sync-embedded Fetch for non-mail collections.** Mail and Contacts now
+   return Sync `Responses/Fetch` data. Calendar, Tasks, and Notes Fetch commands
+   are still ignored and need class-specific responses and tests.
+6. **Online meeting URI fields.** EAS defines `OnlineMeetingConfLink` and
+   `OnlineMeetingExternalLink` from 14.1, but the deployed Stalwart 0.16.27
+   CalendarEvent implementation has no `virtualLocations` property. The
+   JSCalendar-standard mapping cannot be enabled until the backend exposes a
+   representation.
 
 Also completed (`b11914b`): **KQL timestamp offset normalization**. RFC3339
 timestamps in `received:` restrictions now resolve to the UTC calendar day
@@ -245,6 +253,20 @@ The protocol requirements are documented in Microsoft's [ClientUid]
 (https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascal/d22282da-0cc5-4fba-b4b4-5aef341a6c8e)
 and [UID](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascal/8f1fb00c-a156-49e8-9f54-478ecb0ce743)
 specifications.
+
+Also completed in the current source: **Contacts Sync Fetch**. A client Sync
+`Fetch` command now returns the full contact fields in a Sync
+`Responses/Fetch` entry, using the already-filtered address-book snapshot so a
+contact in another book is not exposed. Missing or out-of-book IDs return EAS
+status 8. Regression coverage checks success and collection scoping; the test
+fixture now applies JMAP's `inAddressBook` query filter. Full suite: 293 passed,
+73 ignored; clippy with warnings denied, formatting, and diff checks pass.
+Deployed as `deploy-2026-11-24-eas-contacts-sync-fetch-5f3547a`; homelab
+commit `249abda`. The forced Compose build produced image
+`sha256:f64c7a9121683757d13c62475a28cb1ca65115528b8852b4f6bf6f0a0e3b2a3a`.
+The replacement started at `2026-11-24T07:00:42Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
+continues to advertise EAS 14.0.
 
 Also completed: **KQL property and qualifier compliance**. MS-KQL only recognizes a
 property restriction when the property, operator, and value are contiguous;
