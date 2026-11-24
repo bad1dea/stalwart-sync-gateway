@@ -13595,6 +13595,18 @@ async fn find_proximity_queries_filter_complete_message_text_and_page_exactly() 
     assert_eq!(eas::find_text_after(&second, f::TOTAL), Some("2"));
     assert_eq!(eas::find_all_text_after(&second, air::SERVER_ID).len(), 1);
     assert_eq!(eas::find_text_after(&second, f::RANGE), Some("1-1"));
+    let changed_query = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(sid, "delta NEAR(0) zeta", None, "1-1"))
+        .send()
+        .await
+        .unwrap();
+    let changed_query = wbxml::decode_document(&changed_query.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        eas::find_all_text_after(&changed_query, f::STATUS),
+        vec!["1", "4"]
+    );
 }
 
 #[tokio::test]

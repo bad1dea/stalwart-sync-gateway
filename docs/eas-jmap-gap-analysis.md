@@ -308,8 +308,9 @@ Current prioritized work:
    operator](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-kql/31e6a96d-8b5d-4d3b-b4fa-af4b58e90a39).
    Find paging sessions now also bind the original KQL text, so queries that
    share a broadened JMAP candidate filter cannot reuse each other's page
-   state. Regression coverage checks that proximity queries with the same
-   broad filter retain distinct paging identities.
+   state. An end-to-end paging regression confirms that reusing a SearchId for
+   a different proximity query returns the required restart status even though
+   both queries share the same broad JMAP filter.
    Proximity
    matching also evaluates attachment filenames;
    attachment payload text remains unavailable for local proximity checks.
