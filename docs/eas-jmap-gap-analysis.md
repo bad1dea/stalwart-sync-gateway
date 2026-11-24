@@ -273,10 +273,11 @@ Current prioritized work:
    be ORed with `isread`, `isflagged`, `hasattachment(s)`, importance, received,
    sent, and size restrictions. Other mixed OR terms that lack a safe candidate
    filter or exact local matcher remain unsupported. Repeated same-property
-   phrases are now accepted in mixed explicit AND/OR expressions when explicit
-   operators separate occurrences; adjacent ambiguous implicit repeats remain
-   rejected. Regression coverage checks repeated subject phrases across grouped
-   branches with body and read predicates, plus exact end-to-end result totals.
+   phrases are locally OR-grouped when their KQL grouping is unambiguous,
+   including adjacent alternatives combined with supported filters and explicit
+   groups. Ambiguous repeated-property forms remain rejected. Regression
+   coverage checks repeated subject phrases across grouped branches with body
+   and read predicates, plus exact end-to-end result totals.
    Negated phrases combined
    with predicates outside the supported boolean, importance, received, sent,
    and size set remain rejected to preserve their Boolean meaning.
@@ -284,9 +285,8 @@ Current prioritized work:
    or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
    body and text scans fetch message bodies and reject a truncated body rather
    than return an incomplete match. Implicitly OR-grouped restrictions on a
-   phrase property mixed with explicit operators remain rejected unless
-   explicit AND/OR tokens separate each occurrence, preserving the expression
-   tree's grouping.
+   phrase property mixed with explicit operators are evaluated locally when
+   their expression tree can be preserved; ambiguous groups remain rejected.
    Direct two-operand `NEAR` and `ONEAR` queries and flat/parenthesized Boolean
    expressions containing proximity operators now broaden to the selected
    mailbox and exact-filter token positions locally. The KQL default distance
