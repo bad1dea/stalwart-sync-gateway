@@ -8871,8 +8871,8 @@ mod tests {
                     content_location: Some("cid:part-1".to_owned()),
                 }]),
                 description: Some(crate::model::EmailBody {
-                    body_type: crate::model::EmailBodyType::Plain,
-                    value: "Changed body".to_owned(),
+                    body_type: crate::model::EmailBodyType::Html,
+                    value: "<p>Changed body</p>".to_owned(),
                     is_truncated: false,
                 }),
                 ..Default::default()
@@ -8885,7 +8885,10 @@ mod tests {
             air::CHANGE,
             &event,
             ProtocolVersion::V16_1,
-            &[],
+            &[crate::wbxml::eas::RequestedBodyPreference {
+                body_type: 2,
+                ..Default::default()
+            }],
         );
         let document = builder.finish();
         assert!(eas::find_all_text_after(&document, cal::SUBJECT)
@@ -8893,7 +8896,8 @@ mod tests {
             .any(|subject| subject == "Changed occurrence"));
         assert!(eas::find_all_text_after(&document, base::DATA)
             .iter()
-            .any(|body| body == "Changed body"));
+            .any(|body| body == "<p>Changed body</p>"));
+        assert_eq!(eas::find_text_after(&document, base::TYPE), Some("2"));
         assert!(eas::find_all_text_after(&document, base::DISPLAY_NAME)
             .iter()
             .any(|location| location == "Changed room"));
