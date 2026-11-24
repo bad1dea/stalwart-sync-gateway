@@ -128,11 +128,14 @@ NONE. Quoted phrase order is enforced locally because Stalwart's native text
 index does not preserve it. Direct `NEAR` and `ONEAR` operators now use exact
 local token-distance matching over complete message text and common address
 fields, including Boolean expressions with supported predicates. `attachment:`
-name searches are matched locally against attachment metadata; text attachments
-are extracted for exact text/proximity matching when they are text/*, JSON, or
-XML and at most 2 MiB. PDF, Office/OpenDocument, and larger attachment content
-positions remain unsupported. Find is protocol-version gated to
-16.1 and is not advertised while production negotiates only 14.0.
+name searches are matched locally against attachment metadata. Text, JSON, XML,
+text-bearing PDF, OOXML Word/Excel/PowerPoint, and OpenDocument Text/Spreadsheet/
+Presentation attachments are extracted for exact text/proximity matching up to
+2 MiB, with bounded archive expansion. Legacy binary Office formats, scanned-PDF
+OCR, and larger attachment content remain unsupported. These extraction changes
+are source-tested and deployed; real-client validation remains open. Find is
+protocol-version gated to 16.1 and is not advertised while production negotiates
+only 14.0.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
 SendMail posts a full new outgoing message; SmartReply/SmartForward use
@@ -245,11 +248,14 @@ session's fixes were, not against spec-reading alone.
 ## Remaining verification items
 
 - KQL proximity — direct `NEAR`/`ONEAR` and Boolean combinations with supported
-  predicates now exact-filter full message text and common address fields,
-  using the default distance of eight or an explicit distance. `attachment:`
-  name searches match filenames; attachment-content positions are not yet
-  evaluated.
-- Recurrence — Stalwart 0.16.27 rejects `recurrenceRules` on create and omits
-  it on read; recheck after a backend upgrade.
+  predicates exact-filter full message text and common address fields, using
+  the default distance of eight or an explicit distance. Attachment payload
+  positions are available for supported extracted formats up to 2 MiB;
+  legacy binary Office formats, scanned PDFs, and larger files remain outside
+  local exact matching.
+- Recurrence — common EAS event/task rules map to Stalwart's singular
+  `recurrenceRule`; unsupported patterns fail closed. Task-specific backend
+  create/get and real-client recurrence behavior still need verification.
+  Sensitivity cannot be patched per occurrence under RFC 8984.
 - Real-client 16.1 negotiation and behavior, including Tasks field order and
   enabled Oof rendering. Production remains on 14.0 until that pass.
