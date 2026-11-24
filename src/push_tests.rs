@@ -1025,11 +1025,33 @@ fn mail_preferences(filter: Option<&str>, body: Option<(&str, &str)>) -> wbxml::
 }
 
 fn requested_body_options(preferences: &[eas::RequestedBodyPreference]) -> wbxml::Document {
+    requested_body_options_with_parts(preferences, &[])
+}
+
+fn requested_body_options_with_parts(
+    preferences: &[eas::RequestedBodyPreference],
+    body_parts: &[eas::RequestedBodyPreference],
+) -> wbxml::Document {
     use eas::{airsync as air, airsync_base as base};
     let mut b = eas::DocumentBuilder::new();
     b.start(air::OPTIONS);
     for preference in preferences {
         b.start(base::BODY_PREFERENCE);
+        b.leaf(base::TYPE, preference.body_type.to_string());
+        if let Some(limit) = preference.truncation_size {
+            b.leaf(base::TRUNCATION_SIZE, limit.to_string());
+        }
+        b.leaf(
+            base::ALL_OR_NONE,
+            if preference.all_or_none { "1" } else { "0" },
+        );
+        if let Some(preview) = preference.preview {
+            b.leaf(base::PREVIEW, preview.to_string());
+        }
+        b.end();
+    }
+    for preference in body_parts {
+        b.start(base::BODY_PART_PREFERENCE);
         b.leaf(base::TYPE, preference.body_type.to_string());
         if let Some(limit) = preference.truncation_size {
             b.leaf(base::TRUNCATION_SIZE, limit.to_string());
@@ -1051,6 +1073,38 @@ fn requested_body_options(preferences: &[eas::RequestedBodyPreference]) -> wbxml
     }
     b.end();
     b.finish()
+}
+
+fn subdocuments_for_token(
+    document: &wbxml::Document,
+    token: wbxml::token::Token,
+) -> Vec<wbxml::Document> {
+    document
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(start, node)| {
+            if !matches!(node, wbxml::Node::Start(candidate) if *candidate == token) {
+                return None;
+            }
+            let mut depth = 0usize;
+            for (end, node) in document.nodes.iter().enumerate().skip(start) {
+                match node {
+                    wbxml::Node::Start(_) => depth += 1,
+                    wbxml::Node::End => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(wbxml::Document {
+                                nodes: document.nodes[start..=end].to_vec(),
+                            });
+                        }
+                    }
+                    wbxml::Node::Text(_) | wbxml::Node::Opaque(_) => {}
+                }
+            }
+            None
+        })
+        .collect()
 }
 
 fn sync_body_preferences(
@@ -12143,6 +12197,11 @@ async fn item_operations_fetches_all_entries_in_order_and_isolates_failures() {
     b.leaf(base::TYPE, "1");
     b.leaf(base::TRUNCATION_SIZE, "2");
     b.end();
+    b.start(base::BODY_PART_PREFERENCE);
+    b.leaf(base::TYPE, "4");
+    b.leaf(base::TRUNCATION_SIZE, "5");
+    b.end();
+    b.leaf(air::MIME_SUPPORT, "2");
     b.end();
     b.end();
     b.start(ops::FETCH);
@@ -12172,7 +12231,7 @@ async fn item_operations_fetches_all_entries_in_order_and_isolates_failures() {
     b.end();
     b.end();
     let request = wbxml::encode_document(&b.finish());
-    for version in ["14.0", "16.1"] {
+    for version in ["14.0", "14.1", "16.0", "16.1"] {
         let response = env
             .req("ItemOperations", "client")
             .header("MS-ASProtocolVersion", version)
@@ -12212,6 +12271,17 @@ async fn item_operations_fetches_all_entries_in_order_and_isolates_failures() {
             eas::find_text_after(&fetches[3], base::TRUNCATED),
             Some("1")
         );
+        if matches!(version, "14.1" | "16.0") {
+            let parts = subdocuments_for_token(&fetches[3], base::BODY_PART);
+            assert_eq!(parts.len(), 1, "BodyPart must be included for {version}");
+            assert_eq!(eas::find_text_after(&parts[0], base::TYPE), Some("4"));
+            assert_eq!(body_data_bytes(&parts[0]), Some(&MIME_BYTES[..5]));
+        } else {
+            assert!(
+                subdocuments_for_token(&fetches[3], base::BODY_PART).is_empty(),
+                "ItemOperations BodyPart must be omitted for {version}"
+            );
+        }
         assert_eq!(
             eas::find_text_after(&fetches[7], email::SUBJECT),
             Some("subject m1")
@@ -15267,20 +15337,28 @@ async fn search_and_sync_fetch_use_the_requested_body_preferences() {
         airsync as air, airsync_base as base, search as srch, RequestedBodyPreference as Pref,
     };
     let env = start_env(Opts::default()).await;
-    let options = requested_body_options(&[
-        Pref {
-            body_type: 2,
-            truncation_size: Some(1),
-            all_or_none: true,
-            preview: Some(0),
-        },
-        Pref {
+    let options = requested_body_options_with_parts(
+        &[
+            Pref {
+                body_type: 2,
+                truncation_size: Some(1),
+                all_or_none: true,
+                preview: Some(0),
+            },
+            Pref {
+                body_type: 1,
+                truncation_size: Some(2),
+                preview: Some(1),
+                ..Default::default()
+            },
+        ],
+        &[Pref {
             body_type: 1,
-            truncation_size: Some(2),
-            preview: Some(1),
+            truncation_size: Some(3),
+            preview: Some(2),
             ..Default::default()
-        },
-    ]);
+        }],
+    );
     let mut b = eas::DocumentBuilder::new();
     b.start(srch::SEARCH);
     b.start(srch::STORE);
@@ -15300,6 +15378,7 @@ async fn search_and_sync_fetch_use_the_requested_body_preferences() {
     b.end();
     let response = env
         .req("Search", "client")
+        .header("MS-ASProtocolVersion", "16.1")
         .body(wbxml::encode_document(&b.finish()))
         .send()
         .await
@@ -15308,23 +15387,55 @@ async fn search_and_sync_fetch_use_the_requested_body_preferences() {
     assert_eq!(eas::find_all_text_after(&doc, srch::STATUS), vec!["1", "1"]);
     let data = eas::find_all_text_after(&doc, base::DATA);
     assert!(!data.is_empty());
-    assert!(data.iter().all(|value| value == "bo"));
-    assert!(eas::find_all_text_after(&doc, base::PREVIEW)
+    assert_eq!(
+        data.iter().filter(|value| value.as_str() == "bo").count(),
+        2
+    );
+    assert_eq!(
+        data.iter().filter(|value| value.as_str() == "bod").count(),
+        2
+    );
+    let previews = eas::find_all_text_after(&doc, base::PREVIEW);
+    assert_eq!(
+        previews
+            .iter()
+            .filter(|value| value.as_str() == "b")
+            .count(),
+        2
+    );
+    assert_eq!(
+        previews
+            .iter()
+            .filter(|value| value.as_str() == "bo")
+            .count(),
+        2
+    );
+    let parts = subdocuments_for_token(&doc, base::BODY_PART);
+    assert_eq!(parts.len(), 2);
+    assert!(parts
         .iter()
-        .all(|value| value == "b"));
+        .all(|part| eas::find_text_after(part, base::DATA) == Some("bod")));
 
     let response = env
         .req("Sync", "client")
+        .header("MS-ASProtocolVersion", "16.1")
         .body(sync_body("0", "inbox"))
         .send()
         .await
         .unwrap();
     let prime = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
-    let options = requested_body_options(&[Pref {
-        body_type: 4,
-        truncation_size: Some(5),
-        ..Default::default()
-    }]);
+    let options = requested_body_options_with_parts(
+        &[Pref {
+            body_type: 4,
+            truncation_size: Some(5),
+            ..Default::default()
+        }],
+        &[Pref {
+            body_type: 2,
+            truncation_size: Some(4),
+            ..Default::default()
+        }],
+    );
     let mut b = eas::DocumentBuilder::new();
     b.start(air::SYNC);
     b.start(air::COLLECTIONS);
@@ -15341,6 +15452,7 @@ async fn search_and_sync_fetch_use_the_requested_body_preferences() {
     }
     let response = env
         .req("Sync", "client")
+        .header("MS-ASProtocolVersion", "16.1")
         .body(wbxml::encode_document(&b.finish()))
         .send()
         .await
@@ -15350,6 +15462,11 @@ async fn search_and_sync_fetch_use_the_requested_body_preferences() {
     assert_eq!(eas::find_text_after(&doc, base::TYPE), Some("4"));
     assert_eq!(body_data_bytes(&doc), Some(&MIME_BYTES[..5]));
     assert_eq!(eas::find_text_after(&doc, base::TRUNCATED), Some("1"));
+    let parts = subdocuments_for_token(&doc, base::BODY_PART);
+    assert_eq!(parts.len(), 1);
+    assert_eq!(eas::find_text_after(&parts[0], base::TYPE), Some("2"));
+    assert!(eas::find_text_after(&parts[0], base::DATA).is_some());
+    assert_eq!(eas::find_text_after(&parts[0], base::TRUNCATED), Some("1"));
 }
 
 #[tokio::test]

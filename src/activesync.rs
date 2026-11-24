@@ -1024,6 +1024,7 @@ async fn search_inner(
         },
         mime_data: None,
         text_body: None,
+        body_part: None,
     });
 
     let mut builder = wbxml::eas::DocumentBuilder::new();
@@ -1643,6 +1644,7 @@ async fn search_inner(
                     auth,
                     emails,
                     &body_pref.as_ref().unwrap().requests,
+                    &request.body_part_preferences,
                     request.mime_support,
                 )
                 .await?;
@@ -3334,6 +3336,7 @@ async fn sync_mail(
                 auth,
                 &collection.commands,
                 &collection.body_preferences,
+                &collection.body_part_preferences,
                 collection.mime_support,
             )
             .await
@@ -3798,6 +3801,7 @@ async fn sync_mail(
                     auth,
                     draft_emails,
                     &collection.body_preferences,
+                    &collection.body_part_preferences,
                     collection.mime_support,
                 )
                 .await
@@ -3847,6 +3851,7 @@ async fn sync_mail(
                 auth,
                 emails_to_send,
                 &collection.body_preferences,
+                &collection.body_part_preferences,
                 collection.mime_support,
             )
             .await
@@ -4329,6 +4334,7 @@ async fn resolve_fetch_commands(
     auth: &crate::jmap::client::AuthenticatedSession,
     commands: &[wbxml::eas::SyncClientCommand],
     body_preferences: &[RequestedBodyPreference],
+    body_part_preferences: &[RequestedBodyPreference],
     mime_support: u8,
 ) -> Vec<(
     String,
@@ -4339,11 +4345,16 @@ async fn resolve_fetch_commands(
         if command.kind == wbxml::eas::SyncClientCommandKind::Fetch {
             let result = state.jmap.get_email_by_id(auth, &command.server_id).await;
             let result = match result {
-                Ok(Some(email)) => {
-                    body_preferences_for_email(state, auth, &email, body_preferences, mime_support)
-                        .await
-                        .map(|preference| Some((email, preference)))
-                }
+                Ok(Some(email)) => body_preferences_for_email(
+                    state,
+                    auth,
+                    &email,
+                    body_preferences,
+                    body_part_preferences,
+                    mime_support,
+                )
+                .await
+                .map(|preference| Some((email, preference))),
                 Ok(None) => Ok(None),
                 Err(error) => Err(error),
             };
@@ -4458,6 +4469,22 @@ struct BodyPreference {
     requests: Vec<RequestedBodyPreference>,
     mime_data: Option<MimeBody>,
     text_body: Option<PreparedTextBody>,
+    body_part: Option<PreparedBodyPart>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedBodyPart {
+    body_type: u8,
+    full_size: usize,
+    truncated: bool,
+    data: Option<BodyPartData>,
+    preview: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum BodyPartData {
+    Text(String),
+    Mime(bytes::Bytes),
 }
 
 #[derive(Debug, Clone)]
@@ -4503,10 +4530,12 @@ async fn body_preferences_for_email(
     auth: &AuthenticatedSession,
     email: &crate::model::Email,
     requests: &[RequestedBodyPreference],
+    body_part_requests: &[RequestedBodyPreference],
     mime_support: u8,
 ) -> anyhow::Result<BodyPreference> {
     let allow_mime = mime_support == 2 || (mime_support == 1 && email.smime.is_some());
     let mut effective = requests.to_vec();
+    let mut effective_body_parts = body_part_requests.to_vec();
     if !allow_mime {
         effective.retain(|pref| pref.body_type != 4);
         if effective.is_empty() {
@@ -4520,13 +4549,36 @@ async fn body_preferences_for_email(
                 });
             }
         }
+        effective_body_parts.retain(|pref| pref.body_type != 4);
+        if effective_body_parts.is_empty() {
+            if let Some(pref) = body_part_requests.iter().find(|pref| pref.body_type == 4) {
+                effective_body_parts.push(RequestedBodyPreference {
+                    body_type: match email.body.as_ref().map(|body| body.body_type) {
+                        Some(EmailBodyType::Html) => 2,
+                        _ => 1,
+                    },
+                    ..*pref
+                });
+            }
+        }
     }
     if allow_mime && email.smime.is_some() && effective.iter().any(|pref| pref.body_type == 4) {
         effective.retain(|pref| pref.body_type == 4);
     }
+    if allow_mime
+        && email.smime.is_some()
+        && effective_body_parts.iter().any(|pref| pref.body_type == 4)
+    {
+        effective_body_parts.retain(|pref| pref.body_type == 4);
+    }
     let requests = effective.as_slice();
+    let body_part_requests = effective_body_parts.as_slice();
     let complete_body = if email.body.as_ref().is_some_and(|body| body.is_truncated)
-        && (requests.is_empty() || requests.iter().any(|pref| matches!(pref.body_type, 1..=3)))
+        && (requests.is_empty()
+            || requests.iter().any(|pref| matches!(pref.body_type, 1..=3))
+            || body_part_requests
+                .iter()
+                .any(|pref| matches!(pref.body_type, 1..=3)))
     {
         let body = state
             .jmap
@@ -4555,25 +4607,103 @@ async fn body_preferences_for_email(
                         .is_none_or(|limit| body.value.len() <= limit))
         })
     });
-    let mime_data = if let Some(preference) = requests
+    let native_fits_body_part = body.is_some_and(|body| {
+        let native_type = match body.body_type {
+            EmailBodyType::Plain => 1,
+            EmailBodyType::Html => 2,
+            EmailBodyType::Rtf => 3,
+        };
+        body_part_requests.iter().any(|pref| {
+            pref.body_type == native_type
+                && (!pref.all_or_none
+                    || pref
+                        .truncation_size
+                        .is_none_or(|limit| body.value.len() <= limit))
+        })
+    });
+    let body_mime_pref = requests
         .iter()
-        .find(|pref| pref.body_type == 4 && !native_fits)
-    {
+        .find(|pref| pref.body_type == 4 && !native_fits);
+    let part_mime_pref = body_part_requests
+        .iter()
+        .find(|pref| pref.body_type == 4 && !native_fits_body_part);
+    let downloaded_mime = if body_mime_pref.is_some() || part_mime_pref.is_some() {
         let id = email
             .blob_id
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("message has no MIME blob"))?;
-        Some(MimeBody::from_download(
-            state.jmap.download_blob(auth, id, "message.eml").await?,
-            preference,
-        ))
+        Some(state.jmap.download_blob(auth, id, "message.eml").await?)
     } else {
         None
     };
+    let mime_data = body_mime_pref
+        .zip(downloaded_mime.as_ref())
+        .map(|(preference, data)| MimeBody::from_download(data.clone(), preference));
+    let body_part_mime = part_mime_pref
+        .zip(downloaded_mime.as_ref())
+        .map(|(preference, data)| MimeBody::from_download(data.clone(), preference));
     let selected = select_body_preference(body, mime_data.as_ref(), requests);
+    let selected_body_part =
+        select_body_preference(body, body_part_mime.as_ref(), body_part_requests)
+            .or_else(|| body_part_requests.first().copied());
     let text_body = complete_body
+        .clone()
         .filter(|_| selected.is_none_or(|pref| matches!(pref.body_type, 1..=3)))
         .map(|body| prepare_text_body(body, selected, email.preview.as_deref()));
+    let body_part = if let Some(preference) = selected_body_part {
+        if preference.body_type == 4 {
+            body_part_mime.as_ref().map(|mime| {
+                let truncated = mime.data.len() < mime.full_size;
+                PreparedBodyPart {
+                    body_type: 4,
+                    full_size: mime.full_size,
+                    truncated,
+                    data: (!truncated || !preference.all_or_none)
+                        .then(|| BodyPartData::Mime(mime.data.clone())),
+                    preview: (preference.preview.unwrap_or(255) > 0)
+                        .then_some(email.preview.as_ref())
+                        .flatten()
+                        .map(|preview| {
+                            preview
+                                .chars()
+                                .take(preference.preview.unwrap_or(255))
+                                .collect()
+                        }),
+                }
+            })
+        } else {
+            complete_body
+                .as_ref()
+                .or(email.body.as_ref())
+                .cloned()
+                .map(|body| prepare_text_body(body, Some(preference), email.preview.as_deref()))
+                .map(|body| {
+                    let body_type = match body.body_type {
+                        EmailBodyType::Plain => 1,
+                        EmailBodyType::Html => 2,
+                        EmailBodyType::Rtf => 3,
+                    };
+                    PreparedBodyPart {
+                        body_type,
+                        full_size: body.full_size,
+                        truncated: body.truncated,
+                        data: body.data.map(BodyPartData::Text),
+                        preview: body.preview,
+                    }
+                })
+                .or_else(|| {
+                    Some(PreparedBodyPart {
+                        body_type: preference.body_type,
+                        full_size: 0,
+                        truncated: false,
+                        data: Some(BodyPartData::Text(String::new())),
+                        preview: None,
+                    })
+                })
+        }
+    } else {
+        None
+    };
     Ok(BodyPreference {
         requests: if text_body.is_some() || selected.is_some_and(|pref| pref.body_type == 4) {
             selected.into_iter().collect()
@@ -4582,6 +4712,7 @@ async fn body_preferences_for_email(
         },
         mime_data,
         text_body,
+        body_part,
     })
 }
 
@@ -4590,12 +4721,20 @@ async fn prepare_mail_bodies(
     auth: &AuthenticatedSession,
     emails: Vec<crate::model::Email>,
     requests: &[RequestedBodyPreference],
+    body_part_requests: &[RequestedBodyPreference],
     mime_support: u8,
 ) -> anyhow::Result<Vec<(crate::model::Email, BodyPreference)>> {
     let mut prepared = Vec::with_capacity(emails.len());
     for email in emails {
-        let preference =
-            body_preferences_for_email(state, auth, &email, requests, mime_support).await?;
+        let preference = body_preferences_for_email(
+            state,
+            auth,
+            &email,
+            requests,
+            body_part_requests,
+            mime_support,
+        )
+        .await?;
         prepared.push((email, preference));
     }
     Ok(prepared)
@@ -4745,6 +4884,8 @@ fn write_email_fields(
             if preview_limit > 0 {
                 let preview: String = email
                     .preview
+                    .as_deref()
+                    .map(str::to_owned)
                     .unwrap_or_else(|| {
                         email
                             .body
@@ -4774,6 +4915,28 @@ fn write_email_fields(
                 builder.leaf(base::DATA, data);
             }
             if let Some(preview) = body.preview {
+                builder.leaf(base::PREVIEW, preview);
+            }
+            builder.end();
+        }
+    }
+    if matches!(
+        version,
+        ProtocolVersion::V14_1 | ProtocolVersion::V16_0 | ProtocolVersion::V16_1
+    ) {
+        if let Some(part) = preference.body_part {
+            builder.start(base::BODY_PART);
+            builder.leaf(base::STATUS, "1");
+            builder.leaf(base::TYPE, part.body_type.to_string());
+            builder.leaf(base::ESTIMATED_DATA_SIZE, part.full_size.to_string());
+            builder.leaf(base::TRUNCATED, if part.truncated { "1" } else { "0" });
+            if let Some(data) = part.data {
+                match data {
+                    BodyPartData::Text(data) => builder.leaf(base::DATA, data),
+                    BodyPartData::Mime(data) => write_mime_data(builder, data),
+                }
+            }
+            if let Some(preview) = part.preview {
                 builder.leaf(base::PREVIEW, preview);
             }
             builder.end();
@@ -10363,6 +10526,106 @@ mod tests {
             "Preview must be one level deeper than Body -- i.e. nested inside it"
         );
         assert!(data_seen_before_preview, "Data must come before Preview");
+    }
+
+    #[test]
+    fn body_part_response_has_spec_fields_and_is_version_gated() {
+        let email = Email {
+            draft_revision: None,
+            id: "email-1".to_owned(),
+            mailbox_ids: vec![],
+            subject: "Subject".to_owned(),
+            received_at: None,
+            sent_at: None,
+            size: 0,
+            keywords: vec![],
+            from: String::new(),
+            to: String::new(),
+            cc: String::new(),
+            bcc: String::new(),
+            reply_to: String::new(),
+            importance: 1,
+            preview: None,
+            read: false,
+            body: Some(EmailBody {
+                is_truncated: false,
+                body_type: EmailBodyType::Plain,
+                value: "Hello part".to_owned(),
+            }),
+            smime: None,
+            attachments: vec![],
+            blob_id: None,
+            thread_id: None,
+        };
+        let preference = super::BodyPreference {
+            body_part: Some(super::PreparedBodyPart {
+                body_type: 1,
+                full_size: 10,
+                truncated: false,
+                data: Some(super::BodyPartData::Text("Hello part".to_owned())),
+                preview: Some("Hello part".to_owned()),
+            }),
+            ..Default::default()
+        };
+        let mut builder = DocumentBuilder::new();
+        write_email_fields(
+            &mut builder,
+            "email-1",
+            email.clone(),
+            Some(preference.clone()),
+            ProtocolVersion::V16_1,
+        );
+        let response = builder.finish();
+        let part_start = response
+            .nodes
+            .iter()
+            .position(|node| matches!(
+                node,
+                Node::Start(token) if token.code_page == base::PAGE && token.token == base::BODY_PART.token
+            ))
+            .expect("BodyPart should be included when requested");
+        let part = crate::wbxml::Document {
+            nodes: response.nodes[part_start..].to_vec(),
+        };
+        let child_tokens: Vec<_> = crate::wbxml::eas::child_elements(&part)
+            .iter()
+            .filter_map(|child| match child.nodes.first() {
+                Some(Node::Start(token)) => Some(token.token),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            child_tokens,
+            vec![
+                base::STATUS.token,
+                base::TYPE.token,
+                base::ESTIMATED_DATA_SIZE.token,
+                base::TRUNCATED.token,
+                base::DATA.token,
+                base::PREVIEW.token,
+            ]
+        );
+        assert_eq!(
+            crate::wbxml::eas::find_text_after(&part, base::STATUS),
+            Some("1")
+        );
+        assert_eq!(
+            crate::wbxml::eas::find_text_after(&part, base::DATA),
+            Some("Hello part")
+        );
+
+        let mut legacy = DocumentBuilder::new();
+        write_email_fields(
+            &mut legacy,
+            "email-1",
+            email,
+            Some(preference),
+            ProtocolVersion::V14_0,
+        );
+        assert!(!legacy.finish().nodes.iter().any(|node| matches!(
+            node,
+            Node::Start(token) if token.code_page == base::PAGE && token.token == base::BODY_PART.token
+        )));
     }
 
     #[test]

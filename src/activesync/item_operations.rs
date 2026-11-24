@@ -484,6 +484,11 @@ async fn fetch_item(
                 auth,
                 &email,
                 &fetch.body_preferences,
+                if matches!(version, ProtocolVersion::V14_1 | ProtocolVersion::V16_0) {
+                    &fetch.body_part_preferences
+                } else {
+                    &[]
+                },
                 fetch.mime_support,
             )
             .await

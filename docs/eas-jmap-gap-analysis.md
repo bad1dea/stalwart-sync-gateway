@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `5903807` (2026-11-24)
+## Reconciled status for source `main` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -12,30 +12,24 @@ handling. Check the current Rust implementation before treating any older
 
 Current prioritized work:
 
-1. **BodyPartPreference / BodyPart support.** The current gateway handles
-   `BodyPreference` for whole-message bodies but has no parser or response path
-   for `AirSyncBase:BodyPartPreference` / `AirSyncBase:BodyPart`. JMAP MIME
-   attachment records now retain the corresponding `partId` from
-   `Email.bodyStructure` by matching the shared `blobId` (`cd0119b`); this
-   mapping has a regression test. The WBXML tokens and independent parser for
-   `BodyPartPreference` are now in place, with a regression proving that
-   whole-body and part preferences remain distinct. Parsed values are carried
-   in the Sync, Search, and ItemOperations request models, and Sync option
-   persistence now records them separately from whole-body preferences, with
-   backward-compatible load coverage for older saved options. Applying them
-   to response generation and emitting EAS `BodyPart` responses are still
-   open. Microsoft
-   defines these for 14.1, 16.0, and 16.1. `BodyPartPreference` uses the same
-   Type, TruncationSize, AllOrNone, and Preview shape as `BodyPreference`;
-   `BodyPart` returns Status, Type, EstimatedDataSize, optional Truncated,
-   Data, and Preview. A complete implementation needs to map JMAP
-   `Email.bodyStructure` part IDs to their blobs across Sync, Search, and
-   ItemOperations. Verify operation-specific response constraints first:
-   the common-elements spec lists BodyPart for all three operations, while the
-   ItemOperations Properties page limits it to 14.1 and 16.0. Sources:
+1. **BodyPartPreference / BodyPart response path — implemented in source,
+   deployment pending.** Request parsing and independent Sync option
+   persistence are implemented. Sync and Search now prepare and emit a
+   separate `AirSyncBase:BodyPart` using the requested type, truncation,
+   AllOrNone, and preview settings. ItemOperations fetches do the same for
+   protocol 14.1 and 16.0; its Properties schema explicitly excludes BodyPart
+   for 16.1, so that operation omits it there even though Sync and Search
+   support it in 16.1. The response writer uses the required Status, Type,
+   EstimatedDataSize, Truncated, Data, Preview order. Wire-level regressions
+   exercise Search and Sync at 16.1 and ItemOperations across 14.0, 14.1, 16.0,
+   and 16.1. The saved `Email.bodyStructure` `partId` mapping (`cd0119b`) is
+   retained for attachment records; it is not a selector in the
+   `BodyPartPreference` schema and is not required to answer these requests.
+   Source tests pass; deployment/runtime verification remains open. Sources:
    Microsoft [MS-ASCON Elements](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascon/605bd946-0750-4d9b-b04c-8be28badfa8e),
-   [MS-ASAIRS Appendix A](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asairs/fbbc1af9-5a71-4925-aca8-60a95339c722), and
-   [MS-ASCMD ItemOperations Properties](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/b6b1551a-f841-4bac-967c-a3328af78229).
+   [MS-ASAIRS Appendix A](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asairs/fbbc1af9-5a71-4925-aca8-60a95339c722),
+   [MS-ASCMD ItemOperations Properties](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/b6b1551a-f841-4bac-967c-a3328af78229),
+   and [MS-ASCMD Common Status Codes](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/95cb9d7c-d33d-4b94-9366-d59911c7a060).
 
 2. **Find/KQL parity.** Standalone `subject:"multiword phrase"` now uses
    Stalwart's subject index for candidates and locally enforces case-insensitive
