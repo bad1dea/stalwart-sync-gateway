@@ -929,11 +929,12 @@ mesh `/healthz` returned `ok` and `/readyz` returned `ready`.
 Also completed: **KQL WORDS synonym queries**. `WORDS(a, b)` and its
 whitespace-separated form now map to an OR of text filters, matching MS-SEARCH's
 rule that an item matches when it contains one or more listed terms. Qualifiers
-inside WORDS are ignored as specified. Property restrictions and multiword
-phrases remain rejected inside WORDS because JMAP's text index cannot preserve
-those semantics. Regression tests cover comma and whitespace forms, qualifiers,
-and rejected inputs. Full suite: 258 passed, 73 ignored; clippy, formatting, and
-diff checks pass. See [MS-SEARCH Synonyms](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-search/3e8338e0-d5fe-4a9f-ada9-85bc292d4c1a).
+inside WORDS are ignored as specified. In this initial implementation, property
+restrictions and multiword phrases were rejected inside WORDS; the current
+source status above records the later exact phrase and prefix support.
+Regression tests cover comma and whitespace forms, qualifiers, and rejected
+inputs. Full suite at initial implementation: 258 passed, 73 ignored; clippy,
+formatting, and diff checks passed. See [MS-SEARCH Synonyms](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-search/3e8338e0-d5fe-4a9f-ada9-85bc292d4c1a).
 Deployed as `deploy-2026-11-23-eas-kql-words-3a5d8d7`; homelab commit
 `e747269`. Compose produced image
 `sha256:5817ae369361a17b9082a72f1db8ca1ae955768c584420beada3299117593308`.
