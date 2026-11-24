@@ -296,7 +296,8 @@ Current prioritized work:
    direction, distance, proximity AND/OR combinations, exact totals, and range
    paging. Attachment-content positions remain unsupported. `attachment:` terms
    and phrases also match contiguous words in attachment filenames with exact
-   local post-filtering. Regression suite: 356 passed,
+   local post-filtering. Unordered NEAR also accepts both operands matching one
+   indexed token, as MS-KQL specifies. Regression suite: 357 passed,
    73 ignored; strict Clippy, formatting, and diff checks passed. Neither
    source change is deployed or runtime-verified.
    Phrase matching is case-insensitive and requires adjacent

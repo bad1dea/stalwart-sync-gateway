@@ -995,6 +995,9 @@ fn proximity_matches_email(
         let words = proximity_words(&field);
         let left_positions = find_term_positions(&words, &left);
         let right_positions = find_term_positions(&words, &right);
+        if !ordered && left == right && !left_positions.is_empty() {
+            return Ok(true);
+        }
         for left_start in left_positions {
             let left_end = left_start + left.len();
             let next = right_positions.partition_point(|position| *position < left_end);
@@ -1700,6 +1703,23 @@ mod tests {
             "alpha beta gamma",
             query::PhraseMatch::Onear { max_words: 0 }
         ));
+    }
+
+    #[test]
+    fn unordered_proximity_allows_both_operands_to_match_the_same_token() {
+        assert!(email_matches_phrases(
+            "cat",
+            None,
+            None,
+            None,
+            None,
+            query::PhraseMatch::Near { max_words: 0 },
+            &[
+                ("$proximity-left".to_owned(), "cat".to_owned()),
+                ("$proximity-right".to_owned(), "cat".to_owned()),
+            ],
+        )
+        .unwrap());
     }
 
     #[test]
