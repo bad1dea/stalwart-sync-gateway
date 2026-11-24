@@ -121,7 +121,7 @@ pub(super) async fn handle(
     let reply = if request.gal {
         execute_gal(state, auth, device, request).await
     } else {
-        let phrase = query::subject_phrase_for_postfilter(&request.text);
+        let phrase = query::phrase_for_postfilter(&request.text);
         let filter = match query::to_filter(&request.text) {
             Ok(filter) => filter,
             Err(_) => return error_response(state, "2"),
@@ -143,7 +143,7 @@ async fn execute(
     device: &EasQuery,
     request: Request,
     query: Value,
-    subject_phrase: Option<String>,
+    phrase: Option<(String, String)>,
 ) -> anyhow::Result<wbxml::Document> {
     let collections = state.jmap.collections(auth).await?;
     let mailboxes: Vec<_> = collections
@@ -200,7 +200,7 @@ async fn execute(
     {
         return Ok(restart_document());
     }
-    let properties = &[
+    let mut properties = vec![
         "id",
         "mailboxIds",
         "keywords",
@@ -213,7 +213,13 @@ async fn execute(
         "preview",
         "attachments",
     ];
-    let page = if let Some(phrase) = subject_phrase {
+    if phrase
+        .as_ref()
+        .is_some_and(|(property, _)| property != "subject")
+    {
+        properties.extend(["textBody", "htmlBody", "bodyValues"]);
+    }
+    let page = if let Some((property, phrase)) = phrase {
         let mut position = 0usize;
         let mut matched = 0usize;
         let mut selected = Vec::new();
@@ -222,7 +228,7 @@ async fn execute(
         loop {
             let candidate = state
                 .jmap
-                .query_emails(auth, filter.clone(), position as i64, 100, properties)
+                .query_emails(auth, filter.clone(), position as i64, 100, &properties)
                 .await?;
             if let Some(total) = candidate_total {
                 anyhow::ensure!(
@@ -242,7 +248,7 @@ async fn execute(
             }
             let count = candidate.emails.len();
             for email in candidate.emails {
-                if query::subject_has_phrase(&email.subject, &phrase) {
+                if email_matches_phrase(&email.subject, email.body.as_ref(), &property, &phrase)? {
                     if (request.start..=request.end).contains(&matched) {
                         selected.push(email);
                     }
@@ -267,7 +273,7 @@ async fn execute(
                 filter.clone(),
                 request.start as i64,
                 request.end - request.start + 1,
-                properties,
+                &properties,
             )
             .await?
     };
@@ -493,6 +499,34 @@ fn restart_document() -> wbxml::Document {
     b.end();
     b.finish()
 }
+
+fn email_matches_phrase(
+    subject: &str,
+    body: Option<&crate::model::EmailBody>,
+    property: &str,
+    phrase: &str,
+) -> anyhow::Result<bool> {
+    if matches!(property, "subject" | "text") && query::subject_has_phrase(subject, phrase) {
+        return Ok(true);
+    }
+    if property == "subject" {
+        return Ok(false);
+    }
+    let Some(body) = body else {
+        return Ok(false);
+    };
+    anyhow::ensure!(
+        !body.is_truncated,
+        "Find cannot exact-match a truncated message body"
+    );
+    let plain = match body.body_type {
+        crate::model::EmailBodyType::Plain => body.value.clone(),
+        crate::model::EmailBodyType::Html => super::strip_html_tags(&body.value.replace('>', "> ")),
+        crate::model::EmailBodyType::Rtf => super::rtf_to_plain_text(&body.value),
+    };
+    Ok(query::subject_has_phrase(&plain, phrase))
+}
+
 fn error_document(status: &str) -> wbxml::Document {
     let mut b = DocumentBuilder::new();
     b.start(f::FIND);
@@ -500,6 +534,7 @@ fn error_document(status: &str) -> wbxml::Document {
     b.end();
     b.finish()
 }
+
 fn error_response(state: &AppState, status: &str) -> Response {
     respond(state, error_document(status))
 }
@@ -515,4 +550,48 @@ fn respond(state: &AppState, document: wbxml::Document) -> Response {
         wbxml::encode_document(&document),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{EmailBody, EmailBodyType};
+
+    #[test]
+    fn body_and_text_phrase_match_plain_and_html_content() {
+        let plain = EmailBody {
+            body_type: EmailBodyType::Plain,
+            value: "Hello Alpha beta, see you".to_owned(),
+            is_truncated: false,
+        };
+        assert!(email_matches_phrase("Other", Some(&plain), "body", "alpha beta").unwrap());
+        assert!(!email_matches_phrase("Other", Some(&plain), "body", "beta alpha").unwrap());
+
+        let html = EmailBody {
+            body_type: EmailBodyType::Html,
+            value: "<p>Alpha</p><p>beta</p><script>hidden phrase</script>".to_owned(),
+            is_truncated: false,
+        };
+        assert!(email_matches_phrase("Other", Some(&html), "body", "alpha beta").unwrap());
+        assert!(!email_matches_phrase("Other", Some(&html), "body", "hidden phrase").unwrap());
+        let rtf = EmailBody {
+            body_type: EmailBodyType::Rtf,
+            value: r#"{\rtf1 Alpha beta}"#.to_owned(),
+            is_truncated: false,
+        };
+        assert!(email_matches_phrase("Other", Some(&rtf), "body", "alpha beta").unwrap());
+        assert!(email_matches_phrase("Alpha beta", None, "text", "alpha beta").unwrap());
+        assert!(email_matches_phrase("Other", Some(&plain), "text", "alpha beta").unwrap());
+    }
+
+    #[test]
+    fn body_phrase_fails_closed_on_truncated_body_and_handles_missing_body() {
+        let truncated = EmailBody {
+            body_type: EmailBodyType::Plain,
+            value: "Alpha".to_owned(),
+            is_truncated: true,
+        };
+        assert!(email_matches_phrase("Other", Some(&truncated), "body", "alpha beta").is_err());
+        assert!(!email_matches_phrase("Other", None, "body", "alpha beta").unwrap());
+    }
 }
