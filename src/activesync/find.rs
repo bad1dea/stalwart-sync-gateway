@@ -121,12 +121,12 @@ pub(super) async fn handle(
     let reply = if request.gal {
         execute_gal(state, auth, device, request).await
     } else {
-        let phrase = query::phrase_for_postfilter(&request.text);
+        let phrases = query::phrases_for_postfilter(&request.text).unwrap_or_default();
         let filter = match query::to_filter(&request.text) {
             Ok(filter) => filter,
             Err(_) => return error_response(state, "2"),
         };
-        execute(state, auth, device, request, filter, phrase).await
+        execute(state, auth, device, request, filter, phrases).await
     };
     match reply {
         Ok(reply) => respond(state, reply),
@@ -143,7 +143,7 @@ async fn execute(
     device: &EasQuery,
     request: Request,
     query: Value,
-    phrase: Option<(String, String)>,
+    phrases: Vec<(String, String)>,
 ) -> anyhow::Result<wbxml::Document> {
     let collections = state.jmap.collections(auth).await?;
     let mailboxes: Vec<_> = collections
@@ -213,13 +213,10 @@ async fn execute(
         "preview",
         "attachments",
     ];
-    if phrase
-        .as_ref()
-        .is_some_and(|(property, _)| property != "subject")
-    {
+    if phrases.iter().any(|(property, _)| property != "subject") {
         properties.extend(["textBody", "htmlBody", "bodyValues"]);
     }
-    let page = if let Some((property, phrase)) = phrase {
+    let page = if !phrases.is_empty() {
         let mut position = 0usize;
         let mut matched = 0usize;
         let mut selected = Vec::new();
@@ -248,7 +245,7 @@ async fn execute(
             }
             let count = candidate.emails.len();
             for email in candidate.emails {
-                if email_matches_phrase(&email.subject, email.body.as_ref(), &property, &phrase)? {
+                if email_matches_phrases(&email.subject, email.body.as_ref(), &phrases)? {
                     if (request.start..=request.end).contains(&matched) {
                         selected.push(email);
                     }
@@ -500,6 +497,19 @@ fn restart_document() -> wbxml::Document {
     b.finish()
 }
 
+fn email_matches_phrases(
+    subject: &str,
+    body: Option<&crate::model::EmailBody>,
+    phrases: &[(String, String)],
+) -> anyhow::Result<bool> {
+    for (property, phrase) in phrases {
+        if !email_matches_phrase(subject, body, property, phrase)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn email_matches_phrase(
     subject: &str,
     body: Option<&crate::model::EmailBody>,
@@ -582,6 +592,24 @@ mod tests {
         assert!(email_matches_phrase("Other", Some(&rtf), "body", "alpha beta").unwrap());
         assert!(email_matches_phrase("Alpha beta", None, "text", "alpha beta").unwrap());
         assert!(email_matches_phrase("Other", Some(&plain), "text", "alpha beta").unwrap());
+        assert!(email_matches_phrases(
+            "Alpha beta subject",
+            Some(&plain),
+            &[
+                ("subject".to_owned(), "alpha beta".to_owned()),
+                ("body".to_owned(), "alpha beta".to_owned())
+            ]
+        )
+        .unwrap());
+        assert!(!email_matches_phrases(
+            "Alpha beta subject",
+            Some(&plain),
+            &[
+                ("subject".to_owned(), "alpha beta".to_owned()),
+                ("body".to_owned(), "beta alpha".to_owned())
+            ]
+        )
+        .unwrap());
     }
 
     #[test]
