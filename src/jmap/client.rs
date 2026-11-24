@@ -4588,15 +4588,15 @@ impl JmapClient {
                 || fields.location_coordinates.is_some()
                 || fields.start_time.is_some()
                 || fields.end_time.is_some()
-                || fields.all_day_event.is_some())
+                || fields.all_day_event.is_some()
+                || fields.busy_status.is_some()
+                || fields.sensitivity.is_some()
+                || fields.categories.is_some())
                 && !fields.unsupported_location
-                && fields.busy_status.is_none()
                 && !fields.unsupported_busy_status
-                && fields.sensitivity.is_none()
                 && !fields.unsupported_sensitivity
                 && fields.reminder.is_none()
                 && !fields.unsupported_reminder
-                && fields.categories.is_none()
                 && !fields.unsupported_categories
                 && !fields.recurrence_present
                 && fields.recurrence.is_none()
@@ -4692,6 +4692,37 @@ impl JmapClient {
             patch.insert(
                 format!("recurrenceOverrides/{key}/showWithoutTime"),
                 serde_json::Value::Bool(all_day),
+            );
+        }
+        if let Some(busy_status) = fields.busy_status {
+            let value = match busy_status {
+                0 => "free",
+                1 => "x-eas-tentative",
+                2 => "busy",
+                3 => "x-eas-out-of-office",
+                _ => anyhow::bail!("unsupported calendar availability"),
+            };
+            patch.insert(
+                format!("recurrenceOverrides/{key}/freeBusyStatus"),
+                serde_json::json!(value),
+            );
+        }
+        if let Some(sensitivity) = fields.sensitivity {
+            let value = match sensitivity {
+                0 => "public",
+                2 => "private",
+                _ => anyhow::bail!("unsupported calendar sensitivity"),
+            };
+            patch.insert(
+                format!("recurrenceOverrides/{key}/privacy"),
+                serde_json::json!(value),
+            );
+        }
+        if let Some(categories) = &fields.categories {
+            let keywords: BTreeMap<_, _> = categories.iter().map(|name| (name, true)).collect();
+            patch.insert(
+                format!("recurrenceOverrides/{key}/keywords"),
+                serde_json::json!(keywords),
             );
         }
         if fields.location.is_some() || fields.location_coordinates.is_some() {
@@ -7751,6 +7782,9 @@ fn calendar_recurrence_exceptions(
                             | "start"
                             | "duration"
                             | "showWithoutTime"
+                            | "freeBusyStatus"
+                            | "privacy"
+                            | "keywords"
                     )
                 }),
                 "unsupported recurrence exception fields"
@@ -7844,6 +7878,44 @@ fn calendar_recurrence_exceptions(
                 .get("showWithoutTime")
                 .map(|value| value.as_bool().context("invalid exception all-day flag"))
                 .transpose()?;
+            let busy_status = match patch.get("freeBusyStatus") {
+                None => None,
+                Some(serde_json::Value::Null) => Some(2),
+                Some(value) => Some(
+                    match value.as_str().context("invalid exception availability")? {
+                        "free" => 0,
+                        "x-eas-tentative" => 1,
+                        "busy" => 2,
+                        "x-eas-out-of-office" => 3,
+                        "x-eas-working-elsewhere" => 4,
+                        _ => anyhow::bail!("unsupported exception availability"),
+                    },
+                ),
+            };
+            let sensitivity = match patch.get("privacy") {
+                None => None,
+                Some(serde_json::Value::Null) => Some(0),
+                Some(value) => Some(match value.as_str().context("invalid exception privacy")? {
+                    "public" => 0,
+                    "private" => 2,
+                    "secret" => 3,
+                    _ => anyhow::bail!("unsupported exception privacy"),
+                }),
+            };
+            let categories = match patch.get("keywords") {
+                None => None,
+                Some(serde_json::Value::Null) => Some(Vec::new()),
+                Some(value) => {
+                    let keywords: BTreeMap<String, bool> = serde_json::from_value(value.clone())
+                        .context("invalid exception keywords")?;
+                    Some(
+                        keywords
+                            .into_iter()
+                            .filter_map(|(name, present)| present.then_some(name))
+                            .collect(),
+                    )
+                }
+            };
             Ok(crate::model::CalendarEventException {
                 instance_id,
                 deleted: false,
@@ -7853,6 +7925,9 @@ fn calendar_recurrence_exceptions(
                 start_utc,
                 end_utc,
                 all_day,
+                busy_status,
+                sensitivity,
+                categories,
                 description,
             })
         })
@@ -8588,6 +8663,8 @@ mod tests {
             "uid":"series-uid", "timeZone":"America/Toronto",
             "recurrenceOverrides":{"2026-11-25T12:00:00":{
                 "start":"2026-11-25T13:00:00", "duration":"PT3600S", "showWithoutTime":true,
+                "freeBusyStatus":"x-eas-tentative", "privacy":"secret",
+                "keywords":{"Work":true,"Hidden":false},
                 "title":"Changed occurrence", "description":"Exception body",
                 "descriptionContentType":"text/plain",
                 "locations":{"room":{"name":"Changed room", "coordinates":"geo:43.65,-79.38"}}
@@ -8624,6 +8701,12 @@ mod tests {
             Some("20261125T190000Z")
         );
         assert_eq!(event.recurrence_exceptions[0].all_day, Some(true));
+        assert_eq!(event.recurrence_exceptions[0].busy_status, Some(1));
+        assert_eq!(event.recurrence_exceptions[0].sensitivity, Some(3));
+        assert_eq!(
+            event.recurrence_exceptions[0].categories,
+            Some(vec!["Work".to_owned()])
+        );
 
         let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
             "id":"e", "recurrenceRule":{"frequency":"weekly","byDay":[{"day":"mo"}]},
@@ -9230,6 +9313,9 @@ mod calendar_update_state_tests {
                             assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/start"], "2026-11-15T13:00:00");
                             assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/duration"], "PT3600S");
                             assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/showWithoutTime"], true);
+                            assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/freeBusyStatus"], "x-eas-out-of-office");
+                            assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/privacy"], "private");
+                            assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/keywords"], serde_json::json!({}));
                             Json(serde_json::json!({"methodResponses":[[
                                 "CalendarEvent/set", {"updated":{"event-2":null}}, "instance-change"
                             ]]}))
@@ -9269,6 +9355,9 @@ mod calendar_update_state_tests {
             start_time: Some("20261115T180000Z".to_owned()),
             end_time: Some("20261115T190000Z".to_owned()),
             all_day_event: Some(true),
+            busy_status: Some(3),
+            sensitivity: Some(2),
+            categories: Some(Vec::new()),
             ..Default::default()
         };
         client

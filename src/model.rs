@@ -367,6 +367,9 @@ pub struct CalendarEventException {
     pub start_utc: Option<String>,
     pub end_utc: Option<String>,
     pub all_day: Option<bool>,
+    pub busy_status: Option<u8>,
+    pub sensitivity: Option<u8>,
+    pub categories: Option<Vec<String>>,
     pub description: Option<EmailBody>,
 }
 

@@ -5840,15 +5840,15 @@ fn calendar_instance_change_supported(fields: &wbxml::eas::CalendarFields) -> bo
         || fields.location_coordinates.is_some()
         || fields.start_time.is_some()
         || fields.end_time.is_some()
-        || fields.all_day_event.is_some())
+        || fields.all_day_event.is_some()
+        || fields.busy_status.is_some()
+        || fields.sensitivity.is_some()
+        || fields.categories.is_some())
         && !fields.unsupported_location
-        && fields.busy_status.is_none()
         && !fields.unsupported_busy_status
-        && fields.sensitivity.is_none()
         && !fields.unsupported_sensitivity
         && fields.reminder.is_none()
         && !fields.unsupported_reminder
-        && fields.categories.is_none()
         && !fields.unsupported_categories
         && !fields.recurrence_present
         && fields.recurrence.is_none()
@@ -6422,6 +6422,9 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
         exception.start_utc.hash(&mut hasher);
         exception.end_utc.hash(&mut hasher);
         exception.all_day.hash(&mut hasher);
+        exception.busy_status.hash(&mut hasher);
+        exception.sensitivity.hash(&mut hasher);
+        exception.categories.hash(&mut hasher);
         if let Some(description) = &exception.description {
             description.body_type.eas_value().hash(&mut hasher);
             description.value.hash(&mut hasher);
@@ -6614,6 +6617,19 @@ fn write_calendar_fields(
                 }
                 if let Some(all_day) = exception.all_day {
                     builder.leaf(cal::ALL_DAY_EVENT, if all_day { "1" } else { "0" });
+                }
+                if let Some(busy_status) = exception.busy_status {
+                    builder.leaf(cal::BUSY_STATUS, busy_status.to_string());
+                }
+                if let Some(sensitivity) = exception.sensitivity {
+                    builder.leaf(cal::SENSITIVITY, sensitivity.to_string());
+                }
+                if let Some(categories) = &exception.categories {
+                    builder.start(cal::CATEGORIES);
+                    for category in categories {
+                        builder.leaf(cal::CATEGORY, category.clone());
+                    }
+                    builder.end();
                 }
                 if let Some(title) = &exception.title {
                     builder.leaf(cal::SUBJECT, title.clone());
@@ -8429,6 +8445,9 @@ mod tests {
                 start_utc: Some("20261125T180000Z".to_owned()),
                 end_utc: Some("20261125T190000Z".to_owned()),
                 all_day: Some(true),
+                busy_status: Some(1),
+                sensitivity: Some(2),
+                categories: Some(vec!["Work".to_owned()]),
                 description: Some(crate::model::EmailBody {
                     body_type: crate::model::EmailBodyType::Plain,
                     value: "Changed body".to_owned(),
@@ -8475,6 +8494,16 @@ mod tests {
         assert!(eas::find_all_text_after(&document, cal::ALL_DAY_EVENT)
             .iter()
             .any(|value| value == "1"));
+        assert!(eas::find_all_text_after(&document, cal::BUSY_STATUS)
+            .iter()
+            .any(|value| value == "1"));
+        assert!(eas::find_all_text_after(&document, cal::SENSITIVITY)
+            .iter()
+            .any(|value| value == "2"));
+        assert_eq!(
+            eas::find_all_text_after(&document, cal::CATEGORY),
+            vec!["Work"]
+        );
         assert!(!eas::contains_token(&document, cal::DELETED));
     }
 
