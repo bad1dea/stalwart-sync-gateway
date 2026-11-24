@@ -427,7 +427,12 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `sha256:cb9c0c0b70332bc87b2bdc158251eb9ae112282becec68927bf19d6a4932de6b`,
    started `2026-11-24T22:40:09Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Archive entry count and cumulative selected XML expansion
-   are bounded.
+   are bounded. OOXML Word, Excel, and PowerPoint comment text extraction is
+   deployed as `deploy-2026-11-24-eas-find-ooxml-comments-4e86021`; homelab
+   commit `f04aa52`, image
+   `sha256:ecfe6bd9f465b98eacbc759745296a93dc78175d3e57f2bf46fbd19e03a8271e`,
+   started `2026-11-24T22:47:01Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
    EPUB XHTML chapters use the same archive-entry and expanded-XML limits; a
    mocked HTTP Find regression verifies proximity matching in EPUB text. The
    macro-enabled OOXML types use the same bounded document-part selection; a
