@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `81fdc6c` (2026-11-24)
+## Reconciled status for source `main` at `0b53db8` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -23,8 +23,10 @@ Current prioritized work:
    `NOT subject:"..."` and unary-minus forms such as
    `-body:"..."` are exact-filtered over the scoped mailbox. Positive phrase
    AND negated boolean restrictions (`NOT isread:true` or `-isflagged:true`)
-   retain JMAP's exact boolean filter while exact-checking the phrase; compound
-   negated phrases remain rejected. A positive phrase OR boolean filter is also
+   retain JMAP's exact boolean filter while exact-checking the phrase. A
+   positive phrase AND a negated phrase is exact-filtered by scanning the
+   scoped mailbox; other non-phrase predicates in that broad-scan form remain
+   rejected. A positive phrase OR boolean filter is also
    supported for `isread`, `isflagged`, and `hasattachment(s)` values, with
    exact local evaluation of both branches. Multiple boolean alternatives
    may accompany positive phrase terms in a flat OR expression, including
@@ -36,7 +38,10 @@ Current prioritized work:
    `b681fae`, image
    `sha256:9effefda5525d695bfb3e561cc4759d479e42df8910a340d2574adbd960c62cc`,
    started `2026-11-24T12:43:36Z`, restart count zero, `/healthz` `ok`, and
-   `/readyz` `ready`. The preceding positive-boolean-OR release was deployed as
+   `/readyz` `ready`. The previous negated-phrase feature tag before the
+   same-property grouping guard is
+   `deploy-2026-11-24-eas-kql-negated-phrase-and-db13a97`; it was not deployed.
+   The preceding positive-boolean-OR release was deployed as
    `deploy-2026-11-24-eas-kql-phrase-negated-bool-a0304e8`; homelab commit
    `9749ba1`, image
    `sha256:2d4aaca2cc911156f3ebc69807449ac4ab733d624ca2bb215f7a9623f19026f8`,
@@ -83,16 +88,16 @@ Current prioritized work:
    order, totals, and range paging. An OR expression made only of positive
    phrase terms is exact-filtered across its alternatives. A phrase may also
    be ORed with `isread`, `isflagged`, or `hasattachment(s)` boolean
-   restrictions. Other mixed OR terms, mixed AND/OR precedence, and compound
-   NOT phrase forms remain rejected because the candidate filter could change
-   their Boolean meaning.
+   restrictions. Other mixed OR terms, mixed AND/OR precedence, and negated
+   phrases combined with non-phrase predicates remain rejected because the
+   candidate filter could change their Boolean meaning.
    A single positive `body:"multiword phrase"`
    or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
    body and text scans fetch message bodies and reject a truncated body rather
    than return an incomplete match. Implicitly OR-grouped restrictions on a
-   phrase property and unsupported mixed or compound NOT expressions remain
-   rejected because property grouping or candidate filtering could change
-   Boolean meaning. Phrase matching is case-insensitive and requires adjacent
+   phrase property and negated-phrase OR forms remain rejected because
+   property grouping or candidate filtering could change Boolean meaning.
+   Phrase matching is case-insensitive and requires adjacent
    words in order. Regression tests cover plain, HTML, and RTF bodies,
    subject/body conjunctions, truncation, and unsupported Boolean forms. Full
    suite: 333 passed, 73 ignored; strict Clippy, formatting, and diff checks
