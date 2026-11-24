@@ -7281,7 +7281,8 @@ async fn sync_tasks_collection(
     use wbxml::eas::airsync as air;
 
     if collection.commands.iter().any(|command| {
-        command.task.unsupported_recurrence
+        command.task.unsupported_complete
+            || command.task.unsupported_recurrence
             || (command.task.recurrence_present
                 && command.task.recurrence.is_none()
                 && !matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1))

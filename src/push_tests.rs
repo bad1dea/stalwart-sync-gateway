@@ -15902,6 +15902,48 @@ async fn task_description_changes_are_synced() {
 }
 
 #[tokio::test]
+async fn invalid_task_complete_value_is_rejected_without_writing() {
+    use eas::{airsync as air, tasks};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 1);
+    let prime = item_sync(&env, "ipad", "task_calendar", "0", "100").await;
+    let initial = item_sync(&env, "ipad", "task_calendar", &sync_key(&prime), "100").await;
+
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, sync_key(&initial));
+    b.leaf(air::COLLECTION_ID, "task_calendar");
+    b.empty_tag(air::GET_CHANGES);
+    b.start(air::COMMANDS);
+    b.start(air::CHANGE);
+    b.leaf(air::SERVER_ID, "t0000");
+    b.start(air::APPLICATION_DATA);
+    b.leaf(tasks::COMPLETE, "2");
+    for _ in 0..6 {
+        b.end();
+    }
+    let response = env
+        .req("Sync", "ipad")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let document = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&document, air::STATUS), Some("5"));
+
+    let items = env.mock.groupware.lock().unwrap();
+    let task = items
+        .get("calendar")
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "t0000")
+        .unwrap();
+    assert_eq!(task["progress"], "needs-action");
+}
+
+#[tokio::test]
 async fn task_completion_date_changes_are_saved() {
     use eas::{airsync as air, tasks};
     let env = start_env(Opts::default()).await;

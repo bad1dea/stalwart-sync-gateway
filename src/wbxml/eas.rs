@@ -1379,6 +1379,7 @@ pub struct TaskFields {
     pub due_date: Option<String>,
     pub utc_due_date: Option<String>,
     pub complete: Option<bool>,
+    pub unsupported_complete: bool,
     pub date_completed: Option<String>,
     pub importance: Option<String>,
     pub sensitivity: Option<String>,
@@ -3202,6 +3203,7 @@ fn extract_task_fields(nodes: &[Node]) -> TaskFields {
         ..Default::default()
     };
     let mut path: Vec<Token> = Vec::new();
+    let mut complete_count = 0;
     let mut reminder_set_count = 0;
     let mut reminder_time_count = 0;
 
@@ -3221,7 +3223,12 @@ fn extract_task_fields(nodes: &[Node]) -> TaskFields {
                 } else if same_token(top, tasks::UTC_START_DATE) {
                     fields.utc_start_date = Some(text.clone());
                 } else if same_token(top, tasks::COMPLETE) {
-                    fields.complete = Some(text != "0");
+                    complete_count += 1;
+                    match text.parse::<u8>() {
+                        Ok(0) => fields.complete = Some(false),
+                        Ok(1) => fields.complete = Some(true),
+                        _ => fields.unsupported_complete = true,
+                    }
                 } else if same_token(top, tasks::DATE_COMPLETED) {
                     fields.date_completed = Some(text.clone());
                 } else if same_token(top, tasks::IMPORTANCE) {
@@ -3254,6 +3261,7 @@ fn extract_task_fields(nodes: &[Node]) -> TaskFields {
         }
     }
 
+    fields.unsupported_complete |= complete_count > 1;
     fields.unsupported_reminder |= reminder_set_count > 1
         || reminder_time_count > 1
         || (fields.reminder_set == Some(false) && fields.reminder_time.is_some());
@@ -4183,6 +4191,26 @@ mod tests {
         builder.leaf(tasks::REMINDER_SET, "1");
         builder.end();
         assert!(extract_task_fields(&builder.finish().nodes).unsupported_reminder);
+    }
+
+    #[test]
+    fn task_complete_accepts_only_boolean_values_and_rejects_duplicates() {
+        for (wire, expected) in [("0", Some(false)), ("1", Some(true)), ("2", None)] {
+            let mut builder = DocumentBuilder::new();
+            builder.start(airsync::APPLICATION_DATA);
+            builder.leaf(tasks::COMPLETE, wire);
+            builder.end();
+            let fields = extract_task_fields(&builder.finish().nodes);
+            assert_eq!(fields.complete, expected, "Complete={wire}");
+            assert_eq!(fields.unsupported_complete, wire == "2", "Complete={wire}");
+        }
+
+        let mut duplicate = DocumentBuilder::new();
+        duplicate.start(airsync::APPLICATION_DATA);
+        duplicate.leaf(tasks::COMPLETE, "0");
+        duplicate.leaf(tasks::COMPLETE, "1");
+        duplicate.end();
+        assert!(extract_task_fields(&duplicate.finish().nodes).unsupported_complete);
     }
 
     #[test]

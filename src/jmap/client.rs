@@ -5096,6 +5096,7 @@ impl JmapClient {
         };
 
         anyhow::ensure!(!fields.unsupported_body, "unsupported task body");
+        anyhow::ensure!(!fields.unsupported_complete, "invalid task Complete value");
         anyhow::ensure!(
             !fields.unsupported_categories,
             "unsupported task categories"
