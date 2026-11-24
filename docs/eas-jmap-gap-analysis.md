@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `bd30d88` (2026-11-24)
+## Reconciled status for source `main` at `5903807` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -12,7 +12,22 @@ handling. Check the current Rust implementation before treating any older
 
 Current prioritized work:
 
-1. **Find/KQL parity.** Standalone `subject:"multiword phrase"` now uses
+1. **BodyPartPreference / BodyPart support.** The current gateway handles
+   `BodyPreference` for whole-message bodies but has no parser or response path
+   for `AirSyncBase:BodyPartPreference` / `AirSyncBase:BodyPart`. Microsoft
+   defines these for 14.1, 16.0, and 16.1. `BodyPartPreference` uses the same
+   Type, TruncationSize, AllOrNone, and Preview shape as `BodyPreference`;
+   `BodyPart` returns Status, Type, EstimatedDataSize, optional Truncated,
+   Data, and Preview. A complete implementation needs to map JMAP
+   `Email.bodyStructure` part IDs to their blobs across Sync, Search, and
+   ItemOperations. Verify operation-specific response constraints first:
+   the common-elements spec lists BodyPart for all three operations, while the
+   ItemOperations Properties page limits it to 14.1 and 16.0. Sources:
+   Microsoft [MS-ASCON Elements](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascon/605bd946-0750-4d9b-b04c-8be28badfa8e),
+   [MS-ASAIRS Appendix A](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asairs/fbbc1af9-5a71-4925-aca8-60a95339c722), and
+   [MS-ASCMD ItemOperations Properties](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/b6b1551a-f841-4bac-967c-a3328af78229).
+
+2. **Find/KQL parity.** Standalone `subject:"multiword phrase"` now uses
    Stalwart's subject index for candidates and locally enforces case-insensitive
    adjacent word order, including accurate totals and range paging. Regression
    coverage proves that reversed words and intervening words are excluded.
