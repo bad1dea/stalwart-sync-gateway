@@ -38,9 +38,27 @@ use crate::{
 
 // Keep negotiation at the tested production version while newer response
 // shapes and commands are implemented and checked with independent clients.
-const SUPPORTED_PROTOCOLS: &str = "14.0";
 // Advertise only commands with handlers.
 const SUPPORTED_COMMANDS: &str = "Sync,SendMail,SmartForward,SmartReply,GetAttachment,FolderSync,FolderCreate,FolderDelete,FolderUpdate,MoveItems,GetItemEstimate,Search,Settings,Ping,ItemOperations,Provision,ResolveRecipients,MeetingResponse,ValidateCert";
+const SUPPORTED_COMMANDS_16_1: &str = "Sync,SendMail,SmartForward,SmartReply,GetAttachment,FolderSync,FolderCreate,FolderDelete,FolderUpdate,MoveItems,GetItemEstimate,Search,Find,Settings,Ping,ItemOperations,Provision,ResolveRecipients,MeetingResponse,ValidateCert";
+
+fn supported_protocols(maximum: &str) -> &'static str {
+    match maximum {
+        "14.0" => "14.0",
+        "14.1" => "14.0,14.1",
+        "16.0" => "14.0,14.1,16.0",
+        "16.1" => "14.0,14.1,16.0,16.1",
+        _ => "14.0",
+    }
+}
+
+fn supported_commands(maximum: &str) -> &'static str {
+    if maximum == "16.1" {
+        SUPPORTED_COMMANDS_16_1
+    } else {
+        SUPPORTED_COMMANDS
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProtocolVersion {
@@ -175,7 +193,7 @@ pub async fn get_handler(
 
 pub async fn options_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match authenticate(&state, &headers).await {
-        Ok(_) => eas_options_response(StatusCode::OK),
+        Ok(_) => eas_options_response(StatusCode::OK, &state.config.eas_max_protocol_version),
         Err(error) => {
             tracing::warn!(%error, "ActiveSync OPTIONS authentication failed");
             unauthorized()
@@ -242,11 +260,12 @@ pub async fn post_handler(
         )
             .into_response();
     };
-    if !SUPPORTED_PROTOCOLS.split(',').any(|v| v == version_header) {
+    let supported_versions = supported_protocols(&state.config.eas_max_protocol_version);
+    if !supported_versions.split(',').any(|v| v == version_header) {
         tracing::warn!(
             device_id = query.device_id.as_deref().unwrap_or(""),
             version = version_header,
-            supported = SUPPORTED_PROTOCOLS,
+            supported = supported_versions,
             "client uses a protocol version still under development"
         );
     }
@@ -8438,8 +8457,14 @@ async fn folder_sync(
         StatusCode::OK,
         [
             ("Content-Type", "application/vnd.ms-sync.wbxml"),
-            ("MS-ASProtocolVersions", SUPPORTED_PROTOCOLS),
-            ("MS-ASProtocolCommands", SUPPORTED_COMMANDS),
+            (
+                "MS-ASProtocolVersions",
+                supported_protocols(&state.config.eas_max_protocol_version),
+            ),
+            (
+                "MS-ASProtocolCommands",
+                supported_commands(&state.config.eas_max_protocol_version),
+            ),
         ],
         body,
     )
@@ -8880,16 +8905,16 @@ async fn authenticate(
     state.jmap.session_with_basic(&username, &password).await
 }
 
-fn eas_options_response(status: StatusCode) -> Response {
+fn eas_options_response(status: StatusCode, maximum: &str) -> Response {
     let mut response = status.into_response();
     let headers = response.headers_mut();
     headers.insert(
         "MS-ASProtocolVersions",
-        HeaderValue::from_static(SUPPORTED_PROTOCOLS),
+        HeaderValue::from_static(supported_protocols(maximum)),
     );
     headers.insert(
         "MS-ASProtocolCommands",
-        HeaderValue::from_static(SUPPORTED_COMMANDS),
+        HeaderValue::from_static(supported_commands(maximum)),
     );
     // z-push (the working reference) sends this on every OPTIONS response
     // too -- this gateway never did. Matches the protocol ceiling above.

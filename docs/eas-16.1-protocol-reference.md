@@ -238,10 +238,11 @@ while only actually implementing the ≤14.0 field shapes. iOS negotiates
 the *highest* version the server advertises, so it was parsing 16.x-shaped
 fields (e.g. Attachment's `ContentType`, gated ≥16.0 in the real z-push
 reference) that this gateway never intended to send — silent WBXML parse
-failures on the client side. Fixed by capping `SUPPORTED_PROTOCOLS` to
-`"14.0"`. The current source still advertises only 14.0; although many
-handlers have forced-version 16.1 tests, no 16.1 version bump should be made
-without the full field-shape audit and real-device certification below.
+failures on the client side. Production defaults to advertising only 14.0.
+For isolated testing, `EAS_MAX_PROTOCOL_VERSION=16.1` advertises the audited
+version list through 16.1 and includes the Find command. Keep production at its
+14.0 default until the full field-shape audit and real-device certification
+below succeed.
 
 **Implication for any future version bump** (e.g. targeting real 16.1 to
 pick up native Notes support, RightsManagement, or other 16.x-only
@@ -250,8 +251,8 @@ protocol-version-conditional field-presence/order audit z-push's PHP
 `$mapping` arrays already encode, not just "does the codepage token
 exist" — this was the exact class of bug (structural vs semantic
 verification) called out explicitly this session. Don't bump
-`SUPPORTED_PROTOCOLS` without redoing that audit per-field, and validate
-every change against a live device request/response diff the way this
+the advertised protocol ceiling without redoing that audit per-field, and
+validate every change against a live device request/response diff the way this
 session's fixes were, not against spec-reading alone.
 
 ## Remaining verification items
@@ -273,4 +274,6 @@ session's fixes were, not against spec-reading alone.
   create/get and real-client recurrence behavior still need verification.
   Sensitivity cannot be patched per occurrence under RFC 8984.
 - Real-client 16.1 negotiation and behavior, including Tasks recurrence and
-  enabled Oof rendering. Production remains on 14.0 until that pass.
+  enabled Oof rendering. Set `EAS_MAX_PROTOCOL_VERSION=16.1` only on the
+  isolated test bridge for that pass; production remains on 14.0 until it
+  succeeds.

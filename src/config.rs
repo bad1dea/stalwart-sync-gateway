@@ -9,6 +9,9 @@ pub struct Config {
     pub stalwart_jmap_url: Url,
     pub stalwart_tls_verify: bool,
     pub eas_public_url: Url,
+    /// Highest ActiveSync protocol version advertised by OPTIONS. Production
+    /// defaults to 14.0; an isolated test bridge can opt into 16.1.
+    pub eas_max_protocol_version: String,
     pub state_backend: StateBackend,
     pub state_sqlite_path: String,
     pub log_level: String,
@@ -63,6 +66,13 @@ impl Config {
             "https://mail.example.com/Microsoft-Server-ActiveSync",
         ))
         .context("EAS_PUBLIC_URL must be a URL")?;
+        let eas_max_protocol_version = env_or("EAS_MAX_PROTOCOL_VERSION", "14.0");
+        if !matches!(
+            eas_max_protocol_version.as_str(),
+            "14.0" | "14.1" | "16.0" | "16.1"
+        ) {
+            bail!("EAS_MAX_PROTOCOL_VERSION must be one of 14.0, 14.1, 16.0, or 16.1");
+        }
 
         let state_backend = match env_or("STATE_BACKEND", "sqlite")
             .to_ascii_lowercase()
@@ -79,6 +89,7 @@ impl Config {
             stalwart_jmap_url,
             stalwart_tls_verify: env_bool("STALWART_TLS_VERIFY", true),
             eas_public_url,
+            eas_max_protocol_version,
             state_backend,
             state_sqlite_path: env_or("STATE_SQLITE_PATH", "/data/state.db"),
             log_level: env_or("LOG_LEVEL", &env_or("RUST_LOG", "info")),

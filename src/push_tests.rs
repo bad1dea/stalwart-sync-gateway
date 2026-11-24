@@ -920,6 +920,7 @@ struct Opts {
     max_concurrent: usize,
     sqlite: Option<String>,
     aged_out: crate::config::AgedOut,
+    eas_max_protocol_version: String,
 }
 
 impl Default for Opts {
@@ -928,6 +929,7 @@ impl Default for Opts {
             max_concurrent: 200,
             sqlite: None,
             aged_out: crate::config::AgedOut::SoftDelete,
+            eas_max_protocol_version: "14.0".to_owned(),
         }
     }
 }
@@ -980,6 +982,7 @@ async fn spawn_gateway(
         eas_public_url: "http://localhost/Microsoft-Server-ActiveSync"
             .parse()
             .unwrap(),
+        eas_max_protocol_version: opts.eas_max_protocol_version.clone(),
         state_backend: if opts.sqlite.is_some() {
             StateBackend::Sqlite
         } else {
@@ -1730,6 +1733,7 @@ async fn existing_sqlite_device_state_is_honoured() {
             stalwart_jmap_url: "http://127.0.0.1:1/".parse().unwrap(),
             stalwart_tls_verify: true,
             eas_public_url: "http://x/".parse().unwrap(),
+            eas_max_protocol_version: "14.0".into(),
             state_backend: StateBackend::Sqlite,
             state_sqlite_path: path.clone(),
             log_level: "info".into(),
@@ -2636,6 +2640,37 @@ async fn options_advertises_methods_versions_and_commands() {
         .any(|command| command == "MeetingResponse"));
     assert!(commands.split(',').any(|command| command == "ValidateCert"));
     assert!(!commands.split(',').any(|command| command == "Find"));
+}
+
+#[tokio::test]
+async fn options_can_advertise_16_1_for_an_isolated_test_bridge() {
+    let env = Arc::new(
+        start_env(Opts {
+            eas_max_protocol_version: "16.1".to_owned(),
+            ..Opts::default()
+        })
+        .await,
+    );
+    let response = env
+        .http
+        .request(reqwest::Method::OPTIONS, &env.gw)
+        .basic_auth("u@test", Some("pw"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.headers().get("MS-ASProtocolVersions").unwrap(),
+        "14.0,14.1,16.0,16.1"
+    );
+    let commands = response
+        .headers()
+        .get("MS-ASProtocolCommands")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(commands.split(',').any(|command| command == "Find"));
 }
 
 #[tokio::test]

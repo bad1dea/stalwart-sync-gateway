@@ -34,8 +34,10 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    task back over Sync; run it on the isolated test bridge, then verify client
    behavior.
 2. **Real-client 16.1 validation.** Exercise negotiation, Tasks, BodyPart,
-   Find, and enabled Oof on the isolated test bridge. Production continues to
-   advertise 14.0 until this pass succeeds.
+   Find, and enabled Oof on the isolated test bridge. The gateway now supports
+   an explicit `EAS_MAX_PROTOCOL_VERSION=16.1` test configuration and includes
+   Find in the 16.1 command advertisement. The default remains 14.0; production
+   continues to advertise 14.0 until the client pass succeeds.
 3. **Find content coverage.** Add exact local search over remaining supported
    attachment formats and assess resource-bounded scanned-PDF OCR and large
    attachments. Current extraction is bounded and supports legacy `.xls`,
@@ -419,7 +421,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    reached, and normalization avoids a per-word temporary allocation. Regression
    coverage checks exact-limit XML and normalization, plus rejection above the
    limit. OOXML comment extraction is checked with archive fixtures and an
-   end-to-end Word comment proximity search. The full suite passes 398 tests
+   end-to-end Word comment proximity search. The full suite passes 399 tests
    (74 ignored); strict Clippy, format,
    and diff checks pass.
    Legacy `.xls` attachments are parsed with a vendored Calamine patch that
