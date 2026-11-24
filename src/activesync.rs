@@ -5842,12 +5842,12 @@ fn calendar_instance_change_supported(fields: &wbxml::eas::CalendarFields) -> bo
         || fields.end_time.is_some()
         || fields.all_day_event.is_some()
         || fields.busy_status.is_some()
-        || fields.sensitivity.is_some()
-        || fields.categories.is_some())
+        || fields.categories.is_some()
+        || fields.reminder.is_some())
         && !fields.unsupported_location
         && !fields.unsupported_busy_status
         && !fields.unsupported_sensitivity
-        && fields.reminder.is_none()
+        && fields.sensitivity.is_none()
         && !fields.unsupported_reminder
         && !fields.unsupported_categories
         && !fields.recurrence_present
@@ -6423,8 +6423,8 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
         exception.end_utc.hash(&mut hasher);
         exception.all_day.hash(&mut hasher);
         exception.busy_status.hash(&mut hasher);
-        exception.sensitivity.hash(&mut hasher);
         exception.categories.hash(&mut hasher);
+        exception.reminder_minutes.hash(&mut hasher);
         if let Some(description) = &exception.description {
             description.body_type.eas_value().hash(&mut hasher);
             description.value.hash(&mut hasher);
@@ -6621,15 +6621,19 @@ fn write_calendar_fields(
                 if let Some(busy_status) = exception.busy_status {
                     builder.leaf(cal::BUSY_STATUS, busy_status.to_string());
                 }
-                if let Some(sensitivity) = exception.sensitivity {
-                    builder.leaf(cal::SENSITIVITY, sensitivity.to_string());
-                }
                 if let Some(categories) = &exception.categories {
                     builder.start(cal::CATEGORIES);
                     for category in categories {
                         builder.leaf(cal::CATEGORY, category.clone());
                     }
                     builder.end();
+                }
+                if let Some(reminder) = exception.reminder_minutes {
+                    if let Some(minutes) = reminder {
+                        builder.leaf(cal::REMINDER, minutes.to_string());
+                    } else if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
+                        builder.empty_tag(cal::REMINDER);
+                    }
                 }
                 if let Some(title) = &exception.title {
                     builder.leaf(cal::SUBJECT, title.clone());
@@ -8446,7 +8450,7 @@ mod tests {
                 end_utc: Some("20261125T190000Z".to_owned()),
                 all_day: Some(true),
                 busy_status: Some(1),
-                sensitivity: Some(2),
+                reminder_minutes: Some(Some(15)),
                 categories: Some(vec!["Work".to_owned()]),
                 description: Some(crate::model::EmailBody {
                     body_type: crate::model::EmailBodyType::Plain,
@@ -8497,14 +8501,36 @@ mod tests {
         assert!(eas::find_all_text_after(&document, cal::BUSY_STATUS)
             .iter()
             .any(|value| value == "1"));
-        assert!(eas::find_all_text_after(&document, cal::SENSITIVITY)
+        assert!(eas::find_all_text_after(&document, cal::REMINDER)
             .iter()
-            .any(|value| value == "2"));
+            .any(|value| value == "15"));
         assert_eq!(
             eas::find_all_text_after(&document, cal::CATEGORY),
             vec!["Work"]
         );
         assert!(!eas::contains_token(&document, cal::DELETED));
+    }
+
+    #[test]
+    fn occurrence_reminder_clear_uses_empty_tag_only_for_16_x() {
+        use crate::wbxml::eas::{self, airsync as air, calendar as cal};
+        let event = crate::model::CalendarEvent {
+            recurrence_exceptions: vec![crate::model::CalendarEventException {
+                instance_id: "20261125T170000Z".to_owned(),
+                reminder_minutes: Some(None),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        for (version, expected) in [
+            (ProtocolVersion::V14_0, false),
+            (ProtocolVersion::V16_1, true),
+        ] {
+            let mut builder = eas::DocumentBuilder::new();
+            super::write_calendar_command(&mut builder, air::CHANGE, &event, version, &[]);
+            let document = builder.finish();
+            assert_eq!(eas::contains_token(&document, cal::REMINDER), expected);
+        }
     }
 
     #[test]
@@ -8514,6 +8540,12 @@ mod tests {
             ..Default::default()
         };
         assert!(super::calendar_instance_change_supported(&fields));
+        fields.sensitivity = Some(2);
+        assert!(!super::calendar_instance_change_supported(&fields));
+        fields.sensitivity = None;
+        fields.reminder = Some(Some(10));
+        assert!(super::calendar_instance_change_supported(&fields));
+        fields.reminder = None;
         fields.start_time = Some("20261125T170000Z".to_owned());
         assert!(super::calendar_instance_change_supported(&fields));
         fields.start_time = None;

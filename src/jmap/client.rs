@@ -4590,12 +4590,12 @@ impl JmapClient {
                 || fields.end_time.is_some()
                 || fields.all_day_event.is_some()
                 || fields.busy_status.is_some()
-                || fields.sensitivity.is_some()
-                || fields.categories.is_some())
+                || fields.categories.is_some()
+                || fields.reminder.is_some())
                 && !fields.unsupported_location
                 && !fields.unsupported_busy_status
                 && !fields.unsupported_sensitivity
-                && fields.reminder.is_none()
+                && fields.sensitivity.is_none()
                 && !fields.unsupported_reminder
                 && !fields.unsupported_categories
                 && !fields.recurrence_present
@@ -4622,7 +4622,7 @@ impl JmapClient {
                 &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
                 vec![MethodCall::new(
                     "CalendarEvent/get",
-                    serde_json::json!({"accountId":account_id,"ids":[id],"properties":["id","timeZone","recurrenceRule","recurrenceOverrides"]}),
+                    serde_json::json!({"accountId":account_id,"ids":[id],"properties":["id","timeZone","recurrenceRule","recurrenceOverrides","alerts","useDefaultAlerts"]}),
                     "instance",
                 )],
             )
@@ -4649,6 +4649,33 @@ impl JmapClient {
             .as_str()
             .context("calendar state missing")?;
         let mut patch = serde_json::Map::new();
+        if let Some(reminder) = fields.reminder {
+            anyhow::ensure!(
+                event["useDefaultAlerts"] != true,
+                "cannot change an occurrence reminder while calendar default alerts are active"
+            );
+            let base_alerts = event.get("alerts").unwrap_or(&serde_json::Value::Null);
+            let exception = &event["recurrenceOverrides"][&key];
+            let empty_patch = serde_json::Map::new();
+            let occurrence_patch = if exception.is_null() {
+                &empty_patch
+            } else {
+                exception
+                    .as_object()
+                    .context("invalid recurrence exception patch")?
+            };
+            let effective_alerts = merge_calendar_alert_patch(Some(base_alerts), occurrence_patch)?;
+            let mut alert_patch = serde_json::Map::new();
+            crate::jmap::calendar_reminder::write_reminder(
+                &mut alert_patch,
+                &effective_alerts,
+                reminder,
+            )?;
+            alert_patch.remove("useDefaultAlerts");
+            for (path, value) in alert_patch {
+                patch.insert(format!("recurrenceOverrides/{key}/{path}"), value);
+            }
+        }
         if let Some(subject) = &fields.subject {
             patch.insert(
                 format!("recurrenceOverrides/{key}/title"),
@@ -4707,17 +4734,6 @@ impl JmapClient {
                 serde_json::json!(value),
             );
         }
-        if let Some(sensitivity) = fields.sensitivity {
-            let value = match sensitivity {
-                0 => "public",
-                2 => "private",
-                _ => anyhow::bail!("unsupported calendar sensitivity"),
-            };
-            patch.insert(
-                format!("recurrenceOverrides/{key}/privacy"),
-                serde_json::json!(value),
-            );
-        }
         if let Some(categories) = &fields.categories {
             let keywords: BTreeMap<_, _> = categories.iter().map(|name| (name, true)).collect();
             patch.insert(
@@ -4742,6 +4758,9 @@ impl JmapClient {
                 serde_json::json!({"loc1": location})
             };
             patch.insert(format!("recurrenceOverrides/{key}/locations"), locations);
+        }
+        if patch.is_empty() {
+            return Ok(());
         }
         let update = serde_json::json!({
             "accountId": account_id,
@@ -7743,6 +7762,7 @@ fn simple_geo(value: &str) -> Option<(&str, &str)> {
 
 fn calendar_recurrence_exceptions(
     overrides: Option<&serde_json::Value>,
+    base_alerts: Option<&serde_json::Value>,
     timezone: Option<&str>,
     event_duration: Option<&str>,
 ) -> anyhow::Result<Vec<crate::model::CalendarEventException>> {
@@ -7783,9 +7803,9 @@ fn calendar_recurrence_exceptions(
                             | "duration"
                             | "showWithoutTime"
                             | "freeBusyStatus"
-                            | "privacy"
                             | "keywords"
-                    )
+                            | "alerts"
+                    ) || key.starts_with("alerts/")
                 }),
                 "unsupported recurrence exception fields"
             );
@@ -7892,16 +7912,6 @@ fn calendar_recurrence_exceptions(
                     },
                 ),
             };
-            let sensitivity = match patch.get("privacy") {
-                None => None,
-                Some(serde_json::Value::Null) => Some(0),
-                Some(value) => Some(match value.as_str().context("invalid exception privacy")? {
-                    "public" => 0,
-                    "private" => 2,
-                    "secret" => 3,
-                    _ => anyhow::bail!("unsupported exception privacy"),
-                }),
-            };
             let categories = match patch.get("keywords") {
                 None => None,
                 Some(serde_json::Value::Null) => Some(Vec::new()),
@@ -7916,6 +7926,19 @@ fn calendar_recurrence_exceptions(
                     )
                 }
             };
+            let has_alert_patch = patch
+                .keys()
+                .any(|key| key == "alerts" || key.starts_with("alerts/"));
+            let reminder_minutes = if has_alert_patch {
+                let alerts = merge_calendar_alert_patch(base_alerts, patch)?;
+                let inherited = base_alerts
+                    .map(crate::jmap::calendar_reminder::read_reminder)
+                    .unwrap_or(None);
+                let effective = crate::jmap::calendar_reminder::read_reminder(&alerts);
+                (effective != inherited).then_some(effective)
+            } else {
+                None
+            };
             Ok(crate::model::CalendarEventException {
                 instance_id,
                 deleted: false,
@@ -7926,12 +7949,84 @@ fn calendar_recurrence_exceptions(
                 end_utc,
                 all_day,
                 busy_status,
-                sensitivity,
                 categories,
+                reminder_minutes,
                 description,
             })
         })
         .collect()
+}
+
+fn merge_calendar_alert_patch(
+    base: Option<&serde_json::Value>,
+    override_patch: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<serde_json::Value> {
+    fn unescape(token: &str) -> anyhow::Result<String> {
+        let mut result = String::new();
+        let mut chars = token.chars();
+        while let Some(character) = chars.next() {
+            if character == '~' {
+                match chars
+                    .next()
+                    .context("invalid escaped recurrence alert path")?
+                {
+                    '0' => result.push('~'),
+                    '1' => result.push('/'),
+                    _ => anyhow::bail!("invalid escaped recurrence alert path"),
+                }
+            } else {
+                result.push(character);
+            }
+        }
+        Ok(result)
+    }
+
+    let mut alerts = base
+        .filter(|value| !value.is_null())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(replacement) = override_patch.get("alerts") {
+        anyhow::ensure!(
+            !override_patch.keys().any(|key| key.starts_with("alerts/")),
+            "overlapping recurrence alert patches"
+        );
+        return if replacement.is_null() {
+            Ok(serde_json::json!({}))
+        } else {
+            anyhow::ensure!(
+                replacement.is_object(),
+                "invalid recurrence alerts replacement"
+            );
+            Ok(replacement.clone())
+        };
+    }
+    for (path, value) in override_patch
+        .iter()
+        .filter_map(|(key, value)| key.strip_prefix("alerts/").map(|path| (path, value)))
+    {
+        let tokens = path
+            .split('/')
+            .map(unescape)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        anyhow::ensure!(!tokens.is_empty(), "empty recurrence alert patch path");
+        let (last, parents) = tokens.split_last().unwrap();
+        let mut target = &mut alerts;
+        for token in parents {
+            target = target
+                .as_object_mut()
+                .and_then(|object| object.get_mut(token))
+                .context("recurrence alert patch parent is missing")?;
+        }
+        let object = target
+            .as_object_mut()
+            .context("recurrence alert patch parent is not an object")?;
+        if value.is_null() {
+            object.remove(last);
+        } else {
+            object.insert(last.clone(), value.clone());
+        }
+    }
+    Ok(alerts)
 }
 
 impl From<CalendarEventObject> for CalendarEvent {
@@ -7940,6 +8035,7 @@ impl From<CalendarEventObject> for CalendarEvent {
         let recurrence_time_zone = value.time_zone.clone();
         let recurrence_exceptions = calendar_recurrence_exceptions(
             value.recurrence_overrides.as_ref(),
+            value.alerts.as_ref(),
             recurrence_time_zone.as_deref(),
             value.duration.as_deref(),
         );
@@ -8613,6 +8709,26 @@ mod tests {
     }
 
     #[test]
+    fn recurrence_alert_patches_preserve_unrelated_alerts_and_support_clear() {
+        let base = serde_json::json!({
+            "display":{"@type":"Alert","trigger":{"@type":"OffsetTrigger","relativeTo":"start","offset":"-PT30M"}},
+            "email":{"@type":"Alert","action":"email","trigger":{"@type":"OffsetTrigger","relativeTo":"start","offset":"-PT1H"}}
+        });
+        let changed = serde_json::Map::from_iter([(
+            "alerts/display/trigger".to_owned(),
+            serde_json::json!({"@type":"OffsetTrigger","relativeTo":"start","offset":"-PT15M"}),
+        )]);
+        let merged = super::merge_calendar_alert_patch(Some(&base), &changed).unwrap();
+        assert_eq!(merged["display"]["trigger"]["offset"], "-PT15M");
+        assert!(merged.get("email").is_some());
+
+        let cleared =
+            serde_json::Map::from_iter([("alerts/display".to_owned(), serde_json::Value::Null)]);
+        let merged = super::merge_calendar_alert_patch(Some(&base), &cleared).unwrap();
+        assert!(merged.get("display").is_none());
+        assert!(merged.get("email").is_some());
+    }
+
     fn calendar_recurrence_rules_round_trip_and_map_excluded_exceptions() {
         let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
             "id":"e",
@@ -8661,9 +8777,11 @@ mod tests {
         let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
             "id":"e", "recurrenceRule":{"frequency":"weekly","byDay":[{"day":"mo"}]},
             "uid":"series-uid", "timeZone":"America/Toronto",
+            "alerts":{"display":{"@type":"Alert","trigger":{"@type":"OffsetTrigger","relativeTo":"start","offset":"-PT30M"}}},
             "recurrenceOverrides":{"2026-11-25T12:00:00":{
                 "start":"2026-11-25T13:00:00", "duration":"PT3600S", "showWithoutTime":true,
-                "freeBusyStatus":"x-eas-tentative", "privacy":"secret",
+                "freeBusyStatus":"x-eas-tentative",
+                "alerts/display/trigger":{"@type":"OffsetTrigger","relativeTo":"start","offset":"-PT20M"},
                 "keywords":{"Work":true,"Hidden":false},
                 "title":"Changed occurrence", "description":"Exception body",
                 "descriptionContentType":"text/plain",
@@ -8702,11 +8820,23 @@ mod tests {
         );
         assert_eq!(event.recurrence_exceptions[0].all_day, Some(true));
         assert_eq!(event.recurrence_exceptions[0].busy_status, Some(1));
-        assert_eq!(event.recurrence_exceptions[0].sensitivity, Some(3));
+        assert_eq!(
+            event.recurrence_exceptions[0].reminder_minutes,
+            Some(Some(20))
+        );
         assert_eq!(
             event.recurrence_exceptions[0].categories,
             Some(vec!["Work".to_owned()])
         );
+
+        let privacy_override: super::CalendarEventObject =
+            serde_json::from_value(serde_json::json!({
+                "id":"e", "recurrenceRule":{"frequency":"weekly"},
+                "timeZone":"America/Toronto",
+                "recurrenceOverrides":{"2026-11-25T12:00:00":{"privacy":"private"}}
+            }))
+            .unwrap();
+        assert!(crate::model::CalendarEvent::from(privacy_override).unsupported_recurrence);
 
         let object: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
             "id":"e", "recurrenceRule":{"frequency":"weekly","byDay":[{"day":"mo"}]},
@@ -9291,7 +9421,8 @@ mod calendar_update_state_tests {
                             "CalendarEvent/get", {
                                 "state":"state-2",
                                 "list":[{"id":"event-2", "timeZone":"America/Toronto",
-                                    "recurrenceRule":{"frequency":"weekly"}}]
+                                    "recurrenceRule":{"frequency":"weekly"},
+                                    "alerts":{"display":{"@type":"Alert","trigger":{"@type":"OffsetTrigger","relativeTo":"start","offset":"-PT30M"}}}}]
                             }, "instance"
                         ]]})),
                         1 => {
@@ -9314,8 +9445,8 @@ mod calendar_update_state_tests {
                             assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/duration"], "PT3600S");
                             assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/showWithoutTime"], true);
                             assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/freeBusyStatus"], "x-eas-out-of-office");
-                            assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/privacy"], "private");
                             assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/keywords"], serde_json::json!({}));
+                            assert_eq!(patch["recurrenceOverrides/2026-11-15T10:00:00/alerts/display/trigger"], serde_json::json!({"@type":"OffsetTrigger","relativeTo":"start","offset":"-PT15M"}));
                             Json(serde_json::json!({"methodResponses":[[
                                 "CalendarEvent/set", {"updated":{"event-2":null}}, "instance-change"
                             ]]}))
@@ -9356,8 +9487,8 @@ mod calendar_update_state_tests {
             end_time: Some("20261115T190000Z".to_owned()),
             all_day_event: Some(true),
             busy_status: Some(3),
-            sensitivity: Some(2),
             categories: Some(Vec::new()),
+            reminder: Some(Some(15)),
             ..Default::default()
         };
         client
