@@ -392,6 +392,12 @@ Current prioritized work:
    Free-text and supported string-property terms now accept KQL's trailing `*`
    prefix operator, including supported AND/OR combinations with boolean
    predicates. Quoted property phrases can use it on the final phrase token.
+   `NEAR` and `ONEAR` operands also preserve trailing prefix operators and
+   match token starts locally, so ordered and unordered distance checks use
+   the same prefix semantics as ordinary KQL terms. Regressions exercise
+   prefix operands in both operators, including reversed order and a
+   non-match. Targeted HTTP and unit regressions, strict Clippy, formatting,
+   and diff checks pass. The full suite and deployment verification follow.
    These queries use a scoped mailbox scan and exact local token-prefix
    comparison because JMAP text filters cannot preserve prefix semantics. A
    property-qualified prefix can also be negated with `NOT` or unary minus and

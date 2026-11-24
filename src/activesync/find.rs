@@ -1453,7 +1453,7 @@ fn evaluate_proximity_operand(
 ) -> anyhow::Result<std::collections::BTreeSet<ProximitySpan>> {
     match operand {
         ProximityOperand::Term(term) => {
-            let term = proximity_words(term);
+            let term = proximity_pattern_words(term);
             if term.is_empty() {
                 return Ok(std::collections::BTreeSet::new());
             }
@@ -1539,8 +1539,30 @@ fn find_term_positions(words: &[String], term: &[String]) -> Vec<usize> {
     words
         .windows(term.len())
         .enumerate()
-        .filter_map(|(index, window)| (window == term).then_some(index))
+        .filter_map(|(index, window)| {
+            window
+                .iter()
+                .zip(term)
+                .all(|(word, pattern)| {
+                    pattern.strip_suffix('*').map_or_else(
+                        || word == pattern,
+                        |prefix| !prefix.is_empty() && word.starts_with(prefix),
+                    )
+                })
+                .then_some(index)
+        })
         .collect()
+}
+
+fn proximity_pattern_words(term: &str) -> Vec<String> {
+    let prefix_last = term.trim_end().ends_with('*');
+    let mut words = proximity_words(term.trim_end_matches('*').trim_end());
+    if prefix_last {
+        if let Some(last) = words.last_mut() {
+            last.push('*');
+        }
+    }
+    words
 }
 
 fn email_matches_phrase(
@@ -2623,6 +2645,23 @@ mod tests {
             "alpha beta gamma",
             query::PhraseMatch::Onear { max_words: 0 }
         ));
+    }
+
+    #[test]
+    fn proximity_prefix_terms_match_word_starts_only() {
+        let words = proximity_words("alphabet beta alphabeta bet");
+        assert_eq!(
+            find_term_positions(&words, &proximity_pattern_words("alpha*")),
+            vec![0, 2]
+        );
+        assert_eq!(
+            find_term_positions(&words, &proximity_pattern_words("beta*")),
+            vec![1]
+        );
+        assert_eq!(
+            find_term_positions(&words, &proximity_pattern_words("alpha")),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]

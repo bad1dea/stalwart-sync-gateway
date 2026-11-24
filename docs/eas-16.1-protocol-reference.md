@@ -127,7 +127,8 @@ importance and boolean comparisons, property qualifiers, WORDS, ALL, ANY, and
 NONE. Quoted phrase order is enforced locally because Stalwart's native text
 index does not preserve it. Direct `NEAR` and `ONEAR` operators now use exact
 local token-distance matching over complete message text and common address
-fields, including Boolean expressions with supported predicates. `attachment:`
+fields, including Boolean expressions with supported predicates. Trailing `*`
+prefixes on proximity terms are matched against token starts. `attachment:`
 name searches are matched locally against attachment metadata. Text, JSON, XML,
 text-bearing PDF, OOXML Word/Excel/PowerPoint, and OpenDocument Text/Spreadsheet/
 Presentation attachments are extracted for exact text/proximity matching up to
