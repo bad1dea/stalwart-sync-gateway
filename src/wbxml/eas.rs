@@ -3356,6 +3356,11 @@ fn parse_task_recurrence(
     let mut nodes = vec![Node::Start(calendar::RECURRENCE)];
     let mut recurrence_start = None;
     for (token, value) in recurrence_child_texts(document)? {
+        if same_token(token, tasks::OCCURRENCES) && value.parse::<u8>().is_err() {
+            // MS-ASTASK defines Occurrences as xs:unsignedByte, unlike the
+            // Calendar class's unsignedShort representation.
+            return Err(());
+        }
         if same_token(token, tasks::START) {
             if recurrence_start.is_some() {
                 return Err(());
@@ -4239,6 +4244,23 @@ mod tests {
                 ..Default::default()
             })
         );
+
+        for (occurrences, accepted) in [("255", true), ("256", false)] {
+            let mut bounded = DocumentBuilder::new();
+            bounded.start(airsync::APPLICATION_DATA);
+            bounded.start(tasks::RECURRENCE);
+            bounded.leaf(tasks::START, "2026-11-24T09:00:00.000Z");
+            bounded.leaf(tasks::TYPE, "1");
+            bounded.leaf(tasks::DAY_OF_WEEK, "10");
+            bounded.leaf(tasks::OCCURRENCES, occurrences);
+            bounded.end();
+            bounded.end();
+            let fields = extract_task_fields(&bounded.finish().nodes);
+            assert_eq!(
+                !fields.unsupported_recurrence, accepted,
+                "Task Occurrences={occurrences}: {fields:?}"
+            );
+        }
 
         let mut mismatch = DocumentBuilder::new();
         mismatch.start(airsync::APPLICATION_DATA);
