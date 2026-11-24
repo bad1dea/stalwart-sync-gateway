@@ -5871,6 +5871,7 @@ async fn sync_calendar_collection(
     let mut deleted = false;
     let mut add_responses: Vec<(String, Option<String>, &'static str)> = Vec::new();
     let mut change_responses: Vec<(String, &'static str)> = Vec::new();
+    let mut fetch_ids = Vec::new();
     let journal = format!("__calendar_add__:{}", collection.collection_id);
     let mut completed = Vec::new();
     let mut client_ids = BTreeMap::new();
@@ -6113,10 +6114,7 @@ async fn sync_calendar_collection(
                 }
             }
             wbxml::eas::SyncClientCommandKind::Fetch => {
-                tracing::debug!(
-                    server_id = command.server_id,
-                    "ignoring unsupported Calendar Fetch command"
-                );
+                fetch_ids.push(command.server_id.clone());
             }
         }
     }
@@ -6232,7 +6230,7 @@ async fn sync_calendar_collection(
     builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
     builder.leaf(air::STATUS, "1");
 
-    if !add_responses.is_empty() || !change_responses.is_empty() {
+    if !add_responses.is_empty() || !change_responses.is_empty() || !fetch_ids.is_empty() {
         builder.start(air::RESPONSES);
         for (client_id, server_id, status) in &add_responses {
             builder.start(air::ADD);
@@ -6258,6 +6256,19 @@ async fn sync_calendar_collection(
             builder.start(air::CHANGE);
             builder.leaf(air::SERVER_ID, server_id.clone());
             builder.leaf(air::STATUS, *status);
+            builder.end();
+        }
+        for server_id in fetch_ids {
+            builder.start(air::FETCH);
+            builder.leaf(air::SERVER_ID, server_id.clone());
+            if let Some((_, event)) = current_by_id.get(&server_id) {
+                builder.leaf(air::STATUS, "1");
+                builder.start(air::APPLICATION_DATA);
+                write_calendar_fields(builder, event, version, &collection.body_preferences, false);
+                builder.end();
+            } else {
+                builder.leaf(air::STATUS, "8");
+            }
             builder.end();
         }
         builder.end();
@@ -6619,6 +6630,7 @@ async fn sync_tasks_collection(
     let mut deleted = false;
     let mut add_responses: Vec<(String, Option<String>, &'static str)> = Vec::new();
     let mut change_responses: Vec<(String, &'static str)> = Vec::new();
+    let mut fetch_ids = Vec::new();
 
     for command in &collection.commands {
         match command.kind {
@@ -6678,10 +6690,7 @@ async fn sync_tasks_collection(
                 }
             }
             wbxml::eas::SyncClientCommandKind::Fetch => {
-                tracing::debug!(
-                    server_id = command.server_id,
-                    "ignoring unsupported Tasks Fetch command"
-                );
+                fetch_ids.push(command.server_id.clone());
             }
         }
     }
@@ -6789,7 +6798,7 @@ async fn sync_tasks_collection(
     builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
     builder.leaf(air::STATUS, "1");
 
-    if !add_responses.is_empty() || !change_responses.is_empty() {
+    if !add_responses.is_empty() || !change_responses.is_empty() || !fetch_ids.is_empty() {
         builder.start(air::RESPONSES);
         for (client_id, server_id, status) in &add_responses {
             builder.start(air::ADD);
@@ -6804,6 +6813,19 @@ async fn sync_tasks_collection(
             builder.start(air::CHANGE);
             builder.leaf(air::SERVER_ID, server_id.clone());
             builder.leaf(air::STATUS, *status);
+            builder.end();
+        }
+        for server_id in fetch_ids {
+            builder.start(air::FETCH);
+            builder.leaf(air::SERVER_ID, server_id.clone());
+            if let Some((_, task)) = current_by_id.get(&server_id) {
+                builder.leaf(air::STATUS, "1");
+                builder.start(air::APPLICATION_DATA);
+                write_task_fields(builder, task, &collection.body_preferences, version, false);
+                builder.end();
+            } else {
+                builder.leaf(air::STATUS, "8");
+            }
             builder.end();
         }
         builder.end();
@@ -7068,6 +7090,7 @@ async fn sync_notes_collection(
     let mut deleted = false;
     let mut add_responses: Vec<(String, Option<String>, &'static str)> = Vec::new();
     let mut change_responses: Vec<(String, &'static str)> = Vec::new();
+    let mut fetch_ids = Vec::new();
 
     for command in &collection.commands {
         match command.kind {
@@ -7136,10 +7159,7 @@ async fn sync_notes_collection(
                 // doesn't already have.
             }
             wbxml::eas::SyncClientCommandKind::Fetch => {
-                tracing::debug!(
-                    server_id = command.server_id,
-                    "ignoring unsupported Notes Fetch command"
-                );
+                fetch_ids.push(command.server_id.clone());
             }
         }
     }
@@ -7195,7 +7215,17 @@ async fn sync_notes_collection(
     );
 
     let mut notes = BTreeMap::new();
-    for id in to_add.iter().chain(&to_change) {
+    let note_ids: BTreeSet<String> = to_add
+        .iter()
+        .chain(&to_change)
+        .chain(
+            fetch_ids
+                .iter()
+                .filter(|id| current_by_id.contains_key(*id)),
+        )
+        .cloned()
+        .collect();
+    for id in &note_ids {
         match state.jmap.get_note(auth, id).await {
             Ok(Some(note)) => {
                 notes.insert(id.clone(), note);
@@ -7253,7 +7283,7 @@ async fn sync_notes_collection(
     builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
     builder.leaf(air::STATUS, "1");
 
-    if !add_responses.is_empty() || !change_responses.is_empty() {
+    if !add_responses.is_empty() || !change_responses.is_empty() || !fetch_ids.is_empty() {
         builder.start(air::RESPONSES);
         for (client_id, server_id, status) in &add_responses {
             builder.start(air::ADD);
@@ -7268,6 +7298,19 @@ async fn sync_notes_collection(
             builder.start(air::CHANGE);
             builder.leaf(air::SERVER_ID, server_id.clone());
             builder.leaf(air::STATUS, *status);
+            builder.end();
+        }
+        for server_id in fetch_ids {
+            builder.start(air::FETCH);
+            builder.leaf(air::SERVER_ID, server_id.clone());
+            if let Some(note) = notes.get(&server_id) {
+                builder.leaf(air::STATUS, "1");
+                builder.start(air::APPLICATION_DATA);
+                write_note_fields(builder, note, &collection.body_preferences);
+                builder.end();
+            } else {
+                builder.leaf(air::STATUS, "8");
+            }
             builder.end();
         }
         builder.end();

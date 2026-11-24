@@ -11679,6 +11679,90 @@ async fn contacts_sync_fetch_returns_only_items_in_the_requested_address_book() 
 }
 
 #[tokio::test]
+async fn calendar_task_and_note_sync_fetch_return_full_items() {
+    use eas::{airsync as air, calendar, notes, tasks};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 1);
+
+    for (collection, expected_id, expected_field, expected_value) in [
+        ("cal_calendar", "e0000", calendar::SUBJECT, "Event 0"),
+        ("task_calendar", "t0000", tasks::SUBJECT, "Task 0"),
+    ] {
+        let prime = item_sync(&env, "group-fetch", collection, "0", "25").await;
+        let page = item_sync(&env, "group-fetch", collection, &sync_key(&prime), "25").await;
+        assert!(eas::find_all_text_after(&page, air::SERVER_ID).contains(&expected_id.to_owned()));
+        let key = sync_key(&page);
+        let mut builder = eas::DocumentBuilder::new();
+        builder.start(air::SYNC);
+        builder.start(air::COLLECTIONS);
+        builder.start(air::COLLECTION);
+        builder.leaf(air::SYNC_KEY, key);
+        builder.leaf(air::COLLECTION_ID, collection);
+        builder.leaf(air::GET_CHANGES, "0");
+        builder.start(air::COMMANDS);
+        builder.start(air::FETCH);
+        builder.leaf(air::SERVER_ID, expected_id);
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        let response = env
+            .req("Sync", "group-fetch")
+            .body(wbxml::encode_document(&builder.finish()))
+            .send()
+            .await
+            .unwrap();
+        let document = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(
+            eas::find_all_text_after(&document, air::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(
+            eas::find_all_text_after(&document, expected_field),
+            vec![expected_value]
+        );
+    }
+
+    let prime = item_sync(&env, "group-fetch", "note_notes", "0", "25").await;
+    let page = item_sync(&env, "group-fetch", "note_notes", &sync_key(&prime), "25").await;
+    let note_id = eas::find_all_text_after(&page, air::SERVER_ID)
+        .into_iter()
+        .next()
+        .expect("initial Notes Sync Add includes a ServerId");
+    let mut builder = eas::DocumentBuilder::new();
+    builder.start(air::SYNC);
+    builder.start(air::COLLECTIONS);
+    builder.start(air::COLLECTION);
+    builder.leaf(air::SYNC_KEY, sync_key(&page));
+    builder.leaf(air::COLLECTION_ID, "note_notes");
+    builder.leaf(air::GET_CHANGES, "0");
+    builder.start(air::COMMANDS);
+    builder.start(air::FETCH);
+    builder.leaf(air::SERVER_ID, &note_id);
+    builder.end();
+    builder.end();
+    builder.end();
+    builder.end();
+    builder.end();
+    let response = env
+        .req("Sync", "group-fetch")
+        .body(wbxml::encode_document(&builder.finish()))
+        .send()
+        .await
+        .unwrap();
+    let document = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        eas::find_all_text_after(&document, air::STATUS),
+        vec!["1", "1"]
+    );
+    assert_eq!(
+        eas::find_all_text_after(&document, notes::SUBJECT),
+        vec!["subject n0000"]
+    );
+}
+
+#[tokio::test]
 async fn item_changes_wake_both_devices_and_sync_delivers_them() {
     use eas::airsync as air;
     let env = Arc::new(start_env(Opts::default()).await);
