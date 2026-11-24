@@ -9,6 +9,11 @@ mod sync_options;
 mod sync_request;
 mod validate_cert;
 
+#[cfg(test)]
+pub(crate) fn test_legacy_doc_attachment(text: &str) -> Vec<u8> {
+    find::test_legacy_doc_attachment(text)
+}
+
 use crate::wbxml::eas::RequestedBodyPreference;
 use anyhow::Context;
 use axum::{

@@ -498,6 +498,7 @@ fn is_extractable_attachment_type(content_type: &str) -> bool {
                 | "application/vnd.ms-outlook"
                 | "application/vnd.ms-excel"
                 | "application/vnd.ms-powerpoint"
+                | "application/msword"
                 | "message/rfc822"
                 | "message/global"
         )
@@ -564,6 +565,10 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
             }))
             .ok()??
         }
+        "application/msword" => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            extract_legacy_doc_text(bytes)
+        }))
+        .ok()??,
         "message/rfc822" | "message/global" => {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| extract_rfc822_text(bytes)))
                 .ok()??
@@ -919,6 +924,198 @@ fn extract_legacy_ppt_text(bytes: &[u8]) -> Option<String> {
         }
     }
     Some(text)
+}
+
+fn extract_legacy_doc_text(bytes: &[u8]) -> Option<String> {
+    use std::io::Read;
+
+    let mut compound = cfb::CompoundFile::open(std::io::Cursor::new(bytes)).ok()?;
+    let mut read_bounded_stream = |name: &str| {
+        let mut stream = compound.open_stream(name).ok()?;
+        let size = usize::try_from(stream.len()).ok()?;
+        if size > MAX_FIND_ATTACHMENT_TEXT_BYTES as usize {
+            return None;
+        }
+        let mut data = Vec::with_capacity(size);
+        stream
+            .by_ref()
+            .take(MAX_FIND_ATTACHMENT_TEXT_BYTES + 1)
+            .read_to_end(&mut data)
+            .ok()?;
+        (data.len() <= MAX_FIND_ATTACHMENT_TEXT_BYTES as usize).then_some(data)
+    };
+
+    let word = read_bounded_stream("/WordDocument")?;
+    let table_name = if word.get(10).is_some_and(|flags| flags & 0x02 != 0) {
+        "/1Table"
+    } else {
+        "/0Table"
+    };
+    let table = read_bounded_stream(table_name)?;
+    let pieces = legacy_doc_piece_table(&word, &table)?;
+    let mut output = String::new();
+    for piece in pieces {
+        let end = piece.offset.checked_add(piece.length)?;
+        let raw = word.get(piece.offset..end)?;
+        if piece.compressed {
+            let (decoded, _) = encoding_rs::WINDOWS_1252.decode_without_bom_handling(raw);
+            append_find_text(&mut output, &decoded)?;
+        } else {
+            if raw.len() % 2 != 0 {
+                return None;
+            }
+            let units = raw
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|chunk| u16::from_le_bytes(*chunk))
+                .collect::<Vec<_>>();
+            append_find_text(&mut output, &String::from_utf16_lossy(&units))?;
+        }
+    }
+    Some(output)
+}
+
+#[derive(Debug)]
+struct LegacyDocPiece {
+    compressed: bool,
+    offset: usize,
+    length: usize,
+}
+
+fn legacy_doc_piece_table(word: &[u8], table: &[u8]) -> Option<Vec<LegacyDocPiece>> {
+    let fc_clx = usize::try_from(u32::from_le_bytes(
+        word.get(0x01a2..0x01a6)?.try_into().ok()?,
+    ))
+    .ok()?;
+    let lcb_clx = usize::try_from(u32::from_le_bytes(
+        word.get(0x01a6..0x01aa)?.try_into().ok()?,
+    ))
+    .ok()?;
+    if lcb_clx == 0 {
+        let fc_min =
+            usize::try_from(u32::from_le_bytes(word.get(24..28)?.try_into().ok()?)).ok()?;
+        let fc_mac =
+            usize::try_from(u32::from_le_bytes(word.get(28..32)?.try_into().ok()?)).ok()?;
+        return (fc_mac > fc_min).then_some(vec![LegacyDocPiece {
+            compressed: false,
+            offset: fc_min,
+            length: fc_mac - fc_min,
+        }]);
+    }
+    if lcb_clx > MAX_FIND_ATTACHMENT_TEXT_BYTES as usize {
+        return None;
+    }
+    let clx_end = fc_clx.checked_add(lcb_clx)?;
+    let clx = table.get(fc_clx..clx_end)?;
+    let mut position = 0usize;
+    loop {
+        match *clx.get(position)? {
+            0x01 => {
+                let cb = usize::from(u16::from_le_bytes(
+                    clx.get(position.checked_add(1)?..position.checked_add(3)?)?
+                        .try_into()
+                        .ok()?,
+                ));
+                position = position.checked_add(3)?.checked_add(cb)?;
+            }
+            0x02 => break,
+            _ => return None,
+        }
+    }
+    let plc_header_end = position.checked_add(5)?;
+    let plc_len = usize::try_from(u32::from_le_bytes(
+        clx.get(position.checked_add(1)?..plc_header_end)?
+            .try_into()
+            .ok()?,
+    ))
+    .ok()?;
+    let plc_end = plc_header_end.checked_add(plc_len)?;
+    let plc = clx.get(plc_header_end..plc_end)?;
+    if plc.len() < 8 || !(plc.len() - 4).is_multiple_of(12) {
+        return None;
+    }
+    let piece_count = (plc.len() - 4) / 12;
+    let pcds_start = piece_count.checked_add(1)?.checked_mul(4)?;
+    let mut pieces = Vec::with_capacity(piece_count);
+    for index in 0..piece_count {
+        let cp_start = i32::from_le_bytes(
+            plc.get(index.checked_mul(4)?..index.checked_mul(4)?.checked_add(4)?)?
+                .try_into()
+                .ok()?,
+        );
+        let next_cp = index.checked_add(1)?.checked_mul(4)?;
+        let cp_end =
+            i32::from_le_bytes(plc.get(next_cp..next_cp.checked_add(4)?)?.try_into().ok()?);
+        if cp_start < 0 || cp_end <= cp_start {
+            return None;
+        }
+        let char_count = usize::try_from(cp_end.checked_sub(cp_start)?).ok()?;
+        let pcd_start = pcds_start.checked_add(index.checked_mul(8)?)?;
+        let raw_fc = u32::from_le_bytes(
+            plc.get(pcd_start.checked_add(2)?..pcd_start.checked_add(6)?)?
+                .try_into()
+                .ok()?,
+        );
+        let compressed = raw_fc & 0x4000_0000 != 0;
+        let file_offset = raw_fc & !0xc000_0000;
+        let offset = if compressed {
+            usize::try_from(file_offset >> 1).ok()?
+        } else {
+            usize::try_from(file_offset).ok()?
+        };
+        let length = if compressed {
+            char_count
+        } else {
+            char_count.checked_mul(2)?
+        };
+        pieces.push(LegacyDocPiece {
+            compressed,
+            offset,
+            length,
+        });
+    }
+    Some(pieces)
+}
+
+#[cfg(test)]
+pub(crate) fn test_legacy_doc_attachment(text: &str) -> Vec<u8> {
+    use std::io::Write;
+
+    let raw_text = text.as_bytes();
+    let raw_fc = ((512u32) << 1) | 0x4000_0000;
+    let mut plc = Vec::with_capacity(16);
+    plc.extend_from_slice(&0i32.to_le_bytes());
+    plc.extend_from_slice(&(raw_text.len() as i32).to_le_bytes());
+    plc.extend_from_slice(&0u16.to_le_bytes());
+    plc.extend_from_slice(&raw_fc.to_le_bytes());
+    plc.extend_from_slice(&0u16.to_le_bytes());
+    let mut clx = vec![0x02];
+    clx.extend_from_slice(&(plc.len() as u32).to_le_bytes());
+    clx.extend_from_slice(&plc);
+
+    let mut word = vec![0; 512];
+    word[0x00..0x02].copy_from_slice(&0x00c1u16.to_le_bytes());
+    word[0x02..0x04].copy_from_slice(&0x00bfu16.to_le_bytes());
+    word[10] = 0x02; // fWhichTblStm selects 1Table.
+    word[24..28].copy_from_slice(&0u32.to_le_bytes());
+    word[28..32].copy_from_slice(&(raw_text.len() as u32).to_le_bytes());
+    word[0x01a2..0x01a6].copy_from_slice(&0u32.to_le_bytes());
+    word[0x01a6..0x01aa].copy_from_slice(&(clx.len() as u32).to_le_bytes());
+    word.extend_from_slice(raw_text);
+
+    let mut compound = cfb::CompoundFile::create(std::io::Cursor::new(Vec::new())).unwrap();
+    compound
+        .create_stream("/WordDocument")
+        .unwrap()
+        .write_all(&word)
+        .unwrap();
+    compound
+        .create_stream("/1Table")
+        .unwrap()
+        .write_all(&clx)
+        .unwrap();
+    compound.into_inner().into_inner()
 }
 
 pub(super) fn matching_principals(
@@ -2938,6 +3135,35 @@ mod tests {
             extract_legacy_ppt_text(&vec![0; MAX_FIND_ATTACHMENT_TEXT_BYTES as usize + 1])
                 .is_none()
         );
+    }
+
+    #[test]
+    fn legacy_doc_find_extracts_piece_table_text_with_stream_limits() {
+        assert!(is_extractable_attachment_type("application/msword"));
+        let fixture = test_legacy_doc_attachment("lima mike in old Word");
+        assert_eq!(
+            extract_find_attachment_text("application/msword", &fixture),
+            Some("lima mike in old Word".to_owned())
+        );
+        assert!(
+            extract_legacy_doc_text(&vec![0; MAX_FIND_ATTACHMENT_TEXT_BYTES as usize + 1])
+                .is_none()
+        );
+        assert!(extract_legacy_doc_text(b"not an OLE document").is_none());
+
+        // The CFB directory can claim a stream larger than the received file.
+        // Reject its declared length before allocating or reading that stream.
+        let mut oversized_stream = fixture.clone();
+        let word_name: Vec<u8> = "WordDocument\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let entry = oversized_stream
+            .windows(word_name.len())
+            .position(|bytes| bytes == word_name)
+            .expect("WordDocument directory entry");
+        oversized_stream[entry + 120..entry + 124].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(extract_legacy_doc_text(&oversized_stream).is_none());
     }
 
     fn test_pdf_with_text(text: &str) -> Vec<u8> {

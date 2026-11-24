@@ -14089,6 +14089,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     let eml = b"From: sender@example.test\r\nSubject: message attachment\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nnovember=20oscar in EML".to_vec();
     let outlook_msg = include_bytes!("../tests/fixtures/outlook-ascii.msg").to_vec();
     let legacy_xls = include_bytes!("../tests/fixtures/legacy-xls.xls").to_vec();
+    let legacy_doc = crate::activesync::test_legacy_doc_attachment("papa quebec in old Word");
     let legacy_ppt = {
         fn record(version: u16, record_type: u16, payload: &[u8]) -> Vec<u8> {
             let mut bytes = Vec::with_capacity(payload.len() + 8);
@@ -14190,6 +14191,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     env.mock.add_mail("inbox", "xlsm-attachment");
     env.mock.add_mail("inbox", "xls-attachment");
     env.mock.add_mail("inbox", "ppt-attachment");
+    env.mock.add_mail("inbox", "doc-attachment");
     env.mock.add_mail("inbox", "eml-attachment");
     env.mock.add_mail("inbox", "outlook-msg-attachment");
     env.mock.mail_bodies.lock().unwrap().insert(
@@ -14282,6 +14284,17 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         })],
     );
     env.mock.mail_bodies.lock().unwrap().insert(
+        "doc-attachment".to_owned(),
+        ("unrelated body".to_owned(), false),
+    );
+    env.mock.mail_attachments.lock().unwrap().insert(
+        "doc-attachment".to_owned(),
+        vec![serde_json::json!({
+            "blobId":"doc-blob", "name":"legacy.doc",
+            "type":"application/msword", "size":legacy_doc.len()
+        })],
+    );
+    env.mock.mail_bodies.lock().unwrap().insert(
         "eml-attachment".to_owned(),
         ("unrelated body".to_owned(), false),
     );
@@ -14337,6 +14350,10 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     env.mock.download_blobs.lock().unwrap().insert(
         "ppt-blob".to_owned(),
         ("application/vnd.ms-powerpoint".to_owned(), legacy_ppt),
+    );
+    env.mock.download_blobs.lock().unwrap().insert(
+        "doc-blob".to_owned(),
+        ("application/msword".to_owned(), legacy_doc),
     );
     env.mock
         .download_blobs
@@ -14415,6 +14432,25 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     assert_eq!(
         eas::find_all_text_after(&doc, air::SERVER_ID),
         vec!["ppt-attachment"]
+    );
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "30000000-0000-4000-8000-000000000094",
+            "old NEAR(0) word",
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["doc-attachment"]
     );
 
     let response = env

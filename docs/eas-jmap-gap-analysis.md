@@ -38,13 +38,13 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    advertise 14.0 until this pass succeeds.
 3. **Find content coverage.** Add exact local search over remaining supported
    attachment formats and assess resource-bounded scanned-PDF OCR and large
-   attachments. Current extraction is bounded and supports legacy `.xls` and
-   `.ppt`, EPUB, macro-enabled OOXML, RFC 822 messages, Outlook `.msg`
+   attachments. Current extraction is bounded and supports legacy `.xls`,
+   `.ppt`, and `.doc`, EPUB, macro-enabled OOXML, RFC 822 messages, Outlook `.msg`
    attachments, and Word, Excel, and PowerPoint package comment text, plus
    MIME-declared charsets
    for text attachments and XML declaration encodings;
-   legacy binary Word files, scanned PDFs, and payloads above the extraction
-   limit remain outside exact local matching.
+   scanned PDFs and payloads above the extraction limit remain outside exact
+   local matching.
 
 1. **BodyPartPreference / BodyPart response path — implemented and deployed.**
    Request parsing and independent Sync option
@@ -396,8 +396,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    text-bearing PDFs,
    EPUB XHTML, OOXML Word/Excel/PowerPoint (including
    macro-enabled variants), and OpenDocument Text, Spreadsheet, and Presentation
-   attachments up to 2 MiB for exact text/NEAR checks. Legacy `.xls` worksheets
-   and `.ppt` CFB streams are also parsed within explicit limits. Text
+   attachments up to 2 MiB for exact text/NEAR checks. Legacy `.xls` worksheets,
+   `.ppt` streams, and Word `.doc` piece tables are also parsed within explicit
+   limits. Text
    attachments honor MIME
    `charset` parameters, including common
    legacy single-byte encodings and UTF-16LE, with BOM detection when the
@@ -418,7 +419,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    reached, and normalization avoids a per-word temporary allocation. Regression
    coverage checks exact-limit XML and normalization, plus rejection above the
    limit. OOXML comment extraction is checked with archive fixtures and an
-   end-to-end Word comment proximity search. The full suite passes 397 tests
+   end-to-end Word comment proximity search. The full suite passes 398 tests
    (74 ignored); strict Clippy, format,
    and diff checks pass.
    Legacy `.xls` attachments are parsed with a vendored Calamine patch that
@@ -445,6 +446,11 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `sha256:ab1a7d83f0e0bcb3cffa477af463bd5f59330638b7906bce8a79f6664c571cda`,
    started `2026-11-24T23:03:55Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Extraction remains subject to the 2 MiB attachment limit.
+   Legacy binary Word documents are parsed from bounded CFB streams and their
+   CLX piece tables; invalid offsets, oversized stream declarations, malformed
+   OLE files, and parser panics fail closed. A generated fixture exercises
+   Windows-1252 piece decoding and exact proximity matching through mocked 16.1
+   Find, including a malicious stream length.
    EPUB XHTML chapters use the same archive-entry and expanded-XML limits; a
    mocked HTTP Find regression verifies proximity matching in EPUB text. The
    macro-enabled OOXML types use the same bounded document-part selection; a
