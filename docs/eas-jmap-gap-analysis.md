@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `fb4eb72` (2026-11-24)
+## Reconciled status for source `main` at `b5dbff2` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -39,17 +39,24 @@ Current prioritized work:
    EAS meaning.
 2. **Remaining recurring series exception edits.** Common event and task
    recurrence rules map to Stalwart's singular JSCalendar `recurrenceRule`.
-   EAS 16.0/16.1 occurrence deletes and subject/plain-text body/location edits
-   now map through `InstanceId` and `recurrenceOverrides`; exclusions and
-   those fields round-trip. Per-instance time/other field changes and Task
-   exceptions remain unsupported and fail closed. Regression tests cover
-   location names and coordinates in override writes, reads, and Sync output;
-   the full suite passes (303 passed, 73 ignored), and Clippy with warnings
-   denied passes. Deployed as
+   EAS 16.0/16.1 occurrence deletes and subject/plain-text body/location/time
+   edits now map through `InstanceId` and `recurrenceOverrides`; exclusions
+   and those fields round-trip. Start/end edits convert through the parent
+   event's IANA timezone, preserve the inherited endpoint when only one is
+   changed, derive the new duration, and reject negative durations. All-day
+   flags are occurrence-specific. Other fields and Task exceptions remain
+   unsupported and fail closed. Regression tests cover these mappings; the
+   full suite passes (303 passed, 73 ignored), and Clippy with warnings denied
+   passes. Location support deployed as
    `deploy-2026-11-24-eas-calendar-instance-location-fb4eb72`; homelab commit
    `8e9e20d`. The forced Compose build produced image
    `sha256:42a88cd789681e1743bd1c7f5368e87f61559a0072e8b74cae236236b5eeb277`.
    The container started at `2026-11-24T08:02:34Z` with restart count zero;
+   `/healthz` returned `ok` and `/readyz` returned `ready`. Time and all-day
+   overrides are deployed as `deploy-2026-11-24-eas-calendar-instance-time-b5dbff2`;
+   homelab commit `c53e767`. The forced Compose build produced image
+   `sha256:dd5981dbf3696e21b935a5e7cb292adfa67a8a4d2707329535a15b81f7ef70df`.
+   The container started at `2026-11-24T08:17:03Z` with restart count zero;
    `/healthz` returned `ok` and `/readyz` returned `ready`.
 3. **Real-client 16.1 certification and rollout.** Production remains pinned
    to a tagged 14.0 build. Forced-version protocol tests do not establish that
