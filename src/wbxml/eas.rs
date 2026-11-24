@@ -530,6 +530,8 @@ pub mod item_operations {
     pub const DATA: Token = tag(0x0c, false);
     pub const STATUS: Token = tag(0x0d, false);
     pub const RESPONSE: Token = tag(0x0e, false);
+    pub const VERSION: Token = tag(0x0f, false);
+    pub const SCHEMA: Token = tag(0x10, true);
     pub const PART: Token = tag(0x11, false);
     pub const PROPERTIES: Token = tag(0x0b, false);
 
@@ -1480,6 +1482,9 @@ pub struct ItemOperationsFetchRequest {
     pub range: Option<String>,
     pub body_preferences: Vec<RequestedBodyPreference>,
     pub mime_support: u8,
+    /// Optional ItemOperations Schema: top-level class fields allowed in
+    /// the returned Properties element. `None` means return all fields.
+    pub schema: Option<Vec<Token>>,
 }
 
 /// Direct child elements, retaining their complete WBXML subtrees.
@@ -1528,6 +1533,30 @@ pub fn item_operations_fetch(document: &Document) -> Option<ItemOperationsFetchR
     {
         return None;
     }
+    let options = child_elements(document)
+        .into_iter()
+        .find(|child| same_document_token(child, item_operations::OPTIONS));
+    let schema_document = options.as_ref().and_then(|options| {
+        child_elements(options)
+            .into_iter()
+            .find(|child| same_document_token(child, item_operations::SCHEMA))
+    });
+    let schema = match schema_document {
+        Some(document) => {
+            let mut fields = Vec::new();
+            for field in child_elements(&document) {
+                let [Node::Start(token)] = field.nodes.as_slice() else {
+                    return None;
+                };
+                if token.has_content || token.has_attributes {
+                    return None;
+                }
+                fields.push(*token);
+            }
+            Some(fields)
+        }
+        None => None,
+    };
     Some(ItemOperationsFetchRequest {
         store,
         collection_id,
@@ -1537,7 +1566,12 @@ pub fn item_operations_fetch(document: &Document) -> Option<ItemOperationsFetchR
         range: find_text_after(document, item_operations::RANGE).map(str::to_owned),
         body_preferences: body_preferences(document).ok()?,
         mime_support: mime_support(document).ok()?,
+        schema,
     })
+}
+
+fn same_document_token(document: &Document, expected: Token) -> bool {
+    matches!(document.nodes.first(), Some(Node::Start(token)) if token.code_page == expected.code_page && token.token == expected.token)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

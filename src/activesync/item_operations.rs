@@ -128,6 +128,34 @@ fn encode_response(
     Ok(("application/vnd.ms-sync.multipart", response))
 }
 
+fn write_item_properties(
+    builder: &mut DocumentBuilder,
+    schema: Option<&[wbxml::token::Token]>,
+    write_fields: impl FnOnce(&mut DocumentBuilder),
+) {
+    let mut fields = DocumentBuilder::new();
+    fields.start(ops::PROPERTIES);
+    write_fields(&mut fields);
+    fields.end();
+    let fields = fields.finish();
+
+    builder.start(ops::PROPERTIES);
+    for field in eas::child_elements(&fields) {
+        let Some(wbxml::Node::Start(token)) = field.nodes.first() else {
+            continue;
+        };
+        let included = schema.is_none_or(|schema| {
+            schema.iter().any(|requested| {
+                requested.code_page == token.code_page && requested.token == token.token
+            })
+        });
+        if included {
+            builder.extend(field.nodes);
+        }
+    }
+    builder.end();
+}
+
 async fn fetch_item(
     state: &AppState,
     auth: &AuthenticatedSession,
@@ -254,9 +282,9 @@ async fn fetch_item(
                     builder.leaf(air::SERVER_ID, note_id);
                 }
                 builder.leaf(air::CLASS, "Notes");
-                builder.start(ops::PROPERTIES);
-                write_note_fields(builder, &note, &fetch.body_preferences);
-                builder.end();
+                write_item_properties(builder, fetch.schema.as_deref(), |properties| {
+                    write_note_fields(properties, &note, &fetch.body_preferences)
+                });
             }
             Ok(None) => builder.leaf(ops::STATUS, "6"),
             Err(error) => {
@@ -315,9 +343,15 @@ async fn fetch_item(
                         builder.leaf(air::SERVER_ID, task_id);
                     }
                     builder.leaf(air::CLASS, "Tasks");
-                    builder.start(ops::PROPERTIES);
-                    write_task_fields(builder, &task, &fetch.body_preferences, version, false);
-                    builder.end();
+                    write_item_properties(builder, fetch.schema.as_deref(), |properties| {
+                        write_task_fields(
+                            properties,
+                            &task,
+                            &fetch.body_preferences,
+                            version,
+                            false,
+                        )
+                    });
                 }
                 None => builder.leaf(ops::STATUS, "6"),
             },
@@ -381,9 +415,15 @@ async fn fetch_item(
                         builder.leaf(air::SERVER_ID, event_id);
                     }
                     builder.leaf(air::CLASS, "Calendar");
-                    builder.start(ops::PROPERTIES);
-                    write_calendar_fields(builder, &event, version, &fetch.body_preferences, false);
-                    builder.end();
+                    write_item_properties(builder, fetch.schema.as_deref(), |properties| {
+                        write_calendar_fields(
+                            properties,
+                            &event,
+                            version,
+                            &fetch.body_preferences,
+                            false,
+                        )
+                    });
                 }
                 None => builder.leaf(ops::STATUS, "6"),
             },
@@ -425,9 +465,9 @@ async fn fetch_item(
                     builder.leaf(air::SERVER_ID, contact_id);
                 }
                 builder.leaf(air::CLASS, "Contacts");
-                builder.start(ops::PROPERTIES);
-                write_contact_fields(builder, &contact, false, &[]);
-                builder.end();
+                write_item_properties(builder, fetch.schema.as_deref(), |properties| {
+                    write_contact_fields(properties, &contact, false, &[])
+                });
             }
             Ok(_) => builder.leaf(ops::STATUS, "6"),
             Err(error) => {
@@ -464,9 +504,9 @@ async fn fetch_item(
             } else {
                 builder.leaf(air::SERVER_ID, target);
             }
-            builder.start(ops::PROPERTIES);
-            write_email_fields(builder, target, email, Some(preference), version);
-            builder.end();
+            write_item_properties(builder, fetch.schema.as_deref(), |properties| {
+                write_email_fields(properties, target, email, Some(preference), version)
+            });
         }
         Ok(None) => {
             builder.leaf(ops::STATUS, "6");
