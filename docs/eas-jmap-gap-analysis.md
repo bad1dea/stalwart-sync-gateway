@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `5f3547a` (2026-11-24)
+## Reconciled status for source `main` at `2f9cdbc` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -43,10 +43,7 @@ Current prioritized work:
    ValidateCert, MeetingResponse, and ItemOperations fetches for mail, contacts,
    calendars, tasks, notes, and attachment blobs are implemented. Enterprise
    IRM remains out of scope for the personal-account gateway.
-5. **Sync-embedded Fetch for non-mail collections.** Mail and Contacts now
-   return Sync `Responses/Fetch` data. Calendar, Tasks, and Notes Fetch commands
-   are still ignored and need class-specific responses and tests.
-6. **Online meeting URI fields.** EAS defines `OnlineMeetingConfLink` and
+5. **Online meeting URI fields.** EAS defines `OnlineMeetingConfLink` and
    `OnlineMeetingExternalLink` from 14.1, but the deployed Stalwart 0.16.27
    CalendarEvent implementation has no `virtualLocations` property. The
    JSCalendar-standard mapping cannot be enabled until the backend exposes a
@@ -265,6 +262,20 @@ Deployed as `deploy-2026-11-24-eas-contacts-sync-fetch-5f3547a`; homelab
 commit `249abda`. The forced Compose build produced image
 `sha256:f64c7a9121683757d13c62475a28cb1ca65115528b8852b4f6bf6f0a0e3b2a3a`.
 The replacement started at `2026-11-24T07:00:42Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
+continues to advertise EAS 14.0.
+
+Also completed (`2f9cdbc`): **Calendar, Task, and Notes Sync Fetch**. These
+collection handlers now return `Responses/Fetch` with the complete item data
+and requested body preferences. IDs are resolved from the already-scoped
+collection snapshot; missing or out-of-collection IDs receive status 8.
+Regression coverage exercises all three classes, alongside the Contacts Fetch
+success/scope test. Full suite: 294 passed, 73 ignored; clippy with warnings
+denied, formatting, and diff checks pass. Deployed as
+`deploy-2026-11-24-eas-groupware-sync-fetch-2f9cdbc`; homelab commit `a5f0f12`.
+The forced Compose build produced image
+`sha256:0f91868bc751cc8ee2a2e478dbc80b566e5b5ecdf06ad91667c8f86b70c8a76f`.
+The replacement started at `2026-11-24T07:08:11Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
 continues to advertise EAS 14.0.
 

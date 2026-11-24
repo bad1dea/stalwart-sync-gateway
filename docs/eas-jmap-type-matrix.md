@@ -6,7 +6,7 @@ cited below is transcribed directly from [MS-ASWBXML] v20250520 (fetched as a PD
 from `officeprotocoldoc.z19.web.core.windows.net`), section 2.1.2.1's per-codepage
 tables — the same primary source used to scaffold the corresponding `pub mod`
 blocks in `src/wbxml/eas.rs`. Current implementation status is read fresh from that
-file and `src/activesync.rs` at commit `5f3547a`, not carried over from memory.
+file and `src/activesync.rs` at commit `2f9cdbc`, not carried over from memory.
 
 **Verdict key:** ✅ Implemented · 🟡 Possible via JMAP, not built · ⛔ No JMAP
 equivalent · ❓ Needs live verification.
