@@ -295,20 +295,24 @@ Current prioritized work:
    left-to-right associativity; nested proximity groups on the right are
    rejected because they are not evaluated as a free-text operand. Proximity
    matching also evaluates attachment filenames;
-   attachment payload text remains unindexed locally. Stalwart's JMAP `text`
-   filter can search extracted attachment text only when `attachment` is
+   attachment payload text remains unavailable for local proximity checks.
+   MS-KQL defines `attachment:` as matching attachment file names ([Exchange
+   attachment search property](https://learn.microsoft.com/en-us/exchange/policy-and-compliance/ediscovery/message-properties-and-search-operators));
+   the current exact filename matcher implements that restriction.
+   Unqualified free-text and proximity searches can also cover attachment
+   contents. Stalwart's JMAP
+   `text` filter searches extracted attachment text only when `attachment` is
    enabled in the Search object's `indexEmailFields`; its `body` filter
-   deliberately excludes attachments. JMAP's aggregate `text` match does not
-   identify which field matched, so it cannot by itself implement KQL's
-   attachment-only restriction without false positives from the message body
-   or headers. Stalwart documents extraction for text/plain, text/html, common
-   Office/OpenDocument formats, EPUB, RTF, and PDF, with configurable size and
-   decompression limits and partial-index cases ([Stalwart attachment text
+   deliberately excludes attachments. The aggregate `text` result contains no
+   attachment token positions, so it cannot by itself implement exact NEAR or
+   ONEAR distance checks. Stalwart documents extraction for text/plain,
+   text/html, common Office/OpenDocument formats, EPUB, RTF, and PDF, with
+   configurable size/decompression limits and partial-index cases ([Stalwart attachment text
    extraction](https://www.stalw.art/docs/storage/text-extraction/)). A
-   correct gateway feature therefore needs an exact attachment-content source
-   or extractor and must account for server indexing configuration and
-   truncation; no such local
-   content path is implemented yet. Boolean combinations
+   correct gateway feature needs an exact attachment-content source or
+   extractor and must account for server indexing configuration and
+   truncation; no such local content path is implemented yet. Boolean
+   combinations
    use the existing exact matcher for supported predicates. Regression
    coverage exercises phrase operands,
    direction, distance, proximity AND/OR combinations, exact totals, and range
