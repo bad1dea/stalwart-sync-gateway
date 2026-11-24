@@ -3725,8 +3725,10 @@ impl JmapClient {
 
     /// Creates (`id: None`) or updates (`id: Some`) a calendar event from
     /// ActiveSync `CalendarFields`. EAS recurrence rules map to a single
-    /// Stalwart's singular JSCalendar `recurrenceRule`; per-instance exceptions remain
-    /// unsupported. `start`/`duration`
+    /// Stalwart's singular JSCalendar `recurrenceRule`. EAS 16.x series edits
+    /// that change the rule or start/end clear existing `recurrenceOverrides`
+    /// in the same state-guarded update; per-occurrence edits use
+    /// `save_calendar_event_instance`. `start`/`duration`
     /// deliberately omit `timeZone` and treat the EAS UTC DateTime as a
     /// naive local-looking string -- the SAME convention this codebase's
     /// own read path (`local_to_utc_eas`) already uses for an absent
@@ -3745,6 +3747,7 @@ impl JmapClient {
         id: Option<&str>,
         uid: Option<&str>,
         fields: &crate::wbxml::eas::CalendarFields,
+        clear_recurrence_exceptions: bool,
     ) -> anyhow::Result<String> {
         let Some(account_id) = auth.session.primary_account_for(capabilities::CALENDARS) else {
             anyhow::bail!("JMAP Calendars capability is not available");
@@ -3813,6 +3816,13 @@ impl JmapClient {
                     None => serde_json::Value::Null,
                 },
             );
+        }
+        if clear_recurrence_exceptions
+            && (fields.recurrence_present
+                || fields.start_time.is_some()
+                || fields.end_time.is_some())
+        {
+            event.insert("recurrenceOverrides".to_owned(), serde_json::Value::Null);
         }
         let mut reminder_changed = false;
         if let (Some(reminder), None) = (fields.reminder, id) {
@@ -9331,11 +9341,87 @@ mod calendar_update_state_tests {
         };
         assert_eq!(
             client
-                .save_calendar_event(&auth, "calendar", None, None, &fields)
+                .save_calendar_event(&auth, "calendar", None, None, &fields, false)
                 .await
                 .unwrap(),
             "event-1"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn calendar_16_series_rule_change_clears_existing_occurrence_overrides() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = requests.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(request): Json<serde_json::Value>| {
+                let request_count = request_count.clone();
+                async move {
+                    let call = &request["methodCalls"][0];
+                    match request_count.fetch_add(1, Ordering::SeqCst) {
+                        0 => {
+                            assert_eq!(call[0], "CalendarEvent/get");
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/get", {
+                                    "state":"state-1",
+                                    "list":[{"id":"event-1", "timeZone":"America/Toronto",
+                                        "recurrenceRule":{"frequency":"weekly"},
+                                        "recurrenceOverrides":{"2026-11-25T12:00:00":{"title":"exception"}}}]
+                                }, "state"
+                            ]]}))
+                        }
+                        1 => {
+                            assert_eq!(call[0], "CalendarEvent/set");
+                            assert_eq!(call[1]["ifInState"], "state-1");
+                            let update = &call[1]["update"]["event-1"];
+                            assert!(update["recurrenceRule"].is_object());
+                            assert_eq!(update["recurrenceOverrides"], serde_json::Value::Null);
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/set", {"updated":{"event-1":null}}, "0"
+                            ]]}))
+                        }
+                        _ => panic!("unexpected JMAP call"),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CALENDARS:"a"},
+            "apiUrl":url, "downloadUrl":url, "uploadUrl":url, "username":"user", "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let fields = crate::wbxml::eas::CalendarFields {
+            recurrence_present: true,
+            recurrence: Some(crate::wbxml::eas::CalendarRecurrence {
+                kind: 1,
+                interval: Some(2),
+                day_of_week: Some(10),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        client
+            .save_calendar_event(&auth, "calendar", Some("event-1"), None, &fields, true)
+            .await
+            .unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
         server.abort();
     }
 
@@ -9618,7 +9704,7 @@ mod calendar_update_state_tests {
             ..Default::default()
         };
         assert!(client
-            .save_calendar_event(&auth, "calendar", Some("e"), None, &fields)
+            .save_calendar_event(&auth, "calendar", Some("e"), None, &fields, false)
             .await
             .is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 3);

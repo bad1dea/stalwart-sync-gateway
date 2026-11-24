@@ -5864,6 +5864,14 @@ fn calendar_instance_change_supported(fields: &wbxml::eas::CalendarFields) -> bo
         && fields.body_type.is_none_or(|body_type| body_type == 1)
 }
 
+fn calendar_series_change_clears_exceptions(
+    version: ProtocolVersion,
+    fields: &wbxml::eas::CalendarFields,
+) -> bool {
+    matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1)
+        && (fields.recurrence_present || fields.start_time.is_some() || fields.end_time.is_some())
+}
+
 /// Handles one Calendar collection's Sync round-trip end to end, same
 /// contract and hash-diff shape as `sync_contacts_collection` (see that
 /// function's own doc for the full pattern description -- this is a
@@ -6084,6 +6092,7 @@ async fn sync_calendar_collection(
                                     None,
                                     Some(uid),
                                     &command.calendar,
+                                    false,
                                 )
                                 .await
                         }
@@ -6092,7 +6101,14 @@ async fn sync_calendar_collection(
                 } else {
                     state
                         .jmap
-                        .save_calendar_event(auth, &calendar_id, None, None, &command.calendar)
+                        .save_calendar_event(
+                            auth,
+                            &calendar_id,
+                            None,
+                            None,
+                            &command.calendar,
+                            false,
+                        )
                         .await
                 };
                 match result {
@@ -6133,6 +6149,7 @@ async fn sync_calendar_collection(
                             Some(&command.server_id),
                             None,
                             &command.calendar,
+                            calendar_series_change_clears_exceptions(version, &command.calendar),
                         )
                         .await
                 };
@@ -8557,6 +8574,43 @@ mod tests {
         assert!(super::calendar_instance_change_supported(&fields));
         fields.unsupported_location = true;
         assert!(!super::calendar_instance_change_supported(&fields));
+    }
+
+    #[test]
+    fn series_rule_and_time_changes_clear_exceptions_only_in_eas_16_x() {
+        let fields = crate::wbxml::eas::CalendarFields {
+            recurrence_present: true,
+            ..Default::default()
+        };
+        assert!(!super::calendar_series_change_clears_exceptions(
+            ProtocolVersion::V14_0,
+            &fields
+        ));
+        assert!(super::calendar_series_change_clears_exceptions(
+            ProtocolVersion::V16_0,
+            &fields
+        ));
+        assert!(super::calendar_series_change_clears_exceptions(
+            ProtocolVersion::V16_1,
+            &fields
+        ));
+
+        let fields = crate::wbxml::eas::CalendarFields {
+            end_time: Some("20261125T180000Z".to_owned()),
+            ..Default::default()
+        };
+        assert!(super::calendar_series_change_clears_exceptions(
+            ProtocolVersion::V16_1,
+            &fields
+        ));
+        let fields = crate::wbxml::eas::CalendarFields {
+            subject: Some("Title only".to_owned()),
+            ..Default::default()
+        };
+        assert!(!super::calendar_series_change_clears_exceptions(
+            ProtocolVersion::V16_1,
+            &fields
+        ));
     }
 
     #[test]
