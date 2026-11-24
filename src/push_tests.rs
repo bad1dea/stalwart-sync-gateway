@@ -169,6 +169,10 @@ async fn mock_session(State(m): State<Arc<Mock>>) -> impl IntoResponse {
         "eventSourceUrl": format!("{base}/es/?types={{types}}&closeafter={{closeafter}}&ping={{ping}}"),
         "state": "s"
     });
+    session["capabilities"][crate::jmap::capabilities::PRINCIPALS] = serde_json::json!({});
+    session["accounts"]["a1"]["accountCapabilities"][crate::jmap::capabilities::PRINCIPALS] =
+        serde_json::json!({});
+    session["primaryAccounts"][crate::jmap::capabilities::PRINCIPALS] = serde_json::json!("a1");
     if !m.groupware.lock().unwrap().is_empty() {
         for cap in [
             crate::jmap::capabilities::CONTACTS,
@@ -266,6 +270,7 @@ async fn mock_api(
     let keyword_map = m.keywords.lock().unwrap().clone();
     let mut responses = Vec::new();
     let mut last_query: Vec<String> = Vec::new();
+    let mut last_principals: Vec<String> = Vec::new();
     let mut last_changes: Vec<String> = Vec::new();
     for call in req["methodCalls"].as_array().unwrap() {
         let name = call[0].as_str().unwrap();
@@ -278,6 +283,43 @@ async fn mock_api(
                     continue;
                 }
                 serde_json::json!({"accountId": "a1", "state": "i1", "list": *m.identities.lock().unwrap()})
+            }
+            "Principal/query" => {
+                let identities = m.identities.lock().unwrap().clone();
+                let ids = identities
+                    .iter()
+                    .filter_map(|principal| principal["id"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>();
+                let position = args["position"].as_u64().unwrap_or(0) as usize;
+                let limit = args["limit"].as_u64().unwrap_or(100) as usize;
+                let total = ids.len();
+                last_principals = ids.into_iter().skip(position).take(limit).collect();
+                serde_json::json!({"accountId":"a1", "queryState":"p1", "canCalculateChanges":false,
+                    "position":position, "ids":last_principals, "total":total})
+            }
+            "Principal/get" => {
+                let ids = if args["#ids"]["resultOf"] == "q" {
+                    last_principals.clone()
+                } else {
+                    args["ids"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                };
+                let identities = m.identities.lock().unwrap();
+                let list = identities
+                    .iter()
+                    .filter(|principal| {
+                        principal["id"]
+                            .as_str()
+                            .is_some_and(|id| ids.iter().any(|wanted| wanted == id))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                serde_json::json!({"accountId":"a1", "state":"p1", "list":list, "notFound":[]})
             }
             "Mailbox/get" => {
                 let hidden = m.hidden_folders.lock().unwrap().clone();
@@ -14623,24 +14665,29 @@ async fn unscoped_and_mixed_searches_page_across_classes() {
 
 #[tokio::test]
 async fn search_processes_multiple_store_queries_independently() {
-    use eas::{airsync as air, search as srch};
+    use eas::{airsync as air, gal, search as srch};
     let env = start_env(Opts::default()).await;
     let mut request = eas::DocumentBuilder::new();
     request.start(srch::SEARCH);
-    for term in ["m1", "m2"] {
-        request.start(srch::STORE);
-        request.leaf(srch::NAME, "Mailbox");
-        request.start(srch::QUERY);
-        request.start(srch::AND);
-        request.leaf(air::CLASS, "Email");
-        request.leaf(srch::FREE_TEXT, term);
-        request.end();
-        request.end();
-        request.start(srch::OPTIONS);
-        request.leaf(srch::RANGE, "0-9");
-        request.end();
-        request.end();
-    }
+    request.start(srch::STORE);
+    request.leaf(srch::NAME, "Mailbox");
+    request.start(srch::QUERY);
+    request.start(srch::AND);
+    request.leaf(air::CLASS, "Email");
+    request.leaf(srch::FREE_TEXT, "m1");
+    request.end();
+    request.end();
+    request.start(srch::OPTIONS);
+    request.leaf(srch::RANGE, "0-9");
+    request.end();
+    request.end();
+    request.start(srch::STORE);
+    request.leaf(srch::NAME, "GAL");
+    request.leaf(srch::QUERY, "Owner");
+    request.start(srch::OPTIONS);
+    request.leaf(srch::RANGE, "0-9");
+    request.end();
+    request.end();
     request.end();
 
     let response = env
@@ -14660,7 +14707,11 @@ async fn search_processes_multiple_store_queries_independently() {
     );
     assert_eq!(
         eas::find_all_text_after(&document, srch::LONG_ID),
-        vec!["m1", "m2"]
+        vec!["m1"]
+    );
+    assert_eq!(
+        eas::find_all_text_after(&document, gal::DISPLAY_NAME),
+        vec!["Owner"]
     );
 }
 
