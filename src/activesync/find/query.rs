@@ -68,6 +68,18 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
             .iter()
             .all(|token| matches!(token, Token::Word(_) | Token::Or))
     {
+        if tokens.len() < 3
+            || tokens.len() % 2 == 0
+            || tokens.iter().enumerate().any(|(index, token)| {
+                if index % 2 == 0 {
+                    !matches!(token, Token::Word(_))
+                } else {
+                    *token != Token::Or
+                }
+            })
+        {
+            return None;
+        }
         let boolean = |word: &str| {
             let word = word.strip_prefix('+').unwrap_or(word);
             let (property, value) = word.split_once(':')?;
@@ -105,7 +117,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                 boolean_count += 1;
             }
         }
-        return (phrase_count > 0 && (boolean_count == 0 || phrase_count == 1))
+        return (phrase_count > 0 && (boolean_count > 0 || phrase_count > 1))
             .then_some((PhraseMatch::Any, terms));
     }
     if tokens
@@ -906,6 +918,19 @@ mod tests {
                     ("subject".to_owned(), "alpha beta".to_owned()),
                     ("$isread".to_owned(), "true".to_owned()),
                     ("$isflagged".to_owned(), "true".to_owned())
+                ]
+            ))
+        );
+        assert_eq!(
+            phrases_for_postfilter(
+                r#"subject:"alpha beta" OR subject:"gamma delta" OR isread:true"#
+            ),
+            Some((
+                PhraseMatch::Any,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("subject".to_owned(), "gamma delta".to_owned()),
+                    ("$isread".to_owned(), "true".to_owned())
                 ]
             ))
         );
