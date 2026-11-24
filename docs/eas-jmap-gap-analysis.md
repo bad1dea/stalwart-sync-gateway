@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `e989c62` (2026-11-24)
+## Reconciled status for source `main` at `ea4467e` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -52,9 +52,13 @@ Current prioritized work:
    Start/end edits convert through the parent event's IANA timezone, preserve
    the inherited endpoint when only one is changed, derive the new duration,
    and reject negative durations. All-day flags are occurrence-specific.
-   Sensitivity, attachments, and the remaining meeting-negotiation fields
-   (counter-proposal permission and reply timestamp) remain unsupported and
-   fail closed. ResponseRequested maps to the JSCalendar participant
+   Sensitivity and the remaining meeting-negotiation fields (counter-proposal
+   permission and reply timestamp) remain unsupported and fail closed. Read-only
+   linked attachments on recurring exceptions now map from JSCalendar enclosure
+   links and are fetched from the Calendars account; EAS 16.0/16.1 only. EAS
+   forbids Attachment elements in client command requests, so this is intentionally
+   read-only. Enclosure links without a JMAP blobId fail closed; arbitrary hrefs
+   are not fetched. ResponseRequested maps to the JSCalendar participant
    `expectReply` value when all invitees share one setting; mixed settings are
    omitted because EAS exposes a single boolean. The EAS Tasks class has no
    per-instance exception container, so Task exceptions are not an EAS gap.
@@ -106,6 +110,15 @@ Current prioritized work:
    started `2026-11-24T09:11:12Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. The suite passed 310 tests (73 ignored); strict Clippy,
    formatting, and diff checks passed.
+   Read-only recurring-exception attachments are deployed as
+   `deploy-2026-11-24-eas-calendar-exception-attachments-ea4467e`; homelab
+   commit `de2e4bc`, image
+   `sha256:509c23fbc4f2f5baa504d97cad52e628a5aa40219228d20e381643a52d6cd04a`,
+   started `2026-11-24T09:27:06Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The suite passed 311 tests (73 ignored); strict Clippy,
+   formatting, and diff checks passed. The exception link patch supports full map
+   replacement and individual nested changes; external URL-only enclosures are
+   deliberately not downloaded.
 3. **Real-client 16.1 certification and rollout.** Production remains pinned
    to a tagged 14.0 build. Forced-version protocol tests do not establish that
    iOS/Outlook negotiate or behave correctly against an advertised 16.1 build.

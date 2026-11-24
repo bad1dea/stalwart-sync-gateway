@@ -6,7 +6,7 @@ cited below is transcribed directly from [MS-ASWBXML] v20250520 (fetched as a PD
 from `officeprotocoldoc.z19.web.core.windows.net`), section 2.1.2.1's per-codepage
 tables — the same primary source used to scaffold the corresponding `pub mod`
 blocks in `src/wbxml/eas.rs`. Current implementation status is read fresh from that
-file and `src/activesync.rs` at commit `c336eb1`, not carried over from memory.
+file and `src/activesync.rs` at commit `ea4467e`, not carried over from memory.
 
 **Verdict key:** ✅ Implemented · 🟡 Possible via JMAP, not built · ⛔ No JMAP
 equivalent · ❓ Needs live verification.
@@ -39,7 +39,7 @@ inferred.
 | Categories / Category | 0x0E-0x0F | All | ✅ | JSCalendar `categories` | Values round-trip; clear and omission are distinguished on client edits. |
 | DtStamp | 0x11 | All | ✅ | `CalendarEvent`'s `updated` or the JMAP response's own timestamp | |
 | EndTime | 0x12 | All | ✅ | `start` + `duration`, or explicit `end` (jscalendarbis) | |
-| Exception / Exceptions / Deleted / ExceptionStartTime | 0x13-0x16 | All (16.0+ uses AirSyncBase:InstanceId for occurrence identity) | ✅ deletes, subject, plain body, location, time, all-day, availability, categories, reminders, attendee roster | JSCalendar `recurrenceOverrides` | Deleted occurrences map to `{"excluded":true}`; supported fields map to per-instance overrides. Sensitivity, attachments, and meeting metadata without a JSCalendar equivalent still fail closed; attendee lists now map to occurrence participant overrides. Sensitivity cannot map to JSCalendar `privacy` because RFC 8984 prohibits that property in recurrence patches. |
+| Exception / Exceptions / Deleted / ExceptionStartTime | 0x13-0x16 | All (16.0+ uses AirSyncBase:InstanceId for occurrence identity) | ✅ deletes, subject, plain body, location, time, all-day, availability, categories, reminders, attendee roster, read-only attachments (16.0+) | JSCalendar `recurrenceOverrides` plus enclosure `links` | Deleted occurrences map to `{"excluded":true}`; supported fields map to per-instance overrides. Sensitivity and meeting metadata without a JSCalendar equivalent still fail closed; attachments are read from Calendars-account blobs, and URL-only enclosures are not fetched; attendee lists map to occurrence participant overrides. Sensitivity cannot map to JSCalendar `privacy` because RFC 8984 prohibits that property in recurrence patches. |
 | Location | 0x17 | All (16.0+ uses AirSyncBase:Location, codepage 17) | ✅ versioned | JSCalendar `locations` (map; `locations["1"].name` for the simple case) | Uses codepage 4 through 14.1 and AirSyncBase:Location for 16.0/16.1. Instance-specific location names and coordinates use the same JMAP property in `recurrenceOverrides`. |
 | MeetingStatus | 0x18 | All | ✅ derived | Participant roles, authenticated user's status, and cancellation state | Emits appointment/meeting/received/cancelled states from the JSCalendar participants and event state. |
 | OrganizerEmail / OrganizerName | 0x19-0x1A | All | ✅ two-way | JSCalendar `participants` entry with role `owner` | Organizer is represented by the owner participant; attendee lists exclude the organizer. |
