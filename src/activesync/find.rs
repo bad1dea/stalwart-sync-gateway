@@ -21,6 +21,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::io::Read;
 
 struct Request {
     search_id: String,
@@ -109,6 +110,7 @@ fn same_search(session: &SearchState, filter: &Value, search_text: &str) -> bool
 }
 const SEARCHES: &str = "__find__";
 const MAX_FIND_ATTACHMENT_TEXT_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_FIND_ARCHIVE_ENTRIES: usize = 4096;
 
 pub(super) async fn handle(
     state: &AppState,
@@ -489,6 +491,19 @@ fn is_extractable_attachment_type(content_type: &str) -> bool {
             media_type.as_str(),
             "application/rtf" | "application/json" | "application/xml" | "application/pdf"
         )
+        || is_extractable_office_type(&media_type)
+}
+
+fn is_extractable_office_type(media_type: &str) -> bool {
+    matches!(
+        media_type,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            | "application/vnd.oasis.opendocument.text"
+            | "application/vnd.oasis.opendocument.spreadsheet"
+            | "application/vnd.oasis.opendocument.presentation"
+    )
 }
 
 fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<String> {
@@ -512,6 +527,12 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
             .ok()?
             .ok()?
         }
+        _ if is_extractable_office_type(&media_type) => {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                extract_office_archive_text(bytes, &media_type)
+            }))
+            .ok()??
+        }
         "application/xml" | "text/xml" => extract_xml_text(bytes)?,
         _ if media_type.ends_with("+xml") => extract_xml_text(bytes)?,
         _ if media_type.starts_with("text/") || media_type == "application/json" => {
@@ -520,6 +541,59 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
         _ => return None,
     };
     Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+fn extract_office_archive_text(bytes: &[u8], media_type: &str) -> Option<String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+    if archive.len() > MAX_FIND_ARCHIVE_ENTRIES {
+        return None;
+    }
+    let wanted = |name: &str| match media_type {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
+            name == "word/document.xml"
+                || name == "word/footnotes.xml"
+                || name == "word/endnotes.xml"
+                || (name.starts_with("word/header") && name.ends_with(".xml"))
+                || (name.starts_with("word/footer") && name.ends_with(".xml"))
+        }
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
+            name == "xl/sharedStrings.xml"
+                || (name.starts_with("xl/worksheets/") && name.ends_with(".xml"))
+        }
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
+            (name.starts_with("ppt/slides/slide") || name.starts_with("ppt/notesSlides/notesSlide"))
+                && name.ends_with(".xml")
+        }
+        "application/vnd.oasis.opendocument.text"
+        | "application/vnd.oasis.opendocument.spreadsheet"
+        | "application/vnd.oasis.opendocument.presentation" => name == "content.xml",
+        _ => false,
+    };
+    let mut remaining = MAX_FIND_ATTACHMENT_TEXT_BYTES as usize;
+    let mut output = String::new();
+    let mut found = false;
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).ok()?;
+        if !wanted(file.name()) {
+            continue;
+        }
+        found = true;
+        if file.size() > remaining as u64 {
+            return None;
+        }
+        let mut xml = Vec::with_capacity(file.size() as usize);
+        file.by_ref()
+            .take(remaining as u64 + 1)
+            .read_to_end(&mut xml)
+            .ok()?;
+        if xml.len() > remaining {
+            return None;
+        }
+        remaining -= xml.len();
+        output.push(' ');
+        output.push_str(&extract_xml_text(&xml)?);
+    }
+    found.then_some(output)
 }
 
 fn extract_xml_text(bytes: &[u8]) -> Option<String> {
@@ -2161,6 +2235,12 @@ mod tests {
         assert!(is_extractable_attachment_type("application/xhtml+xml"));
         assert!(is_extractable_attachment_type("application/atom+xml"));
         assert!(is_extractable_attachment_type("application/pdf"));
+        assert!(is_extractable_attachment_type(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ));
+        assert!(is_extractable_attachment_type(
+            "application/vnd.oasis.opendocument.text"
+        ));
         assert_eq!(
             extract_find_attachment_text("text/plain; charset=utf-8", b"alpha beta"),
             Some("alpha beta".to_owned())
@@ -2203,6 +2283,25 @@ mod tests {
         assert_eq!(
             extract_find_attachment_text("application/pdf", b"not a PDF"),
             None
+        );
+        let docx = test_office_archive(&[(
+            "word/document.xml",
+            b"<w:document><w:t>alpha</w:t><w:t>beta</w:t></w:document>",
+        )]);
+        assert_eq!(
+            extract_find_attachment_text(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                &docx
+            ),
+            Some("alpha beta".to_owned())
+        );
+        let odt = test_office_archive(&[(
+            "content.xml",
+            b"<document><p>gamma</p><p>delta</p></document>",
+        )]);
+        assert_eq!(
+            extract_find_attachment_text("application/vnd.oasis.opendocument.text", &odt),
+            Some("gamma delta".to_owned())
         );
 
         let attachment = crate::model::EmailAttachment {
@@ -2276,6 +2375,18 @@ mod tests {
             .as_bytes(),
         );
         pdf
+    }
+
+    fn test_office_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, data) in entries {
+            archive
+                .start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(data).unwrap();
+        }
+        archive.finish().unwrap().into_inner()
     }
 
     #[test]

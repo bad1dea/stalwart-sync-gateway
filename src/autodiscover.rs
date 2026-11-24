@@ -62,9 +62,7 @@ fn valid_structure(text: &str) -> bool {
                 }
             }
             Event::DocType(_) => return false,
-            Event::Text(text)
-                if stack.len() < 3 && !text.as_ref().iter().all(u8::is_ascii_whitespace) =>
-            {
+            Event::Text(text) if stack.len() < 3 && !text.iter().all(u8::is_ascii_whitespace) => {
                 return false
             }
             Event::CData(_) if stack.len() != 3 => return false,

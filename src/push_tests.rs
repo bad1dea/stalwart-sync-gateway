@@ -13752,6 +13752,7 @@ async fn find_attachment_phrase_matches_filename_and_scopes_to_mailbox() {
 #[tokio::test]
 async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     use eas::{airsync as air, find as f};
+    use std::io::Write;
     let env = start_env(Opts::default()).await;
     let pdf_stream = "BT /F1 12 Tf 72 720 Td (charlie delta in PDF) Tj ET";
     let pdf_objects = [
@@ -13781,9 +13782,21 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         )
         .as_bytes(),
     );
+    let mut docx_archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    docx_archive
+        .start_file(
+            "word/document.xml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+    docx_archive
+        .write_all(b"<w:document><w:p><w:t>echo</w:t><w:t>foxtrot in DOCX</w:t></w:p></w:document>")
+        .unwrap();
+    let docx = docx_archive.finish().unwrap().into_inner();
     env.mock.add_mail("inbox", "text-attachment");
     env.mock.add_mail("inbox", "oversized-text-attachment");
     env.mock.add_mail("inbox", "pdf-attachment");
+    env.mock.add_mail("inbox", "docx-attachment");
     env.mock.mail_bodies.lock().unwrap().insert(
         "text-attachment".to_owned(),
         ("unrelated body".to_owned(), false),
@@ -13817,6 +13830,18 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
             "type":"application/pdf", "size":pdf.len()
         })],
     );
+    env.mock.mail_bodies.lock().unwrap().insert(
+        "docx-attachment".to_owned(),
+        ("unrelated body".to_owned(), false),
+    );
+    env.mock.mail_attachments.lock().unwrap().insert(
+        "docx-attachment".to_owned(),
+        vec![serde_json::json!({
+            "blobId":"docx-blob", "name":"notes.docx",
+            "type":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "size":docx.len()
+        })],
+    );
     env.mock.download_blobs.lock().unwrap().insert(
         "text-blob".to_owned(),
         ("text/plain".to_owned(), b"alpha beta in file".to_vec()),
@@ -13826,6 +13851,13 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         .lock()
         .unwrap()
         .insert("pdf-blob".to_owned(), ("application/pdf".to_owned(), pdf));
+    env.mock.download_blobs.lock().unwrap().insert(
+        "docx-blob".to_owned(),
+        (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_owned(),
+            docx,
+        ),
+    );
     let mut oversized_text = vec![b'x'; 2 * 1024 * 1024 + 1];
     oversized_text[..10].copy_from_slice(b"alpha beta");
     env.mock.download_blobs.lock().unwrap().insert(
@@ -13875,6 +13907,25 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     assert_eq!(
         eas::find_all_text_after(&doc, air::SERVER_ID),
         vec!["pdf-attachment"]
+    );
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "30000000-0000-4000-8000-000000000098",
+            "echo NEAR(0) foxtrot",
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["docx-attachment"]
     );
 }
 
