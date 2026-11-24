@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `b5e0e06` (2026-11-24)
+## Reconciled status for source `main` at `fdbf559` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -39,6 +39,14 @@ Current prioritized work:
    `4c6baf8`, image
    `sha256:004107e934579c29c2627e8ebf1fb726be5200f24f572d2c272319386f0a4c39`,
    started `2026-11-24T13:37:12Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
+   formatting, and diff checks passed. Phrase OR expressions now also accept
+   explicit `NOT` and unary-minus phrase alternatives; these broad-scan the
+   scoped mailbox and evaluate each phrase branch exactly. Deployed as
+   `deploy-2026-11-24-eas-kql-negated-phrase-or-fdbf559`; homelab commit
+   `HOMELAB_COMMIT`, image
+   `sha256:f6bec07796a29c5b82d5da2bcaa024eb1d492fa3153f464360d49a3d63867fd5`,
+   started `2026-11-24T13:52:06Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
    formatting, and diff checks passed. The standalone negated form
    `NOT subject:"..."` and unary-minus forms such as
@@ -164,8 +172,8 @@ Current prioritized work:
    or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
    body and text scans fetch message bodies and reject a truncated body rather
    than return an incomplete match. Implicitly OR-grouped restrictions on a
-   phrase property and negated-phrase OR forms remain rejected because
-   property grouping or candidate filtering could change Boolean meaning.
+   phrase property mixed with explicit operators remain rejected because
+   property grouping can change Boolean meaning.
    Phrase matching is case-insensitive and requires adjacent
    words in order. Regression tests cover plain, HTML, and RTF bodies,
    subject/body conjunctions, truncation, and unsupported Boolean forms. Full
