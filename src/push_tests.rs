@@ -14310,6 +14310,9 @@ async fn find_boolean_text_operators_are_exact_with_phrase_restrictions() {
     env.mock.add_mail("inbox", "alpha beta gamma");
     env.mock.add_mail("inbox", "beta alpha");
     env.mock.add_mail("inbox", "alpha only");
+    env.mock.add_mail("inbox", "alpha beta epsilon");
+    env.mock.add_mail("inbox", "alpha beta delta gamma");
+    env.mock.add_mail("inbox", "alpha beta gamma delta");
 
     let response = env
         .req("Find", "client")
@@ -14324,10 +14327,37 @@ async fn find_boolean_text_operators_are_exact_with_phrase_restrictions() {
         .await
         .unwrap();
     let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("5"));
+    let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![
+            "alpha beta",
+            "alpha beta delta gamma",
+            "alpha beta epsilon",
+            "alpha beta gamma",
+            "alpha beta gamma delta"
+        ]
+    );
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "cd7379fc-dcec-4130-92ea-377553c32549",
+            r#"subject:"alpha beta" AND WORDS("gamma delta", epsilon)"#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("2"));
     let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
     ids.sort();
-    assert_eq!(ids, vec!["alpha beta", "alpha beta gamma"]);
+    assert_eq!(ids, vec!["alpha beta epsilon", "alpha beta gamma delta"]);
 }
 
 #[tokio::test]

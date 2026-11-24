@@ -2215,6 +2215,36 @@ mod tests {
     }
 
     #[test]
+    fn words_synonyms_keep_quoted_phrase_semantics_inside_exact_expressions() {
+        let input = r#"subject:"alpha beta" AND WORDS("gamma delta", epsilon)"#;
+        let (kind, terms) = query::phrases_for_postfilter(input).unwrap();
+        assert!(email_matches_phrases(
+            "alpha beta gamma delta",
+            None,
+            None,
+            None,
+            None,
+            kind,
+            &terms,
+        )
+        .unwrap());
+        assert!(
+            email_matches_phrases("alpha beta epsilon", None, None, None, None, kind, &terms,)
+                .unwrap()
+        );
+        assert!(!email_matches_phrases(
+            "alpha beta delta gamma",
+            None,
+            None,
+            None,
+            None,
+            kind,
+            &terms,
+        )
+        .unwrap());
+    }
+
+    #[test]
     fn kql_prefix_queries_keep_boolean_and_or_meaning() {
         let (and_kind, and_terms) =
             query::phrases_for_postfilter("subject:serv* AND isread:true").unwrap();

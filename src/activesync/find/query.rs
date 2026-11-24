@@ -34,9 +34,7 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
     }
     let tokens = tokenize(input)?;
     if let Some(expanded) = expand_boolean_text_operators(&tokens) {
-        let has_exact_term = tokens.iter().any(|token| {
-            matches!(token, Token::Word(word) if search_phrase_word(word).is_some() || prefix_search_term(word).is_some())
-        });
+        let has_exact_term = has_exact_term_outside_boolean_operators(&tokens);
         if has_exact_term && flat_phrase_boolean_expression(&expanded).is_some() {
             return Ok(json!({}));
         }
@@ -146,9 +144,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
     }
     let tokens = tokenize(input).ok()?;
     if let Some(expanded) = expand_boolean_text_operators(&tokens) {
-        let has_exact_term = tokens.iter().any(|token| {
-            matches!(token, Token::Word(word) if search_phrase_word(word).is_some() || prefix_search_term(word).is_some())
-        });
+        let has_exact_term = has_exact_term_outside_boolean_operators(&tokens);
         if has_exact_term {
             return Some((
                 PhraseMatch::Expression,
@@ -674,28 +670,22 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
 }
 
 fn expand_boolean_text_operators(tokens: &[Token]) -> Option<Vec<Token>> {
-    if !tokens
+    let has_boolean_operator = tokens
         .iter()
-        .any(|token| matches!(token, Token::All | Token::Any | Token::None))
-    {
+        .any(|token| matches!(token, Token::All | Token::Any | Token::None));
+    if !has_boolean_operator && !has_complex_words_alternatives(tokens) {
         return None;
     }
     let mut expanded = Vec::new();
     let mut position = 0;
     while position < tokens.len() {
         let operator = match tokens.get(position) {
-            Some(Token::All) => Some(Token::And),
-            Some(Token::Any | Token::None) => Some(Token::Or),
+            Some(Token::All) => Some((Token::And, false, false)),
+            Some(Token::Any | Token::None) => Some((Token::Or, false, false)),
+            Some(Token::Words) => Some((Token::Or, true, true)),
             _ => None,
         };
-        let Some(operator) = operator else {
-            if tokens[position] == Token::Words {
-                // WORDS has independent synonym semantics and remains handled
-                // by its existing dedicated parser.
-                expanded.push(tokens[position].clone());
-                position += 1;
-                continue;
-            }
+        let Some((operator, ignore_qualifiers, allow_commas)) = operator else {
             expanded.push(tokens[position].clone());
             position += 1;
             continue;
@@ -706,13 +696,28 @@ fn expand_boolean_text_operators(tokens: &[Token]) -> Option<Vec<Token>> {
         }
         position += 2;
         let mut terms = Vec::new();
-        while let Some(Token::Word(word)) = tokens.get(position) {
-            let value = free_text_operand(word)?;
-            if value.contains(':') {
-                return None;
+        loop {
+            match tokens.get(position) {
+                Some(Token::Right) => break,
+                Some(Token::Comma) if allow_commas => {
+                    position += 1;
+                    continue;
+                }
+                Some(Token::Word(word)) => {
+                    let word = if ignore_qualifiers {
+                        word.trim_start_matches(['+', '-'])
+                    } else {
+                        word.as_str()
+                    };
+                    let value = free_text_operand(word)?;
+                    if value.contains(':') {
+                        return None;
+                    }
+                    terms.push(format!("text:{word}"));
+                    position += 1;
+                }
+                _ => return None,
             }
-            terms.push(format!("text:{value}"));
-            position += 1;
         }
         if terms.is_empty() || tokens.get(position) != Some(&Token::Right) {
             return None;
@@ -735,6 +740,71 @@ fn expand_boolean_text_operators(tokens: &[Token]) -> Option<Vec<Token>> {
         expanded.push(Token::Right);
     }
     Some(expanded)
+}
+
+fn has_complex_words_alternatives(tokens: &[Token]) -> bool {
+    let mut in_words = false;
+    for token in tokens {
+        match token {
+            Token::Words => in_words = true,
+            Token::Right => in_words = false,
+            Token::Word(word) if in_words => {
+                let term = word.trim_start_matches(['+', '-']);
+                if term.contains('*')
+                    || (term.starts_with('"')
+                        && term.ends_with('"')
+                        && term
+                            .chars()
+                            .filter(|character| character.is_whitespace())
+                            .count()
+                            > 0)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn has_exact_term_outside_boolean_operators(tokens: &[Token]) -> bool {
+    let mut position = 0;
+    while position < tokens.len() {
+        if matches!(
+            tokens[position],
+            Token::All | Token::Any | Token::None | Token::Words
+        ) {
+            if tokens.get(position + 1) != Some(&Token::Left) {
+                position += 1;
+                continue;
+            }
+            let mut depth = 0usize;
+            let mut close = None;
+            for (index, token) in tokens.iter().enumerate().skip(position + 1) {
+                match token {
+                    Token::Left => depth += 1,
+                    Token::Right => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(index);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            position = close.map_or(tokens.len(), |index| index + 1);
+            continue;
+        }
+        if let Token::Word(word) = &tokens[position] {
+            if search_phrase_word(word).is_some() || prefix_search_term(word).is_some() {
+                return true;
+            }
+        }
+        position += 1;
+    }
+    false
 }
 
 #[derive(Clone, Copy)]
@@ -3139,6 +3209,12 @@ mod tests {
             assert!(postfilter.is_some(), "{input}");
             assert_eq!(to_filter(input).unwrap(), json!({}), "{input}");
         }
+        let input = r#"subject:"alpha beta" AND WORDS("gamma delta", epsilon)"#;
+        assert_eq!(
+            phrases_for_postfilter(input).unwrap().0,
+            PhraseMatch::Expression
+        );
+        assert_eq!(to_filter(input).unwrap(), json!({}));
     }
 
     #[test]
