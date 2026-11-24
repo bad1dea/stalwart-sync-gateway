@@ -783,7 +783,46 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
         }
         output.push(expression_operator(&operator)?);
     }
+    if output.iter().any(|(operator, _)| {
+        operator.starts_with("$op$near:") || operator.starts_with("$op$onear:")
+    }) && !valid_proximity_rpn(&output)
+    {
+        return None;
+    }
     Some(output)
+}
+
+fn valid_proximity_rpn(expression: &[(String, String)]) -> bool {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        Boolean,
+        Term,
+        Chain,
+    }
+    let mut stack = Vec::new();
+    for (operator, _) in expression {
+        if operator == "$proximity-term" {
+            stack.push(Kind::Term);
+        } else if operator.starts_with("$op$near:") || operator.starts_with("$op$onear:") {
+            if stack.pop() != Some(Kind::Term) {
+                return false;
+            }
+            if !matches!(stack.pop(), Some(Kind::Term | Kind::Chain)) {
+                return false;
+            }
+            stack.push(Kind::Chain);
+        } else if operator == "$op$and" || operator == "$op$or" {
+            if !matches!(stack.pop(), Some(Kind::Boolean | Kind::Chain))
+                || !matches!(stack.pop(), Some(Kind::Boolean | Kind::Chain))
+            {
+                return false;
+            }
+            stack.push(Kind::Boolean);
+        } else {
+            stack.push(Kind::Boolean);
+        }
+    }
+    matches!(stack.as_slice(), [Kind::Boolean | Kind::Chain])
 }
 
 fn expression_operator(operator: &Token) -> Option<(String, String)> {
@@ -2760,6 +2799,21 @@ mod tests {
                 ],
             ))
         );
+        assert_eq!(
+            phrases_for_postfilter("alpha NEAR(0) beta ONEAR(1) gamma"),
+            Some((
+                PhraseMatch::Expression,
+                vec![
+                    ("$proximity-term".to_owned(), "alpha".to_owned()),
+                    ("$proximity-term".to_owned(), "beta".to_owned()),
+                    ("$op$near:0".to_owned(), String::new()),
+                    ("$proximity-term".to_owned(), "gamma".to_owned()),
+                    ("$op$onear:1".to_owned(), String::new()),
+                ],
+            ))
+        );
+        assert!(phrases_for_postfilter("alpha NEAR (beta NEAR gamma)").is_none());
+        assert!(to_filter("alpha NEAR (beta NEAR gamma)").is_err());
     }
 
     #[test]

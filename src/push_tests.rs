@@ -13533,6 +13533,7 @@ async fn find_proximity_queries_filter_complete_message_text_and_page_exactly() 
             "\"alpha beta\" ONEAR(1) gamma OR gamma NEAR(0) \"alpha beta\"",
             vec!["near-forward", "near-reversed"],
         ),
+        (6, "alpha NEAR(0) beta ONEAR(1) gamma", vec!["near-forward"]),
     ] {
         let search_id = format!("20000000-0000-4000-8000-{index:012}");
         let response = env

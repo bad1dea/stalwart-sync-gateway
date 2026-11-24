@@ -291,7 +291,10 @@ Current prioritized work:
    expressions containing proximity operators now broaden to the selected
    mailbox and exact-filter token positions locally. The KQL default distance
    of eight or an explicit distance is supported; ordered searches preserve
-   operand order. Proximity matching also evaluates attachment filenames;
+   operand order. Flat chains of proximity operators preserve MS-KQL's
+   left-to-right associativity; nested proximity groups on the right are
+   rejected because they are not evaluated as a free-text operand. Proximity
+   matching also evaluates attachment filenames;
    attachment payload text remains unindexed locally. Boolean combinations
    use the existing exact matcher for supported predicates. Regression
    coverage exercises phrase operands,
@@ -302,7 +305,7 @@ Current prioritized work:
    `attachment:*` matches any non-empty attachment list) per
    [MS-KQL property restrictions](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-kql/1b4eb34a-0e20-4aca-b38e-41f531a747ff).
    Unordered NEAR also accepts both operands matching one
-   indexed token, as MS-KQL specifies. Regression suite: 357 passed,
+   indexed token, as MS-KQL specifies. Regression suite: 358 passed,
    73 ignored; strict Clippy, formatting, and diff checks passed. Neither
    source change is deployed or runtime-verified.
    Phrase matching is case-insensitive and requires adjacent
