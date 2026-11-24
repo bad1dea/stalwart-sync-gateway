@@ -4828,6 +4828,10 @@ mod tests {
         builder.end();
         builder.start(search::OPTIONS);
         builder.leaf(search::RANGE, "0-9");
+        builder.start(airsync_base::BODY_PART_PREFERENCE);
+        builder.leaf(airsync_base::TYPE, "2");
+        builder.leaf(airsync_base::TRUNCATION_SIZE, "2048");
+        builder.end();
         builder.end();
         builder.end();
         builder.end();
@@ -4837,6 +4841,30 @@ mod tests {
         assert_eq!(request.class.as_deref(), Some("Email"));
         assert_eq!(request.free_text.as_deref(), Some("invite"));
         assert_eq!(request.range, Some((0, 9)));
+        assert_eq!(request.body_part_preferences.len(), 1);
+        assert_eq!(request.body_part_preferences[0].body_type, 2);
+        assert_eq!(request.body_part_preferences[0].truncation_size, Some(2048));
+    }
+
+    #[test]
+    fn item_operations_fetch_parses_body_part_preferences() {
+        let mut builder = DocumentBuilder::new();
+        builder.start(item_operations::FETCH);
+        builder.leaf(item_operations::STORE, "Mailbox");
+        builder.leaf(airsync::COLLECTION_ID, "inbox");
+        builder.leaf(airsync::SERVER_ID, "email-1");
+        builder.start(item_operations::OPTIONS);
+        builder.start(airsync_base::BODY_PART_PREFERENCE);
+        builder.leaf(airsync_base::TYPE, "1");
+        builder.leaf(airsync_base::ALL_OR_NONE, "1");
+        builder.end();
+        builder.end();
+        builder.end();
+
+        let fetch = item_operations_fetch(&builder.finish()).unwrap();
+        assert_eq!(fetch.body_part_preferences.len(), 1);
+        assert_eq!(fetch.body_part_preferences[0].body_type, 1);
+        assert!(fetch.body_part_preferences[0].all_or_none);
     }
 
     #[test]
@@ -5015,6 +5043,35 @@ mod tests {
         assert_eq!(
             collections[0].body_preferences[0].truncation_size,
             Some(500)
+        );
+    }
+
+    #[test]
+    fn sync_collection_preserves_body_part_preferences_separately() {
+        let mut builder = DocumentBuilder::new();
+        builder.start(airsync::SYNC);
+        builder.start(airsync::COLLECTIONS);
+        builder.start(airsync::COLLECTION);
+        builder.leaf(airsync::SYNC_KEY, "0");
+        builder.leaf(airsync::COLLECTION_ID, "inbox");
+        builder.start(airsync::OPTIONS);
+        builder.start(airsync_base::BODY_PART_PREFERENCE);
+        builder.leaf(airsync_base::TYPE, "4");
+        builder.leaf(airsync_base::TRUNCATION_SIZE, "4096");
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+
+        let collections = sync_collections(&builder.finish());
+        assert_eq!(collections.len(), 1);
+        assert!(collections[0].body_preferences.is_empty());
+        assert_eq!(collections[0].body_part_preferences.len(), 1);
+        assert_eq!(collections[0].body_part_preferences[0].body_type, 4);
+        assert_eq!(
+            collections[0].body_part_preferences[0].truncation_size,
+            Some(4096)
         );
     }
 
