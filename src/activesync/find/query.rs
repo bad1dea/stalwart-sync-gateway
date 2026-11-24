@@ -66,6 +66,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
     }
     if tokens.contains(&Token::Or)
         && !tokens.contains(&Token::And)
+        && is_flat_or_expression(&tokens)
         && tokens
             .iter()
             .all(|token| matches!(token, Token::Word(_) | Token::Or | Token::Not))
@@ -114,7 +115,11 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         }
         return (term_count > 1 && phrase_count > 0).then_some((PhraseMatch::Any, terms));
     }
-    if tokens.contains(&Token::And) && tokens.contains(&Token::Or) {
+    if tokens.contains(&Token::Or)
+        && tokens.iter().any(|token| {
+            matches!(token, Token::Word(word) if search_phrase_word(word.strip_prefix('+').or_else(|| word.strip_prefix('-')).unwrap_or(word)).is_some())
+        })
+    {
         return flat_phrase_boolean_expression(&tokens)
             .map(|terms| (PhraseMatch::Expression, terms));
     }
@@ -232,6 +237,28 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
     Some((PhraseMatch::All, phrases))
 }
 
+fn is_flat_or_expression(tokens: &[Token]) -> bool {
+    let mut position = 0;
+    let mut count = 0;
+    while position < tokens.len() {
+        if tokens.get(position) == Some(&Token::Not) {
+            position += 1;
+        }
+        if !matches!(tokens.get(position), Some(Token::Word(_))) {
+            return false;
+        }
+        count += 1;
+        position += 1;
+        if position < tokens.len() {
+            if tokens.get(position) != Some(&Token::Or) {
+                return false;
+            }
+            position += 1;
+        }
+    }
+    count > 1
+}
+
 fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, String)>> {
     if tokens.iter().any(|token| {
         !matches!(
@@ -242,15 +269,16 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
         return None;
     }
     let mut output = Vec::new();
-    let mut operators = Vec::new();
+    let mut operators: Vec<(Token, bool)> = Vec::new();
     let mut position = 0;
     let mut expect_operand = true;
     let mut phrase_count = 0;
     let mut operator_count = 0;
+    let mut properties = std::collections::HashSet::new();
     while position < tokens.len() {
         if expect_operand {
             if tokens.get(position) == Some(&Token::Left) {
-                operators.push(Token::Left);
+                operators.push((Token::Left, false));
                 position += 1;
                 continue;
             }
@@ -266,22 +294,38 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                     return None;
                 }
                 let (property, value) = boolean_search_term(word)?;
+                if !properties.insert(property.clone()) {
+                    return None;
+                }
                 output.push((format!("$not{property}"), value));
             } else if let Some(negative) = word.strip_prefix('-') {
                 if let Some((property, value)) = search_phrase_word(negative) {
+                    if !properties.insert(property.clone()) {
+                        return None;
+                    }
                     output.push((format!("$not${property}"), value));
                     phrase_count += 1;
                 } else {
                     let (property, value) = boolean_search_term(negative)?;
+                    if !properties.insert(property.clone()) {
+                        return None;
+                    }
                     output.push((format!("$not{property}"), value));
                 }
             } else {
                 let positive = word.strip_prefix('+').unwrap_or(word);
                 if let Some(phrase) = search_phrase_word(positive) {
+                    if !properties.insert(phrase.0.clone()) {
+                        return None;
+                    }
                     output.push(phrase);
                     phrase_count += 1;
                 } else {
-                    output.push(boolean_search_term(word)?);
+                    let term = boolean_search_term(word)?;
+                    if !properties.insert(term.0.clone()) {
+                        return None;
+                    }
+                    output.push(term);
                 }
             }
             position += 1;
@@ -291,9 +335,9 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
             if *operator == Token::Right {
                 while operators
                     .last()
-                    .is_some_and(|previous| *previous != Token::Left)
+                    .is_some_and(|previous| previous.0 != Token::Left)
                 {
-                    let previous = operators.pop().unwrap();
+                    let previous = operators.pop().unwrap().0;
                     output.push((
                         if previous == Token::And {
                             "$op$and"
@@ -304,20 +348,32 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                         String::new(),
                     ));
                 }
-                if operators.pop() != Some(Token::Left) {
+                if operators.pop() != Some((Token::Left, false)) {
                     return None;
                 }
                 position += 1;
                 continue;
             }
             if !matches!(operator, Token::And | Token::Or) {
+                if matches!(operator, Token::Word(_) | Token::Not | Token::Left) {
+                    operators.push((Token::And, true));
+                    operator_count += 1;
+                    expect_operand = true;
+                    continue;
+                }
                 return None;
             }
             while operators.last().is_some_and(|previous| {
-                matches!(previous, Token::And | Token::Or)
-                    && (previous == operator || *previous == Token::And)
+                let (previous, implicit) = previous;
+                let precedence = |operator: &Token, implicit: bool| match (operator, implicit) {
+                    (Token::And, true) => 0,
+                    (Token::Or, false) => 1,
+                    (Token::And, false) => 2,
+                    _ => -1,
+                };
+                precedence(previous, *implicit) >= precedence(operator, false)
             }) {
-                let previous = operators.pop().unwrap();
+                let previous = operators.pop().unwrap().0;
                 output.push((
                     if previous == Token::And {
                         "$op$and"
@@ -328,7 +384,7 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                     String::new(),
                 ));
             }
-            operators.push(operator.clone());
+            operators.push((operator.clone(), false));
             operator_count += 1;
             position += 1;
             expect_operand = true;
@@ -337,7 +393,7 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
     if expect_operand || phrase_count == 0 || operator_count == 0 {
         return None;
     }
-    while let Some(operator) = operators.pop() {
+    while let Some((operator, _)) = operators.pop() {
         if operator == Token::Left {
             return None;
         }
@@ -1188,6 +1244,19 @@ mod tests {
                 ]
             ))
         );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" isread:true OR isflagged:true"#),
+            Some((
+                PhraseMatch::Expression,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$isread".to_owned(), "true".to_owned()),
+                    ("$isflagged".to_owned(), "true".to_owned()),
+                    ("$op$or".to_owned(), String::new()),
+                    ("$op$and".to_owned(), String::new())
+                ]
+            ))
+        );
         for query in [
             r#"subject:"alpha beta" subject:gamma"#,
             r#"subject:"alpha beta" OR subject:gamma"#,
@@ -1262,11 +1331,23 @@ mod tests {
         for query in [
             r#"subject:"alpha beta" subject:"gamma delta""#,
             r#"subject:"alpha beta" -subject:"gamma delta""#,
-            r#"subject:"alpha beta" body:"gamma delta" OR isread:true"#,
         ] {
             assert!(phrases_for_postfilter(query).is_none(), "{query}");
             assert!(to_filter(query).is_err(), "{query}");
         }
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" body:"gamma delta" OR isread:true"#),
+            Some((
+                PhraseMatch::Expression,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("body".to_owned(), "gamma delta".to_owned()),
+                    ("$isread".to_owned(), "true".to_owned()),
+                    ("$op$or".to_owned(), String::new()),
+                    ("$op$and".to_owned(), String::new())
+                ]
+            ))
+        );
         assert_eq!(
             phrases_for_postfilter(r#"subject:"alpha beta" AND NOT body:"gamma delta""#),
             Some((

@@ -13536,6 +13536,26 @@ async fn find_phrase_or_boolean_state_uses_both_exact_branches() {
     ids.sort();
     assert_eq!(ids, vec!["alpha-beta", "m1"]);
 
+    env.mock.set_keyword("alpha-beta", "$seen", true);
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "e4d0c613-aec4-4f4f-a1b7-00912c16923a",
+            r#"subject:"alpha beta" isread:true OR isflagged:true"#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["alpha-beta"]
+    );
+
     let response = env
         .req("Find", "client")
         .header("MS-ASProtocolVersion", "16.1")
