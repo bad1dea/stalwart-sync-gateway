@@ -51,17 +51,15 @@ pub struct VacationResponse {
     pub text_body: Option<String>,
 }
 
-/// Fields settable via `Settings>Oof>Set`. `from_date`/`to_date` are
-/// `Some(None)` vs `None` isn't distinguished here -- every Set this
-/// gateway issues replaces the whole patch, matching how the EAS Set
-/// command itself always carries a complete replacement shape, not a
-/// partial one.
+/// Fields settable via `Settings>Oof>Set`. The outer `Option` distinguishes
+/// an omitted EAS field (leave the JMAP property untouched) from an explicitly
+/// supplied field; the inner `Option` distinguishes a value from a clear.
 pub struct VacationResponseUpdate {
-    pub is_enabled: bool,
-    pub subject: Option<String>,
-    pub text_body: Option<String>,
-    pub from_date: Option<String>,
-    pub to_date: Option<String>,
+    pub is_enabled: Option<bool>,
+    pub subject: Option<Option<String>>,
+    pub text_body: Option<Option<String>>,
+    pub from_date: Option<Option<String>>,
+    pub to_date: Option<Option<String>>,
 }
 
 impl JmapClient {
@@ -107,38 +105,24 @@ impl JmapClient {
         };
 
         let mut patch = serde_json::Map::new();
-        patch.insert(
-            "isEnabled".to_owned(),
-            serde_json::Value::Bool(update.is_enabled),
-        );
-        patch.insert(
-            "subject".to_owned(),
-            update
-                .subject
-                .map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null),
-        );
-        patch.insert(
-            "textBody".to_owned(),
-            update
-                .text_body
-                .map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null),
-        );
-        patch.insert(
-            "fromDate".to_owned(),
-            update
-                .from_date
-                .map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null),
-        );
-        patch.insert(
-            "toDate".to_owned(),
-            update
-                .to_date
-                .map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null),
-        );
+        if let Some(value) = update.is_enabled {
+            patch.insert("isEnabled".to_owned(), serde_json::Value::Bool(value));
+        }
+        for (name, value) in [
+            ("subject", update.subject),
+            ("textBody", update.text_body),
+            ("fromDate", update.from_date),
+            ("toDate", update.to_date),
+        ] {
+            if let Some(value) = value {
+                patch.insert(
+                    name.to_owned(),
+                    value
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+        }
 
         let response: JmapResponse<serde_json::Value> = self
             .api_call(

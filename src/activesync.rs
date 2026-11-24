@@ -2071,6 +2071,9 @@ fn validate_oof_set(
     if from_date.is_some() != to_date.is_some() {
         return "2";
     }
+    if from_date.is_some() && oof_state.is_none() {
+        return "5";
+    }
     if oof_state.is_some_and(|value| !matches!(value, "0" | "1" | "2")) {
         return "5";
     }
@@ -2193,15 +2196,25 @@ async fn settings(
             let mut status = validate_oof_set(oof_state, from_date.as_deref(), to_date.as_deref());
             let mut vacation = None;
             if status == "1" {
-                let is_enabled = oof_state.is_some_and(|state| state != "0");
-                let subject = wbxml::eas::find_text_after(document, set::REPLY_MESSAGE)
-                    .map(|s| s.lines().next().unwrap_or(s).to_owned());
-                let text_body =
-                    wbxml::eas::find_text_after(document, set::REPLY_MESSAGE).map(str::to_owned);
-                let (from_date, to_date) = if oof_state == Some("2") {
-                    (from_date, to_date)
-                } else {
-                    (None, None)
+                let is_enabled = oof_state.map(|state| state != "0");
+                let reply_message =
+                    wbxml::eas::contains_token(document, set::REPLY_MESSAGE).then(|| {
+                        wbxml::eas::find_text_after(document, set::REPLY_MESSAGE)
+                            .unwrap_or_default()
+                            .to_owned()
+                    });
+                let (subject, text_body) = match reply_message {
+                    Some(message) if message.is_empty() => (Some(None), Some(None)),
+                    Some(message) => (
+                        Some(Some(message.lines().next().unwrap_or(&message).to_owned())),
+                        Some(Some(message)),
+                    ),
+                    None => (None, None),
+                };
+                let (from_date, to_date) = match oof_state {
+                    Some("0" | "1") => (Some(None), Some(None)),
+                    Some("2") if from_date.is_some() => (from_date.map(Some), to_date.map(Some)),
+                    _ => (None, None),
                 };
 
                 let update = crate::jmap::vacation::VacationResponseUpdate {
@@ -2211,7 +2224,17 @@ async fn settings(
                     from_date,
                     to_date,
                 };
-                match state.jmap.set_vacation_response(auth, update).await {
+                let update_is_empty = update.is_enabled.is_none()
+                    && update.subject.is_none()
+                    && update.text_body.is_none()
+                    && update.from_date.is_none()
+                    && update.to_date.is_none();
+                let persist = if update_is_empty {
+                    Ok(())
+                } else {
+                    state.jmap.set_vacation_response(auth, update).await
+                };
+                match persist {
                     Ok(()) => match state.jmap.get_vacation_response(auth).await {
                         Ok(Some(response)) => vacation = Some(response),
                         Ok(None) => {
@@ -8898,6 +8921,14 @@ mod tests {
         );
         assert_eq!(validate_oof_set(Some("3"), None, None), "5");
         assert_eq!(validate_oof_set(Some("-1"), None, None), "5");
+        assert_eq!(
+            validate_oof_set(
+                None,
+                Some("2042-05-01T00:00:00Z"),
+                Some("2042-05-02T00:00:00Z")
+            ),
+            "5"
+        );
         assert_eq!(
             validate_oof_set(None, Some("2042-05-01T00:00:00Z"), None),
             "2"

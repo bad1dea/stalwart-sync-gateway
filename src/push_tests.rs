@@ -12558,6 +12558,35 @@ async fn settings_oof_set_requires_jmap_persistence_and_omits_non_time_based_dat
     assert!(saved["fromDate"].is_null());
     assert!(saved["toDate"].is_null());
 
+    *env.mock.vacation_response.lock().unwrap() = serde_json::json!({
+        "id":"singleton", "isEnabled":true, "subject":"Existing",
+        "textBody":"Existing reply", "fromDate":"2042-06-01T00:00:00Z",
+        "toDate":"2042-06-02T00:00:00Z"
+    });
+    let mut partial = eas::DocumentBuilder::new();
+    partial.start(set::SETTINGS);
+    partial.start(set::OOF);
+    partial.start(set::SET);
+    partial.leaf(set::REPLY_MESSAGE, "Updated\nPartial update");
+    partial.end();
+    partial.end();
+    partial.end();
+    let response = env
+        .req("Settings", "oof-partial-set")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(wbxml::encode_document(&partial.finish()))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, set::STATUS), vec!["1", "1"]);
+    let saved = env.mock.vacation_response.lock().unwrap().clone();
+    assert_eq!(saved["isEnabled"], true);
+    assert_eq!(saved["subject"], "Updated");
+    assert_eq!(saved["textBody"], "Updated\nPartial update");
+    assert_eq!(saved["fromDate"], "2042-06-01T00:00:00Z");
+    assert_eq!(saved["toDate"], "2042-06-02T00:00:00Z");
+
     env.mock.vacation_set_error.store(true, Ordering::SeqCst);
     let response = env
         .req("Settings", "oof-set")
