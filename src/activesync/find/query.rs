@@ -77,6 +77,11 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
             return Some((PhraseMatch::Any, terms));
         }
     }
+    if tokens.len() > 2 && tokens.iter().all(|token| matches!(token, Token::Word(_))) {
+        if let Some(terms) = implicit_phrase_boolean_groups(&tokens) {
+            return Some((PhraseMatch::Expression, terms));
+        }
+    }
     if tokens.contains(&Token::Or)
         && !tokens.contains(&Token::And)
         && is_flat_or_expression(&tokens)
@@ -270,6 +275,57 @@ fn is_flat_or_expression(tokens: &[Token]) -> bool {
         }
     }
     count > 1
+}
+
+fn implicit_phrase_boolean_groups(tokens: &[Token]) -> Option<Vec<(String, String)>> {
+    let mut groups: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    let mut group_positions = std::collections::HashMap::<String, usize>::new();
+    let mut phrase_count = 0;
+    let mut repeated_property = false;
+    for token in tokens {
+        let Token::Word(word) = token else {
+            return None;
+        };
+        let (property, term) = if let Some((property, value)) =
+            search_phrase_word(word.strip_prefix('+').unwrap_or(word))
+        {
+            phrase_count += 1;
+            (property.clone(), (property, value))
+        } else {
+            let (term_property, value) = boolean_search_term(word)?;
+            let property = term_property.strip_prefix('$')?.to_owned();
+            (property, (term_property, value))
+        };
+        let position = if let Some(position) = group_positions.get(&property).copied() {
+            repeated_property = true;
+            position
+        } else {
+            let position = groups.len();
+            groups.push((property.clone(), Vec::new()));
+            group_positions.insert(property, position);
+            position
+        };
+        groups[position].1.push(term);
+    }
+    if phrase_count == 0 || !repeated_property {
+        return None;
+    }
+    let mut output = Vec::new();
+    for (group_index, (_, terms)) in groups.into_iter().enumerate() {
+        if terms.is_empty() {
+            return None;
+        }
+        for (term_index, term) in terms.into_iter().enumerate() {
+            output.push(term);
+            if term_index > 0 {
+                output.push(("$op$or".to_owned(), String::new()));
+            }
+        }
+        if group_index > 0 {
+            output.push(("$op$and".to_owned(), String::new()));
+        }
+    }
+    Some(output)
 }
 
 fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, String)>> {
@@ -1359,6 +1415,19 @@ mod tests {
             json!({"operator":"OR", "conditions":[
                 {"subject":"alpha beta"}, {"subject":"gamma delta"}
             ]})
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" subject:"gamma delta" isread:true"#),
+            Some((
+                PhraseMatch::Expression,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("subject".to_owned(), "gamma delta".to_owned()),
+                    ("$op$or".to_owned(), String::new()),
+                    ("$isread".to_owned(), "true".to_owned()),
+                    ("$op$and".to_owned(), String::new())
+                ]
+            ))
         );
         assert_eq!(
             phrases_for_postfilter(r#"subject:"alpha beta" body:"gamma delta" OR isread:true"#),
