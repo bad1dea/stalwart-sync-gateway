@@ -254,8 +254,9 @@ session's fixes were, not against spec-reading alone.
 
 - Tasks — MS-ASTASK Appendix A defines `AllProps` as a repeating `xs:choice`,
   so the schema does not prescribe an element order. Sync emits the fields in
-  its current writer order; actual iOS parsing and recurring-task round trips
-  still require test-bridge/device validation.
+  its current writer order. `Complete` accepts only the specified 0/1 values.
+  Actual iOS parsing and recurring-task round trips still require
+  test-bridge/device validation.
 - KQL proximity — direct `NEAR`/`ONEAR` and Boolean combinations with supported
   predicates exact-filter full message text and common address fields, using
   the default distance of eight or an explicit distance. Attachment payload
