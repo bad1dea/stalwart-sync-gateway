@@ -346,8 +346,15 @@ fn size_condition(operator: &str, value: &str) -> Result<Value, &'static str> {
 }
 
 fn received_condition(operator: &str, value: &str) -> Result<Value, &'static str> {
+    received_condition_at(operator, value, chrono::Utc::now().date_naive())
+}
+
+fn received_condition_at(
+    operator: &str,
+    value: &str,
+    today: chrono::NaiveDate,
+) -> Result<Value, &'static str> {
     use chrono::{Datelike, Months};
-    let today = chrono::Utc::now().date_naive();
     let value = value
         .strip_prefix('"')
         .and_then(|v| v.strip_suffix('"'))
@@ -362,6 +369,10 @@ fn received_condition(operator: &str, value: &str) -> Result<Value, &'static str
     let (start, end) = match value.to_ascii_lowercase().as_str() {
         "today" => (today, today.succ_opt().ok_or("date out of range")?),
         "yesterday" => (today.pred_opt().ok_or("date out of range")?, today),
+        "tomorrow" => {
+            let start = today.succ_opt().ok_or("date out of range")?;
+            (start, start.succ_opt().ok_or("date out of range")?)
+        }
         "this week" => {
             let start = today
                 .checked_sub_days(chrono::Days::new(
@@ -375,6 +386,32 @@ fn received_condition(operator: &str, value: &str) -> Result<Value, &'static str
                     .ok_or("date out of range")?,
             )
         }
+        "last week" => {
+            let this_week = today
+                .checked_sub_days(chrono::Days::new(
+                    today.weekday().num_days_from_monday() as u64
+                ))
+                .ok_or("date out of range")?;
+            (
+                this_week
+                    .checked_sub_days(chrono::Days::new(7))
+                    .ok_or("date out of range")?,
+                this_week,
+            )
+        }
+        "next month" => {
+            let start = today
+                .with_day(1)
+                .ok_or("date out of range")?
+                .checked_add_months(Months::new(1))
+                .ok_or("date out of range")?;
+            (
+                start,
+                start
+                    .checked_add_months(Months::new(1))
+                    .ok_or("date out of range")?,
+            )
+        }
         "this month" => {
             let start = today.with_day(1).ok_or("date out of range")?;
             (
@@ -384,7 +421,7 @@ fn received_condition(operator: &str, value: &str) -> Result<Value, &'static str
                     .ok_or("date out of range")?,
             )
         }
-        "last month" => {
+        "last month" | "past month" => {
             let end = today.with_day(1).ok_or("date out of range")?;
             (
                 end.checked_sub_months(Months::new(1))
@@ -842,6 +879,27 @@ mod tests {
         assert!(to_filter("received:2026-02-30").is_err());
         assert!(to_filter("sent:2026-01-01").is_err());
         assert!(to_filter(r#"received:"this month""#).is_ok());
+    }
+
+    #[test]
+    fn received_relative_dates_cover_tomorrow_weeks_and_months() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 24).unwrap();
+        let cases = [
+            ("tomorrow", "2026-11-25T00:00:00Z", "2026-11-26T00:00:00Z"),
+            ("last week", "2026-11-16T00:00:00Z", "2026-11-23T00:00:00Z"),
+            ("next month", "2026-12-01T00:00:00Z", "2027-01-01T00:00:00Z"),
+            ("past month", "2026-10-01T00:00:00Z", "2026-11-01T00:00:00Z"),
+        ];
+        for (value, start, end) in cases {
+            assert_eq!(
+                received_condition_at(":", value, today).unwrap(),
+                json!({"operator":"AND", "conditions":[
+                    {"operator":"NOT", "conditions":[{"before":start}]},
+                    {"before":end}
+                ]}),
+                "{value}"
+            );
+        }
     }
 
     #[test]
