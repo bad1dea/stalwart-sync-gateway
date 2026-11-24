@@ -6,7 +6,7 @@ cited below is transcribed directly from [MS-ASWBXML] v20250520 (fetched as a PD
 from `officeprotocoldoc.z19.web.core.windows.net`), section 2.1.2.1's per-codepage
 tables — the same primary source used to scaffold the corresponding `pub mod`
 blocks in `src/wbxml/eas.rs`. Current implementation status is read fresh from that
-file and `src/activesync.rs` at commit `216f34d`, not carried over from memory.
+file and `src/activesync.rs` at commit `77d3077`, not carried over from memory.
 
 **Verdict key:** ✅ Implemented · 🟡 Possible via JMAP, not built · ⛔ No JMAP
 equivalent · ❓ Needs live verification.
@@ -31,7 +31,7 @@ inferred.
 
 | Field | Token | Min. version | Status | JMAP (JSCalendar / RFC 8984, superseded by jscalendarbis) mechanism | Notes |
 |---|---|---|---|---|---|
-| Timezone | 0x05 | All | ✅ (`deploy-2026-11-24-eas-calendar-timezone-216f34d`) | JSCalendar IANA `timeZone` → MS-ASDTYPE `TIME_ZONE_INFORMATION` | Emits the 172-byte structure as Base64, with the event-year recurring DST transition rules; fixed-offset zones use zero dates. Invalid or missing IANA zones are omitted. The local event year is derived from its UTC start and zone, with the current UTC year as fallback. |
+| Timezone | 0x05 | All | ✅ (`deploy-2026-11-24-eas-calendar-timezone-year-77d3077`) | JSCalendar IANA `timeZone` → MS-ASDTYPE `TIME_ZONE_INFORMATION` | Emits the 172-byte structure as Base64, with the event-year recurring DST transition rules; fixed-offset zones use zero dates. Invalid or missing IANA zones are omitted. The local event year is derived from its UTC start and zone, with the current UTC year as fallback. |
 | AllDayEvent | 0x06 | All | ✅ | JSCalendar `showWithoutTime` | |
 | Attendees / Attendee / Email / Name | 0x07-0x0A | All | ✅ two-way (`deploy-2026-08-26l`) | JSCalendar `participants` and `replyTo` | Each participant carries its email, name, role, optional flag, and participation status; organizer derives from role `owner`. |
 | Body / BodyTruncated | 0x0B-0x0C | 2.5 only (12.0+ uses AirSyncBase:Body, codepage 17) | ✅ description sync | JSCalendar `description` + `descriptionContentType` | AirSyncBase Body preferences select plain or HTML content; truncation is reported according to the requested preference. |
@@ -86,7 +86,7 @@ cleanly by how well JSContact (RFC 9553) covers them:
 | Title | ✅ (`deploy-2026-11-22-eas-contact-name-prefix-c48ee61c`) | JSContact `name.components` (`prefix`) | Partial edits preserve other name components under `ifInState`. `JobTitle` continues to map separately to JSContact `titles`. |
 | WebPage | ✅ (`deploy-2026-11-22-eas-contact-web-page-d97a2d2`) | JSContact `links[].uri` | HTTP(S) website links are emitted as EAS `WebPage`; updates preserve unrelated links. |
 | YomiCompanyName, YomiFirstName, YomiLastName | ⛔ | JSContact has phonetic-name support (`name.components` with `phonetic` variants) in some draft versions — ❓ unverified whether Stalwart's implementation includes it | Japanese phonetic-reading fields; low priority for this account regardless of JMAP support. |
-| Picture (14.0+... actually "All" per the table, `0x3c`) | ⛔ *(today)* / 🟡 | JSContact `media` (kind `"photo"`) + a blob reference | Same blob-download mechanism already used for Email/Notes attachments — infrastructure exists, just not wired to Contacts. |
+| Picture (`0x3c`) | ✅ two-way | JSContact `media` (kind `photo`) as a bounded data URI | Reads and writes photo bytes up to 5 MiB; media entries unrelated to the EAS picture key are preserved on updates. |
 | Alias, WeightedRank | ⛔ | 14.0+ only fields — ❓ unsurveyed JMAP equivalents | Low priority; `WeightedRank` is Outlook's own contact-frequency scoring, unlikely to have a JMAP analogue at all. |
 
 ## Email (MS-ASEMAIL, WBXML codepage 2) and AirSyncBase (MS-ASAIRS, codepage 17)

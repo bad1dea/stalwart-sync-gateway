@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `216f34d` (2026-11-24)
+## Reconciled status for source `main` at `77d3077` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -124,13 +124,14 @@ Current prioritized work:
    structure for EAS, including recurring standard/daylight transition rules
    derived for the event year. Fixed-offset zones emit zero transition dates;
    invalid zones are omitted. Deployed as
-   `deploy-2026-11-24-eas-calendar-timezone-216f34d`; homelab commit
-   `14e4f16`, image
-   `sha256:90a883352233af51d4f489e5df94f6eb6a0f2119cd30c60701736bedd4455748`,
-   started `2026-11-24T09:37:57Z`, restart count zero, `/healthz` `ok`, and
+   `deploy-2026-11-24-eas-calendar-timezone-year-77d3077`; homelab commit
+   `0770b75`, image
+   `sha256:5d1a1060c9e1fee06554919ac21e7c2943085bf81ec7ebab2c56c6367a6cd3f2`,
+   started `2026-11-24T09:43:37Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. The suite passed 312 tests (73 ignored); strict Clippy,
    formatting, and diff checks passed. Binary-layout regressions cover Toronto
-   daylight transitions and fixed UTC.
+   daylight transitions and fixed UTC; transition rules use the event's local
+   year, including events whose UTC and local dates fall in different years.
 4. **Real-client 16.1 certification and rollout.** Production remains pinned
    to a tagged 14.0 build. Forced-version protocol tests do not establish that
    iOS/Outlook negotiate or behave correctly against an advertised 16.1 build.
