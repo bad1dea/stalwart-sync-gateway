@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `c454ffe` (2026-11-24)
+## Reconciled status for source `main` at `858f5cd` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -16,20 +16,26 @@ Current prioritized work:
    Stalwart's subject index for candidates and locally enforces case-insensitive
    adjacent word order, including accurate totals and range paging. Regression
    coverage proves that reversed words and intervening words are excluded.
-   A single positive subject phrase can also be combined with KQL AND terms;
-   candidate filtering preserves the remaining restrictions and local phrase
-   checking preserves result order, totals, and range paging. Phrase use in
-   OR/NOT expressions remains rejected because filtering candidates there can
-   change Boolean meaning. A single positive `body:"multiword phrase"` or
-   `text:"multiword phrase"` is also exact-filtered locally after JMAP returns
-   indexed candidates; body and text scans fetch message bodies and reject a
-   truncated body rather than return an incomplete exact-match result. Multiple
-   phrases, multiple restrictions on the phrase's property, and OR/NOT forms
-   remain rejected. Phrase matching is case-insensitive and requires adjacent
-   words in order. Regression tests cover plain, HTML, and RTF bodies, subject
-   or body text matching, truncation, and unsupported Boolean forms. Full
+   Positive phrases can be combined with KQL AND terms. Multiple phrases on
+   distinct properties (for example subject plus body) are exact-filtered
+   together; candidate filtering preserves the other restrictions, result
+   order, totals, and range paging. A single positive `body:"multiword phrase"`
+   or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
+   body and text scans fetch message bodies and reject a truncated body rather
+   than return an incomplete match. Implicitly OR-grouped restrictions on a
+   phrase property and phrases in OR/NOT expressions remain rejected because
+   property grouping or candidate filtering there could change Boolean meaning. Phrase matching
+   is case-insensitive and requires adjacent words in order. Regression tests
+   cover plain, HTML, and RTF bodies, subject/body conjunctions, truncation, and
+   unsupported Boolean forms. Full
    suite: 330 passed, 73 ignored; strict Clippy, formatting, and diff checks
    passed. Deployed as
+   `deploy-2026-11-24-eas-kql-multiple-phrases-858f5cd`; homelab commit
+   `0e98f88`, image
+   `sha256:5695256946e4ff707d107015dfaf1688be25c7202d127723162c89ae456d736f`,
+   started `2026-11-24T11:33:47Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
+   The earlier single-property body/text phrase release was deployed as
    `deploy-2026-11-24-eas-kql-body-text-phrases-06b7292`; homelab commit
    `ee54715`, image
    `sha256:22d72a3eccdb0063926874fc4a88d477c0ca9b4535d2ff5efe7fd4f5f90ab642`,
