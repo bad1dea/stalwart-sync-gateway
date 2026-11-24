@@ -7282,6 +7282,8 @@ async fn sync_tasks_collection(
 
     if collection.commands.iter().any(|command| {
         command.task.unsupported_complete
+            || (command.kind == wbxml::eas::SyncClientCommandKind::Add
+                && command.task.complete.is_none())
             || command.task.unsupported_recurrence
             || (command.task.recurrence_present
                 && command.task.recurrence.is_none()

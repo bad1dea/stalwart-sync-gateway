@@ -15753,6 +15753,7 @@ async fn task_add_recurrence_round_trips_through_sync_and_jmap() {
     b.leaf(air::CLIENT_ID, "recurring-task-add");
     b.start(air::APPLICATION_DATA);
     b.leaf(tasks::SUBJECT, "Recurring task fixture");
+    b.leaf(tasks::COMPLETE, "0");
     b.leaf(tasks::START_DATE, "2026-11-24T09:00:00.000Z");
     b.leaf(tasks::UTC_START_DATE, "2026-11-24T09:00:00.000Z");
     b.leaf(tasks::DUE_DATE, "2026-11-25T09:00:00.000Z");
@@ -15941,6 +15942,47 @@ async fn invalid_task_complete_value_is_rejected_without_writing() {
         .find(|item| item["id"] == "t0000")
         .unwrap();
     assert_eq!(task["progress"], "needs-action");
+}
+
+#[tokio::test]
+async fn task_add_requires_complete_field() {
+    use eas::{airsync as air, tasks};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 1);
+    let prime = item_sync(&env, "ipad", "task_calendar", "0", "100").await;
+    let initial = item_sync(&env, "ipad", "task_calendar", &sync_key(&prime), "100").await;
+
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, sync_key(&initial));
+    b.leaf(air::COLLECTION_ID, "task_calendar");
+    b.empty_tag(air::GET_CHANGES);
+    b.start(air::COMMANDS);
+    b.start(air::ADD);
+    b.leaf(air::CLIENT_ID, "task-without-complete");
+    b.start(air::APPLICATION_DATA);
+    b.leaf(tasks::SUBJECT, "Must not be created");
+    for _ in 0..6 {
+        b.end();
+    }
+    let response = env
+        .req("Sync", "ipad")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let document = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&document, air::STATUS), Some("5"));
+    let items = env.mock.groupware.lock().unwrap();
+    assert_eq!(items.get("calendar").unwrap().len(), 2);
+    assert!(!items
+        .get("calendar")
+        .unwrap()
+        .iter()
+        .any(|item| item["title"] == "Must not be created"));
 }
 
 #[tokio::test]
