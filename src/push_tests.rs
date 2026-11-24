@@ -13389,6 +13389,32 @@ async fn find_repeated_and_negated_subject_phrases_are_exact() {
 }
 
 #[tokio::test]
+async fn find_phrase_or_read_state_uses_both_exact_branches() {
+    use eas::{airsync as air, find as f};
+    let env = start_env(Opts::default()).await;
+    env.mock.add_mail("inbox", "alpha-beta");
+    env.mock.add_mail("inbox", "beta-alpha");
+    env.mock.set_keyword("m2", "$seen", true);
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "ee7a1970-b61f-45bd-ae49-58d5e254c076",
+            r#"subject:"alpha beta" OR isread:true"#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("2"));
+    let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
+    ids.sort();
+    assert_eq!(ids, vec!["alpha-beta", "m2"]);
+}
+
+#[tokio::test]
 async fn find_scopes_queries_and_rejects_unsupported_inputs() {
     use eas::{airsync as air, find as f};
     let env = start_env(Opts::default()).await;

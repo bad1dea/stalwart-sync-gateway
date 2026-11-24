@@ -193,7 +193,9 @@ async fn execute(
     // the backend does not preserve phrase semantics, and NOT would exclude
     // messages that do not contain all indexed phrase terms. Scan the scoped
     // mailbox and decide the one standalone negative phrase locally.
-    let query = if phrase_match == query::PhraseMatch::None {
+    let query = if phrase_match == query::PhraseMatch::None
+        || phrases.iter().any(|(property, _)| property == "$isread")
+    {
         json!({})
     } else {
         query
@@ -231,7 +233,10 @@ async fn execute(
         "preview",
         "attachments",
     ];
-    if phrases.iter().any(|(property, _)| property != "subject") {
+    if phrases
+        .iter()
+        .any(|(property, _)| matches!(property.as_str(), "body" | "text"))
+    {
         properties.extend(["textBody", "htmlBody", "bodyValues"]);
     }
     let page = if !phrases.is_empty() {
@@ -266,6 +271,7 @@ async fn execute(
                 if email_matches_phrases(
                     &email.subject,
                     email.body.as_ref(),
+                    Some(email.read),
                     phrase_match,
                     &phrases,
                 )? {
@@ -523,6 +529,7 @@ fn restart_document() -> wbxml::Document {
 fn email_matches_phrases(
     subject: &str,
     body: Option<&crate::model::EmailBody>,
+    is_read: Option<bool>,
     phrase_match: query::PhraseMatch,
     phrases: &[(String, String)],
 ) -> anyhow::Result<bool> {
@@ -537,7 +544,12 @@ fn email_matches_phrases(
         }
         query::PhraseMatch::Any => {
             for (property, phrase) in phrases {
-                if email_matches_phrase(subject, body, property, phrase)? {
+                let matched = if property == "$isread" {
+                    is_read.is_some_and(|read| read == (phrase == "true"))
+                } else {
+                    email_matches_phrase(subject, body, property, phrase)?
+                };
+                if matched {
                     return Ok(true);
                 }
             }
@@ -639,6 +651,7 @@ mod tests {
         assert!(email_matches_phrases(
             "Alpha beta subject",
             Some(&plain),
+            None,
             query::PhraseMatch::All,
             &[
                 ("subject".to_owned(), "alpha beta".to_owned()),
@@ -649,6 +662,7 @@ mod tests {
         assert!(!email_matches_phrases(
             "Alpha beta subject",
             Some(&plain),
+            None,
             query::PhraseMatch::All,
             &[
                 ("subject".to_owned(), "alpha beta".to_owned()),
@@ -658,6 +672,7 @@ mod tests {
         .unwrap());
         assert!(email_matches_phrases(
             "Alpha beta and gamma delta",
+            None,
             None,
             query::PhraseMatch::All,
             &[
@@ -669,6 +684,7 @@ mod tests {
         assert!(!email_matches_phrases(
             "Alpha beta only",
             None,
+            None,
             query::PhraseMatch::All,
             &[
                 ("subject".to_owned(), "alpha beta".to_owned()),
@@ -679,12 +695,14 @@ mod tests {
         assert!(email_matches_phrases(
             "Unrelated subject",
             None,
+            None,
             query::PhraseMatch::None,
             &[("subject".to_owned(), "alpha beta".to_owned())]
         )
         .unwrap());
         assert!(!email_matches_phrases(
             "Alpha beta subject",
+            None,
             None,
             query::PhraseMatch::None,
             &[("subject".to_owned(), "alpha beta".to_owned())]
@@ -693,6 +711,7 @@ mod tests {
         assert!(email_matches_phrases(
             "Other subject",
             Some(&plain),
+            None,
             query::PhraseMatch::Any,
             &[
                 ("subject".to_owned(), "alpha beta".to_owned()),
@@ -702,6 +721,7 @@ mod tests {
         .unwrap());
         assert!(!email_matches_phrases(
             "Other subject",
+            None,
             None,
             query::PhraseMatch::Any,
             &[

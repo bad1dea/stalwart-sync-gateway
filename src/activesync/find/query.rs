@@ -63,6 +63,21 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
             return Some((PhraseMatch::None, vec![search_phrase_word(negative)?]));
         }
     }
+    if let [Token::Word(left), Token::Or, Token::Word(right)] = tokens.as_slice() {
+        let left_phrase = search_phrase_word(left.strip_prefix('+').unwrap_or(left));
+        let right_phrase = search_phrase_word(right.strip_prefix('+').unwrap_or(right));
+        let boolean = |word: &str| {
+            let (property, value) = word.split_once(':')?;
+            (property.eq_ignore_ascii_case("isread") && matches!(value, "true" | "false"))
+                .then(|| ("$isread".to_owned(), value.to_owned()))
+        };
+        if let (Some(phrase), Some(boolean)) = (left_phrase, boolean(right)) {
+            return Some((PhraseMatch::Any, vec![phrase, boolean]));
+        }
+        if let (Some(boolean), Some(phrase)) = (boolean(left), right_phrase) {
+            return Some((PhraseMatch::Any, vec![phrase, boolean]));
+        }
+    }
     if tokens.contains(&Token::Or)
         && tokens
             .iter()
@@ -820,15 +835,40 @@ mod tests {
                 vec![("body".to_owned(), "alpha beta".to_owned())]
             ))
         );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" OR isread:true"#),
+            Some((
+                PhraseMatch::Any,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$isread".to_owned(), "true".to_owned())
+                ]
+            ))
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"isread:false OR subject:"alpha beta""#),
+            Some((
+                PhraseMatch::Any,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$isread".to_owned(), "false".to_owned())
+                ]
+            ))
+        );
+        assert_eq!(
+            to_filter(r#"subject:"alpha beta" OR isread:true"#).unwrap(),
+            json!({"operator":"OR", "conditions":[
+                {"subject":"alpha beta"}, {"hasKeyword":"$seen"}
+            ]})
+        );
         for query in [
-            r#"subject:"alpha beta" OR isread:true"#,
             r#"subject:"alpha beta" subject:gamma"#,
             r#"subject:"alpha beta" OR subject:gamma"#,
         ] {
             assert!(phrases_for_postfilter(query).is_none(), "{query}");
             assert!(to_filter(query).is_err(), "{query}");
         }
-        assert!(phrases_for_postfilter(r#"text:"alpha beta" OR isread:true"#).is_none());
+        assert!(phrases_for_postfilter(r#"text:"alpha beta" OR from:bob"#).is_none());
     }
 
     #[test]
@@ -854,7 +894,6 @@ mod tests {
             ))
         );
         for query in [
-            r#"body:"alpha beta" OR isread:true"#,
             r#"body:"alpha beta" body:gamma"#,
             r#"text:"alpha beta" text:gamma"#,
         ] {
@@ -917,8 +956,6 @@ mod tests {
                 {"subject":"alpha beta"}, {"body":"gamma delta"}
             ]})
         );
-        assert!(phrases_for_postfilter(r#"subject:"alpha beta" OR isread:true"#).is_none());
-        assert!(to_filter(r#"subject:"alpha beta" OR isread:true"#).is_err());
         assert!(phrases_for_postfilter(r#"NOT subject:"alpha beta" AND isread:true"#).is_none());
     }
 
