@@ -1985,6 +1985,75 @@ mod tests {
     }
 
     #[test]
+    fn kql_prefix_queries_keep_boolean_and_or_meaning() {
+        let (and_kind, and_terms) =
+            query::phrases_for_postfilter("subject:serv* AND isread:true").unwrap();
+        assert!(email_matches_phrases(
+            "Server outage",
+            None,
+            Some(true),
+            None,
+            None,
+            and_kind,
+            &and_terms,
+        )
+        .unwrap());
+        assert!(!email_matches_phrases(
+            "Server outage",
+            None,
+            Some(false),
+            None,
+            None,
+            and_kind,
+            &and_terms,
+        )
+        .unwrap());
+        assert!(!email_matches_phrases(
+            "Unrelated outage",
+            None,
+            Some(true),
+            None,
+            None,
+            and_kind,
+            &and_terms,
+        )
+        .unwrap());
+
+        let (or_kind, or_terms) =
+            query::phrases_for_postfilter("subject:serv* OR isread:true").unwrap();
+        assert!(email_matches_phrases(
+            "Server outage",
+            None,
+            Some(false),
+            None,
+            None,
+            or_kind,
+            &or_terms,
+        )
+        .unwrap());
+        assert!(email_matches_phrases(
+            "Unrelated outage",
+            None,
+            Some(true),
+            None,
+            None,
+            or_kind,
+            &or_terms,
+        )
+        .unwrap());
+        assert!(!email_matches_phrases(
+            "Unrelated outage",
+            None,
+            Some(false),
+            None,
+            None,
+            or_kind,
+            &or_terms,
+        )
+        .unwrap());
+    }
+
+    #[test]
     fn body_phrase_fails_closed_on_truncated_body_and_handles_missing_body() {
         let truncated = EmailBody {
             body_type: EmailBodyType::Plain,

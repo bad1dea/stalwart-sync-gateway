@@ -33,10 +33,16 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
         return Ok(json!({}));
     }
     let tokens = tokenize(input)?;
-    if let [Token::Word(word)] = tokens.as_slice() {
-        if prefix_search_term(word).is_some() {
-            return Ok(json!({}));
-        }
+    let has_prefix_term = tokens
+        .iter()
+        .any(|token| matches!(token, Token::Word(word) if prefix_search_term(word).is_some()));
+    if has_prefix_term
+        && ((tokens.len() == 1
+            && matches!(&tokens[0], Token::Word(word) if prefix_search_term(word).is_some()))
+            || flat_phrase_boolean_expression(&tokens).is_some())
+        && phrases_for_postfilter(input).is_some()
+    {
+        return Ok(json!({}));
     }
     if tokens
         .iter()
@@ -274,11 +280,16 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
                         terms.push((format!("$not{property}"), value));
                     }
                 } else {
-                    let term = boolean_search_term(word)
-                        .or_else(|| importance_search_term(word))
-                        .or_else(|| received_search_term(word))
-                        .or_else(|| sent_search_term(word))
-                        .or_else(|| size_search_term(word))?;
+                    let term = if let Some(term) = prefix_search_term(word) {
+                        phrase_count += 1;
+                        term
+                    } else {
+                        boolean_search_term(word)
+                            .or_else(|| importance_search_term(word))
+                            .or_else(|| received_search_term(word))
+                            .or_else(|| sent_search_term(word))
+                            .or_else(|| size_search_term(word))?
+                    };
                     if term.0 == "$importance_cmp" {
                         phrase_count += 1;
                     }
@@ -311,7 +322,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
     }
     if tokens.contains(&Token::Or)
         && tokens.iter().any(|token| {
-            matches!(token, Token::Word(word) if search_phrase_word(word.strip_prefix('+').or_else(|| word.strip_prefix('-')).unwrap_or(word)).is_some())
+            matches!(token, Token::Word(word) if search_phrase_word(word.strip_prefix('+').or_else(|| word.strip_prefix('-')).unwrap_or(word)).is_some() || prefix_search_term(word).is_some())
         })
     {
         return flat_phrase_boolean_expression(&tokens)
@@ -327,7 +338,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
             | Token::Left
             | Token::Right
             | Token::Comma => false,
-            Token::Not => !matches!(tokens.get(index + 1), Some(Token::Word(word)) if boolean_search_term(word).is_some() || importance_search_term(word).is_some() || received_search_term(word).is_some() || sent_search_term(word).is_some() || size_search_term(word).is_some() || search_phrase_word(word).is_some() || simple_search_property_word(word).is_some()),
+            Token::Not => !matches!(tokens.get(index + 1), Some(Token::Word(word)) if boolean_search_term(word).is_some() || importance_search_term(word).is_some() || received_search_term(word).is_some() || sent_search_term(word).is_some() || size_search_term(word).is_some() || search_phrase_word(word).is_some() || simple_search_property_word(word).is_some() || prefix_search_term(word).is_some()),
             _ => true,
         })
     {
@@ -2877,6 +2888,17 @@ mod tests {
         }
         for input in ["*serv", "serv**", "subject:two words*", "-serv*"] {
             assert!(to_filter(input).is_err(), "{input}");
+        }
+        for input in [
+            "subject:serv* AND isread:true",
+            "subject:serv* OR isread:true",
+        ] {
+            assert!(
+                flat_phrase_boolean_expression(&tokenize(input).unwrap()).is_some(),
+                "{input}"
+            );
+            assert!(phrases_for_postfilter(input).is_some(), "{input}");
+            assert_eq!(to_filter(input).unwrap(), json!({}), "{input}");
         }
     }
 
