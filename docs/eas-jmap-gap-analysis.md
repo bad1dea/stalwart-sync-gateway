@@ -281,9 +281,10 @@ Current prioritized work:
    Negated phrases can also combine with exact single-token string restrictions
    on subject, body, text, from, to, cc, bcc, and participants, plus attachment
    filename restrictions; these forms broad-scan the selected mailbox and
-   evaluate each restriction locally. An
-   end-to-end Find regression confirms a negated subject phrase and a positive
-   single-token subject restriction return the exact result and total.
+   evaluate each restriction locally. Regressions check attachment-name
+   alternatives; an end-to-end Find test confirms a negated subject phrase plus
+   a positive single-token subject restriction returns the exact result and
+   total.
    Other predicates outside the supported boolean, importance, received, sent,
    size, and string-property set remain rejected when paired with negated
    phrases.
@@ -341,7 +342,7 @@ Current prioritized work:
    `attachment:*` matches any non-empty attachment list) per
    [MS-KQL property restrictions](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-kql/1b4eb34a-0e20-4aca-b38e-41f531a747ff).
    Unordered NEAR also accepts both operands matching one
-   indexed token, as MS-KQL specifies. Regression suite: 366 passed,
+   indexed token, as MS-KQL specifies. Regression suite: 367 passed,
    73 ignored; strict Clippy, formatting, and diff checks passed. The nested
    current proximity and paging changes are not deployed or runtime-verified.
    Phrase matching is case-insensitive and requires adjacent

@@ -2248,6 +2248,47 @@ mod tests {
     }
 
     #[test]
+    fn negated_phrase_can_be_combined_with_an_attachment_filename_term() {
+        let (kind, terms) =
+            query::phrases_for_postfilter(r#"NOT subject:"alpha beta" AND attachment:report"#)
+                .unwrap();
+        let attachments = [crate::model::EmailAttachment {
+            blob_id: "blob-report".to_owned(),
+            part_id: None,
+            name: "Annual Report.pdf".to_owned(),
+            content_type: "application/pdf".to_owned(),
+            size: 64,
+            content_id: None,
+            content_location: None,
+            inline: false,
+        }];
+        let matches = |subject: &str, attachments: &[crate::model::EmailAttachment]| {
+            email_matches_phrases_with_addresses_and_attachments(
+                subject,
+                None,
+                "",
+                "",
+                "",
+                "",
+                None,
+                None,
+                0,
+                1,
+                None,
+                None,
+                Some(!attachments.is_empty()),
+                attachments,
+                kind,
+                &terms,
+            )
+            .unwrap()
+        };
+        assert!(matches("unrelated subject", &attachments));
+        assert!(!matches("alpha beta", &attachments));
+        assert!(!matches("unrelated subject", &[]));
+    }
+
+    #[test]
     fn proximity_accepts_parenthesized_or_alternatives_as_operands() {
         let (kind, terms) = query::phrases_for_postfilter("cat NEAR(0) (cat OR dog)").unwrap();
         assert!(email_matches_phrases("cat", None, None, None, None, kind, &terms).unwrap());
