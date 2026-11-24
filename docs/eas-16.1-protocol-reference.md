@@ -135,7 +135,8 @@ Presentation attachments are extracted for exact text/proximity matching up to
 OCR, and larger attachment content remain unsupported. These extraction changes
 are source-tested and deployed; real-client validation remains open. Find is
 protocol-version gated to 16.1 and is not advertised while production negotiates
-only 14.0.
+only 14.0. Mailbox results include the EAS `Importance` response property in
+low/normal/high wire values.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
 SendMail posts a full new outgoing message; SmartReply/SmartForward use

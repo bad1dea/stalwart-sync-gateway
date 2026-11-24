@@ -13482,7 +13482,7 @@ async fn find_maps_kql_to_jmap_pages_metadata_and_restarts_changed_searches() {
 
 #[tokio::test]
 async fn find_importance_comparisons_filter_ordered_values_exactly() {
-    use eas::{airsync as air, find as f};
+    use eas::{airsync as air, email as mail, find as f};
     let env = start_env(Opts::default()).await;
     env.mock.remove_mail("inbox", "m1");
     env.mock.remove_mail("inbox", "m2");
@@ -13513,6 +13513,22 @@ async fn find_importance_comparisons_filter_ordered_values_exactly() {
         let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
         ids.sort();
         assert_eq!(ids, expected, "{query}");
+        let mut expected_importance = expected
+            .iter()
+            .map(|id| match *id {
+                "low" => "0",
+                "normal" => "1",
+                "high" => "2",
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        expected_importance.sort();
+        let mut actual_importance = eas::find_all_text_after(&doc, mail::IMPORTANCE);
+        actual_importance.sort();
+        assert_eq!(
+            actual_importance, expected_importance,
+            "{query} importance response"
+        );
     }
 }
 

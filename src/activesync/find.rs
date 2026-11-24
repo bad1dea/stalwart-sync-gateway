@@ -444,6 +444,7 @@ async fn execute(
             b.leaf(mail::FROM, email.from);
         }
         b.leaf(mail::READ, if email.read { "1" } else { "0" });
+        b.leaf(mail::IMPORTANCE, email.importance.to_string());
         b.leaf(
             email2::IS_DRAFT,
             if email.keywords.iter().any(|keyword| keyword == "$draft") {

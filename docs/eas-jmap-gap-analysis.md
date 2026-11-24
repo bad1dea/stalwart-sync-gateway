@@ -35,6 +35,9 @@ Current prioritized work:
    Stalwart's subject index for candidates and locally enforces case-insensitive
    adjacent word order, including accurate totals and range paging. Regression
    coverage proves that reversed words and intervening words are excluded.
+   Mailbox Find responses include the EAS `Importance` property mapped from
+   the JMAP message importance header (0 low, 1 normal, 2 high), with a
+   regression checking all three values.
    GAL Find uses the EAS prefix-string/ANR rule locally across principal
    display names, aliases, and email tokens; multi-token prefixes such as
    `Michael A.` now match `Michael Alexander` despite JMAP's whole-token
