@@ -365,6 +365,18 @@ async fn mock_api(
                 };
                 let items = m.groupware.lock().unwrap();
                 let items = items.get(kind).cloned().unwrap_or_default();
+                let items: Vec<_> = if kind == "contacts" {
+                    if let Some(book) = args["filter"]["inAddressBook"].as_str() {
+                        items
+                            .into_iter()
+                            .filter(|item| item["addressBookIds"][book] == true)
+                            .collect()
+                    } else {
+                        items
+                    }
+                } else {
+                    items
+                };
                 let position = args["position"].as_u64().unwrap_or(0) as usize;
                 // Deliberately return short pages, as a server may do.
                 let limit = (args["limit"].as_u64().unwrap_or(200) as usize).min(37);
@@ -11509,17 +11521,15 @@ fn sync_key(doc: &wbxml::Document) -> String {
 
 fn enable_groupware(env: &Env, count: usize) {
     let mut items = env.mock.groupware.lock().unwrap();
-    items.insert(
-        "contacts".into(),
-        (0..count)
-            .map(|i| {
-                serde_json::json!({
-                    "id": format!("c{i:04}"), "addressBookIds": {"book": true},
-                    "name": {"full": format!("Contact {i}")}
-                })
+    let contacts: Vec<_> = (0..count)
+        .map(|i| {
+            serde_json::json!({
+                "id": format!("c{i:04}"), "addressBookIds": {"book": true},
+                "name": {"full": format!("Contact {i}")}
             })
-            .collect(),
-    );
+        })
+        .collect();
+    items.insert("contacts".into(), contacts);
     let mut calendar: Vec<_> = (0..count)
         .map(|i| {
             serde_json::json!({
@@ -11591,6 +11601,81 @@ async fn item_collections_prime_page_replay_and_resync_without_losing_items() {
         let again = item_sync(&env, "ipad", folder, &sync_key(&reset), "19").await;
         assert_eq!(eas::find_all_text_after(&again, air::SERVER_ID).len(), 19);
     }
+}
+
+#[tokio::test]
+async fn contacts_sync_fetch_returns_only_items_in_the_requested_address_book() {
+    use eas::{airsync as air, contacts};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 1);
+    env.mock
+        .groupware
+        .lock()
+        .unwrap()
+        .get_mut("contacts")
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "contact-in-other-book", "addressBookIds": {"other-book": true},
+            "name": {"full": "Other book contact"}
+        }));
+    let prime = item_sync(&env, "contact-fetch", "ab_book", "0", "25").await;
+
+    let request = |collection: &str, server_id: &str| {
+        let mut builder = eas::DocumentBuilder::new();
+        builder.start(air::SYNC);
+        builder.start(air::COLLECTIONS);
+        builder.start(air::COLLECTION);
+        builder.leaf(air::SYNC_KEY, sync_key(&prime));
+        builder.leaf(air::COLLECTION_ID, collection);
+        builder.leaf(air::GET_CHANGES, "0");
+        builder.start(air::COMMANDS);
+        builder.start(air::FETCH);
+        builder.leaf(air::SERVER_ID, server_id);
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        wbxml::encode_document(&builder.finish())
+    };
+
+    let response = env
+        .req("Sync", "contact-fetch")
+        .body(request("ab_book", "c0000"))
+        .send()
+        .await
+        .unwrap();
+    let document = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert!(eas::contains_token(&document, air::FETCH));
+    assert_eq!(
+        eas::find_all_text_after(&document, air::SERVER_ID),
+        vec!["c0000"]
+    );
+    assert_eq!(
+        eas::find_all_text_after(&document, air::STATUS),
+        vec!["1", "1"]
+    );
+    assert_eq!(
+        eas::find_all_text_after(&document, contacts::FILE_AS),
+        vec!["Contact 0"]
+    );
+
+    let response = env
+        .req("Sync", "contact-fetch")
+        .body(request("ab_book", "contact-in-other-book"))
+        .send()
+        .await
+        .unwrap();
+    let document = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        eas::find_all_text_after(&document, air::SERVER_ID),
+        vec!["contact-in-other-book"]
+    );
+    assert_eq!(
+        eas::find_all_text_after(&document, air::STATUS),
+        vec!["1", "8"]
+    );
+    assert!(!eas::contains_token(&document, contacts::FILE_AS));
 }
 
 #[tokio::test]

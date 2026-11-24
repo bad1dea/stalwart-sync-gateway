@@ -5336,6 +5336,7 @@ async fn sync_contacts_collection(
     let mut deleted = false;
     let mut add_responses: Vec<(String, Option<String>, &'static str)> = Vec::new();
     let mut change_responses: Vec<(String, &'static str)> = Vec::new();
+    let mut fetch_ids = Vec::new();
 
     for command in &collection.commands {
         match command.kind {
@@ -5396,10 +5397,7 @@ async fn sync_contacts_collection(
                 }
             }
             wbxml::eas::SyncClientCommandKind::Fetch => {
-                tracing::debug!(
-                    server_id = command.server_id,
-                    "ignoring unsupported Contacts Fetch command"
-                );
+                fetch_ids.push(command.server_id.clone());
             }
         }
     }
@@ -5498,7 +5496,7 @@ async fn sync_contacts_collection(
     builder.leaf(air::COLLECTION_ID, collection.collection_id.clone());
     builder.leaf(air::STATUS, "1");
 
-    if !add_responses.is_empty() || !change_responses.is_empty() {
+    if !add_responses.is_empty() || !change_responses.is_empty() || !fetch_ids.is_empty() {
         builder.start(air::RESPONSES);
         for (client_id, server_id, status) in &add_responses {
             builder.start(air::ADD);
@@ -5513,6 +5511,19 @@ async fn sync_contacts_collection(
             builder.start(air::CHANGE);
             builder.leaf(air::SERVER_ID, server_id.clone());
             builder.leaf(air::STATUS, *status);
+            builder.end();
+        }
+        for server_id in fetch_ids {
+            builder.start(air::FETCH);
+            builder.leaf(air::SERVER_ID, server_id.clone());
+            if let Some((_, contact)) = current_by_id.get(&server_id) {
+                builder.leaf(air::STATUS, "1");
+                builder.start(air::APPLICATION_DATA);
+                write_contact_fields(builder, contact, false);
+                builder.end();
+            } else {
+                builder.leaf(air::STATUS, "8");
+            }
             builder.end();
         }
         builder.end();
