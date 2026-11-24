@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `d5244e3` (2026-11-22)
+## Reconciled status for source `main` at `f260a09` (2026-11-23)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -237,6 +237,21 @@ image `sha256:dfb72fc4be8d3c959604ecf5de94a8a788c48946cc32af393454dd172c4db005`,
 started at `2026-11-23T01:48:13Z` with restart count zero. Mesh `/healthz`
 returned `ok` and `/readyz` returned `ready`. No live contact was modified
 during deployment.
+
+Also completed (`f260a09`): **EAS Task completion timestamps**. Task Sync now
+parses `Tasks:DateCompleted`, stores it in JSCalendar `progressUpdated`, reads
+that property back for completed tasks, and emits it in WBXML. Incomplete-task
+updates clear the completion timestamp; contradictory completion-date plus
+`Complete=0` input is rejected as an item error. Regression coverage includes
+WBXML decoding, UTC offset normalization, task Sync output, and a client Change
+saved to the JMAP mock. Full suite: 269 passed, 73 ignored; clippy with
+warnings denied, formatting, and diff checks pass. Deployed as
+`deploy-2026-11-23-eas-task-completion-f260a09`; homelab commit `a7f5f62`.
+Compose produced image
+`sha256:bee5f6682599dff81913383e2bf3b21981d05742af656e42b3ae87e39559d369`.
+The replacement started at `2026-11-24T04:17:59Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
+continues to advertise EAS 14.0.
 
 Also completed: **ActiveSync Contact departments**. EAS `Department` maps to
 the final JSContact `organizations[].units[]` entry. Updates merge into the
