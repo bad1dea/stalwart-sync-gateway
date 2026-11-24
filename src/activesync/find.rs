@@ -799,6 +799,40 @@ fn email_matches_phrases_with_addresses_and_attachments(
             let mut values = Vec::new();
             for (property, phrase) in phrases {
                 match property.as_str() {
+                    "$op$not" => {
+                        let value = match values
+                            .pop()
+                            .ok_or_else(|| anyhow::anyhow!("invalid phrase expression"))?
+                        {
+                            ExpressionValue::Boolean(value) => value,
+                            ExpressionValue::ProximityChain(chain) => {
+                                proximity_chain_matches_email(
+                                    subject,
+                                    body,
+                                    from,
+                                    to,
+                                    cc,
+                                    bcc,
+                                    attachments,
+                                    &chain,
+                                )?
+                            }
+                            ExpressionValue::ProximityGroup(operand) => {
+                                proximity_operand_matches_email(
+                                    subject,
+                                    body,
+                                    from,
+                                    to,
+                                    cc,
+                                    bcc,
+                                    attachments,
+                                    &operand,
+                                )?
+                            }
+                            _ => anyhow::bail!("invalid phrase expression"),
+                        };
+                        values.push(ExpressionValue::Boolean(!value));
+                    }
                     "$op$proximity-or" => {
                         let right = proximity_operand_from_value(
                             values
@@ -1979,6 +2013,17 @@ mod tests {
             &terms,
         )
         .unwrap());
+    }
+
+    #[test]
+    fn not_can_negate_a_parenthesized_proximity_expression() {
+        let (kind, terms) = query::phrases_for_postfilter("NOT (alpha ONEAR(0) beta)").unwrap();
+        assert!(
+            !email_matches_phrases("alpha beta", None, None, None, None, kind, &terms,).unwrap()
+        );
+        assert!(
+            email_matches_phrases("beta alpha", None, None, None, None, kind, &terms,).unwrap()
+        );
     }
 
     #[test]

@@ -754,6 +754,13 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
     let mut phrase_positions = std::collections::HashMap::<String, usize>::new();
     while position < tokens.len() {
         if expect_operand {
+            if tokens.get(position) == Some(&Token::Not)
+                && tokens.get(position + 1) == Some(&Token::Left)
+            {
+                operators.push((Token::Not, false));
+                position += 1;
+                continue;
+            }
             if tokens.get(position) == Some(&Token::Left) {
                 operators.push((Token::Left, false));
                 position += 1;
@@ -864,6 +871,12 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                     return None;
                 }
                 position += 1;
+                if operators
+                    .last()
+                    .is_some_and(|operator| operator.0 == Token::Not)
+                {
+                    output.push(expression_operator(&operators.pop()?.0)?);
+                }
                 continue;
             }
             if !matches!(
@@ -940,6 +953,11 @@ fn valid_proximity_rpn(expression: &[(String, String)]) -> bool {
                 return false;
             }
             stack.push(Kind::ProximityGroup);
+        } else if operator == "$op$not" {
+            if !matches!(stack.pop(), Some(Kind::Boolean | Kind::Chain)) {
+                return false;
+            }
+            stack.push(Kind::Boolean);
         } else if operator.starts_with("$op$near:") || operator.starts_with("$op$onear:") {
             if !matches!(
                 stack.pop(),
@@ -973,6 +991,7 @@ fn expression_operator(operator: &Token) -> Option<(String, String)> {
         Token::And => "$op$and".to_owned(),
         Token::Or => "$op$or".to_owned(),
         Token::ProximityOr => "$op$proximity-or".to_owned(),
+        Token::Not => "$op$not".to_owned(),
         Token::Near(distance) => format!("$op$near:{distance}"),
         Token::Onear(distance) => format!("$op$onear:{distance}"),
         _ => return None,
@@ -2983,6 +3002,18 @@ mod tests {
                     ("$proximity-term".to_owned(), "dog".to_owned()),
                     ("$op$proximity-or".to_owned(), String::new()),
                     ("$op$near:0".to_owned(), String::new()),
+                ],
+            ))
+        );
+        assert_eq!(
+            phrases_for_postfilter("NOT (alpha ONEAR(0) beta)"),
+            Some((
+                PhraseMatch::Expression,
+                vec![
+                    ("$proximity-term".to_owned(), "alpha".to_owned()),
+                    ("$proximity-term".to_owned(), "beta".to_owned()),
+                    ("$op$onear:0".to_owned(), String::new()),
+                    ("$op$not".to_owned(), String::new()),
                 ],
             ))
         );

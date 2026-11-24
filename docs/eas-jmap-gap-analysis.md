@@ -298,7 +298,8 @@ Current prioritized work:
    groups may also be used as proximity operands (for example,
    `cat NEAR(0) (cat OR dog)`), including NEAR's same-token match. Regression
    coverage checks nested ordered matching, OR alternatives, same-token
-   matching, and reversed span order, consistent with the [MS-KQL NEAR
+   matching, reversed span order, and `NOT` over a parenthesized proximity
+   expression, consistent with the [MS-KQL NEAR
    operator](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-kql/31e6a96d-8b5d-4d3b-b4fa-af4b58e90a39).
    Proximity
    matching also evaluates attachment filenames;
@@ -329,7 +330,7 @@ Current prioritized work:
    `attachment:*` matches any non-empty attachment list) per
    [MS-KQL property restrictions](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-kql/1b4eb34a-0e20-4aca-b38e-41f531a747ff).
    Unordered NEAR also accepts both operands matching one
-   indexed token, as MS-KQL specifies. Regression suite: 362 passed,
+   indexed token, as MS-KQL specifies. Regression suite: 363 passed,
    73 ignored; strict Clippy, formatting, and diff checks passed. The nested
    proximity change is not deployed or runtime-verified.
    Phrase matching is case-insensitive and requires adjacent
