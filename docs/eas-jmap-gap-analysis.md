@@ -16,10 +16,19 @@ Current prioritized work:
    Stalwart's subject index for candidates and locally enforces case-insensitive
    adjacent word order, including accurate totals and range paging. Regression
    coverage proves that reversed words and intervening words are excluded.
-   Multiword phrases in body/text or compound Boolean expressions remain
-   rejected because those scopes cannot yet be post-filtered without changing
-   query meaning. Regression coverage verifies order, adjacency, totals, and
-   result mapping against an index that returns unordered word candidates.
+   A single positive subject phrase can also be combined with KQL AND terms;
+   candidate filtering preserves the remaining restrictions and local phrase
+   checking preserves result order, totals, and range paging. Phrase use in
+   OR/NOT expressions remains rejected because filtering candidates there can
+   change Boolean meaning. Multiword phrases in body/text remain unavailable.
+   Regression coverage includes reversed/intervening words and a phrase
+   combined with `isread:true`. Deployed as
+   `deploy-2026-11-24-eas-find-subject-phrase-and-e8e0243`; homelab commit
+   `72c8f33`, image
+   `sha256:fccac4d63e2e4be61dcdd48558c88206dbad5daf6fba3b31df2f06a326bb6b61`,
+   started `2026-11-24T10:10:14Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The suite passed 315 tests (73 ignored); strict Clippy,
+   formatting, and diff checks passed.
    Deployed as `deploy-2026-11-24-eas-find-exact-subject-phrases-2727f06`;
    homelab commit `933b23b`. The forced Compose build produced image
    `sha256:58b834bd07b01ca9c5a1c8b9dbde8ed6253aef9da5197deeff6704d49c2e258c`.
