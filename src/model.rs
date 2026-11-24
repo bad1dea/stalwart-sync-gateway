@@ -360,6 +360,8 @@ pub struct CalendarEvent {
     pub response_type: Option<u8>,
     /// Uniform attendee `expectReply` value when all attendees agree.
     pub response_requested: Option<bool>,
+    /// The authenticated attendee's most recent meeting response time.
+    pub appointment_reply_time: Option<String>,
     /// Read-only online meeting URIs exposed by JSCalendar virtualLocations.
     pub online_meeting_conf_link: Option<String>,
     pub online_meeting_external_link: Option<String>,

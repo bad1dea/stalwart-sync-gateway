@@ -61,8 +61,10 @@ Current prioritized work:
    Start/end edits convert through the parent event's IANA timezone, preserve
    the inherited endpoint when only one is changed, derive the new duration,
    and reject negative durations. All-day flags are occurrence-specific.
-   Sensitivity and the remaining meeting-negotiation fields (counter-proposal
-   permission and reply timestamp) remain unsupported and fail closed. Read-only
+   Sensitivity and DisallowNewTimeProposal remain unsupported and fail closed.
+   Top-level AppointmentReplyTime is now mapped from the authenticated
+   participant's unique `scheduleUpdated` value; per-exception reply timestamps
+   remain unsupported. Read-only
    linked attachments on recurring exceptions now map from JSCalendar enclosure
    links and are fetched from the Calendars account; EAS 16.0/16.1 only. EAS
    forbids Attachment elements in client command requests, so this is intentionally
@@ -179,6 +181,14 @@ Current prioritized work:
    `sha256:79ddd9a9cfdd5c76333215384e141a0b6bbb87a53d75d8a108883e0e7966e0fc`,
    started `2026-11-24T10:27:23Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`.
+8. **AppointmentReplyTime.** JSCalendar participant `scheduleUpdated` is the
+   timestamp of that participant's latest response (RFC 8984). The gateway
+   now maps it only when exactly one attendee matches the authenticated user,
+   normalizes it to EAS compact UTC, and rejects the response-only field in
+   client changes. This covers the series-level field; recurrence-exception
+   reply timestamps remain a separate gap. Full-suite validation passed
+   (322 passed, 73 ignored); strict Clippy, formatting, and diff checks pass.
+   Deployment is pending.
 
 Also completed (`b11914b`): **KQL timestamp offset normalization**. RFC3339
 timestamps in `received:` restrictions now resolve to the UTC calendar day

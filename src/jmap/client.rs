@@ -3084,7 +3084,11 @@ impl JmapClient {
                         }
                     }
                 }
-                CalendarEvent::from(item)
+                let appointment_reply_time =
+                    calendar_appointment_reply_time(item.participants.as_ref(), auth.username());
+                let mut event = CalendarEvent::from(item);
+                event.appointment_reply_time = appointment_reply_time;
+                event
             })
             .map(|mut event| {
                 anyhow::ensure!(
@@ -7950,7 +7954,7 @@ struct CalendarEventLocation {
 /// splits this map into `organizer_email`/`organizer_name` (the `"owner"`
 /// entry) plus `attendees` (everyone else) rather than passing it through
 /// as one flat list.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ParticipantObject {
     #[serde(default)]
@@ -7963,6 +7967,34 @@ struct ParticipantObject {
     participation_status: Option<String>,
     #[serde(default)]
     expect_reply: Option<bool>,
+    #[serde(default)]
+    schedule_updated: Option<String>,
+}
+
+fn calendar_appointment_reply_time(
+    participants: Option<&BTreeMap<String, ParticipantObject>>,
+    user: &str,
+) -> Option<String> {
+    let mut matches = participants?.values().filter(|participant| {
+        participant.roles.get("attendee") == Some(&true)
+            && participant
+                .email
+                .as_deref()
+                .is_some_and(|email| email.eq_ignore_ascii_case(user))
+    });
+    let participant = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    participant
+        .schedule_updated
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|date| {
+            date.with_timezone(&chrono::Utc)
+                .format("%Y%m%dT%H%M%SZ")
+                .to_string()
+        })
 }
 
 fn calendar_response_requested(participants: &BTreeMap<String, ParticipantObject>) -> Option<bool> {
@@ -8890,6 +8922,7 @@ impl From<CalendarEventObject> for CalendarEvent {
             cancelled: value.status.as_deref() == Some("cancelled"),
             response_type: None,
             response_requested,
+            appointment_reply_time: None,
             online_meeting_conf_link,
             online_meeting_external_link,
         }
@@ -9276,6 +9309,45 @@ impl From<CalendarObject> for Collection {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn appointment_reply_time_uses_only_the_unique_authenticated_attendee() {
+        let participants: std::collections::BTreeMap<String, super::ParticipantObject> =
+            serde_json::from_value(serde_json::json!({
+                "owner": {"email":"owner@example.test", "roles":{"owner":true}},
+                "guest": {
+                    "email":"guest@example.test", "roles":{"attendee":true},
+                    "scheduleUpdated":"2026-11-24T12:34:56-05:00"
+                }
+            }))
+            .unwrap();
+        assert_eq!(
+            super::calendar_appointment_reply_time(Some(&participants), "GUEST@example.test")
+                .as_deref(),
+            Some("20261124T173456Z")
+        );
+        assert_eq!(
+            super::calendar_appointment_reply_time(Some(&participants), "owner@example.test"),
+            None
+        );
+        assert_eq!(
+            super::calendar_appointment_reply_time(Some(&participants), "absent@example.test"),
+            None
+        );
+        let mut ambiguous = participants.clone();
+        ambiguous.insert(
+            "duplicate".into(),
+            serde_json::from_value(serde_json::json!({
+                "email":"guest@example.test", "roles":{"attendee":true},
+                "scheduleUpdated":"2026-11-24T12:34:56Z"
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            super::calendar_appointment_reply_time(Some(&ambiguous), "guest@example.test"),
+            None
+        );
+    }
+
     #[test]
     fn calendar_virtual_locations_map_to_eas_online_meeting_links() {
         let event: super::CalendarEventObject = serde_json::from_value(serde_json::json!({

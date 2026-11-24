@@ -1302,6 +1302,8 @@ pub struct CalendarFields {
     pub unsupported_response_requested: bool,
     /// Online meeting links are response-only per MS-ASCAL.
     pub unsupported_online_meeting: bool,
+    /// AppointmentReplyTime is response-only per MS-ASCAL.
+    pub unsupported_appointment_reply_time: bool,
     pub attendees: Vec<AttendeeField>,
     pub attendees_present: bool,
     pub unsupported_attendees: bool,
@@ -2751,6 +2753,13 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                         .any(|parent| same_token(*parent, airsync::APPLICATION_DATA))
                 {
                     fields.unsupported_online_meeting = true;
+                }
+                if same_token(*token, calendar::APPOINTMENT_REPLY_TIME)
+                    && path
+                        .iter()
+                        .any(|parent| same_token(*parent, airsync::APPLICATION_DATA))
+                {
+                    fields.unsupported_appointment_reply_time = true;
                 }
                 if same_token(*token, calendar::RESPONSE_REQUESTED)
                     && path
@@ -4234,6 +4243,18 @@ mod tests {
         );
         builder.end();
         assert!(super::extract_calendar_fields(&builder.finish().nodes).unsupported_online_meeting);
+    }
+
+    #[test]
+    fn appointment_reply_time_is_rejected_in_client_changes() {
+        let mut builder = super::DocumentBuilder::new();
+        builder.start(super::airsync::APPLICATION_DATA);
+        builder.leaf(super::calendar::APPOINTMENT_REPLY_TIME, "20261124T173456Z");
+        builder.end();
+        assert!(
+            super::extract_calendar_fields(&builder.finish().nodes)
+                .unsupported_appointment_reply_time
+        );
     }
 
     #[test]
