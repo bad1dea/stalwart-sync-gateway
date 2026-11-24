@@ -386,13 +386,14 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    macro-enabled variants), and OpenDocument Text, Spreadsheet, and Presentation
    attachments up to 2 MiB for exact text/NEAR
    checks. Text attachments honor MIME `charset` parameters, including common
-   legacy single-byte encodings and UTF-16LE, with decoded output capped at
-   2 MiB. RFC 822 and Outlook message decoding are capped at the same 2 MiB
+   legacy single-byte encodings and UTF-16LE, with BOM detection when the
+   charset parameter is absent and decoded output capped at 2 MiB. RFC 822 and
+   Outlook message decoding are capped at the same 2 MiB
    extracted-text limit; compressed Outlook RTF is not expanded. Mocked 16.1
    Find regressions exercise quoted-printable EML extraction through download
    and exact proximity matching, exact subject matching against a real OLE
    Outlook message fixture, `application/problem+json` extraction, and
-   Windows-1252 and UTF-16LE text decoding.
+   Windows-1252 and UTF-16LE text decoding, including BOM-only UTF-16LE.
    PDF parsing failures and parser panics are
    contained as non-matches.
    Archive entry count and cumulative selected XML expansion are bounded.
@@ -417,6 +418,10 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `deploy-2026-11-24-eas-find-charsets-17cec20`; homelab commit `b7210c4`,
    image `sha256:bbd3cb22b2d0436c66762d217562ae31230c2234cf3ace9f38a963bd126899cb`,
    started `2026-11-24T21:31:01Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. BOM-aware MIME text decoding is deployed as
+   `deploy-2026-11-24-eas-find-text-bom-4fc21a6`; homelab commit `b29b8ef`,
+   image `sha256:85658da4780b72fb432fd3d48313afd0baf06379f3a6de891b53204d17c00324`,
+   started `2026-11-24T21:39:18Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. EPUB
    extraction is deployed as `deploy-2026-11-24-eas-find-epub-55daf09`;
    homelab commit `97d913d`, image
