@@ -124,10 +124,10 @@ uses KQL translation for mailbox searches and Principal text queries for
 directory results. The parser supports Boolean groups, size/received,
 importance and boolean comparisons, property qualifiers, WORDS, ALL, ANY, and
 NONE. Quoted phrase order is enforced locally because Stalwart's native text
-index does not preserve it. Direct two-operand `NEAR` and `ONEAR` queries now
-use exact local token-distance matching over complete message text and common
-address fields; mixing proximity expressions into Boolean groups and searching
-attachment contents remain unsupported. Find is protocol-version gated to
+index does not preserve it. Direct `NEAR` and `ONEAR` operators now use exact
+local token-distance matching over complete message text and common address
+fields, including Boolean expressions with supported predicates. Attachment
+content positions remain unsupported. Find is protocol-version gated to
 16.1 and is not advertised while production negotiates only 14.0.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
@@ -232,10 +232,10 @@ session's fixes were, not against spec-reading alone.
 
 - Full WBXML codepage number table (all ~24 pages) — pull from
   Microsoft Learn's per-codepage subpages, not re-derived.
-- KQL proximity query combinations — direct two-operand `NEAR`/`ONEAR` now
-  exact-filter full message text and common address fields locally, with the
-  default distance of eight and explicit distances. Proximity expressions in
-  Boolean groups and attachment-content positions are not yet evaluated.
+- KQL proximity — direct `NEAR`/`ONEAR` and Boolean combinations with supported
+  predicates now exact-filter full message text and common address fields,
+  using the default distance of eight or an explicit distance. Attachment-
+  content positions are not yet evaluated.
 - Recurrence — Stalwart 0.16.27 rejects `recurrenceRules` on create and omits
   it on read; recheck after a backend upgrade.
 - Real-client 16.1 negotiation and behavior, including Tasks field order and

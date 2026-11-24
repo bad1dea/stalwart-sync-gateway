@@ -200,6 +200,9 @@ async fn execute(
             query::PhraseMatch::Near { .. } | query::PhraseMatch::Onear { .. }
         )
         || phrases.iter().any(|(property, _)| {
+            property.starts_with("$op$near:") || property.starts_with("$op$onear:")
+        })
+        || phrases.iter().any(|(property, _)| {
             matches!(
                 property.as_str(),
                 "$not$subject" | "$not$body" | "$not$text"
@@ -729,22 +732,37 @@ fn email_matches_phrases_with_addresses(
             Ok(true)
         }
         query::PhraseMatch::Expression => {
+            enum ExpressionValue {
+                Boolean(bool),
+                ProximityTerm(String),
+            }
             let mut values = Vec::new();
             for (property, phrase) in phrases {
                 match property.as_str() {
                     "$op$and" | "$op$or" => {
-                        let right = values
+                        let ExpressionValue::Boolean(right) = values
                             .pop()
-                            .ok_or_else(|| anyhow::anyhow!("invalid phrase expression"))?;
-                        let left = values
+                            .ok_or_else(|| anyhow::anyhow!("invalid phrase expression"))?
+                        else {
+                            anyhow::bail!("invalid phrase expression");
+                        };
+                        let ExpressionValue::Boolean(left) = values
                             .pop()
-                            .ok_or_else(|| anyhow::anyhow!("invalid phrase expression"))?;
-                        values.push(if property == "$op$and" {
+                            .ok_or_else(|| anyhow::anyhow!("invalid phrase expression"))?
+                        else {
+                            anyhow::bail!("invalid phrase expression");
+                        };
+                        values.push(ExpressionValue::Boolean(if property == "$op$and" {
                             left && right
                         } else {
                             left || right
-                        });
+                        }));
                     }
+                    "$proximity-term" => {
+                        values.push(ExpressionValue::ProximityTerm(phrase.clone()))
+                    }
+                    _ if property.starts_with("$op$near:")
+                        || property.starts_with("$op$onear:") => {}
                     _ => {
                         let negated = property.starts_with("$not$");
                         let property = property.strip_prefix("$not$").unwrap_or(property);
@@ -779,14 +797,80 @@ fn email_matches_phrases_with_addresses(
                                 subject, body, from, to, cc, bcc, property, phrase,
                             )?
                         };
-                        values.push(if negated { !matched } else { matched });
+                        values.push(ExpressionValue::Boolean(if negated {
+                            !matched
+                        } else {
+                            matched
+                        }));
                     }
+                }
+                if let Some(operator) = property.strip_prefix("$op$near:") {
+                    let max_words = operator.parse::<usize>()?;
+                    let ExpressionValue::ProximityTerm(right) = values
+                        .pop()
+                        .ok_or_else(|| anyhow::anyhow!("invalid proximity expression"))?
+                    else {
+                        anyhow::bail!("invalid proximity expression");
+                    };
+                    let ExpressionValue::ProximityTerm(left) = values
+                        .pop()
+                        .ok_or_else(|| anyhow::anyhow!("invalid proximity expression"))?
+                    else {
+                        anyhow::bail!("invalid proximity expression");
+                    };
+                    let matched = proximity_matches_email(
+                        subject,
+                        body,
+                        from,
+                        to,
+                        cc,
+                        bcc,
+                        false,
+                        max_words,
+                        &[
+                            ("$proximity-left".to_owned(), left),
+                            ("$proximity-right".to_owned(), right),
+                        ],
+                    )?;
+                    values.push(ExpressionValue::Boolean(matched));
+                } else if let Some(operator) = property.strip_prefix("$op$onear:") {
+                    let max_words = operator.parse::<usize>()?;
+                    let ExpressionValue::ProximityTerm(right) = values
+                        .pop()
+                        .ok_or_else(|| anyhow::anyhow!("invalid proximity expression"))?
+                    else {
+                        anyhow::bail!("invalid proximity expression");
+                    };
+                    let ExpressionValue::ProximityTerm(left) = values
+                        .pop()
+                        .ok_or_else(|| anyhow::anyhow!("invalid proximity expression"))?
+                    else {
+                        anyhow::bail!("invalid proximity expression");
+                    };
+                    let matched = proximity_matches_email(
+                        subject,
+                        body,
+                        from,
+                        to,
+                        cc,
+                        bcc,
+                        true,
+                        max_words,
+                        &[
+                            ("$proximity-left".to_owned(), left),
+                            ("$proximity-right".to_owned(), right),
+                        ],
+                    )?;
+                    values.push(ExpressionValue::Boolean(matched));
                 }
             }
             if values.len() != 1 {
                 anyhow::bail!("invalid phrase expression");
             }
-            Ok(values[0])
+            match values.pop() {
+                Some(ExpressionValue::Boolean(value)) => Ok(value),
+                _ => anyhow::bail!("invalid phrase expression"),
+            }
         }
         query::PhraseMatch::Near { max_words } => {
             proximity_matches_email(subject, body, from, to, cc, bcc, false, max_words, phrases)
@@ -1524,5 +1608,22 @@ mod tests {
             "alpha beta gamma",
             query::PhraseMatch::Onear { max_words: 0 }
         ));
+    }
+
+    #[test]
+    fn proximity_expression_can_be_combined_with_a_boolean_or() {
+        let (kind, terms) =
+            query::phrases_for_postfilter("\"alpha beta\" ONEAR(1) gamma OR isread:true").unwrap();
+        assert_eq!(kind, query::PhraseMatch::Expression);
+        assert!(email_matches_phrases(
+            "unrelated",
+            None,
+            Some(true),
+            Some(false),
+            Some(false),
+            kind,
+            &terms,
+        )
+        .unwrap());
     }
 }

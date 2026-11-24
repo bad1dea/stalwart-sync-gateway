@@ -13512,16 +13512,32 @@ async fn find_proximity_queries_filter_complete_message_text_and_page_exactly() 
             .unwrap()
             .insert(id.to_owned(), (body.to_owned(), false));
     }
+    env.mock.set_keyword("near-forward", "$seen", true);
     for (index, query, expected) in [
         (1, "\"alpha beta\" ONEAR(1) gamma", vec!["near-forward"]),
         (2, "\"alpha beta\" NEAR(n=0) gamma", vec!["near-reversed"]),
         (3, "gamma NEAR(0) \"alpha beta\"", vec!["near-reversed"]),
+        (
+            4,
+            "\"alpha beta\" ONEAR(1) gamma AND isread:true",
+            vec!["near-forward"],
+        ),
+        (
+            5,
+            "\"alpha beta\" ONEAR(1) gamma OR gamma NEAR(0) \"alpha beta\"",
+            vec!["near-forward", "near-reversed"],
+        ),
     ] {
         let search_id = format!("20000000-0000-4000-8000-{index:012}");
         let response = env
             .req("Find", "client")
             .header("MS-ASProtocolVersion", "16.1")
-            .body(find_body(&search_id, query, None, "0-0"))
+            .body(find_body(
+                &search_id,
+                query,
+                None,
+                if expected.len() > 1 { "0-9" } else { "0-0" },
+            ))
             .send()
             .await
             .unwrap();
@@ -13531,12 +13547,12 @@ async fn find_proximity_queries_filter_complete_message_text_and_page_exactly() 
             Some(expected.len().to_string()).as_deref(),
             "{query}"
         );
-        assert_eq!(
-            eas::find_all_text_after(&doc, air::SERVER_ID),
-            expected,
-            "{query}"
-        );
-        if !expected.is_empty() {
+        let mut actual = eas::find_all_text_after(&doc, air::SERVER_ID);
+        let mut expected = expected;
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected, "{query}");
+        if expected.len() == 1 {
             let page = env
                 .req("Find", "client")
                 .header("MS-ASProtocolVersion", "16.1")

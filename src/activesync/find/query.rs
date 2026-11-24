@@ -7,6 +7,8 @@ enum Token {
     Right,
     And,
     Or,
+    Near(usize),
+    Onear(usize),
     Not,
     Words,
     All,
@@ -30,6 +32,15 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
         return Ok(json!({}));
     }
     let tokens = tokenize(input)?;
+    if tokens
+        .iter()
+        .any(|token| matches!(token, Token::Near(_) | Token::Onear(_)))
+    {
+        if phrases_for_postfilter(input).is_none() {
+            return Err("proximity operators require free-text operands");
+        }
+        return Ok(json!({}));
+    }
     let phrases = tokens
         .iter()
         .filter_map(|token| match token {
@@ -100,6 +111,15 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         ));
     }
     let tokens = tokenize(input).ok()?;
+    if tokens
+        .iter()
+        .any(|token| matches!(token, Token::Near(_) | Token::Onear(_)))
+    {
+        return Some((
+            PhraseMatch::Expression,
+            flat_phrase_boolean_expression(&tokens)?,
+        ));
+    }
     if let [Token::Not, Token::Word(word)] = tokens.as_slice() {
         if let Some(phrase) = search_phrase_word(word) {
             return Some((PhraseMatch::None, vec![phrase]));
@@ -583,7 +603,14 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
     if tokens.iter().any(|token| {
         !matches!(
             token,
-            Token::Word(_) | Token::And | Token::Or | Token::Not | Token::Left | Token::Right
+            Token::Word(_)
+                | Token::And
+                | Token::Or
+                | Token::Near(_)
+                | Token::Onear(_)
+                | Token::Not
+                | Token::Left
+                | Token::Right
         )
     }) {
         return None;
@@ -610,6 +637,24 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
             let Token::Word(word) = tokens.get(position)? else {
                 return None;
             };
+            let proximity_operand = tokens
+                .get(position.wrapping_sub(1))
+                .is_some_and(|token| matches!(token, Token::Near(_) | Token::Onear(_)))
+                || matches!(
+                    tokens.get(position + 1),
+                    Some(Token::Near(_) | Token::Onear(_))
+                );
+            if proximity_operand {
+                if explicit_not {
+                    return None;
+                }
+                let value = free_text_operand(word)?;
+                output.push(("$proximity-term".to_owned(), value));
+                phrase_count += 1;
+                position += 1;
+                expect_operand = false;
+                continue;
+            }
             if explicit_not {
                 if word.starts_with(['+', '-']) {
                     return None;
@@ -683,15 +728,7 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                     .is_some_and(|previous| previous.0 != Token::Left)
                 {
                     let previous = operators.pop().unwrap().0;
-                    output.push((
-                        if previous == Token::And {
-                            "$op$and"
-                        } else {
-                            "$op$or"
-                        }
-                        .to_owned(),
-                        String::new(),
-                    ));
+                    output.push(expression_operator(&previous)?);
                 }
                 if operators.pop() != Some((Token::Left, false)) {
                     return None;
@@ -699,7 +736,10 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                 position += 1;
                 continue;
             }
-            if !matches!(operator, Token::And | Token::Or) {
+            if !matches!(
+                operator,
+                Token::And | Token::Or | Token::Near(_) | Token::Onear(_)
+            ) {
                 if matches!(operator, Token::Word(_) | Token::Not | Token::Left) {
                     operators.push((Token::And, true));
                     operator_count += 1;
@@ -714,20 +754,13 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                     (Token::And, true) => 0,
                     (Token::Or, false) => 1,
                     (Token::And, false) => 2,
+                    (Token::Near(_) | Token::Onear(_), _) => 3,
                     _ => -1,
                 };
                 precedence(previous, *implicit) >= precedence(operator, false)
             }) {
                 let previous = operators.pop().unwrap().0;
-                output.push((
-                    if previous == Token::And {
-                        "$op$and"
-                    } else {
-                        "$op$or"
-                    }
-                    .to_owned(),
-                    String::new(),
-                ));
+                output.push(expression_operator(&previous)?);
             }
             operators.push((operator.clone(), false));
             operator_count += 1;
@@ -742,17 +775,32 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
         if operator == Token::Left {
             return None;
         }
-        output.push((
-            if operator == Token::And {
-                "$op$and"
-            } else {
-                "$op$or"
-            }
-            .to_owned(),
-            String::new(),
-        ));
+        output.push(expression_operator(&operator)?);
     }
     Some(output)
+}
+
+fn expression_operator(operator: &Token) -> Option<(String, String)> {
+    let name = match operator {
+        Token::And => "$op$and".to_owned(),
+        Token::Or => "$op$or".to_owned(),
+        Token::Near(distance) => format!("$op$near:{distance}"),
+        Token::Onear(distance) => format!("$op$onear:{distance}"),
+        _ => return None,
+    };
+    Some((name, String::new()))
+}
+
+fn free_text_operand(word: &str) -> Option<String> {
+    let value = if word.starts_with('"') && word.ends_with('"') && word.len() >= 2 {
+        &word[1..word.len() - 1]
+    } else {
+        word
+    };
+    if value.is_empty() || value.contains(['"', ':', '\\']) || value.trim().is_empty() {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 fn register_expression_phrase(
@@ -1021,7 +1069,34 @@ fn tokenize(input: &str) -> Result<Vec<Token>, &'static str> {
             "ALL" if !quoted => Token::All,
             "ANY" if !quoted => Token::Any,
             "NONE" if !quoted => Token::None,
-            "NEAR" | "ONEAR" | "XRANK" if !quoted => {
+            "NEAR" | "ONEAR" if !quoted => {
+                let distance = if chars.peek() == Some(&'(') {
+                    chars.next();
+                    let mut argument = String::new();
+                    while chars.peek().is_some_and(|ch| *ch != ')') {
+                        argument.push(chars.next().ok_or("unclosed proximity distance")?);
+                    }
+                    if chars.next() != Some(')') {
+                        return Err("unclosed proximity distance");
+                    }
+                    let argument = argument.trim();
+                    let digits = argument.strip_prefix("n=").unwrap_or(argument);
+                    if digits.is_empty() || !digits.chars().all(|ch| ch.is_ascii_digit()) {
+                        return Err("invalid proximity distance");
+                    }
+                    digits
+                        .parse::<usize>()
+                        .map_err(|_| "invalid proximity distance")?
+                } else {
+                    8
+                };
+                if value == "NEAR" {
+                    Token::Near(distance)
+                } else {
+                    Token::Onear(distance)
+                }
+            }
+            "XRANK" if !quoted => {
                 return Err("unsupported search operator");
             }
             _ => Token::Word(value),
@@ -2604,5 +2679,41 @@ mod tests {
         assert_eq!(to_filter("alpha NEAR(3) beta").unwrap(), json!({}));
         assert!(phrases_for_postfilter("subject:alpha NEAR beta").is_none());
         assert!(phrases_for_postfilter("alpha NEAR(999x) beta").is_none());
+    }
+
+    #[test]
+    fn parses_proximity_operators_inside_boolean_expressions() {
+        let expected = Some((
+            PhraseMatch::Expression,
+            vec![
+                ("$proximity-term".to_owned(), "alpha".to_owned()),
+                ("$proximity-term".to_owned(), "beta".to_owned()),
+                ("$op$near:3".to_owned(), String::new()),
+                ("$isread".to_owned(), "true".to_owned()),
+                ("$op$and".to_owned(), String::new()),
+            ],
+        ));
+        assert_eq!(
+            phrases_for_postfilter("alpha NEAR(3) beta AND isread:true"),
+            expected
+        );
+        assert_eq!(
+            to_filter("alpha NEAR(3) beta AND isread:true").unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            phrases_for_postfilter("(alpha ONEAR(n=2) beta) OR isread:false"),
+            Some((
+                PhraseMatch::Expression,
+                vec![
+                    ("$proximity-term".to_owned(), "alpha".to_owned()),
+                    ("$proximity-term".to_owned(), "beta".to_owned()),
+                    ("$op$onear:2".to_owned(), String::new()),
+                    ("$isread".to_owned(), "false".to_owned()),
+                    ("$op$or".to_owned(), String::new()),
+                ],
+            ))
+        );
+        assert!(to_filter("subject:alpha NEAR beta").is_err());
     }
 }
