@@ -618,7 +618,7 @@ fn search_phrase_word(word: &str) -> Option<(String, String)> {
 
 fn boolean_search_term(word: &str) -> Option<(String, String)> {
     let word = word.strip_prefix('+').unwrap_or(word);
-    let (property, value) = word.split_once(':')?;
+    let (property, value) = word.split_once(':').or_else(|| word.split_once('='))?;
     let property = property.to_ascii_lowercase();
     let enabled = match value.to_ascii_lowercase().as_str() {
         "true" | "yes" | "1" => "true",
@@ -1319,6 +1319,16 @@ mod tests {
             phrases_for_postfilter(r#"subject:"alpha beta" AND isread:true"#),
             Some((
                 PhraseMatch::All,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$isread".to_owned(), "true".to_owned())
+                ]
+            ))
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" OR isread=true"#),
+            Some((
+                PhraseMatch::Any,
                 vec![
                     ("subject".to_owned(), "alpha beta".to_owned()),
                     ("$isread".to_owned(), "true".to_owned())
