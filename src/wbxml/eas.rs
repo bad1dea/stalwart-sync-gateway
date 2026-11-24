@@ -358,6 +358,10 @@ pub mod airsync_base {
     pub const LONGITUDE: Token = tag(0x28, false);
     pub const CONTENT_TYPE: Token = tag(0x17, false);
     pub const PREVIEW: Token = tag(0x18, false);
+    /// BodyPartPreference and BodyPart were added for EAS 14.1.
+    pub const BODY_PART_PREFERENCE: Token = tag(0x19, true);
+    pub const BODY_PART: Token = tag(0x1a, true);
+    pub const STATUS: Token = tag(0x1b, false);
     pub const ATTACHMENTS: Token = tag(0x0e, false);
     pub const ATTACHMENT: Token = tag(0x0f, false);
     pub const DISPLAY_NAME: Token = tag(0x10, false);
@@ -1121,6 +1125,19 @@ pub fn mime_support(document: &Document) -> Result<u8, &'static str> {
 }
 
 pub fn body_preferences(document: &Document) -> Result<Vec<RequestedBodyPreference>, &'static str> {
+    preferences_for(document, airsync_base::BODY_PREFERENCE)
+}
+
+pub fn body_part_preferences(
+    document: &Document,
+) -> Result<Vec<RequestedBodyPreference>, &'static str> {
+    preferences_for(document, airsync_base::BODY_PART_PREFERENCE)
+}
+
+fn preferences_for(
+    document: &Document,
+    preference_token: Token,
+) -> Result<Vec<RequestedBodyPreference>, &'static str> {
     let mut preferences = Vec::new();
     let mut start = None;
     let mut depth = 0usize;
@@ -1128,7 +1145,7 @@ pub fn body_preferences(document: &Document) -> Result<Vec<RequestedBodyPreferen
     for (index, node) in document.nodes.iter().enumerate() {
         match node {
             Node::Start(token) => {
-                if same_token(*token, airsync_base::BODY_PREFERENCE) {
+                if same_token(*token, preference_token) {
                     if start.is_some() || !token.has_content {
                         return Err("invalid BodyPreference");
                     }
@@ -4694,6 +4711,31 @@ mod tests {
         b.end();
         b.end();
         assert!(super::body_preferences(&b.finish()).is_err());
+    }
+
+    #[test]
+    fn body_part_preferences_parse_independently_from_whole_body_preferences() {
+        let mut builder = DocumentBuilder::new();
+        builder.start(airsync::OPTIONS);
+        builder.start(airsync_base::BODY_PREFERENCE);
+        builder.leaf(airsync_base::TYPE, "1");
+        builder.end();
+        builder.start(airsync_base::BODY_PART_PREFERENCE);
+        builder.leaf(airsync_base::TYPE, "4");
+        builder.leaf(airsync_base::TRUNCATION_SIZE, "1024");
+        builder.leaf(airsync_base::ALL_OR_NONE, "1");
+        builder.leaf(airsync_base::PREVIEW, "24");
+        builder.end();
+        builder.end();
+        let document = builder.finish();
+
+        assert_eq!(super::body_preferences(&document).unwrap().len(), 1);
+        let part_preferences = super::body_part_preferences(&document).unwrap();
+        assert_eq!(part_preferences.len(), 1);
+        assert_eq!(part_preferences[0].body_type, 4);
+        assert_eq!(part_preferences[0].truncation_size, Some(1024));
+        assert!(part_preferences[0].all_or_none);
+        assert_eq!(part_preferences[0].preview, Some(24));
     }
 
     #[test]
