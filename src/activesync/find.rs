@@ -280,6 +280,7 @@ async fn execute(
                     &email.to,
                     &email.cc,
                     &email.bcc,
+                    email.importance,
                     Some(email.read),
                     Some(email.keywords.iter().any(|keyword| keyword == "$flagged")),
                     Some(!email.attachments.is_empty()),
@@ -553,6 +554,7 @@ fn email_matches_phrases(
         "",
         "",
         "",
+        1,
         is_read,
         is_flagged,
         has_attachment,
@@ -569,6 +571,7 @@ fn email_matches_phrases_with_addresses(
     to: &str,
     cc: &str,
     bcc: &str,
+    importance: u8,
     is_read: Option<bool>,
     is_flagged: Option<bool>,
     has_attachment: Option<bool>,
@@ -584,15 +587,19 @@ fn email_matches_phrases_with_addresses(
                     "isread" | "$isread" => Some("$isread"),
                     "isflagged" | "$isflagged" => Some("$isflagged"),
                     "hasattachment" | "$hasattachment" => Some("$hasattachment"),
+                    "importance" | "$importance" => Some("$importance"),
                     _ => None,
                 };
                 let boolean_match = boolean_property.and_then(|property| match property {
                     "$isread" => is_read,
                     "$isflagged" => is_flagged,
                     "$hasattachment" => has_attachment,
+                    "$importance" => Some(importance_matches(importance, phrase)),
                     _ => None,
                 });
-                let matched = if boolean_property.is_some() {
+                let matched = if matches!(property, "importance" | "$importance") {
+                    importance_matches(importance, phrase)
+                } else if boolean_property.is_some() {
                     boolean_match.is_some_and(|value| value == (phrase == "true"))
                 } else {
                     email_matches_phrase_with_addresses(
@@ -607,6 +614,18 @@ fn email_matches_phrases_with_addresses(
         }
         query::PhraseMatch::Any => {
             for (property, phrase) in phrases {
+                if property == "$importance" {
+                    if importance_matches(importance, phrase) {
+                        return Ok(true);
+                    }
+                    continue;
+                }
+                if property == "$not$importance" {
+                    if !importance_matches(importance, phrase) {
+                        return Ok(true);
+                    }
+                    continue;
+                }
                 let boolean_match = match property.as_str() {
                     "$isread" => is_read,
                     "$isflagged" => is_flagged,
@@ -614,6 +633,7 @@ fn email_matches_phrases_with_addresses(
                     "$not$isread" => is_read.map(|value| !value),
                     "$not$isflagged" => is_flagged.map(|value| !value),
                     "$not$hasattachment" => has_attachment.map(|value| !value),
+                    "$importance" => Some(importance_matches(importance, phrase)),
                     _ => None,
                 };
                 let matched = if property.starts_with('$') {
@@ -663,13 +683,17 @@ fn email_matches_phrases_with_addresses(
                             "isread" | "$isread" => Some("$isread"),
                             "isflagged" | "$isflagged" => Some("$isflagged"),
                             "hasattachment" | "$hasattachment" => Some("$hasattachment"),
+                            "importance" | "$importance" => Some("$importance"),
                             _ => None,
                         };
-                        let matched = if let Some(boolean_property) = boolean_property {
+                        let matched = if matches!(property, "importance" | "$importance") {
+                            importance_matches(importance, phrase)
+                        } else if let Some(boolean_property) = boolean_property {
                             let value = match boolean_property {
                                 "$isread" => is_read,
                                 "$isflagged" => is_flagged,
                                 "$hasattachment" => has_attachment,
+                                "$importance" => Some(importance_matches(importance, phrase)),
                                 _ => None,
                             };
                             value.is_some_and(|value| value == (phrase == "true"))
@@ -743,6 +767,15 @@ fn email_matches_phrase_with_addresses(
         crate::model::EmailBodyType::Rtf => super::rtf_to_plain_text(&body.value),
     };
     Ok(query::subject_has_phrase(&plain, phrase))
+}
+
+fn importance_matches(importance: u8, expected: &str) -> bool {
+    match expected {
+        "low" => importance == 0,
+        "normal" => importance == 1,
+        "high" => importance == 2,
+        _ => false,
+    }
 }
 
 fn error_document(status: &str) -> wbxml::Document {
@@ -915,6 +948,80 @@ mod tests {
             &[
                 ("subject".to_owned(), "alpha beta".to_owned()),
                 ("body".to_owned(), "alpha beta".to_owned())
+            ]
+        )
+        .unwrap());
+        assert!(email_matches_phrases_with_addresses(
+            "Unrelated subject",
+            None,
+            "",
+            "",
+            "",
+            "",
+            2,
+            None,
+            None,
+            None,
+            query::PhraseMatch::Expression,
+            &[
+                ("$not$subject".to_owned(), "alpha beta".to_owned()),
+                ("$importance".to_owned(), "high".to_owned()),
+                ("$op$or".to_owned(), String::new())
+            ]
+        )
+        .unwrap());
+        assert!(!email_matches_phrases_with_addresses(
+            "Alpha beta subject",
+            None,
+            "",
+            "",
+            "",
+            "",
+            1,
+            None,
+            None,
+            None,
+            query::PhraseMatch::Expression,
+            &[
+                ("$not$subject".to_owned(), "alpha beta".to_owned()),
+                ("$importance".to_owned(), "high".to_owned()),
+                ("$op$or".to_owned(), String::new())
+            ]
+        )
+        .unwrap());
+        assert!(email_matches_phrases_with_addresses(
+            "Unrelated subject",
+            None,
+            "",
+            "",
+            "",
+            "",
+            1,
+            None,
+            None,
+            None,
+            query::PhraseMatch::Any,
+            &[
+                ("$not$importance".to_owned(), "high".to_owned()),
+                ("subject".to_owned(), "alpha beta".to_owned())
+            ]
+        )
+        .unwrap());
+        assert!(!email_matches_phrases_with_addresses(
+            "Unrelated subject",
+            None,
+            "",
+            "",
+            "",
+            "",
+            2,
+            None,
+            None,
+            None,
+            query::PhraseMatch::Any,
+            &[
+                ("$not$importance".to_owned(), "high".to_owned()),
+                ("subject".to_owned(), "alpha beta".to_owned())
             ]
         )
         .unwrap());
