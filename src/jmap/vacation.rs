@@ -158,11 +158,22 @@ impl JmapClient {
             )
             .await?;
 
+        let mut saw_set_response = false;
         for method in response.method_responses {
             if method.0 == "error" {
                 anyhow::bail!("JMAP method error in VacationResponse/set");
             }
             if method.0 == "VacationResponse/set" {
+                saw_set_response = true;
+                let singleton_updated = method
+                    .1
+                    .get("updated")
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(|updated| updated.contains_key("singleton"));
+                anyhow::ensure!(
+                    singleton_updated,
+                    "VacationResponse/set did not report singleton as updated"
+                );
                 let not_updated_empty = method
                     .1
                     .get("notUpdated")
@@ -176,6 +187,10 @@ impl JmapClient {
                 }
             }
         }
+        anyhow::ensure!(
+            saw_set_response,
+            "JMAP response omitted VacationResponse/set result"
+        );
         Ok(())
     }
 }

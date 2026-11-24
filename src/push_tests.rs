@@ -76,6 +76,8 @@ struct Mock {
     body_get_error: AtomicBool,
     body_get_incomplete: AtomicBool,
     identities: Mutex<Vec<serde_json::Value>>,
+    vacation_response: Mutex<serde_json::Value>,
+    vacation_set_error: AtomicBool,
 }
 
 impl Mock {
@@ -183,6 +185,9 @@ async fn mock_session(State(m): State<Arc<Mock>>) -> impl IntoResponse {
     session["accounts"]["a1"]["accountCapabilities"][crate::jmap::capabilities::PRINCIPALS] =
         serde_json::json!({});
     session["primaryAccounts"][crate::jmap::capabilities::PRINCIPALS] = serde_json::json!("a1");
+    session["capabilities"][crate::jmap::capabilities::VACATION_RESPONSE] = serde_json::json!({});
+    session["accounts"]["a1"]["accountCapabilities"]
+        [crate::jmap::capabilities::VACATION_RESPONSE] = serde_json::json!({});
     if !m.groupware.lock().unwrap().is_empty() {
         for cap in [
             crate::jmap::capabilities::CONTACTS,
@@ -293,6 +298,22 @@ async fn mock_api(
                     continue;
                 }
                 serde_json::json!({"accountId": "a1", "state": "i1", "list": *m.identities.lock().unwrap()})
+            }
+            "VacationResponse/get" => {
+                serde_json::json!({"accountId":"a1", "state":"vr1", "list":[m.vacation_response.lock().unwrap().clone()]})
+            }
+            "VacationResponse/set" => {
+                if m.vacation_set_error.load(Ordering::SeqCst) {
+                    responses.push(serde_json::json!(["error", {"type":"serverFail"}, cid]));
+                    continue;
+                }
+                if let Some(update) = args["update"]["singleton"].as_object() {
+                    let mut current = m.vacation_response.lock().unwrap();
+                    for (key, value) in update {
+                        current[key] = value.clone();
+                    }
+                }
+                serde_json::json!({"accountId":"a1", "oldState":"vr1", "newState":"vr2", "updated":{"singleton":null}})
             }
             "Principal/query" => {
                 let identities = m.identities.lock().unwrap().clone();
@@ -861,6 +882,11 @@ async fn start_mock() -> Arc<Mock> {
             serde_json::json!({"id": "i1", "name": "Owner", "email": "owner@example.test"}),
             serde_json::json!({"id": "i2", "name": "Alias", "email": "alias@example.test"}),
         ]),
+        vacation_response: Mutex::new(serde_json::json!({
+            "id":"singleton", "isEnabled":false, "subject":null, "textBody":null,
+            "fromDate":null, "toDate":null
+        })),
+        vacation_set_error: AtomicBool::new(false),
     });
     let app = Router::new()
         .route("/.well-known/jmap", get(mock_session))
@@ -12456,6 +12482,96 @@ async fn user_information_uses_versioned_accounts_and_backend_addresses() {
         vec!["1", "110"]
     );
     assert!(!eas::contains_token(&doc, set::SMTP_ADDRESS));
+}
+
+#[tokio::test]
+async fn settings_oof_set_rejects_invalid_state_and_unpaired_schedule() {
+    use eas::settings as set;
+    let env = start_env(Opts::default()).await;
+    for (state, start, end, expected_status) in [
+        ("3", None, None, "5"),
+        ("2", Some("2042-05-01T00:00:00Z"), None, "2"),
+        ("2", None, Some("2042-05-02T00:00:00Z"), "2"),
+    ] {
+        let mut b = eas::DocumentBuilder::new();
+        b.start(set::SETTINGS);
+        b.start(set::OOF);
+        b.start(set::SET);
+        b.leaf(set::OOF_STATE, state);
+        if let Some(start) = start {
+            b.leaf(set::START_TIME, start);
+        }
+        if let Some(end) = end {
+            b.leaf(set::END_TIME, end);
+        }
+        b.end();
+        b.end();
+        b.end();
+        let response = env
+            .req("Settings", "oof-validation")
+            .header("MS-ASProtocolVersion", "16.1")
+            .body(wbxml::encode_document(&b.finish()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(
+            eas::find_all_text_after(&doc, set::STATUS),
+            vec!["1", expected_status]
+        );
+        assert!(!eas::contains_token(&doc, set::GET));
+    }
+}
+
+#[tokio::test]
+async fn settings_oof_set_requires_jmap_persistence_and_omits_non_time_based_dates() {
+    use eas::settings as set;
+    let env = start_env(Opts::default()).await;
+    let mut b = eas::DocumentBuilder::new();
+    b.start(set::SETTINGS);
+    b.start(set::OOF);
+    b.start(set::SET);
+    b.leaf(set::OOF_STATE, "0");
+    b.leaf(set::START_TIME, "2042-05-01T00:00:00Z");
+    b.leaf(set::END_TIME, "2042-05-02T00:00:00Z");
+    b.leaf(set::REPLY_MESSAGE, "Away\nI will reply later");
+    b.end();
+    b.end();
+    b.end();
+    let body = wbxml::encode_document(&b.finish());
+
+    let response = env
+        .req("Settings", "oof-set")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, set::STATUS), vec!["1", "1"]);
+    assert!(eas::contains_token(&doc, set::GET));
+    let saved = env.mock.vacation_response.lock().unwrap().clone();
+    assert_eq!(saved["isEnabled"], false);
+    assert_eq!(saved["subject"], "Away");
+    assert_eq!(saved["textBody"], "Away\nI will reply later");
+    assert!(saved["fromDate"].is_null());
+    assert!(saved["toDate"].is_null());
+
+    env.mock.vacation_set_error.store(true, Ordering::SeqCst);
+    let response = env
+        .req("Settings", "oof-set")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        eas::find_all_text_after(&doc, set::STATUS),
+        vec!["1", "100"]
+    );
+    assert!(!eas::contains_token(&doc, set::GET));
 }
 
 #[tokio::test]

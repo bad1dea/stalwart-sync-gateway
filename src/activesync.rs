@@ -2063,6 +2063,20 @@ fn write_oof_get_body(
     builder.end();
 }
 
+fn validate_oof_set(
+    oof_state: Option<&str>,
+    from_date: Option<&str>,
+    to_date: Option<&str>,
+) -> &'static str {
+    if from_date.is_some() != to_date.is_some() {
+        return "2";
+    }
+    if oof_state.is_some_and(|value| !matches!(value, "0" | "1" | "2")) {
+        return "5";
+    }
+    "1"
+}
+
 async fn settings(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
@@ -2173,45 +2187,69 @@ async fn settings(
         // to stop treating the response as incomplete.
         if is_oof_set {
             let oof_state = wbxml::eas::find_text_after(document, set::OOF_STATE);
-            let is_enabled = oof_state.is_some_and(|state| state != "0");
-            let subject = wbxml::eas::find_text_after(document, set::REPLY_MESSAGE)
-                .map(|s| s.lines().next().unwrap_or(s).to_owned());
-            let text_body =
-                wbxml::eas::find_text_after(document, set::REPLY_MESSAGE).map(str::to_owned);
             let from_date =
                 wbxml::eas::find_text_after(document, set::START_TIME).map(str::to_owned);
             let to_date = wbxml::eas::find_text_after(document, set::END_TIME).map(str::to_owned);
+            let mut status = validate_oof_set(oof_state, from_date.as_deref(), to_date.as_deref());
+            let mut vacation = None;
+            if status == "1" {
+                let is_enabled = oof_state.is_some_and(|state| state != "0");
+                let subject = wbxml::eas::find_text_after(document, set::REPLY_MESSAGE)
+                    .map(|s| s.lines().next().unwrap_or(s).to_owned());
+                let text_body =
+                    wbxml::eas::find_text_after(document, set::REPLY_MESSAGE).map(str::to_owned);
+                let (from_date, to_date) = if oof_state == Some("2") {
+                    (from_date, to_date)
+                } else {
+                    (None, None)
+                };
 
-            let update = crate::jmap::vacation::VacationResponseUpdate {
-                is_enabled,
-                subject,
-                text_body,
-                from_date,
-                to_date,
-            };
-            if let Err(error) = state.jmap.set_vacation_response(auth, update).await {
-                tracing::warn!(%error, "failed to persist Oof Set via VacationResponse/set");
+                let update = crate::jmap::vacation::VacationResponseUpdate {
+                    is_enabled,
+                    subject,
+                    text_body,
+                    from_date,
+                    to_date,
+                };
+                match state.jmap.set_vacation_response(auth, update).await {
+                    Ok(()) => match state.jmap.get_vacation_response(auth).await {
+                        Ok(Some(response)) => vacation = Some(response),
+                        Ok(None) => {
+                            tracing::warn!("VacationResponse/get returned no object after Oof Set");
+                            status = "100";
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to read back Oof Set");
+                            status = "100";
+                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to persist Oof Set via VacationResponse/set");
+                        status = "100";
+                    }
+                }
             }
-            // Real experiment: a Set ack used to be a bare `Oof>Status=1`,
-            // requiring the device to make a SEPARATE Get round-trip to
-            // learn the new state -- two independent requests, two
-            // independent chances for the client's own request-tracking
-            // to race/drop one (the log evidence for that: every capture
-            // this session shows `_oofSettingsRequestsFinished called
-            // back with status -1` / "received results for an unknown
-            // oof settings request" immediately before the real result,
-            // every single time). The [MS-ASWBXML] SettingsResponse.xsd
-            // schema doesn't tie `Get` content to the request having been
-            // a Get -- Oof's response shape is just `Status, Get` (both
-            // optional) regardless of whether the request was a Get or a
-            // Set. Re-fetching and echoing the full state immediately in
-            // the Set ack removes that race entirely: the device gets
-            // the authoritative state in the SAME response it's already
-            // waiting on, no second request needed.
-            let vacation = state.jmap.get_vacation_response(auth).await.ok().flatten();
             builder.start(set::OOF);
-            builder.leaf(set::STATUS, "1");
-            write_oof_get_body(&mut builder, &vacation);
+            builder.leaf(set::STATUS, status);
+            if status == "1" {
+                // Real experiment: a Set ack used to be a bare `Oof>Status=1`,
+                // requiring the device to make a SEPARATE Get round-trip to
+                // learn the new state -- two independent requests, two
+                // independent chances for the client's own request-tracking
+                // to race/drop one (the log evidence for that: every capture
+                // this session shows `_oofSettingsRequestsFinished called
+                // back with status -1` / "received results for an unknown
+                // oof settings request" immediately before the real result,
+                // every single time). The [MS-ASWBXML] SettingsResponse.xsd
+                // schema doesn't tie `Get` content to the request having been
+                // a Get -- Oof's response shape is just `Status, Get` (both
+                // optional) regardless of whether the request was a Get or a
+                // Set. Re-fetching and echoing the full state immediately in
+                // the Set ack removes that race entirely: the device gets
+                // the authoritative state in the SAME response it's already
+                // waiting on, no second request needed.
+                write_oof_get_body(&mut builder, &vacation);
+            }
             builder.end();
         } else {
             let vacation = state.jmap.get_vacation_response(auth).await.ok().flatten();
@@ -8838,13 +8876,37 @@ fn unauthorized() -> Response {
 mod tests {
     use super::{
         apply_body_preference, decode_entity_at, eas_conversation_id, eas_datetime,
-        eas_datetime_dashes, is_non_mail_collection_id, plain_text_preview, write_email_fields,
-        ProtocolVersion,
+        eas_datetime_dashes, is_non_mail_collection_id, plain_text_preview, validate_oof_set,
+        write_email_fields, ProtocolVersion,
     };
     use crate::model::{Email, EmailAttachment, EmailBody, EmailBodyType};
     use crate::wbxml::eas::RequestedBodyPreference as BodyPreference;
     use crate::wbxml::eas::{airsync_base as base, DocumentBuilder};
     use crate::wbxml::Node;
+
+    #[test]
+    fn oof_set_validation_rejects_invalid_states_and_unpaired_dates() {
+        assert_eq!(validate_oof_set(Some("0"), None, None), "1");
+        assert_eq!(validate_oof_set(Some("1"), None, None), "1");
+        assert_eq!(
+            validate_oof_set(
+                Some("2"),
+                Some("2042-05-01T00:00:00Z"),
+                Some("2042-05-02T00:00:00Z")
+            ),
+            "1"
+        );
+        assert_eq!(validate_oof_set(Some("3"), None, None), "5");
+        assert_eq!(validate_oof_set(Some("-1"), None, None), "5");
+        assert_eq!(
+            validate_oof_set(None, Some("2042-05-01T00:00:00Z"), None),
+            "2"
+        );
+        assert_eq!(
+            validate_oof_set(None, None, Some("2042-05-02T00:00:00Z")),
+            "2"
+        );
+    }
 
     #[test]
     fn mime_body_uses_inline_wbxml_string_when_possible() {

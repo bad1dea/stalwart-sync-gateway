@@ -47,10 +47,10 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    retained for attachment records; it is not a selector in the
    `BodyPartPreference` schema and is not required to answer these requests.
    The current deployment tag
-   `deploy-2026-11-24-eas-find-outlook-msg-570285e` includes this path;
-   deployed with homelab commit `25d23c4`, image
-   `sha256:b45a5d0cb91c6d317d18d55f5bbc371a19261ea4bf35691a2c03558a41fd0ffa`,
-   started `2026-11-24T21:04:00Z`, restart count zero, `/healthz` `ok`, and
+   `deploy-2026-11-24-eas-find-json-c86d070` includes this path; deployed with
+   homelab commit `be4a802`, image
+   `sha256:95ead6cd7c7c8d50f43eb6dbeff6fc991d6a2d5a7c2feb94975f991e8c11ab4d`,
+   started `2026-11-24T21:09:38Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Real-client 16.1 behavior remains unverified. Sources:
    Microsoft [MS-ASCON Elements](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascon/605bd946-0750-4d9b-b04c-8be28badfa8e),
    [MS-ASAIRS Appendix A](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asairs/fbbc1af9-5a71-4925-aca8-60a95339c722),
@@ -396,7 +396,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    mocked HTTP Find regression verifies proximity matching in EPUB text. The
    macro-enabled OOXML types use the same restricted document parts; a mocked
    Find regression covers an `.xlsm` attachment. The current full suite passes
-   391 tests (73 ignored), with strict Clippy and format checks passing. RFC
+   394 tests (73 ignored), with strict Clippy and format checks passing. RFC
    822 extraction is deployed as `deploy-2026-11-24-eas-find-rfc822-e5c4f0f`;
    homelab commit `1aff02a`, image
    `sha256:8b763e9e24545d2b8779f54f816ec792c0d758ccca38db9bb807626e80d05d33`,
@@ -405,6 +405,10 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `deploy-2026-11-24-eas-find-outlook-msg-570285e`; homelab commit `25d23c4`,
    image `sha256:b45a5d0cb91c6d317d18d55f5bbc371a19261ea4bf35691a2c03558a41fd0ffa`,
    started `2026-11-24T21:04:00Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Vendor `+json` extraction is deployed as
+   `deploy-2026-11-24-eas-find-json-c86d070`; homelab commit `be4a802`, image
+   `sha256:95ead6cd7c7c8d50f43eb6dbeff6fc991d6a2d5a7c2feb94975f991e8c11ab4d`,
+   started `2026-11-24T21:09:38Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. EPUB
    extraction is deployed as `deploy-2026-11-24-eas-find-epub-55daf09`;
    homelab commit `97d913d`, image
@@ -1564,7 +1568,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | ResolveRecipients / ValidateCert | **Implemented, end-to-end covered** | Principal/contact directory matching; local X.509 chain validation | `src/activesync/resolve_recipients.rs` and `src/activesync/validate_cert.rs`; regression coverage in `src/push_tests.rs`. S/MIME compose/signing remains separate and is not implied by these commands. |
 | Settings: DeviceInformation / UserInformation | **Done (Get)** | Static/echo — no real JMAP-backed device-info storage | `PrimarySmtpAddress` bug (unrecognized field, cascading parse failure) fixed this session by removing it; `EmailAddresses>SMTPAddress` carries the same info in a valid shape. |
 | Settings: Oof (Get) | **Done** *(disabled path live-verified; enabled path spec-derived, not device-verified)* | `VacationResponse/get` (`src/jmap/vacation.rs`) | Real account state now read on every Get. Disabled (`OofState=0`) shape confirmed live, unchanged from the earlier z-push comparison fix. Enabled shape's `OofMessage` block is built from MS-ASSETTINGS' own schema, not live-toggled -- see `src/jmap/vacation.rs` module doc for why (toggling `isEnabled=true` on the real account risks a genuine auto-reply going out unsupervised). Verify with a real device present before fully trusting the enabled path. |
-| Settings: Oof (Set) | **Done, persists** | `VacationResponse/set` (`src/jmap/vacation.rs`) | Live-verified end to end with `isEnabled=false` (safe -- confirmed via direct JMAP query that `subject`/`textBody` actually persisted to the real `VacationResponse.singleton` object, then cleaned back up). `isEnabled=true` was deliberately never live-toggled for the same reason as the Get path above. |
+| Settings: Oof (Set) | **Done, persists and validates** | `VacationResponse/set` (`src/jmap/vacation.rs`) | Live-verified end to end with `isEnabled=false` (safe -- confirmed via direct JMAP query that `subject`/`textBody` actually persisted to the real `VacationResponse.singleton` object, then cleaned back up). `isEnabled=true` was deliberately never live-toggled for the same reason as the Get path above. Set now accepts only OofState 0/1/2, requires StartTime and EndTime together (Status 2 otherwise), and drops schedule times for non-time-based states per MS-ASCMD. It returns failure status 100 if JMAP write or readback fails instead of acknowledging a change that was not persisted; the Settings status specification reserves 100–255 for property-specific errors. |
 | Settings: RightsManagementInformation (IRM) | **Missing, out of scope** | N/A | Enterprise feature, not relevant to this account. |
 | Provision | **Done** | N/A (gateway-local, accept-everything policy) | PolicyStatus bug fixed this session. |
 | MeetingResponse | **Implemented, with protocol-version-specific target handling** | JMAP invitation lookup and `CalendarEvent/set` participation updates | Inbox invitation path and calendar target handling are in `src/activesync/meeting_response.rs`; end-to-end tests cover acceptance, tentative, decline, and invalid targets. The 14.0 restriction on modifying calendar-folder requests is enforced. |
