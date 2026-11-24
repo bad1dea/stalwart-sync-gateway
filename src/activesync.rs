@@ -5892,6 +5892,7 @@ fn calendar_instance_change_supported(fields: &wbxml::eas::CalendarFields) -> bo
         && fields.response_requested.is_none()
         && !fields.unsupported_response_type
         && !fields.unsupported_response_requested
+        && !fields.unsupported_online_meeting
         && !fields.unsupported_attendees
         && !fields.unsupported_body
         && fields.body_type.is_none_or(|body_type| body_type == 1)
@@ -5988,6 +5989,7 @@ async fn sync_calendar_collection(
                 ))
             || command.calendar.unsupported_response_type
             || command.calendar.unsupported_response_requested
+            || command.calendar.unsupported_online_meeting
             || command.calendar.unsupported_sensitivity
             || command.calendar.unsupported_client_uid
             || (command.calendar.client_uid.is_some()
@@ -6465,6 +6467,8 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     event.cancelled.hash(&mut hasher);
     event.response_type.hash(&mut hasher);
     event.response_requested.hash(&mut hasher);
+    event.online_meeting_conf_link.hash(&mut hasher);
+    event.online_meeting_external_link.hash(&mut hasher);
     event.attendees.hash(&mut hasher);
     for exception in &event.recurrence_exceptions {
         exception.instance_id.hash(&mut hasher);
@@ -6480,6 +6484,8 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
         exception.attendees.hash(&mut hasher);
         exception.attachments.hash(&mut hasher);
         exception.reminder_minutes.hash(&mut hasher);
+        exception.online_meeting_conf_link.hash(&mut hasher);
+        exception.online_meeting_external_link.hash(&mut hasher);
         if let Some(description) = &exception.description {
             description.body_type.eas_value().hash(&mut hasher);
             description.value.hash(&mut hasher);
@@ -6749,6 +6755,17 @@ fn write_calendar_fields(
     } else if is_change {
         builder.empty_tag(cal::CATEGORIES);
     }
+    if matches!(
+        version,
+        ProtocolVersion::V14_1 | ProtocolVersion::V16_0 | ProtocolVersion::V16_1
+    ) {
+        if let Some(link) = &event.online_meeting_conf_link {
+            builder.leaf(cal::ONLINE_MEETING_CONF_LINK, link.clone());
+        }
+        if let Some(link) = &event.online_meeting_external_link {
+            builder.leaf(cal::ONLINE_MEETING_EXTERNAL_LINK, link.clone());
+        }
+    }
     if let Some(recurrence) = &event.recurrence {
         builder.start(cal::RECURRENCE);
         builder.leaf(cal::RECURRENCE_TYPE, recurrence.kind.to_string());
@@ -6823,6 +6840,17 @@ fn write_calendar_fields(
                         builder.leaf(cal::CATEGORY, category.clone());
                     }
                     builder.end();
+                }
+                if matches!(
+                    version,
+                    ProtocolVersion::V14_1 | ProtocolVersion::V16_0 | ProtocolVersion::V16_1
+                ) {
+                    if let Some(link) = &exception.online_meeting_conf_link {
+                        builder.leaf(cal::ONLINE_MEETING_CONF_LINK, link.clone());
+                    }
+                    if let Some(link) = &exception.online_meeting_external_link {
+                        builder.leaf(cal::ONLINE_MEETING_EXTERNAL_LINK, link.clone());
+                    }
                 }
                 if let Some(attendees) = &exception.attendees {
                     builder.start(cal::ATTENDEES);
@@ -9294,6 +9322,44 @@ mod tests {
             super::write_calendar_command(&mut b, air::CHANGE, &event, version, &[]);
             assert_eq!(eas::find_text_after(&b.finish(), base::LATITUDE), expected);
         }
+    }
+
+    #[test]
+    fn calendar_online_meeting_links_are_versioned_and_trigger_changes() {
+        use crate::wbxml::eas::{self, airsync as air, calendar as cal};
+        let event = crate::model::CalendarEvent {
+            online_meeting_conf_link: Some("sip:room@example.test".into()),
+            online_meeting_external_link: Some("https://meet.example.test/room".into()),
+            ..Default::default()
+        };
+        let mut empty = crate::model::CalendarEvent::default();
+        assert_ne!(
+            super::calendar_event_hash(&event),
+            super::calendar_event_hash(&empty)
+        );
+        for (version, supported) in [
+            (ProtocolVersion::V14_0, false),
+            (ProtocolVersion::V14_1, true),
+            (ProtocolVersion::V16_0, true),
+            (ProtocolVersion::V16_1, true),
+        ] {
+            let mut builder = eas::DocumentBuilder::new();
+            super::write_calendar_command(&mut builder, air::CHANGE, &event, version, &[]);
+            let document = builder.finish();
+            assert_eq!(
+                eas::find_text_after(&document, cal::ONLINE_MEETING_CONF_LINK),
+                supported.then_some("sip:room@example.test")
+            );
+            assert_eq!(
+                eas::find_text_after(&document, cal::ONLINE_MEETING_EXTERNAL_LINK),
+                supported.then_some("https://meet.example.test/room")
+            );
+        }
+        empty.online_meeting_conf_link = Some("sip:room@example.test".into());
+        assert_ne!(
+            super::calendar_event_hash(&event),
+            super::calendar_event_hash(&empty)
+        );
     }
 
     #[test]

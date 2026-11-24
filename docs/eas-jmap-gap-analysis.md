@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `e8e0243` (2026-11-24)
+## Reconciled status for source `main` at `e8e0243` (2026-11-24; reconciliation in progress)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -164,11 +164,15 @@ Current prioritized work:
    ValidateCert, MeetingResponse, and ItemOperations fetches for mail, contacts,
    calendars, tasks, notes, and attachment blobs are implemented. Enterprise
    IRM remains out of scope for the personal-account gateway.
-7. **Online meeting URI fields.** EAS defines `OnlineMeetingConfLink` and
-   `OnlineMeetingExternalLink` from 14.1, but the deployed Stalwart 0.16.27
-   CalendarEvent implementation has no `virtualLocations` property. The
-   JSCalendar-standard mapping cannot be enabled until the backend exposes a
-   representation.
+7. **Online meeting URI fields.** Stalwart 0.16.27's generic JSCalendar
+   property handling exposes RFC 8984 `virtualLocations` even though the
+   CalendarEvent-specific Rust struct does not name the property. The gateway
+   now reads SIP/SIPS URIs as `OnlineMeetingConfLink` and HTTP(S) URIs as
+   `OnlineMeetingExternalLink`, including recurring-instance overrides, for
+   EAS 14.1/16.0/16.1. These EAS fields are response-only per MS-ASCAL and
+   client writes fail closed. Regression coverage checks base and exception
+   mappings, request rejection, and versioned wire output. Pending full-suite
+   validation and deployment.
 
 Also completed (`b11914b`): **KQL timestamp offset normalization**. RFC3339
 timestamps in `received:` restrictions now resolve to the UTC calendar day

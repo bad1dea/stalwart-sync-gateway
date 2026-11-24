@@ -3024,6 +3024,7 @@ impl JmapClient {
                     "participants",
                     "replyTo",
                     "links",
+                    "virtualLocations",
                 ]),
                 limit,
             )
@@ -7932,6 +7933,8 @@ struct CalendarEventObject {
     recurrence_overrides: Option<serde_json::Value>,
     #[serde(default)]
     links: Option<BTreeMap<String, serde_json::Value>>,
+    #[serde(default)]
+    virtual_locations: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -8020,6 +8023,7 @@ fn calendar_recurrence_exceptions(
     base_alerts: Option<&serde_json::Value>,
     base_participants: Option<&BTreeMap<String, ParticipantObject>>,
     base_links: Option<&BTreeMap<String, serde_json::Value>>,
+    base_virtual_locations: Option<&BTreeMap<String, serde_json::Value>>,
     timezone: Option<&str>,
     event_duration: Option<&str>,
 ) -> anyhow::Result<Vec<crate::model::CalendarEventException>> {
@@ -8064,9 +8068,11 @@ fn calendar_recurrence_exceptions(
                             | "alerts"
                             | "participants"
                             | "links"
+                            | "virtualLocations"
                     ) || key.starts_with("alerts/")
                         || key.starts_with("participants/")
                         || key.starts_with("links/")
+                        || key.starts_with("virtualLocations/")
                 }),
                 "unsupported recurrence exception fields"
             );
@@ -8221,6 +8227,26 @@ fn calendar_recurrence_exceptions(
             } else {
                 None
             };
+            let has_virtual_location_patch = patch
+                .keys()
+                .any(|key| key == "virtualLocations" || key.starts_with("virtualLocations/"));
+            let (online_meeting_conf_link, online_meeting_external_link) =
+                if has_virtual_location_patch {
+                    let base_links = calendar_online_meeting_links(base_virtual_locations);
+                    let virtual_locations = calendar_recurrence_exception_virtual_locations(
+                        base_virtual_locations,
+                        patch,
+                    )?;
+                    let updated_links = calendar_online_meeting_links(Some(&virtual_locations));
+                    (
+                        (updated_links.0 != base_links.0)
+                            .then(|| updated_links.0.unwrap_or_default()),
+                        (updated_links.1 != base_links.1)
+                            .then(|| updated_links.1.unwrap_or_default()),
+                    )
+                } else {
+                    (None, None)
+                };
             Ok(crate::model::CalendarEventException {
                 instance_id,
                 deleted: false,
@@ -8236,9 +8262,118 @@ fn calendar_recurrence_exceptions(
                 attachments,
                 reminder_minutes,
                 description,
+                online_meeting_conf_link,
+                online_meeting_external_link,
             })
         })
         .collect()
+}
+
+fn calendar_recurrence_exception_virtual_locations(
+    base: Option<&BTreeMap<String, serde_json::Value>>,
+    override_patch: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<BTreeMap<String, serde_json::Value>> {
+    fn unescape(token: &str) -> anyhow::Result<String> {
+        let mut result = String::new();
+        let mut chars = token.chars();
+        while let Some(character) = chars.next() {
+            if character == '~' {
+                match chars
+                    .next()
+                    .context("invalid escaped recurrence virtual location path")?
+                {
+                    '0' => result.push('~'),
+                    '1' => result.push('/'),
+                    _ => anyhow::bail!("invalid escaped recurrence virtual location path"),
+                }
+            } else {
+                result.push(character);
+            }
+        }
+        Ok(result)
+    }
+
+    let mut locations = base.cloned().unwrap_or_default();
+    if let Some(replacement) = override_patch.get("virtualLocations") {
+        anyhow::ensure!(
+            !override_patch
+                .keys()
+                .any(|key| key.starts_with("virtualLocations/")),
+            "overlapping recurrence virtual location patches"
+        );
+        locations = if replacement.is_null() {
+            BTreeMap::new()
+        } else {
+            serde_json::from_value(replacement.clone())
+                .context("invalid recurrence virtual locations replacement")?
+        };
+    } else {
+        for (path, value) in override_patch.iter().filter_map(|(key, value)| {
+            key.strip_prefix("virtualLocations/")
+                .map(|path| (path, value))
+        }) {
+            let tokens = path
+                .split('/')
+                .map(unescape)
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            anyhow::ensure!(
+                !tokens.is_empty(),
+                "empty recurrence virtual location patch path"
+            );
+            let (last, parents) = tokens.split_last().unwrap();
+            let mut root = serde_json::to_value(locations)?;
+            let mut target = &mut root;
+            for token in parents {
+                target = target
+                    .as_object_mut()
+                    .and_then(|object| object.get_mut(token))
+                    .context("recurrence virtual location patch parent is missing")?;
+            }
+            let object = target
+                .as_object_mut()
+                .context("recurrence virtual location patch parent is not an object")?;
+            if value.is_null() {
+                object.remove(last);
+            } else {
+                object.insert(last.clone(), value.clone());
+            }
+            locations =
+                serde_json::from_value(root).context("invalid recurrence virtual locations map")?;
+        }
+    }
+    Ok(locations)
+}
+
+fn calendar_online_meeting_links(
+    locations: Option<&BTreeMap<String, serde_json::Value>>,
+) -> (Option<String>, Option<String>) {
+    let Some(locations) = locations else {
+        return (None, None);
+    };
+    fn uri(value: &serde_json::Value) -> Option<&str> {
+        value.get("uri").and_then(serde_json::Value::as_str)
+    }
+    let conference = locations
+        .get("eas_meeting_conf")
+        .and_then(uri)
+        .or_else(|| {
+            locations.values().filter_map(uri).find(|uri| {
+                uri.split_once(':').is_some_and(|(scheme, _)| {
+                    scheme.eq_ignore_ascii_case("sip") || scheme.eq_ignore_ascii_case("sips")
+                })
+            })
+        })
+        .map(str::to_owned);
+    let external = locations
+        .get("eas_meeting_external")
+        .and_then(uri)
+        .or_else(|| {
+            locations.values().filter_map(uri).find(|uri| {
+                url::Url::parse(uri).is_ok_and(|parsed| matches!(parsed.scheme(), "http" | "https"))
+            })
+        })
+        .map(str::to_owned);
+    (conference, external)
 }
 
 fn calendar_recurrence_exception_attendees(
@@ -8564,6 +8699,7 @@ impl From<CalendarEventObject> for CalendarEvent {
             value.alerts.as_ref(),
             value.participants.as_ref(),
             value.links.as_ref(),
+            value.virtual_locations.as_ref(),
             recurrence_time_zone.as_deref(),
             value.duration.as_deref(),
         );
@@ -8614,6 +8750,8 @@ impl From<CalendarEventObject> for CalendarEvent {
         let location_coordinates = selected_location
             .and_then(|location| simple_geo(location.coordinates.as_deref()?))
             .map(|(latitude, longitude)| (latitude.to_owned(), longitude.to_owned()));
+        let (online_meeting_conf_link, online_meeting_external_link) =
+            calendar_online_meeting_links(value.virtual_locations.as_ref());
 
         let participants: Vec<_> = value
             .participants
@@ -8752,6 +8890,8 @@ impl From<CalendarEventObject> for CalendarEvent {
             cancelled: value.status.as_deref() == Some("cancelled"),
             response_type: None,
             response_requested,
+            online_meeting_conf_link,
+            online_meeting_external_link,
         }
     }
 }
@@ -9136,6 +9276,62 @@ impl From<CalendarObject> for Collection {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn calendar_virtual_locations_map_to_eas_online_meeting_links() {
+        let event: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
+            "id": "event",
+            "virtualLocations": {
+                "conf": {"@type":"VirtualLocation", "uri":"sip:room@example.test"},
+                "web": {"@type":"VirtualLocation", "uri":"https://meet.example.test/room"}
+            }
+        }))
+        .unwrap();
+        let event = crate::model::CalendarEvent::from(event);
+        assert_eq!(
+            event.online_meeting_conf_link.as_deref(),
+            Some("sip:room@example.test")
+        );
+        assert_eq!(
+            event.online_meeting_external_link.as_deref(),
+            Some("https://meet.example.test/room")
+        );
+    }
+
+    #[test]
+    fn calendar_virtual_location_recurrence_patch_maps_link_changes() {
+        let base: std::collections::BTreeMap<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({
+                "conf": {"uri":"sip:old@example.test"},
+                "web": {"uri":"https://meet.example.test/old"}
+            }))
+            .unwrap();
+        let overrides = serde_json::json!({
+            "2026-11-24T10:00:00": {
+                "virtualLocations/conf/uri": "sip:new@example.test",
+                "virtualLocations/web/uri": null
+            }
+        });
+        let exceptions = super::calendar_recurrence_exceptions(
+            Some(&overrides),
+            None,
+            None,
+            None,
+            Some(&base),
+            Some("Etc/UTC"),
+            Some("PT1H"),
+        )
+        .unwrap();
+        assert_eq!(exceptions.len(), 1);
+        assert_eq!(
+            exceptions[0].online_meeting_conf_link.as_deref(),
+            Some("sip:new@example.test")
+        );
+        assert_eq!(
+            exceptions[0].online_meeting_external_link.as_deref(),
+            Some("")
+        );
+    }
+
     #[test]
     fn task_importance_maps_to_jscalendar_priority_bands() {
         assert_eq!(super::eas_importance_to_jmap("0"), Some(9));

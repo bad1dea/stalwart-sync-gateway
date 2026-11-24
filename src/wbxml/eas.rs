@@ -1300,6 +1300,8 @@ pub struct CalendarFields {
     pub unsupported_response_type: bool,
     pub response_requested: Option<bool>,
     pub unsupported_response_requested: bool,
+    /// Online meeting links are response-only per MS-ASCAL.
+    pub unsupported_online_meeting: bool,
     pub attendees: Vec<AttendeeField>,
     pub attendees_present: bool,
     pub unsupported_attendees: bool,
@@ -2741,6 +2743,14 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                         .is_some_and(|parent| same_token(*parent, airsync::APPLICATION_DATA))
                 {
                     fields.unsupported_response_type = true;
+                }
+                if (same_token(*token, calendar::ONLINE_MEETING_CONF_LINK)
+                    || same_token(*token, calendar::ONLINE_MEETING_EXTERNAL_LINK))
+                    && path
+                        .iter()
+                        .any(|parent| same_token(*parent, airsync::APPLICATION_DATA))
+                {
+                    fields.unsupported_online_meeting = true;
                 }
                 if same_token(*token, calendar::RESPONSE_REQUESTED)
                     && path
@@ -4208,6 +4218,22 @@ mod tests {
         b.leaf(super::calendar::RESPONSE_TYPE, "3");
         b.end();
         assert!(super::extract_calendar_fields(&b.finish().nodes).unsupported_response_type);
+    }
+
+    #[test]
+    fn calendar_online_meeting_links_are_rejected_in_client_changes() {
+        let mut builder = super::DocumentBuilder::new();
+        builder.start(super::airsync::APPLICATION_DATA);
+        builder.leaf(
+            super::calendar::ONLINE_MEETING_CONF_LINK,
+            "sip:room@example.test",
+        );
+        builder.leaf(
+            super::calendar::ONLINE_MEETING_EXTERNAL_LINK,
+            "https://meet.example.test/room",
+        );
+        builder.end();
+        assert!(super::extract_calendar_fields(&builder.finish().nodes).unsupported_online_meeting);
     }
 
     #[test]

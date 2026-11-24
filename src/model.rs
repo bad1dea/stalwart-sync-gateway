@@ -360,6 +360,9 @@ pub struct CalendarEvent {
     pub response_type: Option<u8>,
     /// Uniform attendee `expectReply` value when all attendees agree.
     pub response_requested: Option<bool>,
+    /// Read-only online meeting URIs exposed by JSCalendar virtualLocations.
+    pub online_meeting_conf_link: Option<String>,
+    pub online_meeting_external_link: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -383,6 +386,8 @@ pub struct CalendarEventException {
     /// occurrence; Some(Some(minutes)) sets an occurrence-specific reminder.
     pub reminder_minutes: Option<Option<u32>>,
     pub description: Option<EmailBody>,
+    pub online_meeting_conf_link: Option<String>,
+    pub online_meeting_external_link: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
