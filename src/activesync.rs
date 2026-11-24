@@ -6561,7 +6561,7 @@ fn calendar_time_zone_blob(time_zone: &str, start_utc: Option<&str>) -> Option<S
     let zone = time_zone.parse::<chrono_tz::Tz>().ok()?;
     let year = start_utc
         .and_then(|value| chrono::NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ").ok())
-        .map(|value| value.year())
+        .map(|value| value.and_utc().with_timezone(&zone).year())
         .unwrap_or_else(|| Utc::now().year());
     let transitions = transition_dates(zone, year)?;
     let mut counts = BTreeMap::<i32, usize>::new();

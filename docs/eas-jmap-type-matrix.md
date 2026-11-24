@@ -31,7 +31,7 @@ inferred.
 
 | Field | Token | Min. version | Status | JMAP (JSCalendar / RFC 8984, superseded by jscalendarbis) mechanism | Notes |
 |---|---|---|---|---|---|
-| Timezone | 0x05 | All | ✅ (`deploy-2026-11-24-eas-calendar-timezone-216f34d`) | JSCalendar IANA `timeZone` → MS-ASDTYPE `TIME_ZONE_INFORMATION` | Emits the 172-byte structure as Base64, with the event-year recurring DST transition rules; fixed-offset zones use zero dates. Invalid or missing IANA zones are omitted. The event year is taken from the UTC start time, with the current UTC year as fallback. |
+| Timezone | 0x05 | All | ✅ (`deploy-2026-11-24-eas-calendar-timezone-216f34d`) | JSCalendar IANA `timeZone` → MS-ASDTYPE `TIME_ZONE_INFORMATION` | Emits the 172-byte structure as Base64, with the event-year recurring DST transition rules; fixed-offset zones use zero dates. Invalid or missing IANA zones are omitted. The local event year is derived from its UTC start and zone, with the current UTC year as fallback. |
 | AllDayEvent | 0x06 | All | ✅ | JSCalendar `showWithoutTime` | |
 | Attendees / Attendee / Email / Name | 0x07-0x0A | All | ✅ two-way (`deploy-2026-08-26l`) | JSCalendar `participants` and `replyTo` | Each participant carries its email, name, role, optional flag, and participation status; organizer derives from role `owner`. |
 | Body / BodyTruncated | 0x0B-0x0C | 2.5 only (12.0+ uses AirSyncBase:Body, codepage 17) | ✅ description sync | JSCalendar `description` + `descriptionContentType` | AirSyncBase Body preferences select plain or HTML content; truncation is reported according to the requested preference. |
