@@ -46,10 +46,10 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    retained for attachment records; it is not a selector in the
    `BodyPartPreference` schema and is not required to answer these requests.
    The current deployment tag
-   `deploy-2026-11-24-eas-task-add-requires-complete-e3f5e6a` includes this
-   path; deployed with homelab commit `85ea708`, image
-   `sha256:c7dd991c2b88e82f07c946b82c034e3447969a64f3d5978710c71559a4040ecc`,
-   started `2026-11-24T20:38:01Z`, restart count zero, `/healthz` `ok`, and
+   `deploy-2026-11-24-eas-find-rfc822-e5c4f0f` includes this path; deployed
+   with homelab commit `1aff02a`, image
+   `sha256:8b763e9e24545d2b8779f54f816ec792c0d758ccca38db9bb807626e80d05d33`,
+   started `2026-11-24T20:54:20Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Real-client 16.1 behavior remains unverified. Sources:
    Microsoft [MS-ASCON Elements](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascon/605bd946-0750-4d9b-b04c-8be28badfa8e),
    [MS-ASAIRS Appendix A](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asairs/fbbc1af9-5a71-4925-aca8-60a95339c722),
@@ -389,7 +389,12 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    mocked HTTP Find regression verifies proximity matching in EPUB text. The
    macro-enabled OOXML types use the same restricted document parts; a mocked
    Find regression covers an `.xlsm` attachment. The current full suite passes
-   391 tests (73 ignored), with strict Clippy and format checks passing. EPUB
+   391 tests (73 ignored), with strict Clippy and format checks passing. RFC
+   822 extraction is deployed as `deploy-2026-11-24-eas-find-rfc822-e5c4f0f`;
+   homelab commit `1aff02a`, image
+   `sha256:8b763e9e24545d2b8779f54f816ec792c0d758ccca38db9bb807626e80d05d33`,
+   started `2026-11-24T20:54:20Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. EPUB
    extraction is deployed as `deploy-2026-11-24-eas-find-epub-55daf09`;
    homelab commit `97d913d`, image
    `sha256:8aa204bddf21960de0338ff595f81ce66564bf5c4015940521b5fa15730e6b23`,
