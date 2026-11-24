@@ -466,6 +466,17 @@ fn condition(property: &str, value: &str) -> Result<Value, &'static str> {
         };
         return Ok(json!({"header": ["Importance", value]}));
     }
+    if property == "kind" {
+        let value = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .unwrap_or(value);
+        if value.eq_ignore_ascii_case("email") {
+            // Mailbox Find already queries Email objects exclusively.
+            return Ok(json!({}));
+        }
+        return Err("unsupported search kind");
+    }
     // Stalwart 0.16.19's native index does not preserve phrase order.
     if value.starts_with('"') && value.chars().any(char::is_whitespace) {
         return Err("phrase search is unavailable");
@@ -710,6 +721,20 @@ mod tests {
         }
         assert!(to_filter("importance:urgent").is_err());
         assert!(to_filter("importance=high").is_err());
+    }
+
+    #[test]
+    fn email_kind_is_satisfied_by_mailbox_find_scope() {
+        assert_eq!(to_filter("kind:email").unwrap(), json!({}));
+        assert_eq!(
+            to_filter("subject:invoice kind:EMAIL").unwrap(),
+            json!({
+                "operator":"AND",
+                "conditions":[{"subject":"invoice"}, {}]
+            })
+        );
+        assert!(to_filter("kind:contacts").is_err());
+        assert!(to_filter("kind=email").is_err());
     }
 
     #[test]
