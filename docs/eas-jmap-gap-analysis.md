@@ -37,7 +37,12 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    Find, and enabled Oof on the isolated test bridge. The gateway now supports
    an explicit `EAS_MAX_PROTOCOL_VERSION=16.1` test configuration and includes
    Find in the 16.1 command advertisement. The default remains 14.0; production
-   continues to advertise 14.0 until the client pass succeeds.
+   continues to advertise 14.0 until the client pass succeeds. A local WBXML
+   regression now checks the enabled Oof Get response's scheduled state,
+   end-time shape, and three audience-specific message blocks; it does not
+   replace checking the enabled state with a real client. The full current
+   suite passes 400 tests (74 ignored); strict Clippy, formatting, and diff
+   checks pass.
    Deployed with that production default as
    `deploy-2026-11-24-eas-16.1-opt-in-13bea13`; homelab commit `fcb698e`, image
    `sha256:902bfe01a2ec516b68b7517f9a38ba730bfafdeb66eb5cd5ec85822ef4e44b0d`,

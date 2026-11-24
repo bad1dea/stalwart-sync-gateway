@@ -8941,7 +8941,7 @@ mod tests {
     use super::{
         apply_body_preference, decode_entity_at, eas_conversation_id, eas_datetime,
         eas_datetime_dashes, is_non_mail_collection_id, plain_text_preview, validate_oof_set,
-        write_email_fields, ProtocolVersion,
+        write_email_fields, write_oof_get_body, ProtocolVersion,
     };
     use crate::model::{Email, EmailAttachment, EmailBody, EmailBodyType};
     use crate::wbxml::eas::RequestedBodyPreference as BodyPreference;
@@ -8977,6 +8977,51 @@ mod tests {
         assert_eq!(
             validate_oof_set(None, None, Some("2042-05-02T00:00:00Z")),
             "2"
+        );
+    }
+
+    #[test]
+    fn enabled_oof_get_emits_spec_shaped_audience_blocks() {
+        use crate::jmap::vacation::VacationResponse;
+        use crate::wbxml::{decode_document, eas, encode_document};
+
+        let vacation = Some(VacationResponse {
+            is_enabled: true,
+            from_date: Some("2026-11-24T00:00:00Z".to_owned()),
+            to_date: Some("2026-12-01T00:00:00Z".to_owned()),
+            subject: Some("Away".to_owned()),
+            text_body: Some("Back next week".to_owned()),
+        });
+        let mut builder = DocumentBuilder::new();
+        write_oof_get_body(&mut builder, &vacation);
+        let doc = decode_document(&encode_document(&builder.finish())).unwrap();
+
+        assert_eq!(
+            eas::find_text_after(&doc, eas::settings::OOF_STATE),
+            Some("2")
+        );
+        assert_eq!(
+            eas::find_text_after(&doc, eas::settings::END_TIME),
+            Some("2026-12-01T00:00:00.000Z")
+        );
+        assert_eq!(
+            eas::find_all_text_after(&doc, eas::settings::ENABLED),
+            vec!["1", "0", "0"]
+        );
+        assert_eq!(
+            eas::find_all_text_after(&doc, eas::settings::REPLY_MESSAGE),
+            vec!["Back next week"]
+        );
+        assert_eq!(
+            eas::find_all_text_after(&doc, eas::settings::BODY_TYPE),
+            vec!["TEXT"]
+        );
+        assert_eq!(
+            doc.nodes
+                .iter()
+                .filter(|node| matches!(node, Node::Start(token) if token.code_page == eas::settings::PAGE && token.token == eas::settings::OOF_MESSAGE.token))
+                .count(),
+            3
         );
     }
 
