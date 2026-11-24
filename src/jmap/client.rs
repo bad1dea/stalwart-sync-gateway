@@ -9148,6 +9148,13 @@ fn try_task_from_object(value: TaskObject) -> anyhow::Result<Task> {
             crate::jmap::calendar_recurrence::from_jscalendar(rule, value.time_zone.as_deref())
         })
         .transpose()?;
+    anyhow::ensure!(
+        recurrence
+            .as_ref()
+            .and_then(|recurrence| recurrence.occurrences)
+            .is_none_or(|occurrences| occurrences <= u8::MAX as u32),
+        "Task recurrence Occurrences exceeds MS-ASTASK unsignedByte range"
+    );
     Ok(Task {
         id: value.id,
         title: value.title,
@@ -9737,6 +9744,13 @@ mod tests {
         assert_eq!(task.recurrence.as_ref().unwrap().kind, 1);
         assert_eq!(task.recurrence.as_ref().unwrap().day_of_week, Some(10));
         assert_eq!(task.recurrence.as_ref().unwrap().occurrences, Some(8));
+
+        let task: super::TaskObject = serde_json::from_value(serde_json::json!({
+            "id":"t", "@type":"Task",
+            "recurrenceRule":{"frequency":"weekly","byDay":[{"day":"mo"}],"count":256}
+        }))
+        .unwrap();
+        assert!(super::try_task_from_object(task).is_err());
 
         let task: super::TaskObject = serde_json::from_value(serde_json::json!({
             "id":"t", "@type":"Task",
