@@ -1091,6 +1091,9 @@ fn email_matches_phrase_with_attachments(
             .any(|value| query::subject_has_phrase(value, phrase)));
     }
     if property == "attachment" {
+        if phrase.trim() == "*" {
+            return Ok(!attachments.is_empty());
+        }
         return Ok(attachments
             .iter()
             .any(|attachment| query::subject_has_phrase(&attachment.name, phrase)));
@@ -1789,6 +1792,45 @@ mod tests {
             Some(false),
             Some(true),
             &wrong_filename,
+            kind,
+            &terms,
+        )
+        .unwrap());
+        let (kind, terms) = query::phrases_for_postfilter("attachment:*").unwrap();
+        assert!(email_matches_phrases_with_addresses_and_attachments(
+            "Unrelated subject",
+            None,
+            "",
+            "",
+            "",
+            "",
+            None,
+            None,
+            123,
+            1,
+            Some(false),
+            Some(false),
+            Some(true),
+            &attachments,
+            kind,
+            &terms,
+        )
+        .unwrap());
+        assert!(!email_matches_phrases_with_addresses_and_attachments(
+            "Unrelated subject",
+            None,
+            "",
+            "",
+            "",
+            "",
+            None,
+            None,
+            0,
+            1,
+            Some(false),
+            Some(false),
+            Some(false),
+            &[],
             kind,
             &terms,
         )
