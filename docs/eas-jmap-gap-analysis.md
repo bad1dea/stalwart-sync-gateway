@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `05bbe4b` (2026-11-24)
+## Reconciled status for source `main` at `e1a7d86` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -16,6 +16,16 @@ Current prioritized work:
    Stalwart's subject index for candidates and locally enforces case-insensitive
    adjacent word order, including accurate totals and range paging. Regression
    coverage proves that reversed words and intervening words are excluded.
+   Explicitly ANDed phrases on the same property (for example two distinct
+   `subject:"..."` terms) are also exact-filtered together; adjacent
+   repeated-property restrictions without `AND` remain rejected because
+   MS-KQL groups those restrictions with OR. Regression tests cover the
+   matching and non-matching subject cases. Deployed as
+   `deploy-2026-11-24-eas-kql-repeat-property-e1a7d86`; homelab commit
+   `5b8a529`, image
+   `sha256:ac8282f1f2104983c0dcfb9b5e41b439bcbd0cbeab9494fffc406ee80787be7c`,
+   started `2026-11-24T11:50:37Z`, restart count zero, `/healthz` `ok`,
+   and `/readyz` `ready`.
    Positive phrases can be combined with KQL AND terms. Multiple phrases on
    distinct properties (for example subject plus body) are exact-filtered
    together; candidate filtering preserves the other restrictions, result
