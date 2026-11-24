@@ -8676,6 +8676,7 @@ impl From<CalendarEventObject> for CalendarEvent {
             location_coordinates,
             start_utc,
             end_utc,
+            time_zone: value.time_zone,
             all_day: value.show_without_time,
             busy_status: Some(match value.free_busy_status.as_deref() {
                 Some("free") => 0,
@@ -9247,6 +9248,7 @@ mod tests {
         let event = crate::model::CalendarEvent::from(object);
         assert!(!event.unsupported_recurrence);
         assert!(event.recurrence.is_some());
+        assert_eq!(event.time_zone.as_deref(), Some("America/Toronto"));
         assert_eq!(
             event.recurrence_exceptions,
             vec![crate::model::CalendarEventException {

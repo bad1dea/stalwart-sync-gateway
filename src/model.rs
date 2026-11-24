@@ -334,6 +334,8 @@ pub struct CalendarEvent {
     /// `local_to_utc_eas`). None if `start` was missing or unparseable.
     pub start_utc: Option<String>,
     pub end_utc: Option<String>,
+    /// Original JSCalendar IANA zone, used to build EAS's binary TimeZone.
+    pub time_zone: Option<String>,
     pub all_day: bool,
     pub busy_status: Option<u8>,
     pub sensitivity: u8,

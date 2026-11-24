@@ -17,6 +17,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
+use chrono::Offset;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
@@ -6421,6 +6422,7 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     event.location_coordinates.hash(&mut hasher);
     event.start_utc.hash(&mut hasher);
     event.end_utc.hash(&mut hasher);
+    event.time_zone.hash(&mut hasher);
     event.all_day.hash(&mut hasher);
     event.busy_status.hash(&mut hasher);
     event.sensitivity.hash(&mut hasher);
@@ -6478,6 +6480,142 @@ fn write_calendar_command(
     builder.end();
 }
 
+/// Encode the event's IANA time zone using MS-ASDTYPE's 172-byte
+/// TIME_ZONE_INFORMATION layout. EAS stores offsets in minutes west of UTC;
+/// transition dates use Windows' recurring nth-weekday SYSTEMTIME form.
+fn calendar_time_zone_blob(time_zone: &str, start_utc: Option<&str>) -> Option<String> {
+    use base64::Engine as _;
+    use chrono::{Datelike, NaiveDate, TimeZone, Timelike, Utc};
+    use std::collections::BTreeMap;
+
+    fn offset_at(zone: chrono_tz::Tz, timestamp: i64) -> Option<i32> {
+        let utc = chrono::DateTime::<Utc>::from_timestamp(timestamp, 0)?;
+        Some(
+            zone.offset_from_utc_datetime(&utc.naive_utc())
+                .fix()
+                .local_minus_utc(),
+        )
+    }
+
+    fn transition_dates(
+        zone: chrono_tz::Tz,
+        year: i32,
+    ) -> Option<Vec<(chrono::NaiveDateTime, i32, i32)>> {
+        let start = NaiveDate::from_ymd_opt(year, 1, 1)?
+            .and_hms_opt(0, 0, 0)?
+            .and_utc();
+        let end = NaiveDate::from_ymd_opt(year + 1, 1, 1)?
+            .and_hms_opt(0, 0, 0)?
+            .and_utc();
+        let mut previous = start.timestamp();
+        let mut previous_offset = offset_at(zone, previous)?;
+        let mut transitions = Vec::new();
+        let mut sample = previous + 12 * 60 * 60;
+        while sample <= end.timestamp() {
+            let current_offset = offset_at(zone, sample)?;
+            if current_offset != previous_offset {
+                let (mut low, mut high) = (previous, sample);
+                while high - low > 1 {
+                    let middle = low + (high - low) / 2;
+                    if offset_at(zone, middle)? == previous_offset {
+                        low = middle;
+                    } else {
+                        high = middle;
+                    }
+                }
+                let local_before =
+                    chrono::DateTime::<Utc>::from_timestamp(high + i64::from(previous_offset), 0)?
+                        .naive_utc();
+                transitions.push((local_before, previous_offset, current_offset));
+                previous_offset = current_offset;
+            }
+            previous = sample;
+            sample += 12 * 60 * 60;
+        }
+        Some(transitions)
+    }
+
+    fn append_long(bytes: &mut Vec<u8>, value: i32) {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn append_system_time(bytes: &mut Vec<u8>, value: Option<chrono::NaiveDateTime>) {
+        if let Some(value) = value {
+            for part in [
+                0,
+                value.month() as u16,
+                value.weekday().num_days_from_sunday() as u16,
+                ((value.day() - 1) / 7 + 1) as u16,
+                value.hour() as u16,
+                value.minute() as u16,
+                value.second() as u16,
+                0,
+            ] {
+                bytes.extend_from_slice(&part.to_le_bytes());
+            }
+        } else {
+            bytes.extend_from_slice(&[0; 16]);
+        }
+    }
+
+    let zone = time_zone.parse::<chrono_tz::Tz>().ok()?;
+    let year = start_utc
+        .and_then(|value| chrono::NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ").ok())
+        .map(|value| value.year())
+        .unwrap_or_else(|| Utc::now().year());
+    let transitions = transition_dates(zone, year)?;
+    let mut counts = BTreeMap::<i32, usize>::new();
+    let first = NaiveDate::from_ymd_opt(year, 1, 1)?
+        .and_hms_opt(12, 0, 0)?
+        .and_utc();
+    let last = NaiveDate::from_ymd_opt(year + 1, 1, 1)?
+        .and_hms_opt(0, 0, 0)?
+        .and_utc();
+    let mut sample = first.timestamp();
+    while sample < last.timestamp() {
+        *counts.entry(offset_at(zone, sample)?).or_default() += 1;
+        sample += 24 * 60 * 60;
+    }
+    // Daylight offsets advance the local clock; the minimum UTC offset is
+    // the standard-time side for IANA zones, including southern-hemisphere
+    // zones where that season falls in the other half of the year.
+    let standard_offset = counts.keys().copied().min()?;
+    let daylight_offset = counts
+        .keys()
+        .copied()
+        .filter(|offset| *offset != standard_offset)
+        .max_by_key(|offset| standard_offset.abs_diff(*offset));
+    let mut standard_date = None;
+    let mut daylight_date = None;
+    if let Some(daylight_offset) = daylight_offset {
+        for (local, before, after) in transitions {
+            if before == standard_offset && after == daylight_offset {
+                daylight_date = Some(local);
+            } else if before == daylight_offset && after == standard_offset {
+                standard_date = Some(local);
+            }
+        }
+        if standard_date.is_none() || daylight_date.is_none() {
+            return None;
+        }
+    }
+
+    let mut bytes = Vec::with_capacity(172);
+    append_long(&mut bytes, -standard_offset / 60);
+    bytes.extend_from_slice(&[0; 64]); // Optional StandardName
+    append_system_time(&mut bytes, standard_date);
+    append_long(&mut bytes, 0); // StandardBias
+    bytes.extend_from_slice(&[0; 64]); // Optional DaylightName
+    append_system_time(&mut bytes, daylight_date);
+    append_long(
+        &mut bytes,
+        daylight_offset
+            .map(|offset| -(offset - standard_offset) / 60)
+            .unwrap_or_default(),
+    );
+    (bytes.len() == 172).then(|| base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 fn write_calendar_fields(
     builder: &mut wbxml::eas::DocumentBuilder,
     event: &crate::model::CalendarEvent,
@@ -6496,6 +6634,11 @@ fn write_calendar_fields(
     // not just the PHP source, for the Organizer/MeetingStatus/Attendees
     // placement specifically -- the PR #187 mapping doesn't cover those
     // three since z-push-stalwart-jmap never implemented them).
+    if let Some(time_zone) = &event.time_zone {
+        if let Some(value) = calendar_time_zone_blob(time_zone, event.start_utc.as_deref()) {
+            builder.leaf(cal::TIMEZONE, value);
+        }
+    }
     if let Some(updated) = &event.updated_utc {
         builder.leaf(cal::DTSTAMP, updated);
     }
@@ -8477,7 +8620,10 @@ mod tests {
     #[test]
     fn calendar_recurrence_is_written_with_eas_fields() {
         use crate::wbxml::eas::{self, airsync as air, calendar as cal};
+        use base64::Engine as _;
         let event = crate::model::CalendarEvent {
+            time_zone: Some("America/Toronto".to_owned()),
+            start_utc: Some("20261125T170000Z".to_owned()),
             recurrence: Some(crate::wbxml::eas::CalendarRecurrence {
                 kind: 1,
                 interval: Some(2),
@@ -8494,6 +8640,24 @@ mod tests {
             eas::find_text_after(&document, cal::RECURRENCE_TYPE),
             Some("1")
         );
+        let encoded_timezone = eas::find_text_after(&document, cal::TIMEZONE).unwrap();
+        let timezone = base64::engine::general_purpose::STANDARD
+            .decode(encoded_timezone)
+            .unwrap();
+        assert_eq!(timezone.len(), 172);
+        assert_eq!(i32::from_le_bytes(timezone[0..4].try_into().unwrap()), 300);
+        assert_eq!(
+            u16::from_le_bytes(timezone[154..156].try_into().unwrap()),
+            3
+        );
+        assert_eq!(
+            u16::from_le_bytes(timezone[158..160].try_into().unwrap()),
+            2
+        );
+        assert_eq!(
+            i32::from_le_bytes(timezone[168..172].try_into().unwrap()),
+            -60
+        );
         assert_eq!(
             eas::find_text_after(&document, cal::RECURRENCE_INTERVAL),
             Some("2")
@@ -8506,6 +8670,34 @@ mod tests {
             eas::find_text_after(&document, cal::RECURRENCE_OCCURRENCES),
             Some("12")
         );
+    }
+
+    #[test]
+    fn calendar_timezone_handles_fixed_offsets_and_dst_zones() {
+        use base64::Engine as _;
+
+        let toronto =
+            super::calendar_time_zone_blob("America/Toronto", Some("20261125T170000Z")).unwrap();
+        let toronto = base64::engine::general_purpose::STANDARD
+            .decode(toronto)
+            .unwrap();
+        assert_eq!(toronto.len(), 172);
+        assert_eq!(i32::from_le_bytes(toronto[0..4].try_into().unwrap()), 300);
+        assert_eq!(u16::from_le_bytes(toronto[70..72].try_into().unwrap()), 11);
+        assert_eq!(u16::from_le_bytes(toronto[154..156].try_into().unwrap()), 3);
+        assert_eq!(
+            i32::from_le_bytes(toronto[168..172].try_into().unwrap()),
+            -60
+        );
+
+        let utc = super::calendar_time_zone_blob("UTC", Some("20261125T170000Z")).unwrap();
+        let utc = base64::engine::general_purpose::STANDARD
+            .decode(utc)
+            .unwrap();
+        assert_eq!(utc.len(), 172);
+        assert_eq!(i32::from_le_bytes(utc[0..4].try_into().unwrap()), 0);
+        assert_eq!(u16::from_le_bytes(utc[70..72].try_into().unwrap()), 0);
+        assert_eq!(u16::from_le_bytes(utc[154..156].try_into().unwrap()), 0);
     }
 
     #[test]
