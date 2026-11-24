@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `e241abb` (2026-11-24)
+## Reconciled status for source `main` at `9b61ba2` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -106,7 +106,17 @@ Current prioritized work:
    `sha256:851a5a222f30126cb785210650169954930290164378fcdf89876f255cf43b6e`,
    started `2026-11-24T14:41:36Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Regression suite: 333 passed, 73 ignored; strict Clippy,
-   formatting, and diff checks passed. The standalone negated form
+   formatting, and diff checks passed. KQL size predicates such as `size>100`
+   and `size:10..20` can now be combined with quoted phrases; candidate filters
+   use JMAP `minSize`/`maxSize`, and local post-filtering preserves inclusive
+   and exclusive boundaries, including negated size conditions. Regression
+   suite: 335 passed, 73 ignored; strict Clippy, formatting, and diff checks
+   passed. Deployed as
+   `deploy-2026-11-24-eas-kql-phrase-size-negation-9b61ba2`; homelab commit
+   `238b77e`, image
+   `sha256:41d4d9c36a880e8a36533c89f77d387ba78502872ce033898e53557a4bc0e2b8`,
+   started `2026-11-24T14:56:15Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The standalone negated form
    `NOT subject:"..."` and unary-minus forms such as
    `-body:"..."` are exact-filtered over the scoped mailbox. Positive phrase
    AND negated boolean restrictions (`NOT isread:true` or `-isflagged:true`)
