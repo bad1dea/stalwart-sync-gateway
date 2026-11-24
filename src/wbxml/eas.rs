@@ -1319,6 +1319,7 @@ pub struct TaskFields {
     pub due_date: Option<String>,
     pub utc_due_date: Option<String>,
     pub complete: Option<bool>,
+    pub date_completed: Option<String>,
 }
 
 /// ActiveSync Contacts class fields decoded from one Add/Change command's
@@ -2980,6 +2981,8 @@ fn extract_task_fields(nodes: &[Node]) -> TaskFields {
                     fields.utc_due_date = Some(text.clone());
                 } else if same_token(top, tasks::COMPLETE) {
                     fields.complete = Some(text != "0");
+                } else if same_token(top, tasks::DATE_COMPLETED) {
+                    fields.date_completed = Some(text.clone());
                 }
             }
             Node::End => {
@@ -3435,6 +3438,7 @@ mod tests {
         builder.leaf(tasks::SUBJECT, "Renew passport");
         builder.leaf(tasks::COMPLETE, "0");
         builder.leaf(tasks::DUE_DATE, "20260905T090000Z");
+        builder.leaf(tasks::DATE_COMPLETED, "2026-09-04T15:30:00.000Z");
         builder.end();
         builder.end();
         builder.end();
@@ -3453,6 +3457,10 @@ mod tests {
         assert_eq!(command.task.subject.as_deref(), Some("Renew passport"));
         assert_eq!(command.task.complete, Some(false));
         assert_eq!(command.task.due_date.as_deref(), Some("20260905T090000Z"));
+        assert_eq!(
+            command.task.date_completed.as_deref(),
+            Some("2026-09-04T15:30:00.000Z")
+        );
     }
 
     #[test]

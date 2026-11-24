@@ -4458,6 +4458,7 @@ impl JmapClient {
                     "due",
                     "timeZone",
                     "progress",
+                    "progressUpdated",
                 ]),
                 limit,
             )
@@ -4620,6 +4621,33 @@ impl JmapClient {
                     .to_owned(),
                 ),
             );
+        }
+        if let Some(date_completed) = fields.date_completed.as_deref() {
+            let timestamp = eas_compact_to_local_iso(date_completed)
+                .and_then(|date| {
+                    chrono::NaiveDateTime::parse_from_str(&date, "%Y-%m-%dT%H:%M:%S").ok()
+                })
+                .map(|date| date.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .or_else(|| {
+                    chrono::DateTime::parse_from_rfc3339(date_completed)
+                        .ok()
+                        .map(|date| {
+                            date.with_timezone(&chrono::Utc)
+                                .format("%Y-%m-%dT%H:%M:%SZ")
+                                .to_string()
+                        })
+                })
+                .context("invalid task completion date")?;
+            anyhow::ensure!(
+                fields.complete != Some(false),
+                "completion date conflicts with incomplete task"
+            );
+            task.insert(
+                "progressUpdated".to_owned(),
+                serde_json::Value::String(timestamp),
+            );
+        } else if fields.complete == Some(false) {
+            task.insert("progressUpdated".to_owned(), serde_json::Value::Null);
         }
 
         let call = match id {
@@ -7452,6 +7480,8 @@ struct TaskObject {
     time_zone: Option<String>,
     #[serde(default)]
     progress: Option<String>,
+    #[serde(default, rename = "progressUpdated")]
+    progress_updated: Option<String>,
     #[serde(rename = "@type", default)]
     kind: String,
 }
@@ -7471,6 +7501,14 @@ impl From<TaskObject> for Task {
                 is_truncated: false,
             }),
             completed: value.progress.as_deref() == Some("completed"),
+            date_completed: (value.progress.as_deref() == Some("completed"))
+                .then(|| {
+                    value
+                        .progress_updated
+                        .as_deref()
+                        .and_then(utc_iso_to_eas_datetime)
+                })
+                .flatten(),
             due: value.due.as_deref().and_then(|due| {
                 if value
                     .time_zone
@@ -7489,6 +7527,13 @@ impl From<TaskObject> for Task {
 // Format the local wall time without applying a timezone offset.
 fn local_to_utc_eas_no_tz(local_iso: &str) -> Option<String> {
     local_to_utc_eas(local_iso, None)
+}
+
+fn utc_iso_to_eas_datetime(value: &str) -> Option<String> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(value)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    Some(parsed.format("%Y-%m-%dT%H:%M:%S.000Z").to_string())
 }
 
 /// Converts a JSCalendar LocalDateTime (`2026-08-25T14:00:00`, no offset)
@@ -7688,6 +7733,27 @@ impl From<CalendarObject> for Collection {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn task_completion_time_round_trips_as_eas_datetime() {
+        let task: super::TaskObject = serde_json::from_value(serde_json::json!({
+            "id": "t", "@type": "Task", "progress": "completed",
+            "progressUpdated": "2026-11-20T11:45:00-05:00"
+        }))
+        .unwrap();
+        let task = crate::model::Task::from(task);
+        assert_eq!(
+            task.date_completed.as_deref(),
+            Some("2026-11-20T16:45:00.000Z")
+        );
+
+        let task: super::TaskObject = serde_json::from_value(serde_json::json!({
+            "id": "t", "@type": "Task", "progress": "needs-action",
+            "progressUpdated": "2026-11-20T16:45:00Z"
+        }))
+        .unwrap();
+        assert_eq!(crate::model::Task::from(task).date_completed, None);
+    }
+
     #[test]
     fn calendar_updated_time_uses_compact_utc() {
         let event: super::CalendarEventObject = serde_json::from_value(

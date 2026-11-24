@@ -356,6 +356,7 @@ async fn mock_api(
             }
             "AddressBook/set" => mock_groupware_collection_set(&m, args, "addressBooks", "book"),
             "Calendar/set" => mock_groupware_collection_set(&m, args, "calendars", "calendar"),
+            "CalendarEvent/set" => mock_calendar_event_set(&m, args),
             "ContactCard/query" | "CalendarEvent/query" => {
                 let kind = if name == "ContactCard/query" {
                     "contacts"
@@ -620,6 +621,33 @@ async fn mock_download(
         MIME_BYTES
     };
     ([("Content-Type", "application/octet-stream")], data).into_response()
+}
+
+fn mock_calendar_event_set(mock: &Mock, args: &serde_json::Value) -> serde_json::Value {
+    let mut all = mock.groupware.lock().unwrap();
+    let list = all.entry("calendar".to_owned()).or_default();
+    let Some(update) = args["update"].as_object() else {
+        return serde_json::json!({"type":"invalidArguments"});
+    };
+    let mut updated = serde_json::Map::new();
+    let mut not_updated = serde_json::Map::new();
+    for (id, patch) in update {
+        let Some(object) = list.iter_mut().find(|item| item["id"] == id.as_str()) else {
+            not_updated.insert(id.clone(), serde_json::json!({"type":"notFound"}));
+            continue;
+        };
+        if let Some(patch) = patch.as_object() {
+            for (property, value) in patch {
+                if value.is_null() {
+                    object.as_object_mut().unwrap().remove(property);
+                } else {
+                    object[property] = value.clone();
+                }
+            }
+        }
+        updated.insert(id.clone(), serde_json::Value::Null);
+    }
+    serde_json::json!({"updated":updated,"notUpdated":not_updated})
 }
 
 fn mock_groupware_collection_set(
@@ -14035,7 +14063,7 @@ async fn task_search_returns_results_and_fetches_them() {
 
 #[tokio::test]
 async fn task_description_changes_are_synced() {
-    use eas::{airsync as air, airsync_base as base};
+    use eas::{airsync as air, airsync_base as base, tasks};
     let env = start_env(Opts::default()).await;
     enable_groupware(&env, 1);
     let prime = item_sync(&env, "ipad", "task_calendar", "0", "100").await;
@@ -14049,6 +14077,8 @@ async fn task_description_changes_are_synced() {
             .find(|item| item["id"] == "t0000")
             .unwrap();
         task["description"] = serde_json::json!("edited description");
+        task["progress"] = serde_json::json!("completed");
+        task["progressUpdated"] = serde_json::json!("2026-11-20T16:45:00Z");
     }
     let update = item_sync(&env, "ipad", "task_calendar", &sync_key(&first), "100").await;
     assert!(eas::contains_token(&update, air::CHANGE));
@@ -14056,6 +14086,57 @@ async fn task_description_changes_are_synced() {
         eas::find_text_after(&update, base::DATA),
         Some("edited description")
     );
+    assert_eq!(
+        eas::find_text_after(&update, tasks::DATE_COMPLETED),
+        Some("2026-11-20T16:45:00.000Z")
+    );
+}
+
+#[tokio::test]
+async fn task_completion_date_changes_are_saved() {
+    use eas::{airsync as air, tasks};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 1);
+    let prime = item_sync(&env, "ipad", "task_calendar", "0", "100").await;
+    let first = item_sync(&env, "ipad", "task_calendar", &sync_key(&prime), "100").await;
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, sync_key(&first));
+    b.leaf(air::COLLECTION_ID, "task_calendar");
+    b.empty_tag(air::GET_CHANGES);
+    b.start(air::COMMANDS);
+    b.start(air::CHANGE);
+    b.leaf(air::SERVER_ID, "t0000");
+    b.start(air::APPLICATION_DATA);
+    b.leaf(tasks::COMPLETE, "1");
+    b.leaf(tasks::DATE_COMPLETED, "2026-11-20T16:45:00.000Z");
+    b.end();
+    for _ in 0..5 {
+        b.end();
+    }
+    let response = env
+        .req("Sync", "ipad")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let response_doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        eas::find_all_text_after(&response_doc, air::STATUS),
+        vec!["1", "1"]
+    );
+    let items = env.mock.groupware.lock().unwrap();
+    let task = items
+        .get("calendar")
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "t0000")
+        .unwrap();
+    assert_eq!(task["progress"], "completed");
+    assert_eq!(task["progressUpdated"], "2026-11-20T16:45:00Z");
 }
 
 #[tokio::test]

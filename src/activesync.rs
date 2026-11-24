@@ -6684,6 +6684,7 @@ fn task_hash(task: &crate::model::Task) -> String {
         body.body_type.eas_value().hash(&mut hasher);
     }
     task.completed.hash(&mut hasher);
+    task.date_completed.hash(&mut hasher);
     task.due.hash(&mut hasher);
     task.due_local.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
@@ -6753,6 +6754,11 @@ fn write_task_fields(
         }
     }
     builder.leaf(tasks::COMPLETE, if task.completed { "1" } else { "0" });
+    if task.completed {
+        if let Some(date_completed) = task.date_completed.as_deref() {
+            builder.leaf(tasks::DATE_COMPLETED, date_completed);
+        }
+    }
     let format_due = |due: &str| {
         chrono::NaiveDateTime::parse_from_str(due, "%Y%m%dT%H%M%SZ")
             .ok()
