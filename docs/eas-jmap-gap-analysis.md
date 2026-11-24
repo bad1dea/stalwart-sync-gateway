@@ -348,7 +348,11 @@ Current prioritized work:
    HTML/RTF conversion and XML element/entity/CDATA handling are covered as
    well. The downloader enforces the cap from the actual body size even if
    attachment metadata advertises less; mocked end-to-end regressions confirm
-   PDF and DOCX text matching and oversized-content rejection.
+   PDF and DOCX text matching and oversized-content rejection. Deployed as
+   `deploy-2026-11-24-eas-find-office-docs-637a508`; homelab commit
+   `d4bd5ac`, image
+   `sha256:6b48329c78265129eae9ab73bb478d51b2465b0198465ffb2881a155edd8261b`,
+   with zero restarts and passing runtime health/readiness checks.
    text-property searches broad-scan the selected mailbox so those attachment
    checks do not depend on JMAP's attachment index setting. Legacy binary
    Office formats, scanned-PDF OCR, and larger attachment extraction remain unsupported, so
@@ -384,10 +388,14 @@ Current prioritized work:
    negated prefix and its boolean OR branch against exact IDs and totals.
    See the [KeyQL wildcard reference](https://learn.microsoft.com/en-us/sharepoint/dev/general-development/keyword-query-language-kql-syntax-reference).
    Regression suite: 382 passed,
-   73 ignored; strict Clippy, formatting, and diff checks passed. The recent
-   prefix-negation, compound text-operator, and text-attachment extraction
-   additions are source-tested but not deployed or runtime-verified;
-   real-client 16.1 certification remains open.
+   73 ignored; strict Clippy, formatting, and diff checks passed. The
+   prefix-negation, compound text-operator, and attachment extraction changes
+   are deployed in `deploy-2026-11-24-eas-find-office-docs-637a508`; homelab
+   commit `d4bd5ac`, image
+   `sha256:6b48329c78265129eae9ab73bb478d51b2465b0198465ffb2881a155edd8261b`,
+   started `2026-11-24T19:25:30Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Runtime health is verified; real-client 16.1
+   certification remains open.
    Phrase matching is case-insensitive and requires adjacent
    words in order. Regression tests cover plain, HTML, and RTF bodies,
    subject/body conjunctions, truncation, and unsupported Boolean forms. Full
