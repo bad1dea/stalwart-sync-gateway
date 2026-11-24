@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `d99b3a3` (2026-11-24)
+## Reconciled status for source `main` at `2727f06` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -18,7 +18,14 @@ Current prioritized work:
    coverage proves that reversed words and intervening words are excluded.
    Multiword phrases in body/text or compound Boolean expressions remain
    rejected because those scopes cannot yet be post-filtered without changing
-   query meaning. KQL `importance:low|normal|high`
+   query meaning. Regression coverage verifies order, adjacency, totals, and
+   result mapping against an index that returns unordered word candidates.
+   Deployed as `deploy-2026-11-24-eas-find-exact-subject-phrases-2727f06`;
+   homelab commit `933b23b`. The forced Compose build produced image
+   `sha256:58b834bd07b01ca9c5a1c8b9dbde8ed6253aef9da5197deeff6704d49c2e258c`.
+   The container started at `2026-11-24T07:53:46Z` with restart count zero;
+   `/healthz` returned `ok` and `/readyz` returned `ready`. KQL
+   `importance:low|normal|high`
    now maps to the standard `Importance` header filter; invalid values and
    ordered/equality comparisons are rejected because JMAP header matching is
    text based. Mailbox Find also accepts `kind:email` as already satisfied by
