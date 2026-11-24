@@ -278,9 +278,12 @@ Current prioritized work:
    groups. Ambiguous repeated-property forms remain rejected. Regression
    coverage checks repeated subject phrases across grouped branches with body
    and read predicates, plus exact end-to-end result totals.
-   Negated phrases combined
-   with predicates outside the supported boolean, importance, received, sent,
-   and size set remain rejected to preserve their Boolean meaning.
+   Negated phrases can also combine with exact single-token string restrictions
+   on subject, body, text, from, to, cc, bcc, and participants; these forms
+   broad-scan the selected mailbox and evaluate each restriction locally.
+   Other predicates outside the supported boolean, importance, received, sent,
+   size, and string-property set remain rejected when paired with negated
+   phrases.
    A single positive `body:"multiword phrase"`
    or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
    body and text scans fetch message bodies and reject a truncated body rather
@@ -334,7 +337,7 @@ Current prioritized work:
    `attachment:*` matches any non-empty attachment list) per
    [MS-KQL property restrictions](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-kql/1b4eb34a-0e20-4aca-b38e-41f531a747ff).
    Unordered NEAR also accepts both operands matching one
-   indexed token, as MS-KQL specifies. Regression suite: 364 passed,
+   indexed token, as MS-KQL specifies. Regression suite: 365 passed,
    73 ignored; strict Clippy, formatting, and diff checks passed. The nested
    current proximity and paging changes are not deployed or runtime-verified.
    Phrase matching is case-insensitive and requires adjacent

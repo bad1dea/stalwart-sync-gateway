@@ -2075,6 +2075,51 @@ mod tests {
     }
 
     #[test]
+    fn negated_phrase_can_be_combined_with_a_text_property_predicate() {
+        let (kind, terms) =
+            query::phrases_for_postfilter(r#"NOT subject:"alpha beta" AND from:alice"#).unwrap();
+        assert_eq!(kind, query::PhraseMatch::All);
+        assert_eq!(
+            terms,
+            vec![
+                ("$not$subject".to_owned(), "alpha beta".to_owned()),
+                ("from".to_owned(), "alice".to_owned()),
+            ]
+        );
+        let matches = |subject: &str, from: &str| {
+            email_matches_phrases_with_addresses(
+                subject, None, from, "", "", "", None, None, 0, 1, None, None, None, kind, &terms,
+            )
+            .unwrap()
+        };
+        assert!(!query::subject_has_phrase(
+            "Bob Example <bob@example.test>",
+            "alice"
+        ));
+        assert!(!email_matches_phrase_with_attachments(
+            "unrelated subject",
+            None,
+            "Bob Example <bob@example.test>",
+            "",
+            "",
+            "",
+            &[],
+            "from",
+            "alice",
+        )
+        .unwrap());
+        assert!(matches(
+            "unrelated subject",
+            "Alice Example <alice@example.test>"
+        ));
+        assert!(!matches("alpha beta", "Alice Example <alice@example.test>"));
+        assert!(!matches(
+            "unrelated subject",
+            "Bob Example <bob@example.test>"
+        ));
+    }
+
+    #[test]
     fn right_nested_proximity_groups_match_as_an_operand() {
         let (kind, terms) =
             query::phrases_for_postfilter("alpha ONEAR(0) (beta ONEAR(0) gamma)").unwrap();
