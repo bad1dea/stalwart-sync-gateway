@@ -69,6 +69,7 @@ struct Mock {
     drop_flag_keywords: AtomicBool,
     download_error: AtomicBool,
     mail_structures: Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
+    mail_attachments: Mutex<std::collections::BTreeMap<String, Vec<serde_json::Value>>>,
     mail_bodies: Mutex<std::collections::BTreeMap<String, (String, bool)>>,
     body_get_limits: Mutex<Vec<(String, usize)>>,
     body_get_error: AtomicBool,
@@ -621,6 +622,10 @@ async fn mock_api(
                             if let Some(structure) = m.mail_structures.lock().unwrap().get(&id) {
                                 email["bodyStructure"] = structure.clone();
                             }
+                            if let Some(attachments) = m.mail_attachments.lock().unwrap().get(&id) {
+                                email["attachments"] =
+                                    serde_json::Value::Array(attachments.clone());
+                            }
 
                             if let Some((value, html)) = m.mail_bodies.lock().unwrap().get(&id) {
                                 let requested =
@@ -823,6 +828,7 @@ async fn start_mock() -> Arc<Mock> {
         drop_flag_keywords: AtomicBool::new(false),
         download_error: AtomicBool::new(false),
         mail_structures: Mutex::new(Default::default()),
+        mail_attachments: Mutex::new(Default::default()),
         mail_bodies: Mutex::new(Default::default()),
         body_get_limits: Mutex::new(Vec::new()),
         body_get_error: AtomicBool::new(false),
@@ -13588,6 +13594,47 @@ async fn find_proximity_queries_filter_complete_message_text_and_page_exactly() 
     assert_eq!(eas::find_text_after(&second, f::TOTAL), Some("2"));
     assert_eq!(eas::find_all_text_after(&second, air::SERVER_ID).len(), 1);
     assert_eq!(eas::find_text_after(&second, f::RANGE), Some("1-1"));
+}
+
+#[tokio::test]
+async fn find_attachment_phrase_matches_filename_and_scopes_to_mailbox() {
+    use eas::{airsync as air, find as f};
+    let env = start_env(Opts::default()).await;
+    env.mock.add_mail("inbox", "attachment-match");
+    env.mock.add_mail("inbox", "attachment-nonmatch");
+    env.mock.mail_attachments.lock().unwrap().insert(
+        "attachment-match".to_owned(),
+        vec![serde_json::json!({
+            "blobId":"blob-match", "name":"Annual Report.pdf",
+            "type":"application/pdf", "size":123
+        })],
+    );
+    env.mock.mail_attachments.lock().unwrap().insert(
+        "attachment-nonmatch".to_owned(),
+        vec![serde_json::json!({
+            "blobId":"blob-other", "name":"Report Annual.pdf",
+            "type":"application/pdf", "size":123
+        })],
+    );
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "30000000-0000-4000-8000-000000000001",
+            "attachment:\"annual report.pdf\"",
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["attachment-match"]
+    );
 }
 
 #[tokio::test]

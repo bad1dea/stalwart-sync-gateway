@@ -294,9 +294,11 @@ Current prioritized work:
    operand order. Boolean combinations use the existing exact matcher for
    supported predicates. Regression coverage exercises phrase operands,
    direction, distance, proximity AND/OR combinations, exact totals, and range
-   paging. Attachment-content positions remain unsupported. Regression suite:
-   353 passed, 73 ignored; strict Clippy, formatting, and diff checks passed.
-   This source change is not deployed or runtime-verified.
+   paging. Attachment-content positions remain unsupported. `attachment:` terms
+   and phrases also match contiguous words in attachment filenames with exact
+   local post-filtering. Regression suite: 356 passed,
+   73 ignored; strict Clippy, formatting, and diff checks passed. Neither
+   source change is deployed or runtime-verified.
    Phrase matching is case-insensitive and requires adjacent
    words in order. Regression tests cover plain, HTML, and RTF bodies,
    subject/body conjunctions, truncation, and unsupported Boolean forms. Full

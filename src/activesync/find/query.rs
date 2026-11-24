@@ -57,6 +57,11 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
     if !phrases.is_empty() && phrases_for_postfilter(input).is_none() {
         return Err("quoted phrases require an expression with unambiguous property grouping");
     }
+    if tokens.iter().any(|token| {
+        matches!(token, Token::Word(word) if search_phrase_word(word).is_some_and(|(property, _)| property == "attachment"))
+    }) {
+        return Ok(json!({}));
+    }
     if needs_broad_importance_negation(&tokens) {
         if phrases_for_postfilter(input).is_none() {
             return Err("unsupported negated importance expression");
@@ -829,7 +834,7 @@ fn register_expression_phrase(
 
 fn search_phrase_word(word: &str) -> Option<(String, String)> {
     let (property, value) = word.split_once(':')?;
-    if ![
+    let allowed = [
         "subject",
         "body",
         "text",
@@ -838,19 +843,29 @@ fn search_phrase_word(word: &str) -> Option<(String, String)> {
         "cc",
         "bcc",
         "participants",
-    ]
-    .iter()
-    .any(|allowed| property.eq_ignore_ascii_case(allowed))
-        || !value.starts_with('"')
-        || !value.ends_with('"')
-        || value.len() < 4
-        || value[1..value.len() - 1].contains('"')
-        || value[1..value.len() - 1].contains('\\')
+        "attachment",
+    ];
+    if !allowed
+        .iter()
+        .any(|allowed| property.eq_ignore_ascii_case(allowed))
     {
         return None;
     }
-    let phrase = &value[1..value.len() - 1];
-    (phrase.split_whitespace().count() > 1)
+    let phrase = if value.starts_with('"')
+        && value.ends_with('"')
+        && value.len() >= 2
+        && !value[1..value.len() - 1].contains(['"', '\\'])
+    {
+        &value[1..value.len() - 1]
+    } else if property.eq_ignore_ascii_case("attachment")
+        && !value.contains(['"', '\\'])
+        && !value.trim().is_empty()
+    {
+        value
+    } else {
+        return None;
+    };
+    (phrase.split_whitespace().count() > 1 || property.eq_ignore_ascii_case("attachment"))
         .then(|| (property.to_ascii_lowercase(), phrase.to_owned()))
 }
 
@@ -2715,5 +2730,28 @@ mod tests {
             ))
         );
         assert!(to_filter("subject:alpha NEAR beta").is_err());
+    }
+
+    #[test]
+    fn attachment_name_phrases_require_exact_local_matching() {
+        assert_eq!(
+            phrases_for_postfilter("attachment:\"annual report.pdf\""),
+            Some((
+                PhraseMatch::All,
+                vec![("attachment".to_owned(), "annual report.pdf".to_owned())]
+            ))
+        );
+        assert_eq!(
+            to_filter("attachment:\"annual report.pdf\"").unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            phrases_for_postfilter("attachment:annualreport.pdf"),
+            Some((
+                PhraseMatch::All,
+                vec![("attachment".to_owned(), "annualreport.pdf".to_owned())]
+            ))
+        );
+        assert_eq!(to_filter("attachment:annualreport.pdf").unwrap(), json!({}));
     }
 }

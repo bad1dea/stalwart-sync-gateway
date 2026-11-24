@@ -126,8 +126,9 @@ importance and boolean comparisons, property qualifiers, WORDS, ALL, ANY, and
 NONE. Quoted phrase order is enforced locally because Stalwart's native text
 index does not preserve it. Direct `NEAR` and `ONEAR` operators now use exact
 local token-distance matching over complete message text and common address
-fields, including Boolean expressions with supported predicates. Attachment
-content positions remain unsupported. Find is protocol-version gated to
+fields, including Boolean expressions with supported predicates. `attachment:`
+name searches are matched locally against attachment metadata; searching
+attachment content positions remains unsupported. Find is protocol-version gated to
 16.1 and is not advertised while production negotiates only 14.0.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
@@ -234,8 +235,9 @@ session's fixes were, not against spec-reading alone.
   Microsoft Learn's per-codepage subpages, not re-derived.
 - KQL proximity — direct `NEAR`/`ONEAR` and Boolean combinations with supported
   predicates now exact-filter full message text and common address fields,
-  using the default distance of eight or an explicit distance. Attachment-
-  content positions are not yet evaluated.
+  using the default distance of eight or an explicit distance. `attachment:`
+  name searches match filenames; attachment-content positions are not yet
+  evaluated.
 - Recurrence — Stalwart 0.16.27 rejects `recurrenceRules` on create and omits
   it on read; recheck after a backend upgrade.
 - Real-client 16.1 negotiation and behavior, including Tasks field order and

@@ -282,7 +282,7 @@ async fn execute(
             }
             let count = candidate.emails.len();
             for email in candidate.emails {
-                if email_matches_phrases_with_addresses(
+                if email_matches_phrases_with_addresses_and_attachments(
                     &email.subject,
                     email.body.as_ref(),
                     &email.from,
@@ -296,6 +296,7 @@ async fn execute(
                     Some(email.read),
                     Some(email.keywords.iter().any(|keyword| keyword == "$flagged")),
                     Some(!email.attachments.is_empty()),
+                    &email.attachments,
                     phrase_match,
                     &phrases,
                 )? {
@@ -596,6 +597,45 @@ fn email_matches_phrases_with_addresses(
     phrase_match: query::PhraseMatch,
     phrases: &[(String, String)],
 ) -> anyhow::Result<bool> {
+    email_matches_phrases_with_addresses_and_attachments(
+        subject,
+        body,
+        from,
+        to,
+        cc,
+        bcc,
+        received_at,
+        sent_at,
+        size,
+        importance,
+        is_read,
+        is_flagged,
+        has_attachment,
+        &[],
+        phrase_match,
+        phrases,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn email_matches_phrases_with_addresses_and_attachments(
+    subject: &str,
+    body: Option<&crate::model::EmailBody>,
+    from: &str,
+    to: &str,
+    cc: &str,
+    bcc: &str,
+    received_at: Option<&str>,
+    sent_at: Option<&str>,
+    size: u64,
+    importance: u8,
+    is_read: Option<bool>,
+    is_flagged: Option<bool>,
+    has_attachment: Option<bool>,
+    attachments: &[crate::model::EmailAttachment],
+    phrase_match: query::PhraseMatch,
+    phrases: &[(String, String)],
+) -> anyhow::Result<bool> {
     match phrase_match {
         query::PhraseMatch::All => {
             for (property, phrase) in phrases {
@@ -628,8 +668,16 @@ fn email_matches_phrases_with_addresses(
                 } else if boolean_property.is_some() {
                     boolean_match.is_some_and(|value| value == (phrase == "true"))
                 } else {
-                    email_matches_phrase_with_addresses(
-                        subject, body, from, to, cc, bcc, property, phrase,
+                    email_matches_phrase_with_attachments(
+                        subject,
+                        body,
+                        from,
+                        to,
+                        cc,
+                        bcc,
+                        attachments,
+                        property,
+                        phrase,
                     )?
                 };
                 if matched == negated {
@@ -711,8 +759,16 @@ fn email_matches_phrases_with_addresses(
                 let matched = if property.starts_with('$') {
                     boolean_match.is_some_and(|value| value == (phrase == "true"))
                 } else {
-                    email_matches_phrase_with_addresses(
-                        subject, body, from, to, cc, bcc, property, phrase,
+                    email_matches_phrase_with_attachments(
+                        subject,
+                        body,
+                        from,
+                        to,
+                        cc,
+                        bcc,
+                        attachments,
+                        property,
+                        phrase,
                     )?
                 };
                 if matched {
@@ -723,8 +779,16 @@ fn email_matches_phrases_with_addresses(
         }
         query::PhraseMatch::None => {
             for (property, phrase) in phrases {
-                if email_matches_phrase_with_addresses(
-                    subject, body, from, to, cc, bcc, property, phrase,
+                if email_matches_phrase_with_attachments(
+                    subject,
+                    body,
+                    from,
+                    to,
+                    cc,
+                    bcc,
+                    attachments,
+                    property,
+                    phrase,
                 )? {
                     return Ok(false);
                 }
@@ -793,8 +857,16 @@ fn email_matches_phrases_with_addresses(
                             };
                             value.is_some_and(|value| value == (phrase == "true"))
                         } else {
-                            email_matches_phrase_with_addresses(
-                                subject, body, from, to, cc, bcc, property, phrase,
+                            email_matches_phrase_with_attachments(
+                                subject,
+                                body,
+                                from,
+                                to,
+                                cc,
+                                bcc,
+                                attachments,
+                                property,
+                                phrase,
                             )?
                         };
                         values.push(ExpressionValue::Boolean(if negated {
@@ -986,6 +1058,21 @@ fn email_matches_phrase_with_addresses(
     property: &str,
     phrase: &str,
 ) -> anyhow::Result<bool> {
+    email_matches_phrase_with_attachments(subject, body, from, to, cc, bcc, &[], property, phrase)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn email_matches_phrase_with_attachments(
+    subject: &str,
+    body: Option<&crate::model::EmailBody>,
+    from: &str,
+    to: &str,
+    cc: &str,
+    bcc: &str,
+    attachments: &[crate::model::EmailAttachment],
+    property: &str,
+    phrase: &str,
+) -> anyhow::Result<bool> {
     if matches!(property, "from" | "to" | "cc" | "bcc") {
         let value = match property {
             "from" => from,
@@ -999,6 +1086,11 @@ fn email_matches_phrase_with_addresses(
         return Ok([from, to, cc, bcc]
             .into_iter()
             .any(|value| query::subject_has_phrase(value, phrase)));
+    }
+    if property == "attachment" {
+        return Ok(attachments
+            .iter()
+            .any(|attachment| query::subject_has_phrase(&attachment.name, phrase)));
     }
     if matches!(property, "subject" | "text") && query::subject_has_phrase(subject, phrase) {
         return Ok(true);
@@ -1621,6 +1713,62 @@ mod tests {
             Some(true),
             Some(false),
             Some(false),
+            kind,
+            &terms,
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn attachment_name_phrase_matches_only_attachment_filenames() {
+        let (kind, terms) =
+            query::phrases_for_postfilter("attachment:\"annual report.pdf\"").unwrap();
+        let attachments = [crate::model::EmailAttachment {
+            blob_id: "blob-1".to_owned(),
+            part_id: None,
+            name: "Annual Report.pdf".to_owned(),
+            content_type: "application/pdf".to_owned(),
+            size: 123,
+            content_id: None,
+            content_location: None,
+            inline: false,
+        }];
+        assert!(email_matches_phrases_with_addresses_and_attachments(
+            "Unrelated subject",
+            None,
+            "",
+            "",
+            "",
+            "",
+            None,
+            None,
+            123,
+            1,
+            Some(false),
+            Some(false),
+            Some(true),
+            &attachments,
+            kind,
+            &terms,
+        )
+        .unwrap());
+        let mut wrong_filename = attachments.clone();
+        wrong_filename[0].name = "report annual.pdf".to_owned();
+        assert!(!email_matches_phrases_with_addresses_and_attachments(
+            "Unrelated subject",
+            None,
+            "",
+            "",
+            "",
+            "",
+            None,
+            None,
+            123,
+            1,
+            Some(false),
+            Some(false),
+            Some(true),
+            &wrong_filename,
             kind,
             &terms,
         )
