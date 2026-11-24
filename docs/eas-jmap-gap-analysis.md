@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `bea1387` (2026-11-24)
+## Reconciled status for source `main` at `a28032b` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -28,15 +28,11 @@ Current prioritized work:
    with explicit offsets normalize to their UTC calendar day before
    constructing the filter. Extend coverage only where the backend preserves
    EAS meaning.
-2. **Recurring calendar events.** The August 2026 probe used the wrong
-   property name. Stalwart 0.16.27 and 1.2.0 both accept and return the
-   singular JSCalendar `recurrenceRule`; this gateway now maps common EAS
-   daily, weekly, monthly, nth-weekday, and yearly recurrence patterns to it
-   and back. It rejects recurrence exceptions (`recurrenceOverrides`) because
-   EAS per-instance exception semantics are not implemented. The gateway also
-   preserves `FirstDayOfWeek` only where the negotiated EAS version supports
-   it, and rejects unsupported/non-representable patterns rather than
-   silently changing them. Production Stalwart does not need an upgrade.
+2. **Recurring series exceptions.** Common event and task recurrence rules
+   now map to Stalwart's singular JSCalendar `recurrenceRule`. Per-instance
+   exceptions (`recurrenceOverrides`) remain unsupported by the gateway, and
+   exception edits are rejected until their EAS patch semantics are mapped
+   and deployed Stalwart behavior is verified.
 3. **Real-client 16.1 certification and rollout.** Production remains pinned
    to a tagged 14.0 build. Forced-version protocol tests do not establish that
    iOS/Outlook negotiate or behave correctly against an advertised 16.1 build.
@@ -213,6 +209,21 @@ Image `sha256:69662846690fb009a6a8e918b384d55a8857c8a08677f10d3d0bf19192abb352`
 started at `2026-11-24T06:11:06Z` with restart count zero; mesh `/healthz`
 returned `ok` and `/readyz` returned `ready`. Production continues to
 advertise EAS 14.0; no client certification is claimed.
+
+Also completed (`a28032b`): **ActiveSync Task recurrence mapping**. Task
+Recurrence patterns now use the shared EAS↔JSCalendar conversion, including
+the recurrence series start and version-gated `FirstDayOfWeek`. Empty
+Recurrence clears a task series only for 16.0/16.1; unsupported shapes and
+non-empty JMAP recurrence overrides fail closed. Regression suite: 289 passed,
+73 ignored; clippy with warnings denied, formatting, and diff checks pass.
+Deployed as `deploy-2026-11-24-eas-task-recurrence-a28032b`; homelab commit
+`49fd351`. Image
+`sha256:3bd2f1874c2719c5b39f89fa058696be289087c26ac22650e114adda47b8a618`
+started at `2026-11-24T06:30:36Z`, restart count zero; mesh `/healthz` returned
+`ok` and `/readyz` returned `ready`. The code uses CalendarEvent with `@type:
+Task` and the same `recurrenceRule` property, but Task-specific backend create/
+get and real-client recurrence paths have not been verified. Production
+continues to advertise EAS 14.0.
 
 Also completed: **KQL property and qualifier compliance**. MS-KQL only recognizes a
 property restriction when the property, operator, and value are contiguous;
@@ -716,7 +727,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Sync: Calendar (read) | **Done** | `CalendarEvent/query`+`/get` (JSCalendar, draft-ietf-calext-jscalendarbis superseding RFC 8984) | Confirmed live against a real event; recurrence is now mapped where supported. |
 | Sync: Calendar (write: add/edit/delete) | **Done** (`deploy-2026-08-25t`; recurrence implementation pending deployment) | `CalendarEvent/set` | `save_calendar_event`/`destroy_calendar_event` handle lifecycle and supported recurrence rules. `start`/`duration` retain existing timezone conventions. Attendees, reminders, and per-instance recurrence exceptions remain out of scope. |
 | Sync: Calendar recurrence (RRULE) | **Done (`deploy-2026-11-24-eas-calendar-recurrence-bea1387`)** | Stalwart singular JSCalendar `recurrenceRule` | Common EAS daily, weekly, monthly, nth-weekday, and yearly rules map both ways. Fresh localhost-only Stalwart 0.16.27 and 1.2.0 probes verified singular-property create/get. The August probe tested plural `recurrenceRules`, which was the wrong Stalwart property. Per-instance exceptions remain unsupported. |
-| Sync: Tasks | **Done, two-way (`deploy-2026-08-26i`)** | `CalendarEvent` with `@type: "Task"` — confirmed live, NOT a separate JMAP object | Overturns the earlier "structurally unclear" verdict. Live-tested directly (2026-08-25): Stalwart accepts and round-trips `@type: "Task"` on `CalendarEvent` — `title`/`due`/`start`/`progress`/`percentComplete`/`priority`/`description` all confirmed by reading the object back, not just a clean create response. There's no separate Tasks-list capability or object; Tasks rides on the SAME Calendar storage as Events, distinguished only by `@type`, with no server-side query filter for it (`{"type"`/`"@type": "Task"}` both come back `unsupportedFilter`, checked live) — `tasks_in_calendar()` fetches the whole calendar and filters client-side. `GatewayCapabilities::tasks` was already `has(CALENDARS)` with a comment calling it "a placeholder, not a real signal" — that alias turns out to have been correct all along. Full Add/Change/Delete lifecycle live-verified over the REAL WBXML wire protocol (not just direct JMAP): FolderSync correctly advertises a "Tasks" folder (type 7); a throwaway task Add → Change (mark complete) → confirmed via direct JMAP read that `progress` actually became `"completed"` server-side → Delete over the wire → confirmed via direct JMAP that the id came back `notFound`. One real open gap: `write_task_command()`'s field order (Subject, Complete, DueDate, UtcDueDate) is NOT device-verified — unlike Calendar/Contacts/Email there's no reference implementation to check it against (this codebase's own `docs/PR187_ANALYSIS.md` says Tasks was never attempted in the z-push fork this project was ported from), and MS-ASCMD's `ItemProperties` group (fetched fresh from learn.microsoft.com) is an `xs:choice`, not an `xs:sequence`, so the wire spec itself doesn't mandate an order. Needs a live device Tasks sync (e.g. iOS Reminders via the EAS account) before trusting it, same standing caveat as the ConversationId redo. |
+| Sync: Tasks | **Done, two-way (`deploy-2026-08-26i`); recurrence mapping (`deploy-2026-11-24-eas-task-recurrence-a28032b`) | `CalendarEvent` with `@type: "Task"` — confirmed live, not a separate JMAP object | Existing Add/Change/Delete lifecycle is live-verified over WBXML. Common EAS recurrence patterns map through the shared JSCalendar `recurrenceRule` conversion; local regressions cover WBXML parse/write and JMAP Task-object conversion. Task-specific Stalwart create/get and real-client recurrence behavior remain unverified. Per-instance recurrence overrides are rejected. The Task field order still needs real-device verification. |
 | Sync: Notes | **Done, two-way** | Email-backed synthetic-message workaround (`src/jmap/notes.rs`) | The most structurally interesting piece of this whole gateway — see that file's module doc. Full Add/Change/Delete supported. |
 | FolderSync | **Done, incremental** | `Mailbox/get`, `AddressBook/get`, `Calendar/get` | Key 0 sends a full Adds snapshot; subsequent keys diff per-device collection fingerprints into Adds/Updates/Deletes. Unknown keys return Status 9. |
 | FolderCreate/Update/Delete | **Done** (`deploy-2026-11-22-eas-groupware-folders-094b478`) | `Mailbox/set`, `AddressBook/set`, and `Calendar/set` | Mail folders retain hierarchical parent support. User Contacts (`Type=14`) and Calendar (`Type=13`) folders create, rename, and delete JMAP collections with synthetic `ab_`/`cal_` EAS IDs; those collections remain root-level because JMAP has no parent hierarchy. Notes and Tasks remain derived collections without independent CRUD. Mocked HTTP regression covers create/rename/delete for both types and rejects invalid types. |

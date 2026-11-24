@@ -33,23 +33,23 @@ inferred.
 |---|---|---|---|---|---|
 | Timezone | 0x05 | All | ⛔ *(today)* / 🟡 | `start` is local time + a separate IANA `timeZone` property (or absent = UTC) | The gateway already does real IANA-timezone-aware UTC conversion for `start_utc`/`end_utc` (`local_to_utc_eas` in `jmap/client.rs`, DST-tested) — the *conversion logic* exists, it just never emits the MS-ASCAL `Timezone` element (a binary-encoded `TIME_ZONE_INFORMATION` struct, not a plain string) back to the device. |
 | AllDayEvent | 0x06 | All | ✅ | JSCalendar `showWithoutTime` | |
-| Attendees / Attendee / Email / Name | 0x07-0x0A | All | ⛔ *(today)* / 🟡 | JSCalendar `participants` (map of participant objects, each with `email`, `name`, `roles`, `participationStatus`) | Directly needed for MeetingResponse too (command matrix) — the same JSCalendar property backs both "who's invited" (this) and "did I accept" (MeetingResponse). |
-| Body / BodyTruncated | 0x0B-0x0C | 2.5 only (12.0+ uses AirSyncBase:Body, codepage 17) | ⛔ *(today)* / 🟡 | JSCalendar `description` | Event description/notes — not currently synced at all. |
-| BusyStatus | 0x0D | All | ✅ | JSCalendar `freeBusyStatus` (`free`/`busy`) — MS-ASCAL's richer `Free`/`Tentative`/`Busy`/`OutOfOffice`/`WorkingElsewhere` has no direct JSCalendar equivalent (JSCalendar's enum is binary) | Currently a static/passthrough value — not independently re-verified this pass whether it round-trips through JSCalendar's coarser enum correctly or is hardcoded. |
-| Categories / Category | 0x0E-0x0F | All | ⛔ | JSCalendar `categories` (map) | Same shape as the Notes categories workaround already solved (`jmap/notes.rs`'s `notecat-*` keyword slugification) — but JSCalendar has a real native `categories` property, so `CalendarEvent/set` wouldn't need Notes' keyword-slugging trick at all. Easier than it looks by analogy to Notes. |
+| Attendees / Attendee / Email / Name | 0x07-0x0A | All | ✅ two-way (`deploy-2026-08-26l`) | JSCalendar `participants` and `replyTo` | Each participant carries its email, name, role, optional flag, and participation status; organizer derives from role `owner`. |
+| Body / BodyTruncated | 0x0B-0x0C | 2.5 only (12.0+ uses AirSyncBase:Body, codepage 17) | ✅ description sync | JSCalendar `description` + `descriptionContentType` | AirSyncBase Body preferences select plain or HTML content; truncation is reported according to the requested preference. |
+| BusyStatus | 0x0D | All | ✅ versioned | JSCalendar `freeBusyStatus` | Maps free/tentative/busy/out-of-office; WorkingElsewhere is emitted only where the EAS version supports it. |
+| Categories / Category | 0x0E-0x0F | All | ✅ | JSCalendar `categories` | Values round-trip; clear and omission are distinguished on client edits. |
 | DtStamp | 0x11 | All | ✅ | `CalendarEvent`'s `updated` or the JMAP response's own timestamp | |
 | EndTime | 0x12 | All | ✅ | `start` + `duration`, or explicit `end` (jscalendarbis) | |
-| Exception / Exceptions / Deleted / ExceptionStartTime | 0x13-0x16 | All (ExceptionStartTime capped at 14.1, dropped 16.0+ with no listed replacement) | ⛔ *(today)* / 🟡 | JSCalendar `recurrenceOverrides` (a map keyed by the overridden instance's original start time, values are patch objects — `null` value = that instance is deleted) | Recurring-event exceptions ("this Tuesday's standup is cancelled," "move Thursday's meeting to 3pm") — structurally different shape (EAS: a flat list of exception objects; JSCalendar: a patch-map) so this is real translation work, not a field rename. |
+| Exception / Exceptions / Deleted / ExceptionStartTime | 0x13-0x16 | All (ExceptionStartTime capped at 14.1, dropped 16.0+ with no listed replacement) | ⛔ | JSCalendar `recurrenceOverrides` | EAS exception patch semantics are not yet mapped, and Stalwart override behavior has not been verified. Non-empty exception input is rejected instead of dropped. |
 | Location | 0x17 | 2.5-14.1 (16.0+ uses AirSyncBase:Location, codepage 17) | ✅ | JSCalendar `locations` (map; `locations["1"].name` for the simple case) | Gateway only emits the codepage-4 form — fine for the versions it advertises (`12.0,12.1,14.0` — all within the 2.5-14.1 window), but would need the AirSyncBase form too if 16.x is ever re-enabled. |
-| MeetingStatus | 0x18 | All | ⛔ | No direct single-field JSCalendar equivalent — inferred from participant roles/`replyTo` presence | MS-ASCAL's `MeetingStatus` (0=appointment, 1=meeting, 3=meeting received as attendee, 5/7=cancelled variants) doesn't map onto one JSCalendar property; would need to be derived from whether `participants` is populated and whose entry is "me." |
-| OrganizerEmail / OrganizerName | 0x19-0x1A | All | ⛔ *(today)* / 🟡 | JSCalendar `participants` entry with role `"owner"`, or a distinct top-level organizer concept in some JSCalendar drafts | Same participants-map mechanism as Attendees above — organizer is just a participant with a specific role, not a separate object. |
+| MeetingStatus | 0x18 | All | ✅ derived | Participant roles, authenticated user's status, and cancellation state | Emits appointment/meeting/received/cancelled states from the JSCalendar participants and event state. |
+| OrganizerEmail / OrganizerName | 0x19-0x1A | All | ✅ two-way | JSCalendar `participants` entry with role `owner` | Organizer is represented by the owner participant; attendee lists exclude the organizer. |
 | **Recurrence** (0x1B, container) with **Type** (0x1C), **Until** (0x1D), **Occurrences** (0x1E), **Interval** (0x1F), **DayOfWeek** (0x20), **DayOfMonth** (0x21), **WeekOfMonth** (0x22), **MonthOfYear** (0x23) | 0x1B-0x23 | All | ✅ Common rules implemented; exceptions unsupported | Stalwart singular JSCalendar `recurrenceRule` | Maps daily, weekly, monthly, nth-weekday, and yearly EAS rules to the server's singular `recurrenceRule`. August's plural `recurrenceRules` probe was the wrong property name; localhost-only Stalwart 0.16.27 and 1.2.0 create/get probes verified the singular property. Per-instance exceptions (`recurrenceOverrides`) and non-representable patterns are rejected. Implementation: `src/jmap/calendar_recurrence.rs`, EAS parser/writer, JMAP create/update and round-trip verification. |
-| Reminder | 0x24 | All | ⛔ *(today)* / 🟡 | JSCalendar `alerts` (map of alert objects with a `trigger` — typically an `OffsetTrigger` with a signed `ISO 8601` duration relative to `start`) | MS-ASCAL's `Reminder` is a single integer (minutes before start); JSCalendar's `alerts` supports multiple richer alerts — a lossy-in-one-direction mapping (many alerts → one reminder) if ever round-tripped both ways. |
+| Reminder | 0x24 | All | ✅ | JSCalendar `alerts` | Maps the representable default-relative alert to EAS minutes; unsupported multi-alert shapes fail closed. |
 | Sensitivity | 0x25 | All | ✅ | JSCalendar `privacy` (`public`/`private`/`secret`) | |
 | Subject | 0x26 | All | ✅ | JSCalendar `title` | |
 | StartTime | 0x27 | All | ✅ | JSCalendar `start` (+ `timeZone`) | |
 | UID | 0x28 | All | ✅ *(assumed — not independently re-verified this pass)* | JSCalendar `uid` | |
-| AttendeeStatus / AttendeeType | 0x29-0x2A | 12.0+ | ⛔ *(today)* / 🟡 | JSCalendar participant `participationStatus` / `roles` | Part of the same participants-map mechanism as Attendees. |
+| AttendeeStatus / AttendeeType | 0x29-0x2A | 12.0+ | ✅ | JSCalendar participant `participationStatus` / `roles` | Accepted, declined, tentative, needs-action, and optional attendee status/type map to EAS values. |
 | DisallowNewTimeProposal / ResponseRequested / AppointmentReplyTime / ResponseType | 0x33-0x36 | 14.0+ | ⛔ | ❓ unsurveyed | Meeting-negotiation metadata (whether the organizer allows counter-proposals, whether a response was requested/given and when). No obvious single JSCalendar property surveyed this pass. |
 | CalendarType / IsLeapMonth | 0x37-0x38 | 14.0+ | ⛔ | N/A — non-Gregorian calendar systems | Out of scope; JSCalendar is Gregorian-only in its core spec. |
 | FirstDayOfWeek | 0x39 | 14.1+ | ✅ Implemented when negotiated version supports it | JSCalendar `recurrenceRule.firstDayOfWeek` | Parsed/written for 14.1, 16.0, and 16.1; omitted from 14.0. A server-side non-Monday value that cannot be represented to an older client is rejected rather than silently changed. |
@@ -152,9 +152,11 @@ before being trusted, same standing caveat as the ConversationId redo.
 The codepage's recurrence-field shape (`Type`/`Start`/`Until`/`Occurrences`/
 `Interval`/`DayOfMonth`/`DayOfWeek`/`WeekOfMonth`/`MonthOfYear`/`CalendarType`/
 `IsLeapMonth`/`FirstDayOfWeek`, tokens 0x10-0x26) is parsed and validated in
-`eas.rs`. Calendar recurrence support is implemented as described in the row
-above; Task recurrence remains unsupported because task-specific recurrence
-semantics are not mapped.
+`eas.rs`. Task recurrence rules map through the shared JSCalendar
+`recurrenceRule` conversion (`deploy-2026-11-24-eas-task-recurrence-a28032b`).
+Local tests cover WBXML parse/write and JMAP Task-object conversion; a
+Task-specific Stalwart create/get and a real-client sync remain unverified.
+Per-instance recurrence exceptions and non-Gregorian patterns are unsupported.
 
 ## Notes (MS-ASNOTE, WBXML codepage 23)
 
