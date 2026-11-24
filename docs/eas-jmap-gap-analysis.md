@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `858f5cd` (2026-11-24)
+## Reconciled status for source `main` at `05bbe4b` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -19,22 +19,32 @@ Current prioritized work:
    Positive phrases can be combined with KQL AND terms. Multiple phrases on
    distinct properties (for example subject plus body) are exact-filtered
    together; candidate filtering preserves the other restrictions, result
-   order, totals, and range paging. A single positive `body:"multiword phrase"`
+   order, totals, and range paging. An OR expression made only of positive
+   phrase terms is also exact-filtered across its alternatives. Mixed
+   phrase/non-phrase OR branches, mixed AND/OR precedence, and NOT forms remain
+   rejected because the candidate filter could change their Boolean meaning.
+   A single positive `body:"multiword phrase"`
    or `text:"multiword phrase"` also exact-filters JMAP's indexed candidates;
    body and text scans fetch message bodies and reject a truncated body rather
    than return an incomplete match. Implicitly OR-grouped restrictions on a
-   phrase property and phrases in OR/NOT expressions remain rejected because
-   property grouping or candidate filtering there could change Boolean meaning. Phrase matching
+   phrase property and mixed or NOT phrase expressions remain rejected because
+   property grouping or candidate filtering could change Boolean meaning. Phrase matching
    is case-insensitive and requires adjacent words in order. Regression tests
    cover plain, HTML, and RTF bodies, subject/body conjunctions, truncation, and
    unsupported Boolean forms. Full
    suite: 330 passed, 73 ignored; strict Clippy, formatting, and diff checks
    passed. Deployed as
+   `deploy-2026-11-24-eas-kql-phrase-or-05bbe4b`; homelab commit
+   `4de6cf1`, image
+   `sha256:9c7aada5cdb22c4b5de0f846b1273184ab5995be3a26ad9d83e588fd816b64b1`,
+   started `2026-11-24T11:40:44Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
+   The prior AND-only multi-property phrase release was deployed as
    `deploy-2026-11-24-eas-kql-multiple-phrases-858f5cd`; homelab commit
    `0e98f88`, image
    `sha256:5695256946e4ff707d107015dfaf1688be25c7202d127723162c89ae456d736f`,
-   started `2026-11-24T11:33:47Z`, restart count zero, `/healthz` `ok`, and
-   `/readyz` `ready`.
+   started `2026-11-24T11:33:47Z`, restart count zero, and both health and
+   readiness checks passed.
    The earlier single-property body/text phrase release was deployed as
    `deploy-2026-11-24-eas-kql-body-text-phrases-06b7292`; homelab commit
    `ee54715`, image
