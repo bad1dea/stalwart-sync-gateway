@@ -804,7 +804,7 @@ fn valid_proximity_rpn(expression: &[(String, String)]) -> bool {
         if operator == "$proximity-term" {
             stack.push(Kind::Term);
         } else if operator.starts_with("$op$near:") || operator.starts_with("$op$onear:") {
-            if stack.pop() != Some(Kind::Term) {
+            if !matches!(stack.pop(), Some(Kind::Term | Kind::Chain)) {
                 return false;
             }
             if !matches!(stack.pop(), Some(Kind::Term | Kind::Chain)) {
@@ -2812,8 +2812,23 @@ mod tests {
                 ],
             ))
         );
-        assert!(phrases_for_postfilter("alpha NEAR (beta NEAR gamma)").is_none());
-        assert!(to_filter("alpha NEAR (beta NEAR gamma)").is_err());
+        assert_eq!(
+            phrases_for_postfilter("alpha NEAR (beta NEAR gamma)"),
+            Some((
+                PhraseMatch::Expression,
+                vec![
+                    ("$proximity-term".to_owned(), "alpha".to_owned()),
+                    ("$proximity-term".to_owned(), "beta".to_owned()),
+                    ("$proximity-term".to_owned(), "gamma".to_owned()),
+                    ("$op$near:8".to_owned(), String::new()),
+                    ("$op$near:8".to_owned(), String::new()),
+                ],
+            ))
+        );
+        assert_eq!(
+            to_filter("alpha NEAR (beta NEAR gamma)").unwrap(),
+            json!({})
+        );
     }
 
     #[test]

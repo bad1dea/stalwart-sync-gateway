@@ -292,8 +292,10 @@ Current prioritized work:
    mailbox and exact-filter token positions locally. The KQL default distance
    of eight or an explicit distance is supported; ordered searches preserve
    operand order. Flat chains of proximity operators preserve MS-KQL's
-   left-to-right associativity; nested proximity groups on the right are
-   rejected because they are not evaluated as a free-text operand. Proximity
+   left-to-right associativity. Parenthesized proximity expressions can appear
+   on either side of another proximity operator and are evaluated recursively
+   against token spans in each indexed text field. Regression coverage checks
+   right-nested ordered matching and rejects reversed span order. Proximity
    matching also evaluates attachment filenames;
    attachment payload text remains unavailable for local proximity checks.
    MS-KQL defines `attachment:` as matching attachment file names ([Exchange
@@ -307,8 +309,8 @@ Current prioritized work:
    attachment token positions, so it cannot by itself implement exact NEAR or
    ONEAR distance checks. Stalwart documents extraction for text/plain,
    text/html, common Office/OpenDocument formats, EPUB, RTF, and PDF, with
-   configurable size/decompression limits and partial-index cases ([Stalwart attachment text
-   extraction](https://www.stalw.art/docs/storage/text-extraction/)). A
+   configurable size/decompression limits and partial-index cases ([Stalwart
+   attachment text extraction](https://www.stalw.art/docs/storage/text-extraction/)). A
    correct gateway feature needs an exact attachment-content source or
    extractor and must account for server indexing configuration and
    truncation; no such local content path is implemented yet. Boolean
@@ -322,9 +324,9 @@ Current prioritized work:
    `attachment:*` matches any non-empty attachment list) per
    [MS-KQL property restrictions](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-kql/1b4eb34a-0e20-4aca-b38e-41f531a747ff).
    Unordered NEAR also accepts both operands matching one
-   indexed token, as MS-KQL specifies. Regression suite: 359 passed,
-   73 ignored; strict Clippy, formatting, and diff checks passed. Neither
-   source change is deployed or runtime-verified.
+   indexed token, as MS-KQL specifies. Regression suite: 361 passed,
+   73 ignored; strict Clippy, formatting, and diff checks passed. The nested
+   proximity change is not deployed or runtime-verified.
    Phrase matching is case-insensitive and requires adjacent
    words in order. Regression tests cover plain, HTML, and RTF bodies,
    subject/body conjunctions, truncation, and unsupported Boolean forms. Full

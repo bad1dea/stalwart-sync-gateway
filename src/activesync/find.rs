@@ -796,11 +796,6 @@ fn email_matches_phrases_with_addresses_and_attachments(
             Ok(true)
         }
         query::PhraseMatch::Expression => {
-            enum ExpressionValue {
-                Boolean(bool),
-                ProximityTerm(String),
-                ProximityChain(ProximityChain),
-            }
             let mut values = Vec::new();
             for (property, phrase) in phrases {
                 match property.as_str() {
@@ -905,51 +900,23 @@ fn email_matches_phrases_with_addresses_and_attachments(
                 }
                 if let Some(operator) = property.strip_prefix("$op$near:") {
                     let max_words = operator.parse::<usize>()?;
-                    let ExpressionValue::ProximityTerm(right) = values
+                    let right = values
                         .pop()
-                        .ok_or_else(|| anyhow::anyhow!("invalid proximity expression"))?
-                    else {
-                        anyhow::bail!("invalid proximity expression");
-                    };
+                        .ok_or_else(|| anyhow::anyhow!("invalid proximity expression"))?;
                     let left = values
                         .pop()
                         .ok_or_else(|| anyhow::anyhow!("invalid proximity expression"))?;
-                    let chain = match left {
-                        ExpressionValue::ProximityTerm(left) => ProximityChain {
-                            operands: vec![left, right],
-                            operators: vec![(false, max_words)],
-                        },
-                        ExpressionValue::ProximityChain(mut chain) => {
-                            chain.operators.push((false, max_words));
-                            chain.operands.push(right);
-                            chain
-                        }
-                        _ => anyhow::bail!("invalid proximity expression"),
-                    };
+                    let chain = proximity_chain_from_values(left, right, false, max_words)?;
                     values.push(ExpressionValue::ProximityChain(chain));
                 } else if let Some(operator) = property.strip_prefix("$op$onear:") {
                     let max_words = operator.parse::<usize>()?;
-                    let ExpressionValue::ProximityTerm(right) = values
+                    let right = values
                         .pop()
-                        .ok_or_else(|| anyhow::anyhow!("invalid proximity expression"))?
-                    else {
-                        anyhow::bail!("invalid proximity expression");
-                    };
+                        .ok_or_else(|| anyhow::anyhow!("invalid proximity expression"))?;
                     let left = values
                         .pop()
                         .ok_or_else(|| anyhow::anyhow!("invalid proximity expression"))?;
-                    let chain = match left {
-                        ExpressionValue::ProximityTerm(left) => ProximityChain {
-                            operands: vec![left, right],
-                            operators: vec![(true, max_words)],
-                        },
-                        ExpressionValue::ProximityChain(mut chain) => {
-                            chain.operators.push((true, max_words));
-                            chain.operands.push(right);
-                            chain
-                        }
-                        _ => anyhow::bail!("invalid proximity expression"),
-                    };
+                    let chain = proximity_chain_from_values(left, right, true, max_words)?;
                     values.push(ExpressionValue::ProximityChain(chain));
                 }
             }
@@ -998,10 +965,41 @@ fn email_matches_phrases_with_addresses_and_attachments(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+enum ExpressionValue {
+    Boolean(bool),
+    ProximityTerm(String),
+    ProximityChain(ProximityChain),
+}
+
+enum ProximityOperand {
+    Term(String),
+    Chain(Box<ProximityChain>),
+}
+
 struct ProximityChain {
-    operands: Vec<String>,
-    operators: Vec<(bool, usize)>,
+    left: ProximityOperand,
+    right: ProximityOperand,
+    ordered: bool,
+    max_words: usize,
+}
+
+fn proximity_chain_from_values(
+    left: ExpressionValue,
+    right: ExpressionValue,
+    ordered: bool,
+    max_words: usize,
+) -> anyhow::Result<ProximityChain> {
+    let into_operand = |value| match value {
+        ExpressionValue::ProximityTerm(term) => Ok(ProximityOperand::Term(term)),
+        ExpressionValue::ProximityChain(chain) => Ok(ProximityOperand::Chain(Box::new(chain))),
+        _ => anyhow::bail!("invalid proximity expression"),
+    };
+    Ok(ProximityChain {
+        left: into_operand(left)?,
+        right: into_operand(right)?,
+        ordered,
+        max_words,
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1033,8 +1031,10 @@ fn proximity_matches_email(
         bcc,
         attachments,
         &ProximityChain {
-            operands: vec![operands[0].1.clone(), operands[1].1.clone()],
-            operators: vec![(ordered, max_words)],
+            left: ProximityOperand::Term(operands[0].1.clone()),
+            right: ProximityOperand::Term(operands[1].1.clone()),
+            ordered,
+            max_words,
         },
     )
 }
@@ -1050,18 +1050,6 @@ fn proximity_chain_matches_email(
     attachments: &[crate::model::EmailAttachment],
     chain: &ProximityChain,
 ) -> anyhow::Result<bool> {
-    anyhow::ensure!(
-        chain.operands.len() >= 2 && chain.operators.len() + 1 == chain.operands.len(),
-        "invalid proximity chain"
-    );
-    let operands = chain
-        .operands
-        .iter()
-        .map(|operand| proximity_words(operand))
-        .collect::<Vec<_>>();
-    if operands.iter().any(Vec::is_empty) {
-        return Ok(false);
-    }
     let mut fields = vec![
         subject.to_owned(),
         from.to_owned(),
@@ -1085,66 +1073,72 @@ fn proximity_chain_matches_email(
     fields.extend(attachments.iter().map(|attachment| attachment.name.clone()));
     for field in fields {
         let words = proximity_words(&field);
-        let mut spans = find_term_positions(&words, &operands[0])
-            .into_iter()
-            .map(|start| ProximitySpan {
-                start,
-                end: start + operands[0].len(),
-            })
-            .collect::<std::collections::BTreeSet<_>>();
-        for (index, (ordered, max_words)) in chain.operators.iter().copied().enumerate() {
-            if spans.is_empty() {
-                break;
-            }
-            let right_positions = find_term_positions(&words, &operands[index + 1]);
-            let right_length = operands[index + 1].len();
-            let mut combined = std::collections::BTreeSet::new();
-            for left in &spans {
-                let after = right_positions.partition_point(|start| *start < left.end);
-                for right_start in &right_positions[after..] {
-                    let gap = right_start.saturating_sub(left.end);
-                    if gap > max_words {
-                        break;
-                    }
-                    insert_proximity_span(&mut combined, *left, *right_start, right_length)?;
-                }
-                if !ordered {
-                    let lower = left
-                        .start
-                        .saturating_sub(right_length.saturating_add(max_words));
-                    let before_start = right_positions.partition_point(|start| *start < lower);
-                    let before_end = right_positions.partition_point(|start| *start < left.end);
-                    for right_start in &right_positions[before_start..before_end] {
-                        let right_end = right_start.saturating_add(right_length);
-                        if right_end > left.start || left.start - right_end <= max_words {
-                            insert_proximity_span(
-                                &mut combined,
-                                *left,
-                                *right_start,
-                                right_length,
-                            )?;
-                        }
-                    }
-                }
-            }
-            spans = combined;
-        }
-        if !spans.is_empty() {
+        if !evaluate_proximity_chain(&words, chain)?.is_empty() {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
+fn evaluate_proximity_operand(
+    words: &[String],
+    operand: &ProximityOperand,
+) -> anyhow::Result<std::collections::BTreeSet<ProximitySpan>> {
+    match operand {
+        ProximityOperand::Term(term) => {
+            let term = proximity_words(term);
+            if term.is_empty() {
+                return Ok(std::collections::BTreeSet::new());
+            }
+            Ok(find_term_positions(words, &term)
+                .into_iter()
+                .map(|start| ProximitySpan {
+                    start,
+                    end: start + term.len(),
+                })
+                .collect())
+        }
+        ProximityOperand::Chain(chain) => evaluate_proximity_chain(words, chain),
+    }
+}
+
+fn evaluate_proximity_chain(
+    words: &[String],
+    chain: &ProximityChain,
+) -> anyhow::Result<std::collections::BTreeSet<ProximitySpan>> {
+    let left_spans = evaluate_proximity_operand(words, &chain.left)?;
+    let right_spans = evaluate_proximity_operand(words, &chain.right)?;
+    let mut combined = std::collections::BTreeSet::new();
+    let mut comparisons = 0usize;
+    for left in &left_spans {
+        for right in &right_spans {
+            comparisons += 1;
+            anyhow::ensure!(
+                comparisons <= 1_000_000,
+                "proximity expression requires too many span comparisons"
+            );
+            let gap = left
+                .start
+                .saturating_sub(right.end)
+                .max(right.start.saturating_sub(left.end));
+            if gap <= chain.max_words
+                && (!chain.ordered || (left.end <= right.start && gap <= chain.max_words))
+            {
+                insert_proximity_span(&mut combined, *left, *right)?;
+            }
+        }
+    }
+    Ok(combined)
+}
+
 fn insert_proximity_span(
     spans: &mut std::collections::BTreeSet<ProximitySpan>,
     left: ProximitySpan,
-    right_start: usize,
-    right_length: usize,
+    right: ProximitySpan,
 ) -> anyhow::Result<()> {
     spans.insert(ProximitySpan {
-        start: left.start.min(right_start),
-        end: left.end.max(right_start.saturating_add(right_length)),
+        start: left.start.min(right.start),
+        end: left.end.max(right.end),
     });
     anyhow::ensure!(
         spans.len() <= 100_000,
@@ -1902,6 +1896,20 @@ mod tests {
     }
 
     #[test]
+    fn right_nested_proximity_groups_match_as_an_operand() {
+        let (kind, terms) =
+            query::phrases_for_postfilter("alpha ONEAR(0) (beta ONEAR(0) gamma)").unwrap();
+        assert!(
+            email_matches_phrases("alpha beta gamma", None, None, None, None, kind, &terms,)
+                .unwrap()
+        );
+        assert!(
+            !email_matches_phrases("beta gamma alpha", None, None, None, None, kind, &terms,)
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn attachment_name_phrase_matches_only_attachment_filenames() {
         let (kind, terms) =
             query::phrases_for_postfilter("attachment:\"annual report.pdf\"").unwrap();
@@ -1994,5 +2002,13 @@ mod tests {
             &terms,
         )
         .unwrap());
+    }
+
+    #[test]
+    fn proximity_terms_without_indexable_words_do_not_match_or_panic() {
+        let (kind, terms) = query::phrases_for_postfilter("\"!!!\" NEAR(2) alpha").unwrap();
+        assert!(
+            !email_matches_phrases("!!! alpha", None, None, None, None, kind, &terms,).unwrap()
+        );
     }
 }
