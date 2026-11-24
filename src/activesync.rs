@@ -10125,6 +10125,7 @@ mod tests {
             smime: None,
             attachments: vec![EmailAttachment {
                 blob_id: "blob-1".to_owned(),
+                part_id: None,
                 name: "file.txt".to_owned(),
                 content_type: "text/plain".to_owned(),
                 size: 10,
@@ -10407,6 +10408,7 @@ mod tests {
             smime: None,
             attachments: vec![EmailAttachment {
                 blob_id: "blob-1".to_owned(),
+                part_id: None,
                 name: "invoice.pdf".to_owned(),
                 content_type: "application/pdf".to_owned(),
                 size: 1234,

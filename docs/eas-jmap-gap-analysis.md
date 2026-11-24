@@ -14,7 +14,11 @@ Current prioritized work:
 
 1. **BodyPartPreference / BodyPart support.** The current gateway handles
    `BodyPreference` for whole-message bodies but has no parser or response path
-   for `AirSyncBase:BodyPartPreference` / `AirSyncBase:BodyPart`. Microsoft
+   for `AirSyncBase:BodyPartPreference` / `AirSyncBase:BodyPart`. JMAP MIME
+   attachment records now retain the corresponding `partId` from
+   `Email.bodyStructure` by matching the shared `blobId` (`0609b07` + working
+   change); this mapping has a regression test. Preference parsing and EAS
+   response emission are still open. Microsoft
    defines these for 14.1, 16.0, and 16.1. `BodyPartPreference` uses the same
    Type, TruncationSize, AllOrNone, and Preview shape as `BodyPreference`;
    `BodyPart` returns Status, Type, EstimatedDataSize, optional Truncated,

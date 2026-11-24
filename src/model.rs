@@ -234,6 +234,9 @@ pub struct DraftAttachment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmailAttachment {
     pub blob_id: String,
+    /// JMAP MIME part identifier from Email.bodyStructure, when present.
+    /// EAS BodyPart requests address individual MIME parts by this identifier.
+    pub part_id: Option<String>,
     pub name: String,
     pub content_type: String,
     pub size: u64,

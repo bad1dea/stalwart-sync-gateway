@@ -7173,6 +7173,10 @@ struct EmailObject {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MimePart {
+    #[serde(default)]
+    part_id: Option<String>,
+    #[serde(default)]
+    blob_id: Option<String>,
     #[serde(default, rename = "type")]
     content_type: String,
     #[serde(default)]
@@ -7180,6 +7184,15 @@ struct MimePart {
 }
 
 impl MimePart {
+    fn part_ids_by_blob(&self, parts: &mut BTreeMap<String, String>) {
+        if let (Some(blob_id), Some(part_id)) = (&self.blob_id, &self.part_id) {
+            parts.insert(blob_id.clone(), part_id.clone());
+        }
+        for part in self.sub_parts.as_deref().unwrap_or_default() {
+            part.part_ids_by_blob(parts);
+        }
+    }
+
     fn smime_kind(&self) -> Option<crate::model::SmimeKind> {
         if ["application/pkcs7-mime", "application/x-pkcs7-mime"]
             .iter()
@@ -7252,10 +7265,15 @@ struct EmailBodyValue {
 impl From<EmailObject> for Email {
     fn from(mut value: EmailObject) -> Self {
         let body = select_body(&mut value);
+        let mut part_ids = BTreeMap::new();
+        if let Some(body_structure) = &value.body_structure {
+            body_structure.part_ids_by_blob(&mut part_ids);
+        }
         let attachments = value
             .attachments
             .into_iter()
             .map(|attachment| crate::model::EmailAttachment {
+                part_id: part_ids.get(&attachment.blob_id).cloned(),
                 blob_id: attachment.blob_id,
                 name: attachment.name.unwrap_or_else(|| "attachment".to_owned()),
                 content_type: attachment
@@ -10302,6 +10320,22 @@ mod tests {
 #[cfg(test)]
 mod smime_tests {
     use super::*;
+
+    #[test]
+    fn email_attachments_keep_their_body_structure_part_ids() {
+        let email: Email = serde_json::from_value::<EmailObject>(serde_json::json!({
+            "id":"m",
+            "attachments":[{"blobId":"blob-a","name":"a.txt"}],
+            "bodyStructure":{"type":"multipart/mixed","subParts":[
+                {"type":"text/plain","partId":"1","blobId":"body-blob"},
+                {"type":"application/octet-stream","partId":"2","blobId":"blob-a"}
+            ]}
+        }))
+        .unwrap()
+        .into();
+        assert_eq!(email.attachments[0].part_id.as_deref(), Some("2"));
+    }
+
     #[test]
     fn mime_structure_classifies_only_whole_smime_messages() {
         use crate::model::SmimeKind::{MultipartSigned, Opaque};
