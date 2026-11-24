@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `6325c68` (2026-11-23)
+## Reconciled status for source `main` at `b981802` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -16,8 +16,10 @@ Current prioritized work:
    Stalwart 0.16.19 indexes incorrectly, including multiword exact phrases.
    A fresh 0.16.27 probe confirms quoted `"alpha beta"` and `"beta alpha"`
    both match a message containing `alpha beta`; exact phrase semantics are
-   still unavailable from the native index. Extend coverage only where the
-   backend preserves EAS meaning.
+   still unavailable from the native index. KQL `importance:low|normal|high`
+   now maps to the standard `Importance` header filter; invalid values and
+   ordered/equality comparisons are rejected because JMAP header matching is
+   text based. Extend coverage only where the backend preserves EAS meaning.
 2. **Recurring calendar events.** The old 0.16.19 probe found JMAP recurrence
    unsupported. A direct create/read probe against the available Stalwart
    0.16.27 sandbox still rejected `recurrenceRules`; this remains blocked by the
@@ -32,6 +34,20 @@ Current prioritized work:
    ValidateCert, MeetingResponse, and ItemOperations fetches for mail, contacts,
    calendars, tasks, notes, and attachment blobs are implemented. Enterprise
    IRM remains out of scope for the personal-account gateway.
+
+Also completed (`b981802`): **KQL message importance restriction**. Find now
+maps `importance:low`, `importance:normal`/`medium`, and `importance:high` to
+JMAP's standard `Importance` header filter. Unknown enum values and ordered or
+equality comparisons remain rejected because the JMAP header matcher is
+text-based. Regression tests check all three levels, case normalization,
+`medium` normalization, and invalid/unsupported forms. Full suite: 276 passed,
+73 ignored; clippy with warnings denied, formatting, and diff checks pass.
+Deployed as `deploy-2026-11-23-eas-kql-importance-b981802`; homelab commit
+`5dbd061`. Compose built image
+`sha256:e2db7af99256433965e60e05d732d8b963b50222b14706d82dcd21e585f018a7`.
+The replacement started at `2026-11-24T05:03:33Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
+continues to advertise EAS 14.0.
 
 Audit corrections from the current source: mail Sync Add creates idempotent
 drafts and non-draft Email items with attachment/MIME support;
