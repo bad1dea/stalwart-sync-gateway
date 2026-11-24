@@ -1316,6 +1316,8 @@ pub struct TaskFields {
     pub body: Option<String>,
     pub body_type: Option<u8>,
     pub unsupported_body: bool,
+    pub start_date: Option<String>,
+    pub utc_start_date: Option<String>,
     pub due_date: Option<String>,
     pub utc_due_date: Option<String>,
     pub complete: Option<bool>,
@@ -2979,6 +2981,10 @@ fn extract_task_fields(nodes: &[Node]) -> TaskFields {
                     fields.due_date = Some(text.clone());
                 } else if same_token(top, tasks::UTC_DUE_DATE) {
                     fields.utc_due_date = Some(text.clone());
+                } else if same_token(top, tasks::START_DATE) {
+                    fields.start_date = Some(text.clone());
+                } else if same_token(top, tasks::UTC_START_DATE) {
+                    fields.utc_start_date = Some(text.clone());
                 } else if same_token(top, tasks::COMPLETE) {
                     fields.complete = Some(text != "0");
                 } else if same_token(top, tasks::DATE_COMPLETED) {
@@ -3438,6 +3444,8 @@ mod tests {
         builder.leaf(tasks::SUBJECT, "Renew passport");
         builder.leaf(tasks::COMPLETE, "0");
         builder.leaf(tasks::DUE_DATE, "20260905T090000Z");
+        builder.leaf(tasks::START_DATE, "20260904T090000Z");
+        builder.leaf(tasks::UTC_START_DATE, "20260904T090000Z");
         builder.leaf(tasks::DATE_COMPLETED, "2026-09-04T15:30:00.000Z");
         builder.end();
         builder.end();
@@ -3457,6 +3465,11 @@ mod tests {
         assert_eq!(command.task.subject.as_deref(), Some("Renew passport"));
         assert_eq!(command.task.complete, Some(false));
         assert_eq!(command.task.due_date.as_deref(), Some("20260905T090000Z"));
+        assert_eq!(command.task.start_date.as_deref(), Some("20260904T090000Z"));
+        assert_eq!(
+            command.task.utc_start_date.as_deref(),
+            Some("20260904T090000Z")
+        );
         assert_eq!(
             command.task.date_completed.as_deref(),
             Some("2026-09-04T15:30:00.000Z")

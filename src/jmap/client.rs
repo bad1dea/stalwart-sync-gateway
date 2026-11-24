@@ -4459,6 +4459,7 @@ impl JmapClient {
                     "timeZone",
                     "progress",
                     "progressUpdated",
+                    "start",
                 ]),
                 limit,
             )
@@ -4535,7 +4536,11 @@ impl JmapClient {
             );
         }
         let mut update_state = None;
-        if fields.due_date.is_some() || fields.utc_due_date.is_some() {
+        if fields.due_date.is_some()
+            || fields.utc_due_date.is_some()
+            || fields.start_date.is_some()
+            || fields.utc_start_date.is_some()
+        {
             let parse = |value: &str| -> anyhow::Result<String> {
                 eas_compact_to_local_iso(value)
                     .or_else(|| {
@@ -4544,10 +4549,8 @@ impl JmapClient {
                             .filter(|date| date.timestamp_subsec_nanos() == 0)
                             .map(|date| date.naive_utc().format("%Y-%m-%dT%H:%M:%S").to_string())
                     })
-                    .context("invalid task due date")
+                    .context("invalid task date")
             };
-            let local = fields.due_date.as_deref().map(parse).transpose()?;
-            let utc = fields.utc_due_date.as_deref().map(parse).transpose()?;
             let timezone = if let Some(id) = id {
                 let response: JmapResponse<serde_json::Value> = self
                     .api_call(
@@ -4587,27 +4590,52 @@ impl JmapClient {
             } else {
                 None
             };
-            let due = if let Some(timezone) = timezone.as_deref() {
-                let utc = utc
-                    .as_deref()
-                    .context("task UTC due date required for a time-zoned task")?;
-                let compact = chrono::NaiveDateTime::parse_from_str(utc, "%Y-%m-%dT%H:%M:%S")?
-                    .format("%Y%m%dT%H%M%SZ")
-                    .to_string();
-                eas_to_calendar_local(&compact, Some(timezone))
-                    .context("task due date cannot be represented in its time zone")?
-                    .format("%Y-%m-%dT%H:%M:%S")
-                    .to_string()
-            } else {
-                if let (Some(local), Some(utc)) = (&local, &utc) {
-                    anyhow::ensure!(
-                        local == utc,
-                        "task local and UTC dates require a known time zone"
-                    );
+            let write_date = |local: Option<String>,
+                              utc: Option<String>,
+                              label: &str|
+             -> anyhow::Result<Option<String>> {
+                if local.is_none() && utc.is_none() {
+                    return Ok(None);
                 }
-                utc.or(local).context("task due date missing")?
+                let value = if let Some(timezone) = timezone.as_deref() {
+                    let utc = utc.as_deref().with_context(|| {
+                        format!("task UTC {label} required for a time-zoned task")
+                    })?;
+                    let compact = chrono::NaiveDateTime::parse_from_str(utc, "%Y-%m-%dT%H:%M:%S")?
+                        .format("%Y%m%dT%H%M%SZ")
+                        .to_string();
+                    eas_to_calendar_local(&compact, Some(timezone))
+                        .with_context(|| {
+                            format!("task {label} cannot be represented in its time zone")
+                        })?
+                        .format("%Y-%m-%dT%H:%M:%S")
+                        .to_string()
+                } else {
+                    if let (Some(local), Some(utc)) = (&local, &utc) {
+                        anyhow::ensure!(
+                            local == utc,
+                            "task local and UTC dates require a known time zone"
+                        );
+                    }
+                    utc.or(local)
+                        .with_context(|| format!("task {label} missing"))?
+                };
+                Ok(Some(value))
             };
-            task.insert("due".to_owned(), serde_json::Value::String(due));
+            if let Some(start) = write_date(
+                fields.start_date.as_deref().map(parse).transpose()?,
+                fields.utc_start_date.as_deref().map(parse).transpose()?,
+                "start date",
+            )? {
+                task.insert("start".to_owned(), serde_json::Value::String(start));
+            }
+            if let Some(due) = write_date(
+                fields.due_date.as_deref().map(parse).transpose()?,
+                fields.utc_due_date.as_deref().map(parse).transpose()?,
+                "due date",
+            )? {
+                task.insert("due".to_owned(), serde_json::Value::String(due));
+            }
         }
         if let Some(complete) = fields.complete {
             task.insert(
@@ -7475,6 +7503,8 @@ struct TaskObject {
     #[serde(default, rename = "descriptionContentType")]
     description_content_type: Option<String>,
     #[serde(default)]
+    start: Option<String>,
+    #[serde(default)]
     due: Option<String>,
     #[serde(default, rename = "timeZone")]
     time_zone: Option<String>,
@@ -7509,6 +7539,17 @@ impl From<TaskObject> for Task {
                         .and_then(utc_iso_to_eas_datetime)
                 })
                 .flatten(),
+            start: value.start.as_deref().and_then(|start| {
+                if value
+                    .time_zone
+                    .as_deref()
+                    .is_some_and(|zone| zone.parse::<chrono_tz::Tz>().is_err())
+                {
+                    return None;
+                }
+                local_to_utc_eas(start, value.time_zone.as_deref())
+            }),
+            start_local: value.start.as_deref().and_then(local_to_utc_eas_no_tz),
             due: value.due.as_deref().and_then(|due| {
                 if value
                     .time_zone
@@ -7737,7 +7778,8 @@ mod tests {
     fn task_completion_time_round_trips_as_eas_datetime() {
         let task: super::TaskObject = serde_json::from_value(serde_json::json!({
             "id": "t", "@type": "Task", "progress": "completed",
-            "progressUpdated": "2026-11-20T11:45:00-05:00"
+            "progressUpdated": "2026-11-20T11:45:00-05:00",
+            "start": "2026-11-20T11:30:00"
         }))
         .unwrap();
         let task = crate::model::Task::from(task);
@@ -7745,6 +7787,7 @@ mod tests {
             task.date_completed.as_deref(),
             Some("2026-11-20T16:45:00.000Z")
         );
+        assert_eq!(task.start.as_deref(), Some("20261120T113000Z"));
 
         let task: super::TaskObject = serde_json::from_value(serde_json::json!({
             "id": "t", "@type": "Task", "progress": "needs-action",

@@ -384,11 +384,25 @@ async fn mock_api(
                     "calendar"
                 };
                 let items = m.groupware.lock().unwrap();
+                let requested_ids = args["ids"]
+                    .as_array()
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 let mut list: Vec<_> = items
                     .get(kind)
                     .into_iter()
                     .flatten()
-                    .filter(|v| last_query.iter().any(|id| v["id"] == id.as_str()))
+                    .filter(|v| {
+                        if args["ids"].is_array() {
+                            requested_ids.iter().any(|id| v["id"] == *id)
+                        } else {
+                            last_query.iter().any(|id| v["id"] == id.as_str())
+                        }
+                    })
                     .cloned()
                     .collect();
                 if m.snapshot_missing_item.load(Ordering::SeqCst) {
@@ -14079,6 +14093,7 @@ async fn task_description_changes_are_synced() {
         task["description"] = serde_json::json!("edited description");
         task["progress"] = serde_json::json!("completed");
         task["progressUpdated"] = serde_json::json!("2026-11-20T16:45:00Z");
+        task["start"] = serde_json::json!("2026-11-20T08:30:00");
     }
     let update = item_sync(&env, "ipad", "task_calendar", &sync_key(&first), "100").await;
     assert!(eas::contains_token(&update, air::CHANGE));
@@ -14089,6 +14104,14 @@ async fn task_description_changes_are_synced() {
     assert_eq!(
         eas::find_text_after(&update, tasks::DATE_COMPLETED),
         Some("2026-11-20T16:45:00.000Z")
+    );
+    assert_eq!(
+        eas::find_text_after(&update, tasks::START_DATE),
+        Some("2026-11-20T08:30:00.000Z")
+    );
+    assert_eq!(
+        eas::find_text_after(&update, tasks::UTC_START_DATE),
+        Some("2026-11-20T08:30:00.000Z")
     );
 }
 
@@ -14112,6 +14135,8 @@ async fn task_completion_date_changes_are_saved() {
     b.start(air::APPLICATION_DATA);
     b.leaf(tasks::COMPLETE, "1");
     b.leaf(tasks::DATE_COMPLETED, "2026-11-20T16:45:00.000Z");
+    b.leaf(tasks::START_DATE, "2026-11-21T08:00:00.000Z");
+    b.leaf(tasks::UTC_START_DATE, "2026-11-21T08:00:00.000Z");
     b.end();
     for _ in 0..5 {
         b.end();
@@ -14137,6 +14162,7 @@ async fn task_completion_date_changes_are_saved() {
         .unwrap();
     assert_eq!(task["progress"], "completed");
     assert_eq!(task["progressUpdated"], "2026-11-20T16:45:00Z");
+    assert_eq!(task["start"], "2026-11-21T08:00:00");
 }
 
 #[tokio::test]

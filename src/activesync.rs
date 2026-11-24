@@ -6685,6 +6685,8 @@ fn task_hash(task: &crate::model::Task) -> String {
     }
     task.completed.hash(&mut hasher);
     task.date_completed.hash(&mut hasher);
+    task.start.hash(&mut hasher);
+    task.start_local.hash(&mut hasher);
     task.due.hash(&mut hasher);
     task.due_local.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
@@ -6764,6 +6766,13 @@ fn write_task_fields(
             .ok()
             .map(|date| date.format("%Y-%m-%dT%H:%M:%S.000Z").to_string())
     };
+    if let (Some(local), Some(utc)) = (
+        task.start_local.as_deref().and_then(format_due),
+        task.start.as_deref().and_then(format_due),
+    ) {
+        builder.leaf(tasks::START_DATE, local);
+        builder.leaf(tasks::UTC_START_DATE, utc);
+    }
     if let (Some(local), Some(utc)) = (
         task.due_local.as_deref().and_then(format_due),
         task.due.as_deref().and_then(format_due),
