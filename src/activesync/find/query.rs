@@ -386,6 +386,27 @@ fn received_condition_at(
                     .ok_or("date out of range")?,
             )
         }
+        "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday" => {
+            let week_start = today
+                .checked_sub_days(chrono::Days::new(
+                    today.weekday().num_days_from_monday() as u64
+                ))
+                .ok_or("date out of range")?;
+            let day_offset = match value.to_ascii_lowercase().as_str() {
+                "monday" => 0,
+                "tuesday" => 1,
+                "wednesday" => 2,
+                "thursday" => 3,
+                "friday" => 4,
+                "saturday" => 5,
+                "sunday" => 6,
+                _ => unreachable!(),
+            };
+            let start = week_start
+                .checked_add_days(chrono::Days::new(day_offset))
+                .ok_or("date out of range")?;
+            (start, start.succ_opt().ok_or("date out of range")?)
+        }
         "last week" => {
             let this_week = today
                 .checked_sub_days(chrono::Days::new(
@@ -891,6 +912,25 @@ mod tests {
             ("past month", "2026-10-01T00:00:00Z", "2026-11-01T00:00:00Z"),
         ];
         for (value, start, end) in cases {
+            assert_eq!(
+                received_condition_at(":", value, today).unwrap(),
+                json!({"operator":"AND", "conditions":[
+                    {"operator":"NOT", "conditions":[{"before":start}]},
+                    {"before":end}
+                ]}),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn received_weekday_search_uses_the_current_monday_based_week() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 24).unwrap();
+        for (value, start, end) in [
+            ("monday", "2026-11-23T00:00:00Z", "2026-11-24T00:00:00Z"),
+            ("TUESDAY", "2026-11-24T00:00:00Z", "2026-11-25T00:00:00Z"),
+            ("Sunday", "2026-11-29T00:00:00Z", "2026-11-30T00:00:00Z"),
+        ] {
             assert_eq!(
                 received_condition_at(":", value, today).unwrap(),
                 json!({"operator":"AND", "conditions":[
