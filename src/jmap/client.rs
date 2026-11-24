@@ -2998,8 +2998,7 @@ impl JmapClient {
                     "recurrenceOverrides",
                     "participants",
                     "replyTo",
-                    "recurrenceRule",
-                    "recurrenceOverrides",
+                    "links",
                 ]),
                 limit,
             )
@@ -6401,6 +6400,30 @@ impl JmapClient {
         let Some(account_id) = auth.session.primary_account_for(capabilities::MAIL) else {
             anyhow::bail!("JMAP Mail capability is not available");
         };
+        self.download_blob_from_account(auth, account_id, blob_id, name)
+            .await
+    }
+
+    pub async fn download_calendar_blob_with_type(
+        &self,
+        auth: &AuthenticatedSession,
+        blob_id: &str,
+        name: &str,
+    ) -> anyhow::Result<(Vec<u8>, String)> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::CALENDARS) else {
+            anyhow::bail!("JMAP Calendars capability is not available");
+        };
+        self.download_blob_from_account(auth, account_id, blob_id, name)
+            .await
+    }
+
+    async fn download_blob_from_account(
+        &self,
+        auth: &AuthenticatedSession,
+        account_id: &str,
+        blob_id: &str,
+        name: &str,
+    ) -> anyhow::Result<(Vec<u8>, String)> {
         let url = auth
             .session
             .download_url
@@ -7865,6 +7888,8 @@ struct CalendarEventObject {
     recurrence_rule: Option<serde_json::Value>,
     #[serde(default)]
     recurrence_overrides: Option<serde_json::Value>,
+    #[serde(default)]
+    links: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -7952,6 +7977,7 @@ fn calendar_recurrence_exceptions(
     overrides: Option<&serde_json::Value>,
     base_alerts: Option<&serde_json::Value>,
     base_participants: Option<&BTreeMap<String, ParticipantObject>>,
+    base_links: Option<&BTreeMap<String, serde_json::Value>>,
     timezone: Option<&str>,
     event_duration: Option<&str>,
 ) -> anyhow::Result<Vec<crate::model::CalendarEventException>> {
@@ -7995,8 +8021,10 @@ fn calendar_recurrence_exceptions(
                             | "keywords"
                             | "alerts"
                             | "participants"
+                            | "links"
                     ) || key.starts_with("alerts/")
                         || key.starts_with("participants/")
+                        || key.starts_with("links/")
                 }),
                 "unsupported recurrence exception fields"
             );
@@ -8141,6 +8169,16 @@ fn calendar_recurrence_exceptions(
             } else {
                 None
             };
+            let has_link_patch = patch
+                .keys()
+                .any(|key| key == "links" || key.starts_with("links/"));
+            let attachments = if has_link_patch {
+                Some(calendar_recurrence_exception_attachments(
+                    base_links, patch,
+                )?)
+            } else {
+                None
+            };
             Ok(crate::model::CalendarEventException {
                 instance_id,
                 deleted: false,
@@ -8153,6 +8191,7 @@ fn calendar_recurrence_exceptions(
                 busy_status,
                 categories,
                 attendees,
+                attachments,
                 reminder_minutes,
                 description,
             })
@@ -8297,6 +8336,107 @@ fn calendar_recurrence_exception_attendees(
         .collect()
 }
 
+fn calendar_recurrence_exception_attachments(
+    base: Option<&BTreeMap<String, serde_json::Value>>,
+    override_patch: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<Vec<crate::model::CalendarAttachment>> {
+    fn unescape(token: &str) -> anyhow::Result<String> {
+        let mut result = String::new();
+        let mut chars = token.chars();
+        while let Some(character) = chars.next() {
+            if character == '~' {
+                match chars
+                    .next()
+                    .context("invalid escaped recurrence link path")?
+                {
+                    '0' => result.push('~'),
+                    '1' => result.push('/'),
+                    _ => anyhow::bail!("invalid escaped recurrence link path"),
+                }
+            } else {
+                result.push(character);
+            }
+        }
+        Ok(result)
+    }
+
+    let mut links = base.cloned().unwrap_or_default();
+    if let Some(replacement) = override_patch.get("links") {
+        anyhow::ensure!(
+            !override_patch.keys().any(|key| key.starts_with("links/")),
+            "overlapping recurrence link patches"
+        );
+        links = if replacement.is_null() {
+            BTreeMap::new()
+        } else {
+            serde_json::from_value(replacement.clone())
+                .context("invalid recurrence links replacement")?
+        };
+    } else {
+        for (path, value) in override_patch
+            .iter()
+            .filter_map(|(key, value)| key.strip_prefix("links/").map(|path| (path, value)))
+        {
+            let tokens = path
+                .split('/')
+                .map(unescape)
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            anyhow::ensure!(!tokens.is_empty(), "empty recurrence link patch path");
+            let (last, parents) = tokens.split_last().unwrap();
+            let mut root = serde_json::to_value(links)?;
+            let mut target = &mut root;
+            for token in parents {
+                target = target
+                    .as_object_mut()
+                    .and_then(|object| object.get_mut(token))
+                    .context("recurrence link patch parent is missing")?;
+            }
+            let object = target
+                .as_object_mut()
+                .context("recurrence link patch parent is not an object")?;
+            if value.is_null() {
+                object.remove(last);
+            } else {
+                object.insert(last.clone(), value.clone());
+            }
+            links = serde_json::from_value(root).context("invalid recurrence links map")?;
+        }
+    }
+
+    links
+        .into_values()
+        .filter(|link| link.get("rel").and_then(serde_json::Value::as_str) == Some("enclosure"))
+        .map(|link| {
+            let blob_id = link
+                .get("blobId")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty() && !id.contains("||"))
+                .context("calendar enclosure has no usable JMAP blobId")?
+                .to_owned();
+            Ok(crate::model::CalendarAttachment {
+                blob_id,
+                name: link
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                content_type: link
+                    .get("contentType")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                size: link.get("size").and_then(serde_json::Value::as_u64),
+                content_id: link
+                    .get("cid")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                content_location: link
+                    .get("href")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
 fn merge_calendar_alert_patch(
     base: Option<&serde_json::Value>,
     override_patch: &serde_json::Map<String, serde_json::Value>,
@@ -8381,6 +8521,7 @@ impl From<CalendarEventObject> for CalendarEvent {
             value.recurrence_overrides.as_ref(),
             value.alerts.as_ref(),
             value.participants.as_ref(),
+            value.links.as_ref(),
             recurrence_time_zone.as_deref(),
             value.duration.as_deref(),
         );
@@ -9128,12 +9269,14 @@ mod tests {
                 "owner":{"email":"owner@example.test","roles":{"owner":true}},
                 "guest":{"email":"guest@example.test","name":"Guest","roles":{"attendee":true,"optional":true},"participationStatus":"accepted"}
             },
+            "links":{"file":{"@type":"Link","blobId":"blob-123","rel":"enclosure","title":"series.pdf","contentType":"application/pdf","size":4096,"cid":"part-1","href":"cid:part-1"}},
             "alerts":{"display":{"@type":"Alert","trigger":{"@type":"OffsetTrigger","relativeTo":"start","offset":"-PT30M"}}},
             "recurrenceOverrides":{"2026-11-25T12:00:00":{
                 "start":"2026-11-25T13:00:00", "duration":"PT3600S", "showWithoutTime":true,
                 "freeBusyStatus":"x-eas-tentative",
                 "alerts/display/trigger":{"@type":"OffsetTrigger","relativeTo":"start","offset":"-PT20M"},
                 "participants/guest/participationStatus":"declined",
+                "links/file/title":"occurrence.pdf",
                 "keywords":{"Work":true,"Hidden":false},
                 "title":"Changed occurrence", "description":"Exception body",
                 "descriptionContentType":"text/plain",
@@ -9187,6 +9330,17 @@ mod tests {
                 name: Some("Guest".to_owned()),
                 participation_status: Some("declined".to_owned()),
                 optional: true,
+            }])
+        );
+        assert_eq!(
+            event.recurrence_exceptions[0].attachments,
+            Some(vec![crate::model::CalendarAttachment {
+                blob_id: "blob-123".to_owned(),
+                name: Some("occurrence.pdf".to_owned()),
+                content_type: Some("application/pdf".to_owned()),
+                size: Some(4096),
+                content_id: Some("part-1".to_owned()),
+                content_location: Some("cid:part-1".to_owned()),
             }])
         );
 
@@ -9819,6 +9973,57 @@ mod calendar_update_state_tests {
             "event-1"
         );
         assert_eq!(requests.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn calendar_attachment_download_uses_calendar_account() {
+        let app = Router::new().route(
+            "/download/:account_id/:blob_id/:name",
+            axum::routing::get(
+                |axum::extract::Path((account_id, blob_id, name)): axum::extract::Path<(
+                    String,
+                    String,
+                    String,
+                )>| async move {
+                    assert_eq!(account_id, "calendar-account");
+                    assert_eq!(blob_id, "blob-123");
+                    assert_eq!(name, "occurrence.pdf");
+                    ([("content-type", "application/pdf")], b"pdf bytes".to_vec())
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{
+                capabilities::MAIL:"mail-account", capabilities::CALENDARS:"calendar-account"
+            },
+            "apiUrl":url,
+            "downloadUrl":format!("{url}download/{{accountId}}/{{blobId}}/{{name}}?type={{type}}"),
+            "uploadUrl":url, "username":"user", "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let (bytes, content_type) = client
+            .download_calendar_blob_with_type(&auth, "blob-123", "occurrence.pdf")
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"pdf bytes");
+        assert_eq!(content_type, "application/pdf");
         server.abort();
     }
 

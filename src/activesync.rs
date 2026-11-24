@@ -6445,6 +6445,7 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
         exception.busy_status.hash(&mut hasher);
         exception.categories.hash(&mut hasher);
         exception.attendees.hash(&mut hasher);
+        exception.attachments.hash(&mut hasher);
         exception.reminder_minutes.hash(&mut hasher);
         if let Some(description) = &exception.description {
             description.body_type.eas_value().hash(&mut hasher);
@@ -6673,6 +6674,53 @@ fn write_calendar_fields(
                         builder.end();
                     }
                     builder.end();
+                }
+                if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
+                    if let Some(attachments) = &exception.attachments {
+                        use wbxml::eas::airsync_base as base;
+                        builder.start(base::ATTACHMENTS);
+                        for attachment in attachments {
+                            let name = attachment
+                                .name
+                                .as_deref()
+                                .filter(|name| !name.is_empty())
+                                .unwrap_or("attachment");
+                            builder.start(base::ATTACHMENT);
+                            builder.leaf(base::DISPLAY_NAME, name);
+                            builder.leaf(
+                                base::FILE_REFERENCE,
+                                format!("calendar:{}||{name}", attachment.blob_id),
+                            );
+                            builder.leaf(
+                                base::METHOD,
+                                if attachment.content_type.as_deref() == Some("message/rfc822") {
+                                    "5"
+                                } else {
+                                    "1"
+                                },
+                            );
+                            builder.leaf(
+                                base::ESTIMATED_DATA_SIZE,
+                                attachment.size.unwrap_or_default().to_string(),
+                            );
+                            if let Some(content_id) = &attachment.content_id {
+                                builder.leaf(base::CONTENT_ID, content_id);
+                            }
+                            if let Some(content_location) = &attachment.content_location {
+                                builder.leaf(base::CONTENT_LOCATION, content_location);
+                            }
+                            builder.leaf(
+                                base::IS_INLINE,
+                                if attachment.content_id.is_some() {
+                                    "1"
+                                } else {
+                                    "0"
+                                },
+                            );
+                            builder.end();
+                        }
+                        builder.end();
+                    }
                 }
                 if let Some(reminder) = exception.reminder_minutes {
                     if let Some(minutes) = reminder {
@@ -8518,6 +8566,14 @@ mod tests {
                     participation_status: Some("tentative".to_owned()),
                     optional: true,
                 }]),
+                attachments: Some(vec![crate::model::CalendarAttachment {
+                    blob_id: "blob-123".to_owned(),
+                    name: Some("occurrence.pdf".to_owned()),
+                    content_type: Some("application/pdf".to_owned()),
+                    size: Some(4096),
+                    content_id: Some("part-1".to_owned()),
+                    content_location: Some("cid:part-1".to_owned()),
+                }]),
                 description: Some(crate::model::EmailBody {
                     body_type: crate::model::EmailBodyType::Plain,
                     value: "Changed body".to_owned(),
@@ -8582,7 +8638,35 @@ mod tests {
             eas::find_text_after(&document, cal::ATTENDEE_STATUS),
             Some("2")
         );
+        assert_eq!(
+            eas::find_text_after(&document, base::FILE_REFERENCE),
+            Some("calendar:blob-123||occurrence.pdf")
+        );
+        assert_eq!(eas::find_text_after(&document, base::METHOD), Some("1"));
+        assert!(
+            eas::find_all_text_after(&document, base::ESTIMATED_DATA_SIZE)
+                .iter()
+                .any(|size| size == "4096")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, base::CONTENT_ID),
+            Some("part-1")
+        );
+        assert_eq!(eas::find_text_after(&document, base::IS_INLINE), Some("1"));
         assert!(!eas::contains_token(&document, cal::DELETED));
+
+        let mut legacy_builder = eas::DocumentBuilder::new();
+        super::write_calendar_command(
+            &mut legacy_builder,
+            air::CHANGE,
+            &event,
+            ProtocolVersion::V14_0,
+            &[],
+        );
+        assert!(!eas::contains_token(
+            &legacy_builder.finish(),
+            base::ATTACHMENTS
+        ));
     }
 
     #[test]

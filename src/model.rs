@@ -373,10 +373,22 @@ pub struct CalendarEventException {
     pub categories: Option<Vec<String>>,
     /// None inherits the series attendee list; Some(empty) explicitly clears it.
     pub attendees: Option<Vec<Attendee>>,
+    /// None inherits the series attachments; Some(empty) clears them.
+    pub attachments: Option<Vec<CalendarAttachment>>,
     /// None inherits the series reminder; Some(None) removes it for this
     /// occurrence; Some(Some(minutes)) sets an occurrence-specific reminder.
     pub reminder_minutes: Option<Option<u32>>,
     pub description: Option<EmailBody>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CalendarAttachment {
+    pub blob_id: String,
+    pub name: Option<String>,
+    pub content_type: Option<String>,
+    pub size: Option<u64>,
+    pub content_id: Option<String>,
+    pub content_location: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

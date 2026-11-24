@@ -12049,11 +12049,19 @@ async fn item_operations_fetches_all_entries_in_order_and_isolates_failures() {
     use base64::Engine;
     use eas::{airsync as air, airsync_base as base, item_operations as ops};
     let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 0);
     let mut b = eas::DocumentBuilder::new();
     b.start(ops::ITEM_OPERATIONS);
     b.start(ops::FETCH);
     b.leaf(ops::STORE, "Mailbox");
     b.leaf(base::FILE_REFERENCE, "binary||test.dat");
+    b.start(ops::OPTIONS);
+    b.leaf(ops::RANGE, "1-3");
+    b.end();
+    b.end();
+    b.start(ops::FETCH);
+    b.leaf(ops::STORE, "Mailbox");
+    b.leaf(base::FILE_REFERENCE, "calendar:binary||calendar.dat");
     b.start(ops::OPTIONS);
     b.leaf(ops::RANGE, "1-3");
     b.end();
@@ -12102,11 +12110,11 @@ async fn item_operations_fetches_all_entries_in_order_and_isolates_failures() {
         let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
         assert_eq!(
             eas::find_all_text_after(&doc, ops::STATUS),
-            vec!["1", "1", "6", "1", "8", "9", "15"]
+            vec!["1", "1", "1", "6", "1", "8", "9", "15"]
         );
         let root = eas::child_elements(&doc);
         let fetches = eas::child_elements(&root[1]);
-        assert_eq!(fetches.len(), 6);
+        assert_eq!(fetches.len(), 7);
         let data = eas::find_text_after(&fetches[0], ops::DATA).unwrap();
         assert_eq!(
             base64::engine::general_purpose::STANDARD
@@ -12119,9 +12127,16 @@ async fn item_operations_fetches_all_entries_in_order_and_isolates_failures() {
             eas::find_text_after(&fetches[0], ops::TOTAL),
             Some(BLOB_BYTES.len().to_string()).as_deref()
         );
-        assert_eq!(eas::find_text_after(&fetches[2], base::DATA), Some("bo"));
+        let calendar_data = eas::find_text_after(&fetches[1], ops::DATA).unwrap();
         assert_eq!(
-            eas::find_text_after(&fetches[2], base::TRUNCATED),
+            base64::engine::general_purpose::STANDARD
+                .decode(calendar_data)
+                .unwrap(),
+            BLOB_BYTES[1..4]
+        );
+        assert_eq!(eas::find_text_after(&fetches[3], base::DATA), Some("bo"));
+        assert_eq!(
+            eas::find_text_after(&fetches[3], base::TRUNCATED),
             Some("1")
         );
     }

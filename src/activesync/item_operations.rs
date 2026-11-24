@@ -144,11 +144,18 @@ async fn fetch_item(
             builder.leaf(ops::STATUS, "15");
             return;
         };
-        match state
-            .jmap
-            .download_blob_with_type(auth, blob_id, name)
-            .await
-        {
+        let download = if let Some(calendar_blob_id) = blob_id.strip_prefix("calendar:") {
+            state
+                .jmap
+                .download_calendar_blob_with_type(auth, calendar_blob_id, name)
+                .await
+        } else {
+            state
+                .jmap
+                .download_blob_with_type(auth, blob_id, name)
+                .await
+        };
+        match download {
             Ok((data, content_type)) => {
                 let slice = match fetch.range.as_deref() {
                     Some(range) => match byte_range(range, data.len()) {
