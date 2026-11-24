@@ -1850,6 +1850,7 @@ dependencies = [
  "bytes",
  "chrono",
  "chrono-tz",
+ "encoding_rs",
  "http",
  "mail-parser",
  "msg_parser",

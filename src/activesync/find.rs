@@ -534,9 +534,13 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
         .trim()
         .to_ascii_lowercase();
     let text = match media_type.as_str() {
-        "text/plain" => String::from_utf8_lossy(bytes).into_owned(),
-        "text/html" => super::strip_html_tags(&String::from_utf8_lossy(bytes).replace('>', "> ")),
-        "text/rtf" | "application/rtf" => super::rtf_to_plain_text(&String::from_utf8_lossy(bytes)),
+        "text/plain" => decode_find_attachment_text(content_type, bytes)?,
+        "text/html" => super::strip_html_tags(
+            &decode_find_attachment_text(content_type, bytes)?.replace('>', "> "),
+        ),
+        "text/rtf" | "application/rtf" => {
+            super::rtf_to_plain_text(&decode_find_attachment_text(content_type, bytes)?)
+        }
         "application/pdf" => {
             // Attachments are untrusted input. pdf-extract can panic on malformed
             // object graphs, so contain parser panics and treat malformed PDFs as
@@ -569,11 +573,25 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
             || media_type == "application/json"
             || media_type.ends_with("+json") =>
         {
-            String::from_utf8_lossy(bytes).into_owned()
+            decode_find_attachment_text(content_type, bytes)?
         }
         _ => return None,
     };
     Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+fn decode_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<String> {
+    let charset = content_type.split(';').skip(1).find_map(|parameter| {
+        let (name, value) = parameter.split_once('=')?;
+        name.trim()
+            .eq_ignore_ascii_case("charset")
+            .then(|| value.trim().trim_matches(['"', '\'']))
+    });
+    let encoding = charset
+        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        .unwrap_or(encoding_rs::UTF_8);
+    let (decoded, _) = encoding.decode_without_bom_handling(bytes);
+    (decoded.len() <= MAX_FIND_ATTACHMENT_TEXT_BYTES as usize).then(|| decoded.into_owned())
 }
 
 fn extract_rfc822_text(bytes: &[u8]) -> Option<String> {
@@ -2458,6 +2476,14 @@ mod tests {
         assert_eq!(
             extract_find_attachment_text("text/plain; charset=utf-8", b"alpha beta"),
             Some("alpha beta".to_owned())
+        );
+        assert_eq!(
+            extract_find_attachment_text("text/plain; charset=windows-1252", b"price \x80"),
+            Some("price €".to_owned())
+        );
+        assert_eq!(
+            extract_find_attachment_text("text/plain; charset=\"UTF-16LE\"", b"a\0b\0"),
+            Some("ab".to_owned())
         );
         assert_eq!(
             extract_find_attachment_text("text/html", b"<p>alpha</p><p>beta</p>"),
