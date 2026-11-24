@@ -40,8 +40,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    attachment formats and assess resource-bounded scanned-PDF OCR and large
    attachments. Current extraction is bounded and supports legacy `.xls` and
    `.ppt`, EPUB, macro-enabled OOXML, RFC 822 messages, Outlook `.msg`
-   attachments, and
-   Word, Excel, and PowerPoint package comment text, plus MIME-declared charsets
+   attachments, and Word, Excel, and PowerPoint package comment text, plus
+   MIME-declared charsets
    for text attachments and XML declaration encodings;
    legacy binary Word files, scanned PDFs, and payloads above the extraction
    limit remain outside exact local matching.
@@ -396,9 +396,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    text-bearing PDFs,
    EPUB XHTML, OOXML Word/Excel/PowerPoint (including
    macro-enabled variants), and OpenDocument Text, Spreadsheet, and Presentation
-   attachments up to 2 MiB for exact text/NEAR checks. Legacy `.xls` and `.ppt`
-   are also supported with bounded workbook allocation and CFB stream parsing.
-   Text attachments honor MIME
+   attachments up to 2 MiB for exact text/NEAR checks. Legacy `.xls` worksheets
+   and `.ppt` CFB streams are also parsed within explicit limits. Text
+   attachments honor MIME
    `charset` parameters, including common
    legacy single-byte encodings and UTF-16LE, with BOM detection when the
    charset parameter is absent; XML text also honors its encoding declaration.
@@ -440,8 +440,11 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    Legacy binary PowerPoint slides, notes, and comments are extracted with
    `duke-slides` using limits for input bytes, CFB entries, stream bytes, record
    depth, and retained text. Unit coverage checks a generated legacy OLE PPT,
-   an oversized input, and a mocked 16.1 Find proximity query. This extraction
-   remains subject to the 2 MiB attachment limit.
+   an oversized input, and a mocked 16.1 Find proximity query. Deployed as
+   `deploy-2026-11-24-eas-find-ppt-e4952a3`; homelab commit `552b5d1`, image
+   `sha256:ab1a7d83f0e0bcb3cffa477af463bd5f59330638b7906bce8a79f6664c571cda`,
+   started `2026-11-24T23:03:55Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Extraction remains subject to the 2 MiB attachment limit.
    EPUB XHTML chapters use the same archive-entry and expanded-XML limits; a
    mocked HTTP Find regression verifies proximity matching in EPUB text. The
    macro-enabled OOXML types use the same bounded document-part selection; a
