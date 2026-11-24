@@ -6685,6 +6685,7 @@ fn task_hash(task: &crate::model::Task) -> String {
     }
     task.completed.hash(&mut hasher);
     task.date_completed.hash(&mut hasher);
+    task.importance.hash(&mut hasher);
     task.start.hash(&mut hasher);
     task.start_local.hash(&mut hasher);
     task.due.hash(&mut hasher);
@@ -6756,6 +6757,16 @@ fn write_task_fields(
         }
     }
     builder.leaf(tasks::COMPLETE, if task.completed { "1" } else { "0" });
+    if let Some(importance) = task.importance {
+        builder.leaf(
+            tasks::IMPORTANCE,
+            match importance {
+                0 => "0",
+                1 => "1",
+                _ => "2",
+            },
+        );
+    }
     if task.completed {
         if let Some(date_completed) = task.date_completed.as_deref() {
             builder.leaf(tasks::DATE_COMPLETED, date_completed);

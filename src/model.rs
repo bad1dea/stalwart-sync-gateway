@@ -374,6 +374,7 @@ pub struct Task {
     pub description: Option<EmailBody>,
     pub completed: bool,
     pub date_completed: Option<String>,
+    pub importance: Option<u8>,
     pub start: Option<String>,
     pub start_local: Option<String>,
     pub due: Option<String>,

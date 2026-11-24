@@ -14094,6 +14094,7 @@ async fn task_description_changes_are_synced() {
         task["progress"] = serde_json::json!("completed");
         task["progressUpdated"] = serde_json::json!("2026-11-20T16:45:00Z");
         task["start"] = serde_json::json!("2026-11-20T08:30:00");
+        task["priority"] = serde_json::json!(9);
     }
     let update = item_sync(&env, "ipad", "task_calendar", &sync_key(&first), "100").await;
     assert!(eas::contains_token(&update, air::CHANGE));
@@ -14113,6 +14114,7 @@ async fn task_description_changes_are_synced() {
         eas::find_text_after(&update, tasks::UTC_START_DATE),
         Some("2026-11-20T08:30:00.000Z")
     );
+    assert_eq!(eas::find_text_after(&update, tasks::IMPORTANCE), Some("0"));
 }
 
 #[tokio::test]
@@ -14134,6 +14136,7 @@ async fn task_completion_date_changes_are_saved() {
     b.leaf(air::SERVER_ID, "t0000");
     b.start(air::APPLICATION_DATA);
     b.leaf(tasks::COMPLETE, "1");
+    b.leaf(tasks::IMPORTANCE, "2");
     b.leaf(tasks::DATE_COMPLETED, "2026-11-20T16:45:00.000Z");
     b.leaf(tasks::START_DATE, "2026-11-21T08:00:00.000Z");
     b.leaf(tasks::UTC_START_DATE, "2026-11-21T08:00:00.000Z");
@@ -14162,6 +14165,7 @@ async fn task_completion_date_changes_are_saved() {
         .unwrap();
     assert_eq!(task["progress"], "completed");
     assert_eq!(task["progressUpdated"], "2026-11-20T16:45:00Z");
+    assert_eq!(task["priority"], 1);
     assert_eq!(task["start"], "2026-11-21T08:00:00");
 }
 

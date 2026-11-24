@@ -1322,6 +1322,7 @@ pub struct TaskFields {
     pub utc_due_date: Option<String>,
     pub complete: Option<bool>,
     pub date_completed: Option<String>,
+    pub importance: Option<String>,
 }
 
 /// ActiveSync Contacts class fields decoded from one Add/Change command's
@@ -2989,6 +2990,8 @@ fn extract_task_fields(nodes: &[Node]) -> TaskFields {
                     fields.complete = Some(text != "0");
                 } else if same_token(top, tasks::DATE_COMPLETED) {
                     fields.date_completed = Some(text.clone());
+                } else if same_token(top, tasks::IMPORTANCE) {
+                    fields.importance = Some(text.clone());
                 }
             }
             Node::End => {
@@ -3443,6 +3446,7 @@ mod tests {
         builder.start(airsync::APPLICATION_DATA);
         builder.leaf(tasks::SUBJECT, "Renew passport");
         builder.leaf(tasks::COMPLETE, "0");
+        builder.leaf(tasks::IMPORTANCE, "2");
         builder.leaf(tasks::DUE_DATE, "20260905T090000Z");
         builder.leaf(tasks::START_DATE, "20260904T090000Z");
         builder.leaf(tasks::UTC_START_DATE, "20260904T090000Z");
@@ -3464,6 +3468,7 @@ mod tests {
         assert_eq!(command.client_id, "client-task-1");
         assert_eq!(command.task.subject.as_deref(), Some("Renew passport"));
         assert_eq!(command.task.complete, Some(false));
+        assert_eq!(command.task.importance.as_deref(), Some("2"));
         assert_eq!(command.task.due_date.as_deref(), Some("20260905T090000Z"));
         assert_eq!(command.task.start_date.as_deref(), Some("20260904T090000Z"));
         assert_eq!(

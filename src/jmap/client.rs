@@ -4460,6 +4460,7 @@ impl JmapClient {
                     "progress",
                     "progressUpdated",
                     "start",
+                    "priority",
                 ]),
                 limit,
             )
@@ -4534,6 +4535,10 @@ impl JmapClient {
                 "title".to_owned(),
                 serde_json::Value::String(subject.clone()),
             );
+        }
+        if let Some(importance) = fields.importance.as_deref() {
+            let priority = eas_importance_to_jmap(importance).context("invalid task importance")?;
+            task.insert("priority".to_owned(), serde_json::json!(priority));
         }
         let mut update_state = None;
         if fields.due_date.is_some()
@@ -7512,6 +7517,8 @@ struct TaskObject {
     progress: Option<String>,
     #[serde(default, rename = "progressUpdated")]
     progress_updated: Option<String>,
+    #[serde(default)]
+    priority: Option<u8>,
     #[serde(rename = "@type", default)]
     kind: String,
 }
@@ -7539,6 +7546,7 @@ impl From<TaskObject> for Task {
                         .and_then(utc_iso_to_eas_datetime)
                 })
                 .flatten(),
+            importance: jmap_task_priority_to_eas(value.priority),
             start: value.start.as_deref().and_then(|start| {
                 if value
                     .time_zone
@@ -7562,6 +7570,24 @@ impl From<TaskObject> for Task {
             }),
             due_local: value.due.as_deref().and_then(local_to_utc_eas_no_tz),
         }
+    }
+}
+
+fn eas_importance_to_jmap(importance: &str) -> Option<u8> {
+    match importance {
+        "0" => Some(9),
+        "1" => Some(5),
+        "2" => Some(1),
+        _ => None,
+    }
+}
+
+fn jmap_task_priority_to_eas(priority: Option<u8>) -> Option<u8> {
+    match priority? {
+        1..=4 => Some(2),
+        5 => Some(1),
+        6..=9 => Some(0),
+        _ => None,
     }
 }
 
@@ -7775,11 +7801,29 @@ impl From<CalendarObject> for Collection {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn task_importance_maps_to_jscalendar_priority_bands() {
+        assert_eq!(super::eas_importance_to_jmap("0"), Some(9));
+        assert_eq!(super::eas_importance_to_jmap("1"), Some(5));
+        assert_eq!(super::eas_importance_to_jmap("2"), Some(1));
+        assert_eq!(super::eas_importance_to_jmap("3"), None);
+        for priority in 1..=4 {
+            assert_eq!(super::jmap_task_priority_to_eas(Some(priority)), Some(2));
+        }
+        assert_eq!(super::jmap_task_priority_to_eas(Some(5)), Some(1));
+        for priority in 6..=9 {
+            assert_eq!(super::jmap_task_priority_to_eas(Some(priority)), Some(0));
+        }
+        assert_eq!(super::jmap_task_priority_to_eas(Some(0)), None);
+        assert_eq!(super::jmap_task_priority_to_eas(None), None);
+    }
+
+    #[test]
     fn task_completion_time_round_trips_as_eas_datetime() {
         let task: super::TaskObject = serde_json::from_value(serde_json::json!({
             "id": "t", "@type": "Task", "progress": "completed",
             "progressUpdated": "2026-11-20T11:45:00-05:00",
-            "start": "2026-11-20T11:30:00"
+            "start": "2026-11-20T11:30:00",
+            "priority": 1
         }))
         .unwrap();
         let task = crate::model::Task::from(task);
@@ -7788,6 +7832,7 @@ mod tests {
             Some("2026-11-20T16:45:00.000Z")
         );
         assert_eq!(task.start.as_deref(), Some("20261120T113000Z"));
+        assert_eq!(task.importance, Some(2));
 
         let task: super::TaskObject = serde_json::from_value(serde_json::json!({
             "id": "t", "@type": "Task", "progress": "needs-action",
