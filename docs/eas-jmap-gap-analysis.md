@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `1f7f7c9` (2026-11-23)
+## Reconciled status for source `main` at `8955793` (2026-11-23)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -250,6 +250,20 @@ warnings denied, formatting, and diff checks pass. Deployed as
 Compose produced image
 `sha256:bee5f6682599dff81913383e2bf3b21981d05742af656e42b3ae87e39559d369`.
 The replacement started at `2026-11-24T04:17:59Z` with restart count zero;
+mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
+continues to advertise EAS 14.0.
+
+Also completed (`8955793`): **EAS Task categories**. `Tasks:Categories` now
+maps to JSCalendar `keywords`; an omitted field preserves existing keywords,
+and an empty category container clears them. Duplicate, empty, or malformed
+category entries return an item error rather than being silently discarded.
+Regression coverage checks parsing, JMAP read/write, and Sync output. Full
+suite: 270 passed, 73 ignored; clippy with warnings denied, formatting, and
+diff checks pass. Deployed as
+`deploy-2026-11-23-eas-task-categories-8955793`; homelab commit `fafc043`.
+Compose produced image
+`sha256:19ac39e560616d90b8145dfde80ff9d0c50d7a21f7f53c7a643fe54933b111df`.
+The replacement started at `2026-11-24T04:39:43Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
 continues to advertise EAS 14.0.
 
