@@ -51,8 +51,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    attachments, and Word, Excel, and PowerPoint package comment text, plus
    MIME-declared charsets
    for text attachments and XML declaration encodings;
-   scanned PDFs and payloads above the extraction limit remain outside exact
-   local matching.
+   scanned PDFs, source attachments above 4 MiB, and extracted text above 2 MiB
+   remain outside exact local matching.
 
 1. **BodyPartPreference / BodyPart response path — implemented and deployed.**
    Request parsing and independent Sync option
@@ -404,7 +404,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    text-bearing PDFs,
    EPUB XHTML, OOXML Word/Excel/PowerPoint (including
    macro-enabled variants), and OpenDocument Text, Spreadsheet, and Presentation
-   attachments up to 2 MiB for exact text/NEAR checks. Legacy `.xls` worksheets,
+   attachment containers up to 4 MiB for exact text/NEAR checks, with extracted
+   text still capped at 2 MiB. Legacy `.xls` worksheets,
    `.ppt` streams, and Word `.doc` piece tables are also parsed within explicit
    limits. Text
    attachments honor MIME
@@ -449,11 +450,15 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    Legacy binary PowerPoint slides, notes, and comments are extracted with
    `duke-slides` using limits for input bytes, CFB entries, stream bytes, record
    depth, and retained text. Unit coverage checks a generated legacy OLE PPT,
-   an oversized input, and a mocked 16.1 Find proximity query. Deployed as
+   an oversized input, and a mocked 16.1 Find proximity query. The mocked
+   end-to-end test also searches a DOCX package larger than 2 MiB while keeping
+   its extracted text small; attachment input is capped at 4 MiB and extracted
+   text at 2 MiB. Deployed as
    `deploy-2026-11-24-eas-find-ppt-e4952a3`; homelab commit `552b5d1`, image
    `sha256:ab1a7d83f0e0bcb3cffa477af463bd5f59330638b7906bce8a79f6664c571cda`,
    started `2026-11-24T23:03:55Z`, restart count zero, `/healthz` `ok`, and
-   `/readyz` `ready`. Extraction remains subject to the 2 MiB attachment limit.
+   `/readyz` `ready`. Extraction remains subject to the 4 MiB input and 2 MiB
+   text limits.
    Legacy binary Word documents are parsed from bounded CFB streams and their
    CLX piece tables; invalid offsets, oversized stream declarations, malformed
    OLE files, and parser panics fail closed. A generated fixture exercises

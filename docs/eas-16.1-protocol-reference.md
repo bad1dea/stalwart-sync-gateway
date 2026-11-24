@@ -266,9 +266,9 @@ session's fixes were, not against spec-reading alone.
 - KQL proximity — direct `NEAR`/`ONEAR` and Boolean combinations with supported
   predicates exact-filter full message text and common address fields, using
   the default distance of eight or an explicit distance. Attachment payload
-  positions are available for supported extracted formats up to 2 MiB;
-  legacy binary Office formats, scanned PDFs, and larger files remain outside
-  local exact matching.
+  positions are available for supported extracted formats up to 4 MiB input
+  and 2 MiB extracted text; scanned PDFs and larger files remain outside local
+  exact matching.
 - Recurrence — common EAS event/task rules map to Stalwart's singular
   `recurrenceRule`; unsupported patterns fail closed. Task-specific backend
   create/get and real-client recurrence behavior still need verification.

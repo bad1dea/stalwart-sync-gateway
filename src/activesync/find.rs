@@ -110,6 +110,7 @@ fn same_search(session: &SearchState, filter: &Value, search_text: &str) -> bool
 }
 const SEARCHES: &str = "__find__";
 const MAX_FIND_ATTACHMENT_TEXT_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_FIND_ARCHIVE_ENTRIES: usize = 4096;
 
 pub(super) async fn handle(
@@ -324,7 +325,7 @@ async fn execute(
                 if !is_match && search_attachment_text {
                     for attachment in &mut email.attachments {
                         if attachment.extracted_text.is_some()
-                            || attachment.size > MAX_FIND_ATTACHMENT_TEXT_BYTES
+                            || attachment.size > MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES
                             || !is_extractable_attachment_type(&attachment.content_type)
                         {
                             continue;
@@ -335,7 +336,7 @@ async fn execute(
                                 auth,
                                 &attachment.blob_id,
                                 &attachment.name,
-                                MAX_FIND_ATTACHMENT_TEXT_BYTES as usize,
+                                MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES as usize,
                             )
                             .await?
                         else {
@@ -898,7 +899,7 @@ fn extract_legacy_ppt_text(bytes: &[u8]) -> Option<String> {
     // PPT is a compound-file container. Keep each parser limit at or below the
     // already enforced attachment cap so a small hostile file cannot cause a
     // large stream, persist table, or parsed text allocation.
-    let max_bytes = MAX_FIND_ATTACHMENT_TEXT_BYTES as usize;
+    let max_bytes = MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES as usize;
     let limits = duke_slides::ParseLimits {
         max_input_bytes: max_bytes,
         max_entries: 2_048,
@@ -907,8 +908,8 @@ fn extract_legacy_ppt_text(bytes: &[u8]) -> Option<String> {
         max_xml_depth: 128,
         max_xml_nodes: 250_000,
         max_xml_attributes: 250_000,
-        max_xml_text_bytes: max_bytes,
-        max_xml_attribute_bytes: max_bytes,
+        max_xml_text_bytes: MAX_FIND_ATTACHMENT_TEXT_BYTES as usize,
+        max_xml_attribute_bytes: MAX_FIND_ATTACHMENT_TEXT_BYTES as usize,
     };
     let presentation = duke_slides::parse_presentation(bytes, &limits).ok()?;
     let mut text = presentation.body_text();
@@ -933,16 +934,16 @@ fn extract_legacy_doc_text(bytes: &[u8]) -> Option<String> {
     let mut read_bounded_stream = |name: &str| {
         let mut stream = compound.open_stream(name).ok()?;
         let size = usize::try_from(stream.len()).ok()?;
-        if size > MAX_FIND_ATTACHMENT_TEXT_BYTES as usize {
+        if size > MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES as usize {
             return None;
         }
         let mut data = Vec::with_capacity(size);
         stream
             .by_ref()
-            .take(MAX_FIND_ATTACHMENT_TEXT_BYTES + 1)
+            .take(MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES + 1)
             .read_to_end(&mut data)
             .ok()?;
-        (data.len() <= MAX_FIND_ATTACHMENT_TEXT_BYTES as usize).then_some(data)
+        (data.len() <= MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES as usize).then_some(data)
     };
 
     let word = read_bounded_stream("/WordDocument")?;
@@ -3132,7 +3133,7 @@ mod tests {
             Some("Legacy powerpoint phrase".to_owned())
         );
         assert!(
-            extract_legacy_ppt_text(&vec![0; MAX_FIND_ATTACHMENT_TEXT_BYTES as usize + 1])
+            extract_legacy_ppt_text(&vec![0; MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES as usize + 1])
                 .is_none()
         );
     }
@@ -3146,7 +3147,7 @@ mod tests {
             Some("lima mike in old Word".to_owned())
         );
         assert!(
-            extract_legacy_doc_text(&vec![0; MAX_FIND_ATTACHMENT_TEXT_BYTES as usize + 1])
+            extract_legacy_doc_text(&vec![0; MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES as usize + 1])
                 .is_none()
         );
         assert!(extract_legacy_doc_text(b"not an OLE document").is_none());

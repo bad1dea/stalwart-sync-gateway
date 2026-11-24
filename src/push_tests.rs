@@ -14195,7 +14195,19 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     docx_archive
         .write_all(b"<w:comments><w:comment><w:t>golf hotel in a Word comment</w:t></w:comment></w:comments>")
         .unwrap();
+    docx_archive
+        .start_file(
+            "word/media/large-embedded-file.bin",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+    let embedded_file = (0..3 * 1024 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    docx_archive.write_all(&embedded_file).unwrap();
     let docx = docx_archive.finish().unwrap().into_inner();
+    assert!(docx.len() > 2 * 1024 * 1024 && docx.len() <= 4 * 1024 * 1024);
     let mut epub_archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     epub_archive
         .start_file(
@@ -14222,6 +14234,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     env.mock.add_mail("inbox", "oversized-text-attachment");
     env.mock.add_mail("inbox", "pdf-attachment");
     env.mock.add_mail("inbox", "docx-attachment");
+    env.mock.add_mail("inbox", "too-large-attachment");
     env.mock.add_mail("inbox", "epub-attachment");
     env.mock.add_mail("inbox", "xlsm-attachment");
     env.mock.add_mail("inbox", "xls-attachment");
@@ -14272,6 +14285,18 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
             "blobId":"docx-blob", "name":"notes.docx",
             "type":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "size":docx.len()
+        })],
+    );
+    env.mock.mail_bodies.lock().unwrap().insert(
+        "too-large-attachment".to_owned(),
+        ("unrelated body".to_owned(), false),
+    );
+    env.mock.mail_attachments.lock().unwrap().insert(
+        "too-large-attachment".to_owned(),
+        vec![serde_json::json!({
+            "blobId":"never-downloaded-blob", "name":"too-large.docx",
+            "type":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "size":4 * 1024 * 1024 + 1
         })],
     );
     env.mock.mail_bodies.lock().unwrap().insert(
