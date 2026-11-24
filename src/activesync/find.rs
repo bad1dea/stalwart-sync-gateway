@@ -476,6 +476,7 @@ fn is_extractable_attachment_type(content_type: &str) -> bool {
         .trim()
         .to_ascii_lowercase();
     media_type.starts_with("text/")
+        || media_type.ends_with("+xml")
         || matches!(
             media_type.as_str(),
             "application/rtf" | "application/json" | "application/xml"
@@ -494,6 +495,7 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
         "text/html" => super::strip_html_tags(&String::from_utf8_lossy(bytes).replace('>', "> ")),
         "text/rtf" | "application/rtf" => super::rtf_to_plain_text(&String::from_utf8_lossy(bytes)),
         "application/xml" | "text/xml" => extract_xml_text(bytes)?,
+        _ if media_type.ends_with("+xml") => extract_xml_text(bytes)?,
         _ if media_type.starts_with("text/") || media_type == "application/json" => {
             String::from_utf8_lossy(bytes).into_owned()
         }
@@ -2101,6 +2103,8 @@ mod tests {
 
     #[test]
     fn find_extracts_text_attachments_for_exact_search_matching() {
+        assert!(is_extractable_attachment_type("application/xhtml+xml"));
+        assert!(is_extractable_attachment_type("application/atom+xml"));
         assert_eq!(
             extract_find_attachment_text("text/plain; charset=utf-8", b"alpha beta"),
             Some("alpha beta".to_owned())
@@ -2126,6 +2130,13 @@ mod tests {
         );
         assert_eq!(
             extract_find_attachment_text("text/xml", b"<root><![CDATA[alpha beta]]></root>",),
+            Some("alpha beta".to_owned())
+        );
+        assert_eq!(
+            extract_find_attachment_text(
+                "application/xhtml+xml",
+                b"<html><body><p>alpha</p><p>beta</p></body></html>",
+            ),
             Some("alpha beta".to_owned())
         );
         assert_eq!(
