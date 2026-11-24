@@ -22,6 +22,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    only 0 or 1, duplicate values fail, and Task Add requires `Complete`.
    Task `Occurrences` is limited to its MS-ASTASK `unsignedByte` range, with
    255 accepted and 256 rejected before a JMAP write.
+   Recurrence replies include `CalendarType=1` for monthly/yearly patterns;
+   Gregorian calendar variants are accepted on input, while non-Gregorian
+   systems and leap-month recurrences remain rejected.
    Mocked Sync regressions cover recurring Add/Fetch and invalid or missing
    Complete without a JMAP write. Next verify create/get and recurrence
    against real Stalwart, then on a client.
@@ -976,6 +979,22 @@ Regression cases cover the 255/256 boundary. The full suite passes 394 tests
 `deploy-2026-11-24-eas-task-occurrences-8e555b2`; homelab commit `b24a4a4`,
 image `sha256:f1d8259fce691e8828305a74f5bdf7420a0574f2e14efbe063b7c3270dd47b2c`,
 started `2026-11-24T21:47:42Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`.
+
+Calendar and Task recurrence responses now include the required
+`CalendarType=1` (Gregorian) for monthly, monthly-by-day, yearly, and
+yearly-by-day patterns. Requests accept Gregorian calendar variants and the
+Gregorian `IsLeapMonth=0` value; unsupported calendar systems, leap-month
+semantics, and misplaced recurrence fields fail closed. Regression tests cover
+all four response recurrence types in the Calendar class, Task output, and
+accepted/rejected Task inputs. Sources: Microsoft [MS-ASCAL CalendarType](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascal/ca68b4ac-49e8-404a-b291-e82eb25ac885)
+and [MS-ASTASK CalendarType](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-astask/f78253a6-26d7-444c-b9a6-7f9ea6afabe7).
+The full suite passes 394 tests (73 ignored); strict Clippy, formatting, and
+diff checks pass. Deployed as
+`deploy-2026-11-24-eas-recurrence-calendar-type-500f2ac`; homelab commit
+`430aedd`, image
+`sha256:4e6770b9c5e6cf0945a3ef4ce767233775613ab4a304fb8a7a99c4d3965c2032`,
+started `2026-11-24T21:55:05Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`.
 
 Also completed: **Task Complete validation**. MS-ASTASK requires `Complete`
