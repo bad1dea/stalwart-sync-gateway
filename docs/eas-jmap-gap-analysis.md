@@ -29,8 +29,10 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    include the required `FirstDayOfWeek`, with Sunday as the fallback when the
    JMAP recurrence has no explicit preference.
    Mocked Sync regressions cover recurring Add/Fetch and invalid or missing
-   Complete without a JMAP write. Next verify create/get and recurrence
-   against real Stalwart, then on a client.
+   Complete without a JMAP write. An ignored live-test harness now performs EAS
+   recurring Task Add, checks the saved JMAP recurrenceRule, and Fetches the
+   task back over Sync; run it on the isolated test bridge, then verify client
+   behavior.
 2. **Real-client 16.1 validation.** Exercise negotiation, Tasks, BodyPart,
    Find, and enabled Oof on the isolated test bridge. Production continues to
    advertise 14.0 until this pass succeeds.
@@ -415,7 +417,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    coverage checks exact-limit XML and normalization, plus rejection above the
    limit. OOXML comment extraction is checked with archive fixtures and an
    end-to-end Word comment proximity search. The full suite passes 396 tests
-   (73 ignored); strict Clippy, format,
+   (74 ignored); strict Clippy, format,
    and diff checks pass.
    Legacy `.xls` attachments are parsed with a vendored Calamine patch that
    caps dense worksheet and formula ranges at 250,000 total cells before range

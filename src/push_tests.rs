@@ -4521,6 +4521,125 @@ mod e2e {
     }
 
     #[tokio::test]
+    #[ignore = "requires the isolated live Stalwart test bridge"]
+    async fn e2e_task_recurrence_add_get_and_sync_round_trip() {
+        use eas::tasks;
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let calendars = live
+            .call_using(
+                serde_json::json!([["Calendar/get",{"accountId":live.account},"0"]]),
+                &using,
+            )
+            .await;
+        let calendar = calendars[0][1]["list"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let folder = format!("cal_{calendar}");
+        let device = dev("task-recurrence-live");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let initial = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+
+        let mut add = eas::DocumentBuilder::new();
+        add.start(air::SYNC);
+        add.start(air::COLLECTIONS);
+        add.start(air::COLLECTION);
+        add.leaf(air::SYNC_KEY, sync_key(&initial));
+        add.leaf(air::COLLECTION_ID, &folder);
+        add.empty_tag(air::GET_CHANGES);
+        add.start(air::COMMANDS);
+        add.start(air::ADD);
+        add.leaf(air::CLIENT_ID, "live-recurring-task");
+        add.start(air::APPLICATION_DATA);
+        add.leaf(tasks::SUBJECT, "Live recurring task fixture");
+        add.leaf(tasks::COMPLETE, "0");
+        add.leaf(tasks::START_DATE, "2042-07-06T10:00:00.000Z");
+        add.leaf(tasks::UTC_START_DATE, "2042-07-06T10:00:00.000Z");
+        add.leaf(tasks::DUE_DATE, "2042-07-07T10:00:00.000Z");
+        add.leaf(tasks::UTC_DUE_DATE, "2042-07-07T10:00:00.000Z");
+        add.start(tasks::RECURRENCE);
+        add.leaf(tasks::TYPE, "0");
+        add.leaf(tasks::START, "2042-07-06T10:00:00.000Z");
+        add.leaf(tasks::INTERVAL, "2");
+        add.leaf(tasks::OCCURRENCES, "3");
+        add.end();
+        for _ in 0..6 {
+            add.end();
+        }
+        let added = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                wbxml::encode_document(&add.finish()),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&added, air::STATUS)
+            .iter()
+            .all(|status| status == "1"));
+        let id = eas::find_text_after(&added, air::SERVER_ID)
+            .expect("Stalwart should accept the recurring Task")
+            .to_owned();
+
+        let stored = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{
+                    "accountId":live.account,"ids":[&id],"properties":["@type","title","start","due","recurrenceRule"]
+                },"0"]]),
+                &using,
+            )
+            .await;
+        let task = &stored[0][1]["list"][0];
+        assert_eq!(task["@type"], "Task");
+        assert_eq!(task["title"], "Live recurring task fixture");
+        assert_eq!(task["recurrenceRule"]["frequency"], "daily");
+        assert_eq!(task["recurrenceRule"]["interval"], 2);
+        assert_eq!(task["recurrenceRule"]["count"], 3);
+
+        let fetched = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&added), &folder),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&fetched, air::SERVER_ID),
+            Some(id.as_str())
+        );
+        assert_eq!(eas::find_text_after(&fetched, tasks::TYPE), Some("0"));
+        assert_eq!(eas::find_text_after(&fetched, tasks::INTERVAL), Some("2"));
+        assert_eq!(
+            eas::find_text_after(&fetched, tasks::OCCURRENCES),
+            Some("3")
+        );
+
+        let cleanup = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set",{
+                    "accountId":live.account,"destroy":[&id]
+                },"0"]]),
+                &using,
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
     #[ignore]
     async fn e2e_calendar_categories_round_trip_between_devices() {
         use eas::calendar as cal;
