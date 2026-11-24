@@ -121,10 +121,10 @@ Search is the older mailbox-content + GAL search command; Find is its
 newer replacement, notably capable of GAL (directory) lookups. Both are
 implemented. Mailbox and GAL Search use JMAP Email/Principal queries; Find
 uses KQL translation for mailbox searches and Principal text queries for
-directory results. The parser supports Boolean groups, size/received and
-boolean comparisons, property qualifiers, WORDS, ALL, ANY, and NONE. Exact
-multiword phrase order and proximity operators remain unavailable because
-Stalwart's native text index does not preserve them. Find is protocol-version
+directory results. The parser supports Boolean groups, size/received,
+importance and boolean comparisons, property qualifiers, WORDS, ALL, ANY, and
+NONE. Quoted phrase order is enforced locally because Stalwart's native text
+index does not preserve it; proximity operators remain unavailable. Find is protocol-version
 gated to 16.1 and is not advertised while production negotiates only 14.0.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
@@ -229,8 +229,9 @@ session's fixes were, not against spec-reading alone.
 
 - Full WBXML codepage number table (all ~24 pages) — pull from
   Microsoft Learn's per-codepage subpages, not re-derived.
-- Exact KQL phrase semantics — Stalwart 0.16.27 returns the same message for
-  reversed quoted words, so native `Email/query` cannot safely implement it.
+- KQL proximity operators — Stalwart 0.16.27 does not expose token positions
+  in its query results, so NEAR/ONEAR are not locally evaluated yet. Quoted
+  phrase order is already exact-filtered in the gateway.
 - Recurrence — Stalwart 0.16.27 rejects `recurrenceRules` on create and omits
   it on read; recheck after a backend upgrade.
 - Real-client 16.1 negotiation and behavior, including Tasks field order and

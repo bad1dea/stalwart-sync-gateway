@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `64f4f52` (2026-11-24)
+## Reconciled status for source `main` at `bd30d88` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -125,6 +125,17 @@ Current prioritized work:
    `deploy-2026-11-24-eas-kql-sent-date-81b1409`; homelab commit `b0367aa`,
    image `sha256:b8ae02312614bb4c6ec41932d72ced10a18759a767932c235bc7f3c7e25648ee`,
    started `2026-11-24T15:09:22Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Importance comparisons now accept `=`, `<>`, `<`, `<=`,
+   `>`, and `>=` with local low/normal/high ordering; JMAP header equality
+   filters narrow safe candidates while ordered and negated comparisons scan
+   the selected mailbox and apply exact post-filtering. Regression coverage
+   checks comparison boundaries, negation, OR with a boolean predicate, result
+   IDs, and totals. The full suite passed 341 tests (73 ignored); strict Clippy,
+   formatting, and diff checks passed. Deployed as
+   `deploy-2026-11-24-eas-kql-importance-comparisons-bd30d88`; homelab commit
+   `118c119`, image
+   `sha256:5e3d9e325a56e4aff841ab779f5207c2ac835f1f3535456a02150b630ec64ed2`,
+   started `2026-11-24T16:03:06Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. The standalone negated form
    `NOT subject:"..."` and unary-minus forms such as
    `-body:"..."` are exact-filtered over the scoped mailbox. Positive phrase
@@ -522,10 +533,10 @@ to advertise EAS 14.0.
 
 Also completed (`b981802`): **KQL message importance restriction**. Find now
 maps `importance:low`, `importance:normal`/`medium`, and `importance:high` to
-JMAP's standard `Importance` header filter. Unknown enum values and ordered or
-equality comparisons remain rejected because the JMAP header matcher is
-text-based. Regression tests check all three levels, case normalization,
-`medium` normalization, and invalid/unsupported forms. Full suite: 276 passed,
+JMAP's standard `Importance` header filter. The original implementation
+rejected comparisons; the follow-up deployment below adds exact ordered local
+evaluation. Regression tests check all three levels, case normalization,
+`medium` normalization, comparisons, and invalid forms. Full suite: 276 passed,
 73 ignored; clippy with warnings denied, formatting, and diff checks pass.
 Deployed as `deploy-2026-11-23-eas-kql-importance-b981802`; homelab commit
 `5dbd061`. Compose built image
@@ -533,6 +544,18 @@ Deployed as `deploy-2026-11-23-eas-kql-importance-b981802`; homelab commit
 The replacement started at `2026-11-24T05:03:33Z` with restart count zero;
 mesh `/healthz` returned `ok` and `/readyz` returned `ready`. Production
 continues to advertise EAS 14.0.
+
+Also completed (`bd30d88`): **KQL importance comparisons**. Find now evaluates
+equality, inequality, and ordered comparisons against the standard low/normal/
+high importance order. Ordered and negated comparisons broaden JMAP candidates
+and locally filter exact values; mixed OR terms and NOT are covered end to end.
+Full suite: 341 passed, 73 ignored; strict Clippy, formatting, and diff checks
+passed. Deployed as
+`deploy-2026-11-24-eas-kql-importance-comparisons-bd30d88`; homelab commit
+`118c119`, image
+`sha256:5e3d9e325a56e4aff841ab779f5207c2ac835f1f3535456a02150b630ec64ed2`,
+started `2026-11-24T16:03:06Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`.
 
 Also completed (`0b5503d`): **KQL email kind restriction**. Since mailbox Find
 queries only JMAP Email objects, `kind:email` is satisfied by the mailbox
