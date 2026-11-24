@@ -15,6 +15,12 @@ enum Token {
     Comma,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PhraseMatch {
+    All,
+    Any,
+}
+
 pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
     let tokens = tokenize(input)?;
     let phrases = tokens
@@ -44,8 +50,21 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
     Ok(filter)
 }
 
-pub(super) fn phrases_for_postfilter(input: &str) -> Option<Vec<(String, String)>> {
+pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(String, String)>)> {
     let tokens = tokenize(input).ok()?;
+    if tokens.contains(&Token::Or)
+        && tokens
+            .iter()
+            .all(|token| matches!(token, Token::Word(_) | Token::Or))
+    {
+        let mut phrases = Vec::new();
+        for token in &tokens {
+            let Token::Word(word) = token else { continue };
+            let word = word.strip_prefix('+').unwrap_or(word);
+            phrases.push(search_phrase_word(word)?);
+        }
+        return (!phrases.is_empty()).then_some((PhraseMatch::Any, phrases));
+    }
     if tokens
         .iter()
         .any(|token| !matches!(token, Token::Word(_) | Token::And))
@@ -94,7 +113,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<Vec<(String, String)
             return None;
         }
     }
-    Some(phrases)
+    Some((PhraseMatch::All, phrases))
 }
 
 fn search_phrase_word(word: &str) -> Option<(String, String)> {
@@ -744,11 +763,17 @@ mod tests {
     fn positive_conjunctive_subject_phrases_are_candidates_for_exact_post_filtering() {
         assert_eq!(
             phrases_for_postfilter(r#"subject:"alpha beta""#),
-            Some(vec![("subject".to_owned(), "alpha beta".to_owned())])
+            Some((
+                PhraseMatch::All,
+                vec![("subject".to_owned(), "alpha beta".to_owned())]
+            ))
         );
         assert_eq!(
             phrases_for_postfilter(r#"subject:"alpha beta" AND isread:true"#),
-            Some(vec![("subject".to_owned(), "alpha beta".to_owned())])
+            Some((
+                PhraseMatch::All,
+                vec![("subject".to_owned(), "alpha beta".to_owned())]
+            ))
         );
         assert_eq!(
             to_filter(r#"subject:"alpha beta" AND isread:true"#).unwrap(),
@@ -776,7 +801,10 @@ mod tests {
     fn positive_conjunctive_body_and_text_phrases_use_exact_postfiltering() {
         assert_eq!(
             phrases_for_postfilter(r#"body:"alpha beta" AND isread:true"#),
-            Some(vec![("body".to_owned(), "alpha beta".to_owned())])
+            Some((
+                PhraseMatch::All,
+                vec![("body".to_owned(), "alpha beta".to_owned())]
+            ))
         );
         assert_eq!(
             to_filter(r#"body:"alpha beta" AND isread:true"#).unwrap(),
@@ -786,7 +814,10 @@ mod tests {
         );
         assert_eq!(
             phrases_for_postfilter(r#"text:"alpha beta""#),
-            Some(vec![("text".to_owned(), "alpha beta".to_owned())])
+            Some((
+                PhraseMatch::All,
+                vec![("text".to_owned(), "alpha beta".to_owned())]
+            ))
         );
         for query in [
             r#"body:"alpha beta" OR isread:true"#,
@@ -799,10 +830,13 @@ mod tests {
         }
         assert_eq!(
             phrases_for_postfilter(r#"subject:"alpha beta" AND body:"gamma delta""#),
-            Some(vec![
-                ("subject".to_owned(), "alpha beta".to_owned()),
-                ("body".to_owned(), "gamma delta".to_owned())
-            ])
+            Some((
+                PhraseMatch::All,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("body".to_owned(), "gamma delta".to_owned())
+                ]
+            ))
         );
         assert_eq!(
             to_filter(r#"subject:"alpha beta" AND body:"gamma delta""#).unwrap(),
@@ -818,6 +852,24 @@ mod tests {
             assert!(phrases_for_postfilter(query).is_none(), "{query}");
             assert!(to_filter(query).is_err(), "{query}");
         }
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" OR body:"gamma delta""#),
+            Some((
+                PhraseMatch::Any,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("body".to_owned(), "gamma delta".to_owned())
+                ]
+            ))
+        );
+        assert_eq!(
+            to_filter(r#"subject:"alpha beta" OR body:"gamma delta""#).unwrap(),
+            json!({"operator":"OR", "conditions":[
+                {"subject":"alpha beta"}, {"body":"gamma delta"}
+            ]})
+        );
+        assert!(phrases_for_postfilter(r#"subject:"alpha beta" OR isread:true"#).is_none());
+        assert!(to_filter(r#"subject:"alpha beta" OR isread:true"#).is_err());
     }
 
     #[test]

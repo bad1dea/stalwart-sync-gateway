@@ -121,12 +121,20 @@ pub(super) async fn handle(
     let reply = if request.gal {
         execute_gal(state, auth, device, request).await
     } else {
-        let phrases = query::phrases_for_postfilter(&request.text).unwrap_or_default();
+        let phrase_filter = query::phrases_for_postfilter(&request.text);
         let filter = match query::to_filter(&request.text) {
             Ok(filter) => filter,
             Err(_) => return error_response(state, "2"),
         };
-        execute(state, auth, device, request, filter, phrases).await
+        execute(
+            state,
+            auth,
+            device,
+            request,
+            filter,
+            phrase_filter.unwrap_or((query::PhraseMatch::All, Vec::new())),
+        )
+        .await
     };
     match reply {
         Ok(reply) => respond(state, reply),
@@ -143,7 +151,7 @@ async fn execute(
     device: &EasQuery,
     request: Request,
     query: Value,
-    phrases: Vec<(String, String)>,
+    phrase_filter: (query::PhraseMatch, Vec<(String, String)>),
 ) -> anyhow::Result<wbxml::Document> {
     let collections = state.jmap.collections(auth).await?;
     let mailboxes: Vec<_> = collections
@@ -181,6 +189,7 @@ async fn execute(
         json!({"operator":"OR", "conditions":scope.iter().map(|id| json!({"inMailbox":id})).collect::<Vec<_>>()})
     };
     let filter = json!({"operator":"AND", "conditions":[query, folder_filter]});
+    let (phrase_match, phrases) = phrase_filter;
     let user = auth.username();
     let device = device.device_id.as_deref().unwrap_or("unknown");
     let now = chrono::Utc::now().timestamp();
@@ -245,7 +254,12 @@ async fn execute(
             }
             let count = candidate.emails.len();
             for email in candidate.emails {
-                if email_matches_phrases(&email.subject, email.body.as_ref(), &phrases)? {
+                if email_matches_phrases(
+                    &email.subject,
+                    email.body.as_ref(),
+                    phrase_match,
+                    &phrases,
+                )? {
                     if (request.start..=request.end).contains(&matched) {
                         selected.push(email);
                     }
@@ -500,14 +514,27 @@ fn restart_document() -> wbxml::Document {
 fn email_matches_phrases(
     subject: &str,
     body: Option<&crate::model::EmailBody>,
+    phrase_match: query::PhraseMatch,
     phrases: &[(String, String)],
 ) -> anyhow::Result<bool> {
-    for (property, phrase) in phrases {
-        if !email_matches_phrase(subject, body, property, phrase)? {
-            return Ok(false);
+    match phrase_match {
+        query::PhraseMatch::All => {
+            for (property, phrase) in phrases {
+                if !email_matches_phrase(subject, body, property, phrase)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        query::PhraseMatch::Any => {
+            for (property, phrase) in phrases {
+                if email_matches_phrase(subject, body, property, phrase)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         }
     }
-    Ok(true)
 }
 
 fn email_matches_phrase(
@@ -595,6 +622,7 @@ mod tests {
         assert!(email_matches_phrases(
             "Alpha beta subject",
             Some(&plain),
+            query::PhraseMatch::All,
             &[
                 ("subject".to_owned(), "alpha beta".to_owned()),
                 ("body".to_owned(), "alpha beta".to_owned())
@@ -604,9 +632,30 @@ mod tests {
         assert!(!email_matches_phrases(
             "Alpha beta subject",
             Some(&plain),
+            query::PhraseMatch::All,
             &[
                 ("subject".to_owned(), "alpha beta".to_owned()),
                 ("body".to_owned(), "beta alpha".to_owned())
+            ]
+        )
+        .unwrap());
+        assert!(email_matches_phrases(
+            "Other subject",
+            Some(&plain),
+            query::PhraseMatch::Any,
+            &[
+                ("subject".to_owned(), "alpha beta".to_owned()),
+                ("body".to_owned(), "alpha beta".to_owned())
+            ]
+        )
+        .unwrap());
+        assert!(!email_matches_phrases(
+            "Other subject",
+            None,
+            query::PhraseMatch::Any,
+            &[
+                ("subject".to_owned(), "alpha beta".to_owned()),
+                ("text".to_owned(), "alpha beta".to_owned())
             ]
         )
         .unwrap());
