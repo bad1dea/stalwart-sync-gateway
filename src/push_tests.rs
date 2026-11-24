@@ -13753,6 +13753,33 @@ async fn find_phrase_and_negated_read_filter_preserves_kql_and_semantics() {
 }
 
 #[tokio::test]
+async fn find_negated_phrase_can_filter_with_a_single_token_subject_restriction() {
+    use eas::{airsync as air, find as f};
+    let env = start_env(Opts::default()).await;
+    env.mock.add_mail("inbox", "alpha-beta");
+    env.mock.add_mail("inbox", "gamma");
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "c9b36e4a-0d55-4f40-a593-467273ca5bc9",
+            r#"NOT subject:"alpha beta" AND subject:gamma"#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["gamma"]
+    );
+}
+
+#[tokio::test]
 async fn find_repeated_and_negated_subject_phrases_are_exact() {
     use eas::{airsync as air, find as f};
     let env = start_env(Opts::default()).await;
