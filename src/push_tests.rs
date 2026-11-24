@@ -13522,6 +13522,24 @@ async fn find_phrase_or_boolean_state_uses_both_exact_branches() {
         .req("Find", "client")
         .header("MS-ASProtocolVersion", "16.1")
         .body(find_body(
+            "55afbc37-ed3e-4234-9752-ae3ea33e7bc9",
+            r#"subject:"alpha beta" OR isread:true AND isflagged:true"#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("2"));
+    let mut ids = eas::find_all_text_after(&doc, air::SERVER_ID);
+    ids.sort();
+    assert_eq!(ids, vec!["alpha-beta", "m1"]);
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
             "e8d9c3a8-8b4e-43d9-998d-d3956ed8ab6e",
             r#"subject:"alpha beta" OR NOT isread:true"#,
             None,

@@ -20,6 +20,7 @@ pub(super) enum PhraseMatch {
     All,
     Any,
     None,
+    Expression,
 }
 
 pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
@@ -64,6 +65,7 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         }
     }
     if tokens.contains(&Token::Or)
+        && !tokens.contains(&Token::And)
         && tokens
             .iter()
             .all(|token| matches!(token, Token::Word(_) | Token::Or | Token::Not))
@@ -111,6 +113,10 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
             }
         }
         return (term_count > 1 && phrase_count > 0).then_some((PhraseMatch::Any, terms));
+    }
+    if tokens.contains(&Token::And) && tokens.contains(&Token::Or) {
+        return flat_phrase_boolean_expression(&tokens)
+            .map(|terms| (PhraseMatch::Expression, terms));
     }
     if tokens
         .iter()
@@ -224,6 +230,96 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         }
     }
     Some((PhraseMatch::All, phrases))
+}
+
+fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, String)>> {
+    if tokens
+        .iter()
+        .any(|token| !matches!(token, Token::Word(_) | Token::And | Token::Or | Token::Not))
+    {
+        return None;
+    }
+    let mut output = Vec::new();
+    let mut operators = Vec::new();
+    let mut position = 0;
+    let mut expect_operand = true;
+    let mut phrase_count = 0;
+    let mut operator_count = 0;
+    while position < tokens.len() {
+        if expect_operand {
+            let explicit_not = tokens.get(position) == Some(&Token::Not);
+            if explicit_not {
+                position += 1;
+            }
+            let Token::Word(word) = tokens.get(position)? else {
+                return None;
+            };
+            if explicit_not {
+                if word.starts_with(['+', '-']) {
+                    return None;
+                }
+                let (property, value) = boolean_search_term(word)?;
+                output.push((format!("$not{property}"), value));
+            } else if let Some(negative) = word.strip_prefix('-') {
+                if let Some((property, value)) = search_phrase_word(negative) {
+                    output.push((format!("$not${property}"), value));
+                    phrase_count += 1;
+                } else {
+                    let (property, value) = boolean_search_term(negative)?;
+                    output.push((format!("$not{property}"), value));
+                }
+            } else {
+                let positive = word.strip_prefix('+').unwrap_or(word);
+                if let Some(phrase) = search_phrase_word(positive) {
+                    output.push(phrase);
+                    phrase_count += 1;
+                } else {
+                    output.push(boolean_search_term(word)?);
+                }
+            }
+            position += 1;
+            expect_operand = false;
+        } else {
+            let operator = tokens.get(position)?;
+            if !matches!(operator, Token::And | Token::Or) {
+                return None;
+            }
+            while operators.last().is_some_and(|previous| {
+                matches!(previous, Token::And | Token::Or)
+                    && (previous == operator || *previous == Token::And)
+            }) {
+                let previous = operators.pop().unwrap();
+                output.push((
+                    if previous == Token::And {
+                        "$op$and"
+                    } else {
+                        "$op$or"
+                    }
+                    .to_owned(),
+                    String::new(),
+                ));
+            }
+            operators.push(operator.clone());
+            operator_count += 1;
+            position += 1;
+            expect_operand = true;
+        }
+    }
+    if expect_operand || phrase_count == 0 || operator_count == 0 {
+        return None;
+    }
+    while let Some(operator) = operators.pop() {
+        output.push((
+            if operator == Token::And {
+                "$op$and"
+            } else {
+                "$op$or"
+            }
+            .to_owned(),
+            String::new(),
+        ));
+    }
+    Some(output)
 }
 
 fn search_phrase_word(word: &str) -> Option<(String, String)> {
@@ -1044,6 +1140,19 @@ mod tests {
                     ("subject".to_owned(), "alpha beta".to_owned()),
                     ("subject".to_owned(), "gamma delta".to_owned()),
                     ("$isread".to_owned(), "true".to_owned())
+                ]
+            ))
+        );
+        assert_eq!(
+            phrases_for_postfilter(r#"subject:"alpha beta" OR isread:true AND isflagged:true"#),
+            Some((
+                PhraseMatch::Expression,
+                vec![
+                    ("subject".to_owned(), "alpha beta".to_owned()),
+                    ("$isread".to_owned(), "true".to_owned()),
+                    ("$isflagged".to_owned(), "true".to_owned()),
+                    ("$op$and".to_owned(), String::new()),
+                    ("$op$or".to_owned(), String::new())
                 ]
             ))
         );

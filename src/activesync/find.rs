@@ -193,10 +193,12 @@ async fn execute(
     // the backend does not preserve phrase semantics, and NOT would exclude
     // messages that do not contain all indexed phrase terms. Scan the scoped
     // mailbox and decide the negative phrase locally.
-    let query = if phrase_match == query::PhraseMatch::None
-        || phrases
-            .iter()
-            .any(|(property, _)| property.starts_with('$'))
+    let query = if matches!(
+        phrase_match,
+        query::PhraseMatch::None | query::PhraseMatch::Expression
+    ) || phrases
+        .iter()
+        .any(|(property, _)| property.starts_with('$'))
     {
         json!({})
     } else {
@@ -581,6 +583,52 @@ fn email_matches_phrases(
                 }
             }
             Ok(true)
+        }
+        query::PhraseMatch::Expression => {
+            let mut values = Vec::new();
+            for (property, phrase) in phrases {
+                match property.as_str() {
+                    "$op$and" | "$op$or" => {
+                        let right = values
+                            .pop()
+                            .ok_or_else(|| anyhow::anyhow!("invalid phrase expression"))?;
+                        let left = values
+                            .pop()
+                            .ok_or_else(|| anyhow::anyhow!("invalid phrase expression"))?;
+                        values.push(if property == "$op$and" {
+                            left && right
+                        } else {
+                            left || right
+                        });
+                    }
+                    _ => {
+                        let negated = property.starts_with("$not$");
+                        let property = property.strip_prefix("$not$").unwrap_or(property);
+                        let boolean_property = match property {
+                            "isread" | "$isread" => Some("$isread"),
+                            "isflagged" | "$isflagged" => Some("$isflagged"),
+                            "hasattachment" | "$hasattachment" => Some("$hasattachment"),
+                            _ => None,
+                        };
+                        let matched = if let Some(boolean_property) = boolean_property {
+                            let value = match boolean_property {
+                                "$isread" => is_read,
+                                "$isflagged" => is_flagged,
+                                "$hasattachment" => has_attachment,
+                                _ => None,
+                            };
+                            value.is_some_and(|value| value == (phrase == "true"))
+                        } else {
+                            email_matches_phrase(subject, body, property, phrase)?
+                        };
+                        values.push(if negated { !matched } else { matched });
+                    }
+                }
+            }
+            if values.len() != 1 {
+                anyhow::bail!("invalid phrase expression");
+            }
+            Ok(values[0])
         }
     }
 }
