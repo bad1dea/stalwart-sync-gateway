@@ -89,12 +89,13 @@ around `ping()` for the standing note on why that was deliberately not
 ### ItemOperations (§2.2.1.10)
 Generalized item-fetch command — can fetch a message body, an attachment,
 or (with `Options>Schema`) a subset of fields, and supports fetching
-multiple items across different stores in one request. This gateway
-implements only the empty-Options-list, single-store `Fetch` case (see
-`item_operations()`); the real device this session uses the Sync-embedded
-`<Fetch>` for opening messages instead (confirmed live), so this path is
-currently for legacy/other-client compatibility rather than the observed
-daily-driver flow.
+multiple items across different stores in one request. This gateway accepts
+multiple Fetch operations, applies each Store independently, parses body and
+MIME options, and now restricts the returned Properties fields to the
+top-level entries requested by Schema for mail, contacts, calendar events,
+tasks, and notes. The real device this session uses the Sync-embedded
+`<Fetch>` for opening messages instead (confirmed live), so this path remains
+secondary for that client even though its protocol handling is broader.
 
 ### GetAttachment (§2.2.2.8, **legacy — pre-14.0 only**)
 A plain `GET ...?Cmd=GetAttachment&AttachmentName=...`, no WBXML request

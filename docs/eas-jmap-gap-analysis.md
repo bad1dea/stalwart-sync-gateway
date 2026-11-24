@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` at `6b14d20` (2026-11-24)
+## Reconciled status for source `main` at `64f4f52` (2026-11-24)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -451,6 +451,15 @@ Current prioritized work:
    `0a41d14`, image
    `sha256:147b29674bf7bab24abff1f73e83dcbe1db06b7ed9a7bccb0379f8836ee976b2`,
    started `2026-11-24T15:34:15Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`.
+   ItemOperations Fetch now parses the optional Schema and returns only the
+   requested top-level class fields for mail, contacts, calendar events, tasks,
+   and notes. The full suite passed 339 tests (73 ignored); strict Clippy,
+   formatting, and diff checks passed. Deployed as
+   `deploy-2026-11-24-eas-itemoperations-schema-64f4f52`; homelab commit
+   `db3b8f0`, image
+   `sha256:2543965c1ae42b7a3ea71e12033965a978b07b444f721cd1e157f4caaa53b0f3`,
+   started `2026-11-24T15:45:06Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`.
 7. **Online meeting URI fields.** Stalwart 0.16.27's generic JSCalendar
    property handling exposes RFC 8984 `virtualLocations` even though the
@@ -1271,7 +1280,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | FolderSync | **Done, incremental** | `Mailbox/get`, `AddressBook/get`, `Calendar/get` | Key 0 sends a full Adds snapshot; subsequent keys diff per-device collection fingerprints into Adds/Updates/Deletes. Unknown keys return Status 9. |
 | FolderCreate/Update/Delete | **Done** (`deploy-2026-11-22-eas-groupware-folders-094b478`) | `Mailbox/set`, `AddressBook/set`, and `Calendar/set` | Mail folders retain hierarchical parent support. User Contacts (`Type=14`) and Calendar (`Type=13`) folders create, rename, and delete JMAP collections with synthetic `ab_`/`cal_` EAS IDs; those collections remain root-level because JMAP has no parent hierarchy. Notes and Tasks remain derived collections without independent CRUD. Mocked HTTP regression covers create/rename/delete for both types and rejects invalid types. |
 | Ping | **Done** | N/A (gateway-local long-poll + JMAP poll underneath, implementation detail not deeply re-read this pass) | Empirically rock-solid over the entire multi-day A/B test; deliberately not touched further this session even where a codepage table read once looked mismatched. |
-| ItemOperations (Fetch) | **Done (legacy/secondary path)** | `Email/get` + `download_blob()` | Real device confirmed to use the *Sync-embedded* Fetch instead for opening messages; this command path exists for other-client compatibility. |
+| ItemOperations (Fetch) | **Implemented (legacy/secondary path)** | `Email/get` + `download_blob()` | Multiple Fetch operations, per-operation Store dispatch, body/MIME preferences, and optional Schema field filtering are supported for mail, contacts, calendars, tasks, and notes. Real device confirmed to use the *Sync-embedded* Fetch instead for opening messages. |
 | ItemOperations (attachment fetch via ItemOperations, not GetAttachment) | **Implemented** | `download_blob_with_type()` | `FileReference` fetch supports full and byte-range blob responses. ItemOperations Fetch also routes notes, tasks, calendar events, contacts, and mail. |
 | GetAttachment (legacy) | **Done** | `download_blob()` | `AttachmentName` reference is a synthetic `blobId||name` string this gateway itself issues. |
 | GetItemEstimate | **Done** | Counts from the same `Email/query`/`ContactCard/query`/`CalendarEvent/query` paths used for Sync | FolderType field bug fixed this session. |
