@@ -7035,6 +7035,9 @@ fn write_calendar_fields(
     if let Some(recurrence) = &event.recurrence {
         builder.start(cal::RECURRENCE);
         builder.leaf(cal::RECURRENCE_TYPE, recurrence.kind.to_string());
+        if matches!(recurrence.kind, 2 | 3 | 5 | 6) {
+            builder.leaf(cal::CALENDAR_TYPE, "1");
+        }
         if let Some(until) = &recurrence.until {
             builder.leaf(cal::RECURRENCE_UNTIL, until.clone());
         }
@@ -7774,6 +7777,9 @@ fn write_task_fields(
             builder.leaf(tasks::START, series_start);
         }
         builder.leaf(tasks::TYPE, recurrence.kind.to_string());
+        if matches!(recurrence.kind, 2 | 3 | 5 | 6) {
+            builder.leaf(tasks::CALENDAR_TYPE, "1");
+        }
         if let Some(until) = &recurrence.until {
             builder.leaf(tasks::UNTIL, until.clone());
         }
@@ -9041,6 +9047,30 @@ mod tests {
             eas::find_text_after(&document, cal::RECURRENCE_OCCURRENCES),
             Some("12")
         );
+        assert_eq!(eas::find_text_after(&document, cal::CALENDAR_TYPE), None);
+
+        for kind in [2, 3, 5, 6] {
+            let event = crate::model::CalendarEvent {
+                recurrence: Some(crate::wbxml::eas::CalendarRecurrence {
+                    kind,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let mut builder = eas::DocumentBuilder::new();
+            super::write_calendar_command(
+                &mut builder,
+                air::ADD,
+                &event,
+                ProtocolVersion::V16_1,
+                &[],
+            );
+            assert_eq!(
+                eas::find_text_after(&builder.finish(), cal::CALENDAR_TYPE),
+                Some("1"),
+                "calendar recurrence type {kind}"
+            );
+        }
     }
 
     #[test]
@@ -9356,7 +9386,7 @@ mod tests {
     #[test]
     fn task_recurrence_is_written_with_tasks_codepage_fields() {
         use crate::wbxml::eas::{self, airsync as air, tasks};
-        let task = crate::model::Task {
+        let mut task = crate::model::Task {
             id: "task-1".to_owned(),
             title: "Weekly task".to_owned(),
             description: None,
@@ -9390,6 +9420,15 @@ mod tests {
         assert_eq!(
             eas::find_text_after(&document, tasks::OCCURRENCES),
             Some("8")
+        );
+        assert_eq!(eas::find_text_after(&document, tasks::CALENDAR_TYPE), None);
+
+        task.recurrence.as_mut().unwrap().kind = 2;
+        let mut builder = eas::DocumentBuilder::new();
+        super::write_task_command(&mut builder, air::ADD, &task, &[], ProtocolVersion::V16_1);
+        assert_eq!(
+            eas::find_text_after(&builder.finish(), tasks::CALENDAR_TYPE),
+            Some("1")
         );
     }
 

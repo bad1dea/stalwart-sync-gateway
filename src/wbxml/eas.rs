@@ -3378,6 +3378,8 @@ fn parse_task_recurrence(
             0x17 => calendar::RECURRENCE_WEEK_OF_MONTH,
             0x18 => calendar::RECURRENCE_MONTH_OF_YEAR,
             0x26 => calendar::FIRST_DAY_OF_WEEK,
+            _ if same_token(token, tasks::CALENDAR_TYPE) => calendar::CALENDAR_TYPE,
+            _ if same_token(token, tasks::IS_LEAP_MONTH) => calendar::IS_LEAP_MONTH,
             _ => return Err(()),
         };
         if token.code_page != tasks::PAGE {
@@ -3476,7 +3478,10 @@ fn parse_calendar_recurrence(document: &Document) -> Result<Option<CalendarRecur
     }
     let mut values = std::collections::BTreeMap::<u8, String>::new();
     for (token, value) in recurrence_child_texts(document)? {
-        if !(matches!(token.token, 0x1c..=0x23) || same_token(token, calendar::FIRST_DAY_OF_WEEK))
+        if !(matches!(token.token, 0x1c..=0x23)
+            || same_token(token, calendar::FIRST_DAY_OF_WEEK)
+            || same_token(token, calendar::CALENDAR_TYPE)
+            || same_token(token, calendar::IS_LEAP_MONTH))
             || token.code_page != calendar::PAGE
         {
             return Err(());
@@ -3495,6 +3500,17 @@ fn parse_calendar_recurrence(document: &Document) -> Result<Option<CalendarRecur
     let kind = u8::try_from(kind).map_err(|_| ())?;
     if !matches!(kind, 0 | 1 | 2 | 3 | 5 | 6) {
         return Err(());
+    }
+    if let Some(calendar_type) = values.get(&calendar::CALENDAR_TYPE.token) {
+        let calendar_type = calendar_type.parse::<u8>().map_err(|_| ())?;
+        if !matches!(kind, 2 | 3 | 5 | 6) || !matches!(calendar_type, 1 | 2 | 9 | 10 | 11 | 12) {
+            return Err(());
+        }
+    }
+    if let Some(is_leap_month) = values.get(&calendar::IS_LEAP_MONTH.token) {
+        if !matches!(kind, 5 | 6) || is_leap_month != "0" {
+            return Err(());
+        }
     }
     let interval = number(calendar::RECURRENCE_INTERVAL)?;
     let occurrences = number(calendar::RECURRENCE_OCCURRENCES)?;
@@ -4244,6 +4260,36 @@ mod tests {
                 ..Default::default()
             })
         );
+
+        for (calendar_type, accepted) in [("1", true), ("3", false)] {
+            let mut calendar = DocumentBuilder::new();
+            calendar.start(airsync::APPLICATION_DATA);
+            calendar.start(tasks::RECURRENCE);
+            calendar.leaf(tasks::START, "2026-11-24T09:00:00.000Z");
+            calendar.leaf(tasks::TYPE, "2");
+            calendar.leaf(tasks::DAY_OF_MONTH, "24");
+            calendar.leaf(tasks::CALENDAR_TYPE, calendar_type);
+            calendar.end();
+            calendar.end();
+            let fields = extract_task_fields(&calendar.finish().nodes);
+            assert_eq!(
+                !fields.unsupported_recurrence, accepted,
+                "Task CalendarType={calendar_type}: {fields:?}"
+            );
+        }
+
+        let mut leap_month = DocumentBuilder::new();
+        leap_month.start(airsync::APPLICATION_DATA);
+        leap_month.start(tasks::RECURRENCE);
+        leap_month.leaf(tasks::START, "2026-11-24T09:00:00.000Z");
+        leap_month.leaf(tasks::TYPE, "5");
+        leap_month.leaf(tasks::DAY_OF_MONTH, "24");
+        leap_month.leaf(tasks::MONTH_OF_YEAR, "11");
+        leap_month.leaf(tasks::CALENDAR_TYPE, "1");
+        leap_month.leaf(tasks::IS_LEAP_MONTH, "0");
+        leap_month.end();
+        leap_month.end();
+        assert!(!extract_task_fields(&leap_month.finish().nodes).unsupported_recurrence);
 
         for (occurrences, accepted) in [("255", true), ("256", false)] {
             let mut bounded = DocumentBuilder::new();
