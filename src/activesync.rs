@@ -5833,14 +5833,43 @@ fn write_contact_address_fields(
     }
 }
 
+fn calendar_instance_change_supported(fields: &wbxml::eas::CalendarFields) -> bool {
+    (fields.subject.is_some() || fields.body.is_some())
+        && !fields.unsupported_location
+        && fields.location.is_none()
+        && fields.location_coordinates.is_none()
+        && fields.start_time.is_none()
+        && fields.end_time.is_none()
+        && fields.all_day_event.is_none()
+        && fields.busy_status.is_none()
+        && !fields.unsupported_busy_status
+        && fields.sensitivity.is_none()
+        && !fields.unsupported_sensitivity
+        && fields.reminder.is_none()
+        && !fields.unsupported_reminder
+        && fields.categories.is_none()
+        && !fields.unsupported_categories
+        && !fields.recurrence_present
+        && fields.recurrence.is_none()
+        && !fields.unsupported_recurrence
+        && fields.client_uid.is_none()
+        && !fields.unsupported_client_uid
+        && !fields.uid_present
+        && !fields.unsupported_response_type
+        && fields.attendees.is_empty()
+        && !fields.attendees_present
+        && !fields.unsupported_attendees
+        && !fields.unsupported_body
+        && fields.body_type.is_none_or(|body_type| body_type == 1)
+}
+
 /// Handles one Calendar collection's Sync round-trip end to end, same
 /// contract and hash-diff shape as `sync_contacts_collection` (see that
 /// function's own doc for the full pattern description -- this is a
 /// direct copy of it onto Calendar). Recurrence, attendee, and reminder
 /// fields are handled by this collection's supported paths.
-/// `CalendarEvent/set` supports
-/// in-place `update` (confirmed live -- see `save_calendar_event`'s doc),
-/// so like Contacts, the JMAP id is a stable ServerId across edits.
+/// `CalendarEvent/set` supports in-place `update` (confirmed live -- see
+/// `save_calendar_event`'s doc), so the JMAP id is a stable ServerId.
 async fn sync_calendar_collection(
     state: &AppState,
     auth: &AuthenticatedSession,
@@ -5884,7 +5913,9 @@ async fn sync_calendar_collection(
     for command in &collection.commands {
         if command.instance_id.is_some()
             && (!matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1)
-                || command.kind != wbxml::eas::SyncClientCommandKind::Delete)
+                || !(command.kind == wbxml::eas::SyncClientCommandKind::Delete
+                    || (command.kind == wbxml::eas::SyncClientCommandKind::Change
+                        && calendar_instance_change_supported(&command.calendar))))
         {
             if command.kind == wbxml::eas::SyncClientCommandKind::Change {
                 change_responses.push((command.server_id.clone(), "6"));
@@ -6081,17 +6112,30 @@ async fn sync_calendar_collection(
                 }
             }
             wbxml::eas::SyncClientCommandKind::Change => {
-                match state
-                    .jmap
-                    .save_calendar_event(
-                        auth,
-                        &calendar_id,
-                        Some(&command.server_id),
-                        None,
-                        &command.calendar,
-                    )
-                    .await
-                {
+                let result = if let Some(instance_id) = command.instance_id.as_deref() {
+                    state
+                        .jmap
+                        .save_calendar_event_instance(
+                            auth,
+                            &command.server_id,
+                            instance_id,
+                            &command.calendar,
+                        )
+                        .await
+                        .map(|()| command.server_id.clone())
+                } else {
+                    state
+                        .jmap
+                        .save_calendar_event(
+                            auth,
+                            &calendar_id,
+                            Some(&command.server_id),
+                            None,
+                            &command.calendar,
+                        )
+                        .await
+                };
+                match result {
                     Ok(id) => change_responses.push((id, "1")),
                     Err(error) => {
                         tracing::warn!(
@@ -6368,7 +6412,15 @@ fn calendar_event_hash(event: &crate::model::CalendarEvent) -> String {
     event.cancelled.hash(&mut hasher);
     event.response_type.hash(&mut hasher);
     event.attendees.hash(&mut hasher);
-    event.recurrence_exceptions.hash(&mut hasher);
+    for exception in &event.recurrence_exceptions {
+        exception.instance_id.hash(&mut hasher);
+        exception.deleted.hash(&mut hasher);
+        exception.title.hash(&mut hasher);
+        if let Some(description) = &exception.description {
+            description.body_type.eas_value().hash(&mut hasher);
+            description.value.hash(&mut hasher);
+        }
+    }
     format!("{:016x}", hasher.finish())
 }
 
@@ -6530,7 +6582,7 @@ fn write_calendar_fields(
     }
     if !event.recurrence_exceptions.is_empty() {
         builder.start(cal::EXCEPTIONS);
-        for occurrence in &event.recurrence_exceptions {
+        for exception in &event.recurrence_exceptions {
             builder.start(cal::EXCEPTION);
             if let Some(uid) = &event.uid {
                 builder.leaf(cal::UID, uid.clone());
@@ -6538,14 +6590,36 @@ fn write_calendar_fields(
             if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
                 use wbxml::eas::airsync_base as base;
                 let instance_id =
-                    chrono::NaiveDateTime::parse_from_str(occurrence, "%Y%m%dT%H%M%SZ")
+                    chrono::NaiveDateTime::parse_from_str(&exception.instance_id, "%Y%m%dT%H%M%SZ")
                         .map(|date| date.format("%Y-%m-%dT%H:%M:%S.000Z").to_string())
-                        .unwrap_or_else(|_| occurrence.clone());
+                        .unwrap_or_else(|_| exception.instance_id.clone());
                 builder.leaf(base::INSTANCE_ID, instance_id);
             } else {
-                builder.leaf(cal::EXCEPTION_START_TIME, occurrence.clone());
+                builder.leaf(cal::EXCEPTION_START_TIME, exception.instance_id.clone());
             }
-            builder.leaf(cal::DELETED, "1");
+            if exception.deleted {
+                builder.leaf(cal::DELETED, "1");
+            } else {
+                if let Some(title) = &exception.title {
+                    builder.leaf(cal::SUBJECT, title.clone());
+                }
+                if let Some(body) = &exception.description {
+                    use wbxml::eas::airsync_base as base;
+                    let preference = select_body_preference(Some(body), None, requests);
+                    if requests.is_empty() || preference.is_some() {
+                        let (kind, data, size, truncated) =
+                            apply_body_preference(body.clone(), preference);
+                        builder.start(base::BODY);
+                        builder.leaf(base::TYPE, kind.eas_value());
+                        builder.leaf(base::ESTIMATED_DATA_SIZE, size.to_string());
+                        builder.leaf(base::TRUNCATED, if truncated { "1" } else { "0" });
+                        if !truncated || !preference.is_some_and(|pref| pref.all_or_none) {
+                            builder.leaf(base::DATA, data);
+                        }
+                        builder.end();
+                    }
+                }
+            }
             builder.end();
         }
         builder.end();
@@ -8280,7 +8354,11 @@ mod tests {
         use crate::wbxml::eas::{self, airsync as air, airsync_base as base, calendar as cal};
         let event = crate::model::CalendarEvent {
             uid: Some("series-uid".to_owned()),
-            recurrence_exceptions: vec!["20261125T170000Z".to_owned()],
+            recurrence_exceptions: vec![crate::model::CalendarEventException {
+                instance_id: "20261125T170000Z".to_owned(),
+                deleted: true,
+                ..Default::default()
+            }],
             ..Default::default()
         };
         for (version, expected_token, expected_value) in [
@@ -8309,6 +8387,52 @@ mod tests {
             );
             assert!(eas::contains_token(&document, cal::EXCEPTIONS));
         }
+
+        let event = crate::model::CalendarEvent {
+            uid: Some("series-uid".to_owned()),
+            recurrence_exceptions: vec![crate::model::CalendarEventException {
+                instance_id: "20261125T170000Z".to_owned(),
+                title: Some("Changed occurrence".to_owned()),
+                description: Some(crate::model::EmailBody {
+                    body_type: crate::model::EmailBodyType::Plain,
+                    value: "Changed body".to_owned(),
+                    is_truncated: false,
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut builder = eas::DocumentBuilder::new();
+        super::write_calendar_command(
+            &mut builder,
+            air::CHANGE,
+            &event,
+            ProtocolVersion::V16_1,
+            &[],
+        );
+        let document = builder.finish();
+        assert!(eas::find_all_text_after(&document, cal::SUBJECT)
+            .iter()
+            .any(|subject| subject == "Changed occurrence"));
+        assert!(eas::find_all_text_after(&document, base::DATA)
+            .iter()
+            .any(|body| body == "Changed body"));
+        assert!(!eas::contains_token(&document, cal::DELETED));
+    }
+
+    #[test]
+    fn occurrence_change_gate_rejects_unimplemented_field_shapes() {
+        let mut fields = crate::wbxml::eas::CalendarFields {
+            subject: Some("Occurrence".to_owned()),
+            ..Default::default()
+        };
+        assert!(super::calendar_instance_change_supported(&fields));
+        fields.start_time = Some("20261125T170000Z".to_owned());
+        assert!(!super::calendar_instance_change_supported(&fields));
+        fields.start_time = None;
+        fields.body = Some("body".to_owned());
+        fields.body_type = Some(3);
+        assert!(!super::calendar_instance_change_supported(&fields));
     }
 
     #[test]

@@ -340,9 +340,8 @@ pub struct CalendarEvent {
     pub reminder_minutes: Option<u32>,
     pub categories: Vec<String>,
     pub recurrence: Option<crate::wbxml::eas::CalendarRecurrence>,
-    /// Original occurrence starts excluded from this recurrence, in compact
-    /// UTC EAS DateTime form. Non-exclusion recurrence overrides stay gated.
-    pub recurrence_exceptions: Vec<String>,
+    /// Occurrence-specific EAS exception fields, keyed by the original start.
+    pub recurrence_exceptions: Vec<CalendarEventException>,
     pub unsupported_recurrence: bool,
     pub organizer_email: Option<String>,
     pub organizer_name: Option<String>,
@@ -355,6 +354,15 @@ pub struct CalendarEvent {
     pub is_organizer: bool,
     pub cancelled: bool,
     pub response_type: Option<u8>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CalendarEventException {
+    /// Original occurrence start in compact UTC EAS DateTime form.
+    pub instance_id: String,
+    pub deleted: bool,
+    pub title: Option<String>,
+    pub description: Option<EmailBody>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
