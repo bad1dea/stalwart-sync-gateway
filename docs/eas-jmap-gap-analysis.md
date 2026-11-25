@@ -24,9 +24,9 @@ cases. Full suite: 451 passed, 77 ignored; strict
 Clippy, formatting, and diff checks pass. Source: Microsoft
 [MS-ASTASK DeadOccur](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-astask/5167f64a-ef73-4e22-9147-12abc1f9f5e8)
 and [MS-ASTASK Regenerate](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-astask/095370af-32df-41f5-af33-625efa9a053d).
-Deployed to Amy's isolated bridge as `localhost/eas16-isolated:48a9cc2`
-(image `sha256:f471beae2a763e5854ab30f21e05b1035cde3330d69bd40a3eed9cef48a82893`),
-started `2026-11-25T10:02:58.800870492Z`, with zero restarts. `/healthz` and
+Deployed to Amy's isolated bridge as `localhost/eas16-isolated:eeb4dd5`
+(image `sha256:cea59bc2c412235a4d321153f002df128422dc6a0288c8246f95b16c1c0f738d`),
+started `2026-11-25T10:12:31.247991269Z`, with zero restarts. `/healthz` and
 `/readyz` both return HTTP 200 (`ok` and `ready`). `EAS_MAX_PROTOCOL_VERSION`
 remains unset, preserving the 14.0 default; production is untouched.
 
