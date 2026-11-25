@@ -19,9 +19,9 @@ The spec's own overview lays out the intended command sequence:
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
    `100.64.0.50:18090`, backed by isolated Stalwart. Its current gateway image
-   is `4a52a89` (`sha256:904d005201ccf454b567355db166f088223a13b7a75757d9f261ac9a1d87e8eb`),
-   started `2026-11-25T11:22:36.910938357Z` with zero restarts. `/healthz`
-   and `/readyz` returned HTTP 200 at `11:22:45Z`; the Compose environment
+   is `d276441` (`sha256:15040486345e09a65f0ce140ab84f5960472c3b4e26869c445d7aa08790d187c`),
+   started `2026-11-25T11:27:14.813042683Z` with zero restarts. `/healthz`
+   and `/readyz` returned HTTP 200 at `11:27:19Z`; the Compose environment
    leaves `EAS_MAX_PROTOCOL_VERSION` unset, so it still defaults to EAS 14.0.
    Set the variable to 16.1 during the planned client test window.
 2. **Provision** — device sends its info, gets + acks security policy.
@@ -191,9 +191,8 @@ Supported JSCalendar recurrence rules map into Email:Recurrences, with a
 required recurrence interval emitted even when the source uses its default.
 `InstanceType` is 0 for a single event and 1 for a recurring master.
 Unsupported recurrence rules suppress structured meeting-request metadata.
-Parser and WBXML regressions cover these mappings. Recurrences are deployed on
-the isolated bridge as `4a52a89`; the InstanceType addition is not yet
-deployed. The bridge still defaults to EAS 14.0. Real-client validation
+Parser and WBXML regressions cover these mappings, now deployed on the isolated
+bridge as `d276441`. It still defaults to EAS 14.0. Real-client validation
 remains pending.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
