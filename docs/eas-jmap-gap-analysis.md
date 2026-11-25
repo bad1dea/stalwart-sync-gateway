@@ -66,9 +66,9 @@ both its per-command timeout and remaining total budget; existing real scanned
 and mixed-PDF fixtures cover the installed Poppler/Tesseract path. The full
 suite passes 404 tests (75 ignored), strict Clippy passes, and formatting and
 diff checks pass. Deployed as
-`deploy-2026-11-25-eas-find-ocr-5pages-f3102c4`; Homelab commit `57b2ae6`,
-image `sha256:76ecbdf2069b4204e1e32f6c429497ab33b360a40e604b76b8f709bb1f31ac3a`,
-started `2026-11-25T02:18:04Z`, restart count zero, `/healthz` `ok`, and
+`deploy-2026-11-25-eas-find-ocr-10pages-937d6a1`; Homelab commit `e427f79`,
+image `sha256:1680ca7b41ea185fe3ae76521b9f97f648362c37c9d723e69fc57485b82bd9ac`,
+started `2026-11-25T02:50:16Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. Production retains the 14.0 protocol default.
 
 Generic ZIP Find now also extracts common source-code files such as `.rs`,
