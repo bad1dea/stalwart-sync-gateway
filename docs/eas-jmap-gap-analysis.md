@@ -48,6 +48,19 @@ started `2026-11-25T04:39:53Z`, restart count zero, `/healthz` `ok`, and
 verified; exercising an actual calendar write against Stalwart and testing
 with a real 16.1 client remain separate validation steps.
 
+ResolveRecipients `Availability` is now implemented locally for EAS 14.0+.
+The request requires an RFC 3339 `StartTime`, accepts the specified seven-day
+default `EndTime`, and rejects windows shorter than 30 minutes or longer than
+365 days. Exact single-principal results use batched JMAP
+`Principal/getAvailability` calls (respecting `maxCallsInRequest`) and return
+30-minute `MergedFreeBusy` slots; tentative, busy, explicit EAS out-of-office,
+and free map to `1`, `2`, `3`, and `0`. JMAP errors map to per-recipient EAS
+availability statuses 162/163. Regressions cover input validation, default
+range, slot boundaries/status conversion, and batched success/per-principal
+failure. Full suite: 420 passed, 76 ignored; strict Clippy, formatting, and
+diff checks pass. This change is not yet committed or deployed, and live
+Stalwart free/busy round-trip remains to be verified.
+
 Find now extracts Excel Binary Workbook (`.xlsb`) cell values through the
 existing vendored Calamine parser, including its registered macro-enabled
 content type. A real Calamine XLSB fixture verifies extraction of worksheet

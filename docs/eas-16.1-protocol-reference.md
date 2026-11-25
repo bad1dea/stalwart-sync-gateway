@@ -205,6 +205,11 @@ status 104, and using an `InstanceId` with a non-recurring event returns status
 `deploy-2026-11-25-eas-meeting-response-instance-status-dc6df90`; real-client 16.1
 certification remains separate from handler coverage.
 
+ResolveRecipients Availability (introduced in EAS 14.0) now uses JMAP
+`Principal/getAvailability` for exact recipients and returns the required
+30-minute MergedFreeBusy string. Input bounds and per-recipient errors are
+covered by regressions; live Stalwart verification is still pending.
+
 ## WBXML codepages (MS-ASWBXML)
 
 Microsoft's [MS-ASWBXML namespace table](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-aswbxml/2e57ccd4-cf38-45a0-bb11-95304bd1180d)

@@ -994,6 +994,101 @@ impl JmapClient {
         Ok(principals)
     }
 
+    /// Returns free/busy periods for multiple Principals in one JMAP request.
+    /// The nested error status is an EAS per-recipient availability status;
+    /// transport and malformed response errors remain outer errors and are
+    /// reported as transient.
+    pub async fn principal_availabilities(
+        &self,
+        auth: &AuthenticatedSession,
+        principal_ids: &[String],
+        utc_start: &str,
+        utc_end: &str,
+    ) -> anyhow::Result<
+        std::collections::HashMap<String, Result<Vec<serde_json::Value>, &'static str>>,
+    > {
+        if principal_ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let Some(account_id) = auth.session.primary_account_for(capabilities::PRINCIPALS) else {
+            return Ok(principal_ids
+                .iter()
+                .cloned()
+                .map(|id| (id, Err("163")))
+                .collect());
+        };
+        let mut results = std::collections::HashMap::new();
+        let max_calls = auth
+            .session
+            .capabilities
+            .get(capabilities::CORE)
+            .and_then(|core| core["maxCallsInRequest"].as_u64())
+            .unwrap_or(16)
+            .clamp(1, 100) as usize;
+        for chunk in principal_ids.chunks(max_calls) {
+            let calls: Vec<_> = chunk
+                .iter()
+                .enumerate()
+                .map(|(index, principal_id)| {
+                    MethodCall::new(
+                        "Principal/getAvailability",
+                        serde_json::json!({
+                            "accountId": account_id,
+                            "id": principal_id,
+                            "utcStart": utc_start,
+                            "utcEnd": utc_end,
+                            "showDetails": true,
+                            "eventProperties": ["freeBusyStatus"]
+                        }),
+                        &format!("availability-{index}"),
+                    )
+                })
+                .collect();
+            let response: JmapResponse<serde_json::Value> = self
+                .api_call(
+                    auth,
+                    &[
+                        capabilities::CORE.to_owned(),
+                        capabilities::PRINCIPALS.to_owned(),
+                        capabilities::PRINCIPALS_AVAILABILITY.to_owned(),
+                    ],
+                    calls,
+                )
+                .await?;
+            for method in response.method_responses {
+                if let Some(index) = method.2.strip_prefix("availability-") {
+                    let Ok(index) = index.parse::<usize>() else {
+                        continue;
+                    };
+                    let Some(principal_id) = chunk.get(index) else {
+                        continue;
+                    };
+                    match method.0.as_str() {
+                        "Principal/getAvailability" => {
+                            let list = method.1["list"]
+                                .as_array()
+                                .context("Principal/getAvailability omitted list")?
+                                .clone();
+                            results.insert(principal_id.clone(), Ok(list));
+                        }
+                        "error" => {
+                            let status = match method.1["type"].as_str() {
+                                Some("forbidden" | "notFound" | "tooLarge") => "163",
+                                _ => "162",
+                            };
+                            results.insert(principal_id.clone(), Err(status));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        for principal_id in principal_ids {
+            results.entry(principal_id.clone()).or_insert(Err("162"));
+        }
+        Ok(results)
+    }
+
     /// Real bug, found live while implementing mail deletion detection:
     /// `emails_in_mailbox` is sorted newest-first and capped at `limit`,
     /// so an OLD message that's still on the server but has simply been
@@ -12593,6 +12688,81 @@ mod meeting_response_send_tests {
             "1"
         );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn principal_availability_batches_queries_and_preserves_per_recipient_errors() {
+        let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let captured_count = call_count.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(request): Json<serde_json::Value>| {
+                let call_count = captured_count.clone();
+                async move {
+                let calls = request["methodCalls"].as_array().unwrap();
+                assert_eq!(calls.len(), 1);
+                assert!(request["using"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|cap| cap == capabilities::PRINCIPALS_AVAILABILITY));
+                assert_eq!(calls[0][0], "Principal/getAvailability");
+                assert_eq!(calls[0][1]["showDetails"], true);
+                assert_eq!(calls[0][1]["eventProperties"], serde_json::json!(["freeBusyStatus"]));
+                    let response = match call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                        0 => {
+                            assert_eq!(calls[0][1]["id"], "p1");
+                            serde_json::json!(["Principal/getAvailability", {"list":[{
+                                "utcStart":"2042-05-05T10:00:00Z","utcEnd":"2042-05-05T11:00:00Z","busyStatus":"confirmed","event":null
+                            }]}, "availability-0"])
+                        }
+                        1 => {
+                            assert_eq!(calls[0][1]["id"], "p2");
+                            serde_json::json!(["error", {"type":"forbidden"}, "availability-0"])
+                        }
+                        _ => panic!("unexpected availability request"),
+                    };
+                    Json(serde_json::json!({"methodResponses":[response]}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{capabilities::CORE:{"maxCallsInRequest":1}}, "primaryAccounts":{capabilities::PRINCIPALS:"a"}, "apiUrl":url,
+            "downloadUrl":url,"uploadUrl":url,"username":"user@example.test","state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user@example.test".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let results = client
+            .principal_availabilities(
+                &auth,
+                &["p1".into(), "p2".into()],
+                "2042-05-05T10:00:00.000Z",
+                "2042-05-05T11:00:00.000Z",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            results["p1"].as_ref().unwrap()[0]["busyStatus"],
+            "confirmed"
+        );
+        assert_eq!(results["p2"].as_ref().unwrap_err(), &"163");
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 2);
         server.abort();
     }
 }

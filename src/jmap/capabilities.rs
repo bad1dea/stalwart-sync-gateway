@@ -10,6 +10,7 @@ pub const FILES: &str = "urn:ietf:params:jmap:filenode";
 pub const WEBSOCKET: &str = "urn:ietf:params:jmap:websocket";
 pub const VACATION_RESPONSE: &str = "urn:ietf:params:jmap:vacationresponse";
 pub const PRINCIPALS: &str = "urn:ietf:params:jmap:principals";
+pub const PRINCIPALS_AVAILABILITY: &str = "urn:ietf:params:jmap:principals:availability";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GatewayCapabilities {

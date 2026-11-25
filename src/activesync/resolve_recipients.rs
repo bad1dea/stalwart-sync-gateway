@@ -8,11 +8,132 @@ use crate::{
         Document, Node,
     },
 };
+use anyhow::Context;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use std::collections::BTreeMap;
+use chrono::{DateTime, Duration, Utc};
+use std::collections::{BTreeMap, HashMap};
+
+#[derive(Clone, Copy, Debug)]
+struct AvailabilityRequest {
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+}
+
+const FREE_BUSY_SLOT_NANOS: i64 = 30 * 60 * 1_000_000_000;
+
+impl AvailabilityRequest {
+    fn parse(document: &Document) -> Result<Self, &'static str> {
+        let fields = eas::child_elements(document);
+        let mut start = None;
+        let mut end = None;
+        for field in fields {
+            let Some(Node::Start(token)) = field.nodes.first() else {
+                return Err("5");
+            };
+            let value = eas::find_text_after(&field, *token).ok_or("5")?;
+            if is(&field, rr::START_TIME) {
+                if start.is_some() {
+                    return Err("5");
+                }
+                start = Some(parse_eas_time(value).ok_or("5")?);
+            } else if is(&field, rr::END_TIME) {
+                if end.is_some() {
+                    return Err("5");
+                }
+                end = Some(parse_eas_time(value).ok_or("5")?);
+            } else {
+                return Err("5");
+            }
+        }
+        let start = start.ok_or("5")?;
+        let end = end.unwrap_or(start + Duration::days(7));
+        let span = end.signed_duration_since(start);
+        if span < Duration::minutes(30) || span > Duration::days(365) {
+            return Err("5");
+        }
+        Ok(Self { start, end })
+    }
+
+    fn jmap_start(self) -> String {
+        self.start
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
+    fn jmap_end(self) -> String {
+        self.end
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+}
+
+fn parse_eas_time(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+}
+
+fn merged_free_busy(
+    request: AvailabilityRequest,
+    periods: &[serde_json::Value],
+) -> anyhow::Result<String> {
+    let nanos = request
+        .end
+        .signed_duration_since(request.start)
+        .num_nanoseconds()
+        .context("free/busy range overflow")?;
+    let slots = ((nanos + FREE_BUSY_SLOT_NANOS - 1) / FREE_BUSY_SLOT_NANOS) as usize;
+    anyhow::ensure!(slots <= 365 * 48, "free/busy slot count exceeds limit");
+    let mut values = vec![b'0'; slots];
+    for period in periods {
+        let start = period["utcStart"]
+            .as_str()
+            .and_then(parse_eas_time)
+            .context("free/busy period has invalid start")?;
+        let end = period["utcEnd"]
+            .as_str()
+            .and_then(parse_eas_time)
+            .context("free/busy period has invalid end")?;
+        if end <= start {
+            continue;
+        }
+        let status = match period["event"]["freeBusyStatus"].as_str() {
+            Some("x-eas-out-of-office") => b'3',
+            _ => match period["busyStatus"].as_str() {
+                Some("tentative") => b'1',
+                Some("confirmed" | "unavailable") => b'2',
+                _ => b'4',
+            },
+        };
+        let clipped_start = start.max(request.start);
+        let clipped_end = end.min(request.end);
+        if clipped_end <= clipped_start {
+            continue;
+        }
+        let first = clipped_start
+            .signed_duration_since(request.start)
+            .num_nanoseconds()
+            .context("free/busy start offset overflow")?
+            .div_euclid(FREE_BUSY_SLOT_NANOS) as usize;
+        let last = clipped_end
+            .signed_duration_since(request.start)
+            .num_nanoseconds()
+            .context("free/busy end offset overflow")?
+            .checked_add(FREE_BUSY_SLOT_NANOS - 1)
+            .context("free/busy range overflow")?
+            / FREE_BUSY_SLOT_NANOS;
+        let last = last as usize;
+        for value in values
+            .iter_mut()
+            .take(last.min(slots))
+            .skip(first.min(slots))
+        {
+            *value = (*value).max(status);
+        }
+    }
+    String::from_utf8(values).context("free/busy stream is not UTF-8")
+}
 
 fn is(doc: &Document, expected: Token) -> bool {
     matches!(doc.nodes.first(), Some(Node::Start(token)) if token.code_page == expected.code_page && token.token == expected.token)
@@ -24,6 +145,13 @@ struct Recipient {
     email: String,
     alias: String,
     kind: &'static str,
+    principal_id: Option<String>,
+}
+
+fn insert_recipient(candidates: &mut BTreeMap<String, Recipient>, recipient: Recipient) {
+    candidates
+        .entry(recipient.email.to_lowercase())
+        .or_insert(recipient);
 }
 
 fn matching<'a>(query: &str, candidates: &'a [Recipient]) -> Vec<&'a Recipient> {
@@ -49,13 +177,16 @@ fn matching<'a>(query: &str, candidates: &'a [Recipient]) -> Vec<&'a Recipient> 
         .collect()
 }
 
-fn request(doc: &Document) -> Result<(Vec<String>, usize), &'static str> {
+fn request(
+    doc: &Document,
+) -> Result<(Vec<String>, usize, Option<AvailabilityRequest>), &'static str> {
     if !is(doc, rr::RESOLVE_RECIPIENTS) {
         return Err("5");
     }
     let mut queries = Vec::new();
     let mut max = 100usize;
     let mut options_seen = false;
+    let mut availability = None;
     for child in eas::child_elements(doc) {
         if is(&child, rr::TO) {
             let value = eas::find_text_after(&child, rr::TO)
@@ -89,7 +220,12 @@ fn request(doc: &Document) -> Result<(Vec<String>, usize), &'static str> {
                         Some("2" | "3") => return Err("6"),
                         _ => return Err("5"),
                     }
-                } else if is(&option, rr::AVAILABILITY) || is(&option, rr::PICTURE) {
+                } else if is(&option, rr::AVAILABILITY) {
+                    if availability.is_some() {
+                        return Err("5");
+                    }
+                    availability = Some(AvailabilityRequest::parse(&option)?);
+                } else if is(&option, rr::PICTURE) {
                     return Err("6");
                 } else {
                     return Err("5");
@@ -102,7 +238,7 @@ fn request(doc: &Document) -> Result<(Vec<String>, usize), &'static str> {
     if queries.is_empty() || queries.len() > 100 {
         return Err("5");
     }
-    Ok((queries, max))
+    Ok((queries, max, availability))
 }
 
 pub(super) async fn handle(
@@ -113,7 +249,7 @@ pub(super) async fn handle(
     let parsed = request(document);
     let mut b = DocumentBuilder::new();
     b.start(rr::RESOLVE_RECIPIENTS);
-    let (queries, max) = match parsed {
+    let (queries, max, availability) = match parsed {
         Ok(v) => v,
         Err(status) => {
             b.leaf(rr::STATUS, status);
@@ -130,13 +266,14 @@ pub(super) async fn handle(
         {
             for p in state.jmap.all_principals(auth).await? {
                 if let Some(email) = p.email.filter(|s| !s.is_empty()) {
-                    candidates.insert(
-                        (email.to_lowercase(), "1"),
+                    insert_recipient(
+                        &mut candidates,
                         Recipient {
                             name: p.display_name,
                             email,
                             alias: p.alias,
                             kind: "1",
+                            principal_id: Some(p.id),
                         },
                     );
                 }
@@ -166,8 +303,8 @@ pub(super) async fn handle(
                     .to_owned()
                 });
                 for email in c.emails.into_iter().filter(|s| !s.is_empty()) {
-                    candidates.insert(
-                        (email.to_lowercase(), "2"),
+                    insert_recipient(
+                        &mut candidates,
                         Recipient {
                             name: if name.is_empty() {
                                 email.clone()
@@ -177,6 +314,7 @@ pub(super) async fn handle(
                             email,
                             alias: String::new(),
                             kind: "2",
+                            principal_id: None,
                         },
                     );
                 }
@@ -194,9 +332,47 @@ pub(super) async fn handle(
             return response(b);
         }
     };
+    let matches: Vec<_> = queries
+        .iter()
+        .map(|query| matching(query, &candidates))
+        .collect();
+    let principal_ids: Vec<_> = if availability.is_some() {
+        matches
+            .iter()
+            .filter(|items| items.len() == 1)
+            .filter_map(|items| items[0].principal_id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let availability_results = if let Some(request) = availability {
+        match state
+            .jmap
+            .principal_availabilities(
+                auth,
+                &principal_ids,
+                &request.jmap_start(),
+                &request.jmap_end(),
+            )
+            .await
+        {
+            Ok(results) => results,
+            Err(error) => {
+                tracing::warn!(%error, "recipient availability request failed");
+                principal_ids
+                    .iter()
+                    .cloned()
+                    .map(|id| (id, Err("162")))
+                    .collect()
+            }
+        }
+    } else {
+        HashMap::new()
+    };
     b.leaf(rr::STATUS, "1");
-    for query in queries {
-        let items = matching(&query, &candidates);
+    for (query, items) in queries.into_iter().zip(matches) {
         let count = items.len();
         let shown = if count == 1 { 1 } else { count.min(max) };
         b.start(rr::RESPONSE);
@@ -216,6 +392,28 @@ pub(super) async fn handle(
             b.leaf(rr::TYPE, item.kind);
             b.leaf(rr::DISPLAY_NAME, &item.name);
             b.leaf(rr::EMAIL_ADDRESS, &item.email);
+            if let Some(request) = availability.filter(|_| count == 1) {
+                b.start(rr::AVAILABILITY);
+                let result = item
+                    .principal_id
+                    .as_ref()
+                    .and_then(|id| availability_results.get(id));
+                match result {
+                    Some(Ok(periods)) => match merged_free_busy(request, periods) {
+                        Ok(stream) => {
+                            b.leaf(rr::STATUS, "1");
+                            b.leaf(rr::MERGED_FREE_BUSY, stream);
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "invalid recipient availability response");
+                            b.leaf(rr::STATUS, "162");
+                        }
+                    },
+                    Some(Err(status)) => b.leaf(rr::STATUS, *status),
+                    None => b.leaf(rr::STATUS, "163"),
+                }
+                b.end();
+            }
             b.end();
         }
         b.end();
@@ -244,16 +442,121 @@ mod tests {
                 email: "alice@example.test".into(),
                 alias: "alice".into(),
                 kind: "1",
+                principal_id: Some("principal-1".into()),
             },
             Recipient {
                 name: "Alice Smith".into(),
                 email: "smith@example.test".into(),
                 alias: String::new(),
                 kind: "2",
+                principal_id: None,
             },
         ];
         assert_eq!(matching("ALICE", &recipients).len(), 1);
         assert_eq!(matching("ali", &recipients).len(), 2);
         assert!(matching("unknown", &recipients).is_empty());
+    }
+
+    #[test]
+    fn duplicate_contact_and_principal_address_resolves_once_to_principal() {
+        let mut candidates = BTreeMap::new();
+        insert_recipient(
+            &mut candidates,
+            Recipient {
+                name: "Directory person".into(),
+                email: "person@example.test".into(),
+                alias: "person".into(),
+                kind: "1",
+                principal_id: Some("principal-1".into()),
+            },
+        );
+        insert_recipient(
+            &mut candidates,
+            Recipient {
+                name: "Saved contact".into(),
+                email: "PERSON@example.test".into(),
+                alias: String::new(),
+                kind: "2",
+                principal_id: None,
+            },
+        );
+        let candidates: Vec<_> = candidates.into_values().collect();
+        let matches = matching("person@example.test", &candidates);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].kind, "1");
+        assert_eq!(matches[0].principal_id.as_deref(), Some("principal-1"));
+    }
+
+    fn availability_document(start: &str, end: Option<&str>) -> Document {
+        let mut builder = DocumentBuilder::new();
+        builder.start(rr::AVAILABILITY);
+        builder.leaf(rr::START_TIME, start);
+        if let Some(end) = end {
+            builder.leaf(rr::END_TIME, end);
+        }
+        builder.end();
+        builder.end();
+        wbxml::decode_document(&wbxml::encode_document(&builder.finish())).unwrap()
+    }
+
+    #[test]
+    fn availability_option_requires_start_and_rejects_duplicate_ranges() {
+        let mut builder = DocumentBuilder::new();
+        builder.start(rr::RESOLVE_RECIPIENTS);
+        builder.leaf(rr::TO, "person@example.test");
+        builder.start(rr::OPTIONS);
+        builder.start(rr::AVAILABILITY);
+        builder.leaf(rr::START_TIME, "2042-05-05T10:00:00Z");
+        builder.end();
+        builder.end();
+        builder.end();
+        let document = wbxml::decode_document(&wbxml::encode_document(&builder.finish())).unwrap();
+        let (_, _, availability) = request(&document).unwrap();
+        let availability = availability.unwrap();
+        assert_eq!(availability.end - availability.start, Duration::days(7));
+
+        let mut builder = DocumentBuilder::new();
+        builder.start(rr::RESOLVE_RECIPIENTS);
+        builder.leaf(rr::TO, "person@example.test");
+        builder.start(rr::OPTIONS);
+        builder.start(rr::AVAILABILITY);
+        builder.end();
+        builder.end();
+        builder.end();
+        let document = wbxml::decode_document(&wbxml::encode_document(&builder.finish())).unwrap();
+        assert_eq!(request(&document).unwrap_err(), "5");
+    }
+
+    #[test]
+    fn availability_requires_valid_bounded_time_range() {
+        let valid = availability_document("2042-05-05T10:00:00Z", None);
+        let parsed = AvailabilityRequest::parse(&valid).unwrap();
+        assert_eq!(parsed.end - parsed.start, Duration::days(7));
+
+        for (start, end) in [
+            ("invalid", Some("2042-05-05T11:00:00Z")),
+            ("2042-05-05T10:00:00Z", Some("2042-05-05T10:29:59Z")),
+            ("2042-05-05T10:00:00Z", Some("2043-05-06T10:00:00Z")),
+        ] {
+            assert!(AvailabilityRequest::parse(&availability_document(start, end)).is_err());
+        }
+    }
+
+    #[test]
+    fn availability_maps_busy_tentative_oof_and_free_into_half_hour_slots() {
+        let request = AvailabilityRequest::parse(&availability_document(
+            "2042-05-05T10:00:00Z",
+            Some("2042-05-05T12:00:00Z"),
+        ))
+        .unwrap();
+        let periods = vec![
+            serde_json::json!({"utcStart":"2042-05-05T10:10:00Z","utcEnd":"2042-05-05T10:20:00Z","busyStatus":"confirmed"}),
+            serde_json::json!({"utcStart":"2042-05-05T10:30:00Z","utcEnd":"2042-05-05T10:40:00Z","busyStatus":"tentative"}),
+            serde_json::json!({"utcStart":"2042-05-05T11:00:00Z","utcEnd":"2042-05-05T11:10:00Z","busyStatus":"confirmed","event":{"freeBusyStatus":"x-eas-out-of-office"}}),
+            serde_json::json!({"utcStart":"2042-05-05T11:30:00Z","utcEnd":"2042-05-05T11:30:00.500Z","busyStatus":"tentative"}),
+            serde_json::json!({"utcStart":"2042-05-05T12:00:00Z","utcEnd":"2042-05-05T12:30:00Z","busyStatus":"confirmed"}),
+        ];
+        assert_eq!(merged_free_busy(request, &periods).unwrap(), "2131");
+        assert_eq!(merged_free_busy(request, &[]).unwrap(), "0000");
     }
 }
