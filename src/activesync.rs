@@ -11014,7 +11014,7 @@ mod tests {
         write_email_fields(
             &mut v141_builder,
             "invitation",
-            email,
+            email.clone(),
             None,
             ProtocolVersion::V14_1,
         );
@@ -11023,6 +11023,27 @@ mod tests {
             eas::find_text_after(&v141, email2::MEETING_MESSAGE_TYPE),
             Some("1")
         );
+
+        for meeting_message_type in [5, 6] {
+            let mut delegated = email.clone();
+            delegated
+                .meeting_request
+                .as_mut()
+                .unwrap()
+                .meeting_message_type = meeting_message_type;
+            let mut delegated_builder = DocumentBuilder::new();
+            write_email_fields(
+                &mut delegated_builder,
+                "delegated-invitation",
+                delegated,
+                None,
+                ProtocolVersion::V16_1,
+            );
+            assert_eq!(
+                eas::find_text_after(&delegated_builder.finish(), email2::MEETING_MESSAGE_TYPE),
+                Some(if meeting_message_type == 5 { "5" } else { "6" })
+            );
+        }
     }
 
     #[test]

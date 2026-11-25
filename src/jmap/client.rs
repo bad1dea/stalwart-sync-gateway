@@ -8461,6 +8461,18 @@ fn email_meeting_request_from_event(
                 .is_some_and(|email| email.eq_ignore_ascii_case(attendee_email))
     });
     let attendee = attendee?;
+    let meeting_message_type = if participant_has_delegation(attendee, "delegatedFrom") {
+        // This copy was delegated to the authenticated attendee. EAS type 6
+        // tells the client it must not respond to the original request.
+        6
+    } else if participant_has_delegation(attendee, "delegatedTo") {
+        // This is the delegator's copy of the request.
+        5
+    } else if event["sequence"].as_u64().unwrap_or_default() > 0 {
+        2
+    } else {
+        1
+    };
     let response_requested = attendee["expectReply"].as_bool();
     let organizer = participants.values().find_map(|participant| {
         (participant["roles"]["owner"] == true)
@@ -8534,12 +8546,14 @@ fn email_meeting_request_from_event(
         time_zone,
         location,
         all_day: event["showWithoutTime"] == true,
-        meeting_message_type: if event["sequence"].as_u64().unwrap_or_default() > 0 {
-            2
-        } else {
-            1
-        },
+        meeting_message_type,
     })
+}
+
+fn participant_has_delegation(participant: &serde_json::Value, property: &str) -> bool {
+    participant[property]
+        .as_object()
+        .is_some_and(|delegations| delegations.values().any(|delegated| delegated == true))
 }
 
 fn calendar_disallow_new_time_proposal_from_blob(bytes: &[u8]) -> Option<bool> {
@@ -8637,6 +8651,46 @@ mod meeting_request_conversion_tests {
         });
         let request = email_meeting_request_from_event(&fallback, "attendee@example.test").unwrap();
         assert_eq!(request.organizer.as_deref(), Some("host@example.test"));
+    }
+
+    #[test]
+    fn maps_js_calendar_delegation_to_eas_meeting_message_types() {
+        let base = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"u",
+            "updated":"2026-11-25T14:00:00Z", "timeZone":"Etc/UTC",
+            "sequence":4,
+            "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}}
+        });
+        let mut delegated_request = base.clone();
+        delegated_request["participants"]["attendee"]["delegatedFrom"] =
+            serde_json::json!({"organizer":true});
+        assert_eq!(
+            email_meeting_request_from_event(&delegated_request, "attendee@example.test")
+                .unwrap()
+                .meeting_message_type,
+            6
+        );
+
+        let mut delegator_copy = base.clone();
+        delegator_copy["participants"]["attendee"]["delegatedTo"] =
+            serde_json::json!({"delegate":true});
+        assert_eq!(
+            email_meeting_request_from_event(&delegator_copy, "attendee@example.test")
+                .unwrap()
+                .meeting_message_type,
+            5
+        );
+
+        // False-valued ids do not mark a delegation; an ordinary update keeps
+        // its sequence-derived type.
+        delegator_copy["participants"]["attendee"]["delegatedTo"] =
+            serde_json::json!({"delegate":false});
+        assert_eq!(
+            email_meeting_request_from_event(&delegator_copy, "attendee@example.test")
+                .unwrap()
+                .meeting_message_type,
+            2
+        );
     }
 
     #[test]
