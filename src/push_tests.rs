@@ -4884,6 +4884,8 @@ mod e2e {
     async fn e2e_calendar_busy_status_round_trips_between_devices() {
         use eas::{calendar as cal, resolve_recipients as rr};
         let live = Live::new("E2E_USER2").await;
+        let protocol_version =
+            std::env::var("E2E_PROTOCOL_VERSION").unwrap_or_else(|_| "14.0".to_owned());
         let using = [
             "urn:ietf:params:jmap:core",
             "urn:ietf:params:jmap:calendars",
@@ -4913,14 +4915,14 @@ mod e2e {
         for prefix in ["calendar-busy-a", "calendar-busy-b"] {
             let device = dev(prefix);
             let prime = live
-                .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+                .wbxml_version("Sync", &device, sync_body("0", &folder), &protocol_version)
                 .await;
             let sync = live
                 .wbxml_version(
                     "Sync",
                     &device,
                     sync_body(&sync_key(&prime), &folder),
-                    "16.1",
+                    &protocol_version,
                 )
                 .await;
             assert!(eas::find_all_text_after(&sync, air::SERVER_ID).contains(&id));
@@ -4951,7 +4953,7 @@ mod e2e {
                     "Sync",
                     &devices[0].0,
                     wbxml::encode_document(&b.finish()),
-                    "16.1",
+                    &protocol_version,
                 )
                 .await;
             assert!(eas::find_all_text_after(&response, air::STATUS)
@@ -4989,7 +4991,7 @@ mod e2e {
                     "ResolveRecipients",
                     &dev("availability"),
                     wbxml::encode_document(&request.finish()),
-                    "16.1",
+                    &protocol_version,
                 )
                 .await;
             assert_eq!(
@@ -5011,7 +5013,7 @@ mod e2e {
                     "Sync",
                     &devices[1].0,
                     sync_body(&devices[1].1, &folder),
-                    "16.1",
+                    &protocol_version,
                 )
                 .await;
             assert_eq!(
@@ -5041,7 +5043,7 @@ mod e2e {
                 "Sync",
                 &devices[0].0,
                 wbxml::encode_document(&b.finish()),
-                "16.1",
+                &protocol_version,
             )
             .await;
         assert!(eas::find_all_text_after(&response, air::STATUS).contains(&"6".to_owned()));
@@ -5080,7 +5082,7 @@ mod e2e {
                 "Sync",
                 &devices[0].0,
                 wbxml::encode_document(&b.finish()),
-                "16.1",
+                &protocol_version,
             )
             .await;
         assert!(eas::find_all_text_after(&added, air::STATUS)
