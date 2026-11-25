@@ -37,7 +37,9 @@ excluded, and invitations without such a display alert omit the field.
 Supported JSCalendar recurrence rules now map through the existing Calendar
 recurrence converter to Email:Recurrences; the required EAS interval defaults
 to 1, and unsupported recurrence rules fail closed by omitting structured
-meeting-request metadata. Commit `4a52a89` is deployed to Amy's isolated
+meeting-request metadata. `InstanceType` now reports 0 for a single event and
+1 for a recurring master based on the parsed recurrence rule. The mapping is
+awaiting deployment. Commit `4a52a89` is deployed to Amy's isolated
 bridge as `localhost/eas16-isolated:4a52a89` (image
 `sha256:904d005201ccf454b567355db166f088223a13b7a75757d9f261ac9a1d87e8eb`),
 started `2026-11-25T11:22:36.910938357Z`, with zero restarts. At
@@ -58,6 +60,8 @@ provide the calendar values used for the EAS sensitivity and busy status.
 The recurrence container and its required pattern fields are specified by
 Microsoft [Recurrences](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/8722b485-daac-45ae-a640-35241de8233c)
 and [Recurrence](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/a033deda-0745-428d-b9ca-d08f3e6febcd).
+Microsoft [InstanceType](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/a4d48239-6936-4b22-9267-623ecdb49b5e)
+defines 0 as a single appointment and 1 as a recurring master.
 
 MeetingResponse now gates `ProposedStartTime` and `ProposedEndTime` to EAS
 16.1. `SendResponse` remains available in 16.0 and 16.1, but a proposal on

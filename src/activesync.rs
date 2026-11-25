@@ -5224,6 +5224,14 @@ fn write_email_meeting_request(
     if let Some(end) = &meeting.end {
         builder.leaf(mail::END_TIME, eas_datetime(end));
     }
+    builder.leaf(
+        mail::INSTANCE_TYPE,
+        if meeting.recurrence.is_some() {
+            "1"
+        } else {
+            "0"
+        },
+    );
     if let Some(organizer) = &meeting.organizer {
         builder.leaf(mail::ORGANIZER, organizer.clone());
     }
@@ -10846,6 +10854,10 @@ mod tests {
             Some("20261125T140000Z")
         );
         assert_eq!(
+            eas::find_text_after(&document, mail::INSTANCE_TYPE),
+            Some("1")
+        );
+        assert_eq!(
             eas::find_text_after(&document, mail::ORGANIZER),
             Some("Meeting Host")
         );
@@ -10891,6 +10903,21 @@ mod tests {
             node,
             Node::Start(token) if token == &mail::GLOBAL_OBJ_ID || token == &mail::LOCATION
         )));
+
+        let mut single = email.clone();
+        single.meeting_request.as_mut().unwrap().recurrence = None;
+        let mut single_builder = DocumentBuilder::new();
+        write_email_fields(
+            &mut single_builder,
+            "single-invitation",
+            single,
+            None,
+            ProtocolVersion::V16_1,
+        );
+        assert_eq!(
+            eas::find_text_after(&single_builder.finish(), mail::INSTANCE_TYPE),
+            Some("0")
+        );
 
         let mut legacy_builder = DocumentBuilder::new();
         write_email_fields(
