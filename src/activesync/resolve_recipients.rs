@@ -264,7 +264,9 @@ fn request(doc: &Document) -> Result<ParsedRequest, &'static str> {
                     availability = Some(AvailabilityRequest::parse(&option)?);
                 } else if is(&option, rr::PICTURE) {
                     let mut max_size = 102400usize;
-                    let mut max_pictures = 100usize;
+                    // MaxPictures is optional and limits each To query, not the
+                    // complete ResolveRecipients request.
+                    let mut max_pictures = usize::MAX;
                     let mut picture_fields = std::collections::BTreeSet::new();
                     for field in eas::child_elements(&option) {
                         let Some(Node::Start(token)) = field.nodes.first() else {
@@ -445,9 +447,9 @@ pub(super) async fn handle(
     } else {
         HashMap::new()
     };
-    let mut pictures_sent = 0usize;
     b.leaf(rr::STATUS, "1");
     for (query, items) in queries.into_iter().zip(matches) {
+        let mut pictures_sent = 0usize;
         let count = items.len();
         let shown = if count == 1 { 1 } else { count.min(max) };
         b.start(rr::RESPONSE);
@@ -643,6 +645,18 @@ mod tests {
         builder.leaf(rr::TO, "person@example.test");
         builder.start(rr::OPTIONS);
         builder.start(rr::PICTURE);
+        builder.end();
+        builder.end();
+        builder.end();
+        let document = wbxml::decode_document(&wbxml::encode_document(&builder.finish())).unwrap();
+        let (_, _, _, picture) = request(&document).unwrap();
+        assert_eq!(picture.unwrap().max_pictures, usize::MAX);
+
+        let mut builder = DocumentBuilder::new();
+        builder.start(rr::RESOLVE_RECIPIENTS);
+        builder.leaf(rr::TO, "person@example.test");
+        builder.start(rr::OPTIONS);
+        builder.start(rr::PICTURE);
         builder.leaf(rr::MAX_SIZE, "102401");
         builder.end();
         builder.end();
@@ -669,6 +683,13 @@ mod tests {
         );
         assert_eq!(picture_value(Some(&[9]), options, &mut sent), ("175", None));
         assert_eq!(sent, 1);
+
+        // Each To query gets its own MaxPictures budget.
+        let mut second_query_sent = 0;
+        assert_eq!(
+            picture_value(Some(&[1]), options, &mut second_query_sent),
+            ("1", Some(&[1][..]))
+        );
     }
 
     #[test]
