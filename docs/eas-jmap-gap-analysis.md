@@ -24,14 +24,13 @@ passed, 76 ignored; strict Clippy, formatting, and diff checks pass. Invalid
 RFC 3339 `InstanceId` values now return EAS status 104, and an instance reply
 against a non-recurring event returns status 146. Both outcomes have focused
 regressions. Current full suite: 415 passed, 76 ignored; strict Clippy,
-formatting, and diff checks pass. These status-code changes are implemented
-locally but not yet committed or deployed. The previously deployed baseline is
-`deploy-2026-11-24-eas-meeting-response-recurrence-d963275`; Homelab commit
-`5c003f3`, image
-`sha256:30faa72b4c3b3777f419d8a1369705e00c59c9f437bdb312cb8291f6861806ac`,
-started `2026-11-25T05:00:14Z`, restart count zero, `/healthz` and `/readyz`
-both healthy through the mesh and public endpoint. Production continues to
-advertise EAS 14.0; real-client 16.1 certification remains open.
+formatting, and diff checks pass. Deployed as
+`deploy-2026-11-25-eas-meeting-response-instance-status-dc6df90`; Homelab
+commit `bcf93b8`, image
+`sha256:6885183cc13186ef145bca71643f27c39525b1d08b9cbd541abedbc811e18cd0`,
+started `2026-11-25T05:13:04Z`, restart count zero, `/healthz` and `/readyz`
+healthy through the mesh, and public `/healthz` healthy. Production continues
+to advertise EAS 14.0; real-client 16.1 certification remains open.
 
 Calendar `DisallowNewTimeProposal` client writes now parse the EAS boolean,
 merge `X-MICROSOFT-DISALLOW-COUNTER` into Stalwart's retained iCalendar
