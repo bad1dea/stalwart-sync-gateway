@@ -264,8 +264,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `deploy-2026-11-24-eas-16.1-opt-in-13bea13`; homelab commit `fcb698e`, image
    `sha256:902bfe01a2ec516b68b7517f9a38ba730bfafdeb66eb5cd5ec85822ef4e44b0d`,
    started `2026-11-24T23:30:09Z`, restart count zero, `/healthz` `ok`, and
-   `/readyz` `ready`. The container has no protocol override, so the live
-   production endpoint continues to use the tested 14.0 default.
+   `/readyz` `ready`. The isolated Amy bridge has since been refreshed from
+   `main` through commit `eb9ccc5`, with no protocol override, so it remains on
+   the 14.0 default. Real-client certification remains a separate step.
 2. **Find content coverage — code paths complete within explicit resource
    budgets.** Bounded extraction supports legacy `.xls`,
    binary Excel `.xlsb`,
@@ -1872,8 +1873,12 @@ new VTIMEZONE/local-time implementation is deployed as
 `sha256:c4bb48640bcaffcba53791486e299b8f55b919dc1ff3495c1efbcdb4b4addfc6`),
 started `2026-11-25T07:50:44Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`.
-The current source change adds EXDATE support for excluded series occurrences
-and is awaiting deployment.
+Excluded-occurrence EXDATE support is deployed to the isolated Amy bridge as
+`localhost/eas16-isolated:eb9ccc5` (image
+`sha256:36f00fd8da929965cc0334f3d9ec40420c8cfb5dd2ac0ae414035e5c90f2081b`),
+started `2026-11-25T07:57:54Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. The Compose environment omits a protocol override, so this
+isolated gateway remains at 14.0 pending the planned real-client test window.
 JSCalendar's
 `participationComment` is a note explaining RSVP status, not the custom email
 body carried by EAS `SendResponse`; mapping the two directly would lose the

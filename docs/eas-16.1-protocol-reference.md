@@ -19,9 +19,8 @@ The spec's own overview lays out the intended command sequence:
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
    `100.64.0.50:18090`, backed by isolated Stalwart. Health and readiness pass;
-   its current gateway image is `task-recurrence-debug` and it still defaults
-   to EAS 14.0. Refresh the isolated image and set `EAS_MAX_PROTOCOL_VERSION`
-   to 16.1 before using it for client certification.
+   its current gateway image is `eb9ccc5` and it still defaults to EAS 14.0.
+   Set `EAS_MAX_PROTOCOL_VERSION` to 16.1 during the planned client test window.
 2. **Provision** — device sends its info, gets + acks security policy.
 3. **FolderSync** — retrieves the folder hierarchy.
 4. **GetItemEstimate** — count of pending changes, then **Sync** to
@@ -218,9 +217,8 @@ client validation remains open. Counters include named event locations and
 supported JSCalendar recurrence rules. Stable IANA zones emit VTIMEZONE and
 use local wall time; recurrence exceptions and irregular or unknown zones fail
 closed. Excluded instances map to EXDATE; positive recurrence overrides fail
-closed pending exception VEVENT serialization. The VTIMEZONE path is deployed
-to the isolated bridge at the 14.0 default; the EXDATE addition is awaiting
-deployment. JSCalendar's
+closed pending exception VEVENT serialization. VTIMEZONE and EXDATE support
+are deployed to the isolated bridge at the 14.0 default. JSCalendar's
 `participationComment` is an RSVP note, not the
 outgoing email body, so the two are not treated as equivalent
 ([RFC 8984 §4.4.6](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6)).
