@@ -18177,6 +18177,46 @@ async fn contact_search_pages_and_rejects_changed_snapshots() {
 }
 
 #[tokio::test]
+async fn contact_search_uses_get_all_when_contact_query_is_unavailable() {
+    use eas::{airsync as air, contacts, search as srch};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 5);
+    env.mock
+        .contact_query_unavailable
+        .store(true, Ordering::SeqCst);
+    let mut b = eas::DocumentBuilder::new();
+    b.start(srch::SEARCH);
+    b.start(srch::STORE);
+    b.leaf(srch::NAME, "Mailbox");
+    b.start(srch::QUERY);
+    b.start(srch::AND);
+    b.leaf(air::CLASS, "Contacts");
+    b.leaf(srch::FREE_TEXT, "contact");
+    b.end();
+    b.end();
+    b.start(srch::OPTIONS);
+    b.leaf(srch::RANGE, "1-2");
+    b.end();
+    b.end();
+    b.end();
+
+    let response = env
+        .req("Search", "client")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+
+    assert_eq!(eas::find_all_text_after(&doc, srch::STATUS), vec!["1", "1"]);
+    assert_eq!(eas::find_text_after(&doc, srch::TOTAL), Some("5"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, contacts::FILE_AS),
+        vec!["Contact 1", "Contact 2"]
+    );
+}
+
+#[tokio::test]
 async fn contact_search_combines_and_or_terms() {
     use eas::{airsync as air, contacts, search as srch};
     let env = start_env(Opts::default()).await;

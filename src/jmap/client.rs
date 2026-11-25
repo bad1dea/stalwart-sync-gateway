@@ -2075,6 +2075,74 @@ impl JmapClient {
                         "titles","nicknames","addresses","anniversaries","notes","onlineServices","media","links","keywords"]
                 }), "g"),
             ]).await?;
+            if let Some(error) = response
+                .method_responses
+                .iter()
+                .find(|method| method.0 == "error")
+            {
+                if error.1["type"] == "serverUnavailable" {
+                    // Keep recipient/contact search usable when a Contacts
+                    // server exposes Get but its query backend is down.
+                    // Guard the single all-card snapshot with Get state reads
+                    // so a concurrent update cannot produce mixed results.
+                    let before = self.contact_snapshot_state(auth).await?;
+                    let mut items: Vec<serde_json::Value> = self
+                        .get_all_query_fallback(auth, "ContactCard", &filter, None, 0)
+                        .await?;
+                    let after = self.contact_snapshot_state(auth).await?;
+                    anyhow::ensure!(before == after, "contacts changed during search");
+                    items.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+
+                    let mut total = 0u64;
+                    let mut contacts = Vec::new();
+                    for item in items {
+                        let has =
+                            |term: &str| fields.iter().any(|field| matches(&item[*field], term));
+                        if !terms.iter().all(|term| has(term))
+                            || alternatives
+                                .as_ref()
+                                .is_some_and(|values| !values.iter().any(|term| has(term)))
+                        {
+                            continue;
+                        }
+                        if total >= position as u64 && contacts.len() < limit {
+                            let card: ContactCardObject = serde_json::from_value(item)?;
+                            let picture_blob = card
+                                .media
+                                .get("eas_picture")
+                                .or_else(|| {
+                                    card.media
+                                        .values()
+                                        .find(|media| media.kind.as_deref() == Some("photo"))
+                                })
+                                .and_then(|media| media.blob_id.clone());
+                            let mut contact = Contact::from(card);
+                            self.apply_contact_extensions(account, &mut contact).await?;
+                            if fetch_picture_blobs && contact.picture.is_none() {
+                                if let Some(blob_id) = picture_blob {
+                                    if let Some((bytes, _)) = self
+                                        .download_contact_blob_limited(
+                                            auth,
+                                            &blob_id,
+                                            "contact-picture",
+                                            102401,
+                                        )
+                                        .await?
+                                    {
+                                        contact.picture = Some(bytes);
+                                    } else {
+                                        contact.picture = Some(vec![0; 102401]);
+                                    }
+                                }
+                            }
+                            contacts.push(contact);
+                        }
+                        total += 1;
+                    }
+                    return Ok((contacts, total));
+                }
+                anyhow::bail!("JMAP contact search failed: {}", error.1);
+            }
             let query = response
                 .method_responses
                 .iter()
