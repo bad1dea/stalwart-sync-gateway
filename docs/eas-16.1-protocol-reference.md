@@ -133,8 +133,9 @@ name searches are matched locally against attachment metadata. String-property
 `*` tests and negated property-presence restrictions are evaluated locally.
 Text, JSON, XML,
 text-bearing PDF, EPUB XHTML, OOXML Word/Excel/PowerPoint (including
-macro-enabled variants), and OpenDocument Text/Spreadsheet/Presentation
-attachments are extracted for exact text/proximity matching up to
+macro-enabled variants), OpenDocument Text/Spreadsheet/Presentation, and
+allowlisted text/config files inside generic ZIP archives are extracted for
+exact text/proximity matching up to
 4 MiB input and 2 MiB extracted text, with bounded archive expansion. CSV,
 NDJSON, YAML, and TOML application media types use charset-aware text decoding.
 Legacy `.xls` workbooks are also parsed

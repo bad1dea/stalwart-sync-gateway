@@ -558,6 +558,8 @@ fn is_extractable_archive_type(media_type: &str) -> bool {
             | "application/vnd.ms-powerpoint.presentation.macroenabled.12"
             | "application/vnd.ms-powerpoint.slideshow.macroenabled.12"
             | "application/vnd.ms-powerpoint.template.macroenabled.12"
+            | "application/zip"
+            | "application/x-zip-compressed"
             | "application/vnd.oasis.opendocument.text"
             | "application/vnd.oasis.opendocument.spreadsheet"
             | "application/vnd.oasis.opendocument.presentation"
@@ -770,6 +772,31 @@ fn extract_archive_text(bytes: &[u8], media_type: &str) -> Option<String> {
         | "application/vnd.oasis.opendocument.spreadsheet"
         | "application/vnd.oasis.opendocument.presentation" => name == "content.xml",
         "application/epub+zip" => name.to_ascii_lowercase().ends_with(".xhtml"),
+        "application/zip" | "application/x-zip-compressed" => {
+            let extension = name.rsplit_once('.').map(|(_, extension)| extension);
+            extension.is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "txt"
+                        | "md"
+                        | "csv"
+                        | "json"
+                        | "xml"
+                        | "html"
+                        | "htm"
+                        | "yaml"
+                        | "yml"
+                        | "toml"
+                        | "sql"
+                        | "log"
+                        | "ini"
+                        | "cfg"
+                        | "conf"
+                        | "properties"
+                        | "rtf"
+                )
+            })
+        }
         _ => false,
     };
     let mut remaining = MAX_FIND_ATTACHMENT_TEXT_BYTES as usize;
@@ -780,6 +807,7 @@ fn extract_archive_text(bytes: &[u8], media_type: &str) -> Option<String> {
         if !wanted(file.name()) {
             continue;
         }
+        let name = file.name().to_ascii_lowercase();
         found = true;
         if file.size() > remaining as u64 {
             return None;
@@ -793,8 +821,24 @@ fn extract_archive_text(bytes: &[u8], media_type: &str) -> Option<String> {
             return None;
         }
         remaining -= xml.len();
+        let text = if matches!(
+            media_type,
+            "application/zip" | "application/x-zip-compressed"
+        ) {
+            if name.ends_with(".xml") {
+                extract_xml_text(&xml)?
+            } else if name.ends_with(".html") || name.ends_with(".htm") {
+                super::strip_html_tags(&String::from_utf8_lossy(&xml))
+            } else if name.ends_with(".rtf") {
+                super::rtf_to_plain_text(&String::from_utf8_lossy(&xml))
+            } else {
+                decode_find_attachment_text("text/plain; charset=utf-8", &xml)?
+            }
+        } else {
+            extract_xml_text(&xml)?
+        };
         output.push(' ');
-        output.push_str(&extract_xml_text(&xml)?);
+        output.push_str(&text);
     }
     found.then_some(output)
 }
@@ -3012,9 +3056,15 @@ mod tests {
 
     #[test]
     fn find_extracts_text_attachments_for_exact_search_matching() {
+        use std::io::Write;
+
         assert!(is_extractable_attachment_type("application/xhtml+xml"));
         assert!(is_extractable_attachment_type("application/atom+xml"));
         assert!(is_extractable_attachment_type("application/pdf"));
+        assert!(is_extractable_attachment_type("application/zip"));
+        assert!(is_extractable_attachment_type(
+            "application/x-zip-compressed"
+        ));
         assert!(is_extractable_attachment_type("application/vnd.ms-outlook"));
         assert!(is_extractable_attachment_type("application/problem+json"));
         for media_type in [
@@ -3090,6 +3140,24 @@ mod tests {
                 b"{\"event\":\"alpha\"}\n{\"event\":\"beta\"}",
             ),
             Some("{\"event\":\"alpha\"} {\"event\":\"beta\"}".to_owned())
+        );
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("docs/README.md", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"alpha beta from a ZIP readme").unwrap();
+        zip.start_file(
+            "settings/config.yaml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"gamma: delta").unwrap();
+        zip.start_file("images/logo.png", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"binary image data is skipped").unwrap();
+        let zip = zip.finish().unwrap().into_inner();
+        assert_eq!(
+            extract_find_attachment_text("application/zip", &zip),
+            Some("alpha beta from a ZIP readme gamma: delta".to_owned())
         );
         let eml = b"From: sender@example.test\r\nSubject: alpha subject\r\nContent-Type: multipart/alternative; boundary=body\r\n\r\n--body\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nplain=20beta\r\n--body\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>html gamma</p>\r\n--body--\r\n";
         let extracted = extract_find_attachment_text("message/rfc822", eml).unwrap();

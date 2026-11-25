@@ -51,9 +51,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    production endpoint continues to use the tested 14.0 default.
 3. **Find content coverage.** Current bounded extraction supports legacy `.xls`,
    `.ppt`, and `.doc`, EPUB, macro-enabled OOXML, RFC 822 messages, Outlook `.msg`
-   attachments, and Word, Excel, and PowerPoint package comment text, plus
-   MIME-declared charsets
-   for text attachments and XML declaration encodings;
+   attachments, ordinary ZIP archives with allowlisted text/config files, and
+   Word, Excel, and PowerPoint package comment text, plus
+   MIME-declared charsets for text attachments and XML declaration encodings.
    Scanned-only PDFs up to three pages now use resource-bounded OCR. Attachments
    above 4 MiB, scanned PDFs above three pages, PDFs mixing scanned and
    selectable-text pages, and extracted text above 2 MiB remain outside exact
@@ -414,7 +414,10 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    YAML, and TOML use the same charset-aware bounded extraction path. Legacy
    `.xls` worksheets,
    `.ppt` streams, and Word `.doc` piece tables are also parsed within explicit
-   limits. Text
+   limits. Generic ZIP extraction selects text/config extensions only and
+   retains the existing 4096-entry and cumulative 2 MiB expanded-data limits.
+   A mocked 16.1 Find test verifies exact proximity search through a downloaded
+   ZIP README. Text
    attachments honor MIME
    `charset` parameters, including common
    legacy single-byte encodings and UTF-16LE, with BOM detection when the
