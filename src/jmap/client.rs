@@ -14,7 +14,7 @@ use crate::{
     },
     model::{
         eas_folder_type, CalendarEvent, Collection, CollectionKind, Contact, Email, EmailBody,
-        EmailBodyType, EmailMeetingRequest, EmailState, Task,
+        EmailBodyType, EmailMeetingForwardee, EmailMeetingRequest, EmailState, Task,
     },
 };
 
@@ -8473,6 +8473,27 @@ fn email_meeting_request_from_event(
     } else {
         1
     };
+    let forwardees = attendee["delegatedTo"]
+        .as_object()
+        .into_iter()
+        .flat_map(|delegations| delegations.iter())
+        .filter(|(_, delegated)| *delegated == true)
+        .filter_map(|(id, _)| {
+            let participant = participants.get(id)?;
+            let email = participant["email"].as_str()?.trim();
+            if email.is_empty() {
+                return None;
+            }
+            let name = participant["name"]
+                .as_str()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(email);
+            Some(EmailMeetingForwardee {
+                name: name.to_owned(),
+                email: email.to_owned(),
+            })
+        })
+        .collect();
     let response_requested = attendee["expectReply"].as_bool();
     let organizer = participants.values().find_map(|participant| {
         (participant["roles"]["owner"] == true)
@@ -8547,6 +8568,7 @@ fn email_meeting_request_from_event(
         location,
         all_day: event["showWithoutTime"] == true,
         meeting_message_type,
+        forwardees,
     })
 }
 
@@ -8674,23 +8696,30 @@ mod meeting_request_conversion_tests {
         let mut delegator_copy = base.clone();
         delegator_copy["participants"]["attendee"]["delegatedTo"] =
             serde_json::json!({"delegate":true});
+        delegator_copy["participants"]["delegate"] = serde_json::json!({
+            "email":"delegate@example.test", "name":"Calendar Delegate",
+            "roles":{"attendee":true}
+        });
         assert_eq!(
             email_meeting_request_from_event(&delegator_copy, "attendee@example.test")
                 .unwrap()
                 .meeting_message_type,
             5
         );
+        let forwardee = &email_meeting_request_from_event(&delegator_copy, "attendee@example.test")
+            .unwrap()
+            .forwardees[0];
+        assert_eq!(forwardee.name, "Calendar Delegate");
+        assert_eq!(forwardee.email, "delegate@example.test");
 
         // False-valued ids do not mark a delegation; an ordinary update keeps
         // its sequence-derived type.
         delegator_copy["participants"]["attendee"]["delegatedTo"] =
             serde_json::json!({"delegate":false});
-        assert_eq!(
-            email_meeting_request_from_event(&delegator_copy, "attendee@example.test")
-                .unwrap()
-                .meeting_message_type,
-            2
-        );
+        let unmapped =
+            email_meeting_request_from_event(&delegator_copy, "attendee@example.test").unwrap();
+        assert_eq!(unmapped.meeting_message_type, 2);
+        assert!(unmapped.forwardees.is_empty());
     }
 
     #[test]

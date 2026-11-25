@@ -5215,7 +5215,9 @@ fn write_email_meeting_request(
     time_zone: &str,
     version: ProtocolVersion,
 ) {
-    use wbxml::eas::{airsync_base as base, calendar, email as mail, email2};
+    use wbxml::eas::{
+        airsync_base as base, calendar, compose_mail as compose, email as mail, email2,
+    };
 
     builder.start(mail::MEETING_REQUEST);
     if meeting.all_day {
@@ -5238,6 +5240,21 @@ fn write_email_meeting_request(
     );
     if let Some(organizer) = &meeting.organizer {
         builder.leaf(mail::ORGANIZER, organizer.clone());
+    }
+    if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1)
+        && !meeting.forwardees.is_empty()
+    {
+        builder.start(compose::FORWARDEES);
+        for forwardee in &meeting.forwardees {
+            builder.start(compose::FORWARDEE);
+            builder.leaf(compose::NAME, forwardee.name.clone());
+            // Email is not supported on Sync responses in protocol 16.0.
+            if version == ProtocolVersion::V16_1 {
+                builder.leaf(compose::EMAIL, forwardee.email.clone());
+            }
+            builder.end();
+        }
+        builder.end();
     }
     if let Some(response_requested) = meeting.response_requested {
         builder.leaf(
@@ -10833,7 +10850,9 @@ mod tests {
 
     #[test]
     fn meeting_request_writes_versioned_fields_for_16x_and_14x() {
-        use crate::wbxml::eas::{self, airsync_base as base, calendar, email as mail, email2};
+        use crate::wbxml::eas::{
+            self, airsync_base as base, calendar, compose_mail, email as mail, email2,
+        };
         use base64::Engine as _;
 
         let email = Email {
@@ -10881,6 +10900,7 @@ mod tests {
                 location: Some("Room 42".to_owned()),
                 all_day: false,
                 meeting_message_type: 1,
+                forwardees: vec![],
             }),
             calendar_blob_ids: vec![],
         };
@@ -11023,6 +11043,38 @@ mod tests {
             eas::find_text_after(&v141, email2::MEETING_MESSAGE_TYPE),
             Some("1")
         );
+
+        for (version, email_supported) in [
+            (ProtocolVersion::V16_0, false),
+            (ProtocolVersion::V16_1, true),
+        ] {
+            let mut forwarded = email.clone();
+            forwarded.meeting_request.as_mut().unwrap().forwardees =
+                vec![crate::model::EmailMeetingForwardee {
+                    name: "Calendar Delegate".to_owned(),
+                    email: "delegate@example.test".to_owned(),
+                }];
+            let mut forwarded_builder = DocumentBuilder::new();
+            write_email_fields(
+                &mut forwarded_builder,
+                "forwarded-invitation",
+                forwarded,
+                None,
+                version,
+            );
+            let forwarded = forwarded_builder.finish();
+            assert!(forwarded.nodes.iter().any(
+                |node| matches!(node, Node::Start(token) if token == &compose_mail::FORWARDEES)
+            ));
+            assert_eq!(
+                eas::find_text_after(&forwarded, compose_mail::NAME),
+                Some("Calendar Delegate")
+            );
+            assert_eq!(
+                eas::find_text_after(&forwarded, compose_mail::EMAIL),
+                email_supported.then_some("delegate@example.test")
+            );
+        }
 
         for meeting_message_type in [5, 6] {
             let mut delegated = email.clone();

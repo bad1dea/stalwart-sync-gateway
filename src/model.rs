@@ -103,6 +103,13 @@ pub struct EmailMeetingRequest {
     pub location: Option<String>,
     pub all_day: bool,
     pub meeting_message_type: u8,
+    pub forwardees: Vec<EmailMeetingForwardee>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmailMeetingForwardee {
+    pub name: String,
+    pub email: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

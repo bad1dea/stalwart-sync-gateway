@@ -596,6 +596,10 @@ pub mod compose_mail {
     pub const MIME: Token = tag(0x10, false);
     pub const CLIENT_ID: Token = tag(0x11, false);
     pub const STATUS: Token = tag(0x12, false);
+    pub const FORWARDEES: Token = tag(0x15, true);
+    pub const FORWARDEE: Token = tag(0x16, true);
+    pub const NAME: Token = tag(0x17, false);
+    pub const EMAIL: Token = tag(0x18, false);
 
     pub const fn tag(token: u8, has_content: bool) -> Token {
         Token {
@@ -5127,6 +5131,10 @@ mod tests {
         assert_eq!(calendar::UID, calendar::tag(0x28, false));
         assert_eq!(airsync_base::LOCATION, airsync_base::tag(0x20, true));
         assert_eq!(email2::MEETING_MESSAGE_TYPE, email2::tag(0x13, false));
+        assert_eq!(compose_mail::FORWARDEES, compose_mail::tag(0x15, true));
+        assert_eq!(compose_mail::FORWARDEE, compose_mail::tag(0x16, true));
+        assert_eq!(compose_mail::NAME, compose_mail::tag(0x17, false));
+        assert_eq!(compose_mail::EMAIL, compose_mail::tag(0x18, false));
     }
 
     #[test]
