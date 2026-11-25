@@ -1862,7 +1862,10 @@ VTIMEZONE or exception set. An occurrence counter uses the request's UTC
 started `2026-11-25T07:28:29Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. The test stack has no protocol override and therefore
 retains the 14.0 default; real-client 16.1 behavior remains unverified. The
-later source change to include event locations is awaiting deployment.
+current isolated image is `localhost/eas16-isolated:23f4cbc`
+(`sha256:2cab227d05bf11ab4ed089238c010fb818e138d928c5c076cd7b119937d8bf94`),
+started `2026-11-25T07:35:41Z`, restart count zero, and `/healthz` and `/readyz`
+both pass. This deployment includes named event locations in counter MIME.
 JSCalendar's
 `participationComment` is a note explaining RSVP status, not the custom email
 body carried by EAS `SendResponse`; mapping the two directly would lose the
