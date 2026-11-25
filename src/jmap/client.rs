@@ -834,17 +834,22 @@ impl JmapClient {
                 }
             }
         }
-        let uids: BTreeSet<_> = requests
+        let proposal_scopes: BTreeSet<_> = requests
             .values()
             .filter(|request| {
                 request.proposed_start_time.is_none() && request.proposed_end_time.is_none()
             })
-            .map(|request| request.uid.clone())
+            .map(|request| (request.uid.clone(), request.recurrence_key.clone()))
             .collect();
-        for uid in uids {
-            match self.calendar_counter_proposal_for_uid(auth, &uid).await {
+        for (uid, recurrence_key) in proposal_scopes {
+            match self
+                .calendar_counter_proposal_for_uid(auth, &uid, recurrence_key.as_deref())
+                .await
+            {
                 Ok(Some((start, end))) => {
-                    for request in requests.values_mut().filter(|request| request.uid == uid) {
+                    for request in requests.values_mut().filter(|request| {
+                        request.uid == uid && request.recurrence_key == recurrence_key
+                    }) {
                         request.proposed_start_time = Some(start.clone());
                         request.proposed_end_time = Some(end.clone());
                     }
@@ -4024,6 +4029,7 @@ impl JmapClient {
         &self,
         auth: &AuthenticatedSession,
         uid: &str,
+        recurrence_key: Option<&str>,
     ) -> anyhow::Result<Option<(String, String)>> {
         let account_id = auth
             .session
@@ -4082,7 +4088,11 @@ impl JmapClient {
         let Some(event) = events.iter().find(|event| event.id == event_id) else {
             return Ok(None);
         };
-        Ok(calendar_counter_proposal_from_event(event, auth.username()))
+        Ok(calendar_counter_proposal_from_event(
+            event,
+            auth.username(),
+            recurrence_key,
+        ))
     }
 
     async fn verify_calendar_coordinates(
@@ -8622,8 +8632,12 @@ fn email_meeting_request_from_event(
                 .is_some_and(|email| email.eq_ignore_ascii_case(attendee_email))
     });
     let attendee = attendee?;
-    let (proposed_start_time, proposed_end_time) =
-        calendar_proposed_times_from_icalendar(event.get("iCalendar"), attendee_email, None);
+    let recurrence_key = event["recurrenceId"].as_str().map(str::to_owned);
+    let (proposed_start_time, proposed_end_time) = calendar_proposed_times_from_icalendar(
+        event.get("iCalendar"),
+        attendee_email,
+        recurrence_key.as_deref(),
+    );
     let meeting_message_type = if participant_has_delegation(attendee, "delegatedFrom") {
         // This copy was delegated to the authenticated attendee. EAS type 6
         // tells the client it must not respond to the original request.
@@ -8735,6 +8749,7 @@ fn email_meeting_request_from_event(
         reminder_seconds,
         recurrence,
         recurrence_id,
+        recurrence_key,
         disallow_new_time_proposal: None,
         proposed_start_time,
         proposed_end_time,
@@ -9020,9 +9035,20 @@ mod meeting_request_conversion_tests {
     fn maps_attendee_counter_proposals_to_meeting_request_values() {
         let start = eas_proposed_time_property_name("attendee@example.test", None, "START");
         let end = eas_proposed_time_property_name("attendee@example.test", None, "END");
+        let occurrence_start = eas_proposed_time_property_name(
+            "attendee@example.test",
+            Some("2026-12-01T10:00:00"),
+            "START",
+        );
+        let occurrence_end = eas_proposed_time_property_name(
+            "attendee@example.test",
+            Some("2026-12-01T10:00:00"),
+            "END",
+        );
         let event = serde_json::json!({
             "@type":"Event", "method":"request", "uid":"u",
             "updated":"2026-11-25T14:00:00Z", "timeZone":"Etc/UTC",
+            "recurrenceId":"2026-12-01T10:00:00",
             "participants":{
                 "owner":{"email":"owner@example.test","roles":{"owner":true}},
                 "attendee":{"email":"attendee@example.test","roles":{"attendee":true}},
@@ -9030,17 +9056,23 @@ mod meeting_request_conversion_tests {
             },
             "iCalendar":{"properties":[
                 [start, {}, "date-time", "2026-12-01T15:30:00Z"],
-                [end, {}, "date-time", "2026-12-01T16:30:00Z"]
+                [end, {}, "date-time", "2026-12-01T16:30:00Z"],
+                [occurrence_start, {}, "date-time", "2026-12-01T17:30:00Z"],
+                [occurrence_end, {}, "date-time", "2026-12-01T18:30:00Z"]
             ]}
         });
         let request = email_meeting_request_from_event(&event, "attendee@example.test").unwrap();
         assert_eq!(
+            request.recurrence_key.as_deref(),
+            Some("2026-12-01T10:00:00")
+        );
+        assert_eq!(
             request.proposed_start_time.as_deref(),
-            Some("20261201T153000Z")
+            Some("20261201T173000Z")
         );
         assert_eq!(
             request.proposed_end_time.as_deref(),
-            Some("20261201T163000Z")
+            Some("20261201T183000Z")
         );
         let other = email_meeting_request_from_event(&event, "other@example.test").unwrap();
         assert_eq!(other.proposed_start_time, None);
@@ -9242,6 +9274,16 @@ mod email_meeting_request_fetch_tests {
             eas_proposed_time_property_name("attendee@example.test", None, "START");
         let proposal_end_name =
             eas_proposed_time_property_name("attendee@example.test", None, "END");
+        let occurrence_start_name = eas_proposed_time_property_name(
+            "attendee@example.test",
+            Some("2026-12-01T10:00:00"),
+            "START",
+        );
+        let occurrence_end_name = eas_proposed_time_property_name(
+            "attendee@example.test",
+            Some("2026-12-01T10:00:00"),
+            "END",
+        );
         let app = Router::new().route(
             "/",
             post(move |Json(request): Json<serde_json::Value>| {
@@ -9276,6 +9318,7 @@ mod email_meeting_request_fetch_tests {
                                     "updated":"2026-11-25T14:00:00Z",
                                     "start":"2026-12-01T10:00:00", "duration":"PT3600S",
                                     "timeZone":"America/Toronto",
+                                    "recurrenceId":"2026-12-01T10:00:00",
                                     "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}},
                                     "sequence":0,
                                     "locations":{"room":{"name":"Room 42"}}
@@ -9293,7 +9336,9 @@ mod email_meeting_request_fetch_tests {
                                     "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}},
                                     "iCalendar":{"properties":[
                                         [proposal_start_name, {}, "date-time", "2026-12-01T15:30:00Z"],
-                                        [proposal_end_name, {}, "date-time", "2026-12-01T16:30:00Z"]
+                                        [proposal_end_name, {}, "date-time", "2026-12-01T16:30:00Z"],
+                                        [occurrence_start_name, {}, "date-time", "2026-12-01T17:30:00Z"],
+                                        [occurrence_end_name, {}, "date-time", "2026-12-01T18:30:00Z"]
                                     ]}
                                 }]}, "g"]
                             ]}))
@@ -9345,13 +9390,18 @@ mod email_meeting_request_fetch_tests {
         assert_eq!(request.uid, "meeting@example.test");
         assert_eq!(request.start.as_deref(), Some("20261201T150000Z"));
         assert_eq!(request.end.as_deref(), Some("20261201T160000Z"));
+        assert_eq!(request.recurrence_id.as_deref(), Some("20261201T150000Z"));
+        assert_eq!(
+            request.recurrence_key.as_deref(),
+            Some("2026-12-01T10:00:00")
+        );
         assert_eq!(
             request.proposed_start_time.as_deref(),
-            Some("20261201T153000Z")
+            Some("20261201T173000Z")
         );
         assert_eq!(
             request.proposed_end_time.as_deref(),
-            Some("20261201T163000Z")
+            Some("20261201T183000Z")
         );
         assert_eq!(
             request
@@ -10253,6 +10303,7 @@ struct ParticipantObject {
 fn calendar_counter_proposal_from_event(
     event: &CalendarEventObject,
     user: &str,
+    recurrence_key: Option<&str>,
 ) -> Option<(String, String)> {
     if event.kind != "Event" {
         return None;
@@ -10270,7 +10321,7 @@ fn calendar_counter_proposal_from_event(
     }
     let email = attendee.email.as_deref()?;
     let (start, end) =
-        calendar_proposed_times_from_icalendar(event.i_calendar.as_ref(), email, None);
+        calendar_proposed_times_from_icalendar(event.i_calendar.as_ref(), email, recurrence_key);
     Some((start?, end?))
 }
 
@@ -11892,11 +11943,11 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            super::calendar_counter_proposal_from_event(&event, "guest@example.test"),
+            super::calendar_counter_proposal_from_event(&event, "guest@example.test", None),
             Some(("20261125T150000Z".to_owned(), "20261125T160000Z".to_owned()))
         );
         assert_eq!(
-            super::calendar_counter_proposal_from_event(&event, "other@example.test"),
+            super::calendar_counter_proposal_from_event(&event, "other@example.test", None),
             None
         );
         let mut ambiguous = event.clone();
@@ -11909,7 +11960,7 @@ mod tests {
             },
         );
         assert_eq!(
-            super::calendar_counter_proposal_from_event(&ambiguous, "guest@example.test"),
+            super::calendar_counter_proposal_from_event(&ambiguous, "guest@example.test", None),
             None
         );
         let converted = super::calendar_event_from(event, Some("guest@example.test"));

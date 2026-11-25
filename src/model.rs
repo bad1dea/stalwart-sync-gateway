@@ -98,6 +98,9 @@ pub struct EmailMeetingRequest {
     /// Original occurrence start for a meeting invitation to one recurring
     /// instance, in EAS compact UTC DateTime form.
     pub recurrence_id: Option<String>,
+    /// JSCalendar recurrence key for looking up occurrence-scoped metadata.
+    /// This is not written on the EAS wire; `recurrence_id` is its EAS UTC form.
+    pub recurrence_key: Option<String>,
     pub disallow_new_time_proposal: Option<bool>,
     pub proposed_start_time: Option<String>,
     pub proposed_end_time: Option<String>,

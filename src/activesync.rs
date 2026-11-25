@@ -11059,6 +11059,7 @@ mod tests {
                     ..Default::default()
                 }),
                 recurrence_id: Some("20261201T150000Z".to_owned()),
+                recurrence_key: Some("2026-12-01T10:00:00".to_owned()),
                 disallow_new_time_proposal: Some(true),
                 proposed_start_time: Some("2026-12-01T15:30:00Z".to_owned()),
                 proposed_end_time: Some("2026-12-01T16:30:00Z".to_owned()),
