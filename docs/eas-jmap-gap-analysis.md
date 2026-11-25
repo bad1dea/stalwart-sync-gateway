@@ -31,11 +31,11 @@ attendee's JSCalendar `expectReply` boolean to EAS values 1/0, preserving
 omission if the property is missing. Sensitivity maps JSCalendar privacy
 `public`/`private`/`secret` to EAS 0/2/3; BusyStatus maps free/busy to 0/2 and
 uses JSCalendar's default `busy` when omitted. These values are included only
-when recognized. This addition is awaiting deployment. Commit `f53e3bc` is
-deployed to Amy's isolated bridge as `localhost/eas16-isolated:f53e3bc` (image
-`sha256:caec6a29215417e7d66f8c3dbc5e121b536932862dbba5034750b2f510436972`),
-started `2026-11-25T11:03:30.990395848Z`, with zero restarts. At
-`2026-11-25T11:03:35Z`, `/healthz` and `/readyz` returned HTTP 200 (`ok` and
+when recognized. Commit `76f42fa` is deployed to Amy's isolated bridge as
+`localhost/eas16-isolated:76f42fa` (image
+`sha256:91ae5608d72e1b00ebaea32bf154af023c59fdabf1386ed99e8a76959c32741e`),
+started `2026-11-25T11:09:19.139520784Z`, with zero restarts. At
+`2026-11-25T11:09:23Z`, `/healthz` and `/readyz` returned HTTP 200 (`ok` and
 `ready`). `EAS_MAX_PROTOCOL_VERSION` remains unset, preserving the 14.0
 default; production is untouched. Real-client validation remains pending.
 Sources: Microsoft

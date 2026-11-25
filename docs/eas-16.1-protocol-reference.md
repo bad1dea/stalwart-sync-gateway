@@ -19,9 +19,9 @@ The spec's own overview lays out the intended command sequence:
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
    `100.64.0.50:18090`, backed by isolated Stalwart. Its current gateway image
-   is `f53e3bc` (`sha256:caec6a29215417e7d66f8c3dbc5e121b536932862dbba5034750b2f510436972`),
-   started `2026-11-25T11:03:30.990395848Z` with zero restarts. `/healthz`
-   and `/readyz` returned HTTP 200 at `11:03:35Z`; the Compose environment
+   is `76f42fa` (`sha256:91ae5608d72e1b00ebaea32bf154af023c59fdabf1386ed99e8a76959c32741e`),
+   started `2026-11-25T11:09:19.139520784Z` with zero restarts. `/healthz`
+   and `/readyz` returned HTTP 200 at `11:09:23Z`; the Compose environment
    leaves `EAS_MAX_PROTOCOL_VERSION` unset, so it still defaults to EAS 14.0.
    Set the variable to 16.1 during the planned client test window.
 2. **Provision** — device sends its info, gets + acks security policy.
@@ -185,9 +185,9 @@ fallback) to Email:Organizer. `ResponseRequested` maps the current attendee's
 JSCalendar `expectReply` value to EAS 1/0, omitting the element if unavailable.
 `Sensitivity` maps JSCalendar `privacy` public/private/secret to EAS
 0/2/3. `BusyStatus` maps free/busy to 0/2 and applies JSCalendar's default of
-busy when omitted. These mappings are covered by parser and WBXML tests; the
-latest additions are not yet deployed. The bridge still defaults to EAS 14.0.
-Real-client validation remains pending.
+busy when omitted. These mappings are covered by parser and WBXML tests and
+are deployed on the isolated bridge as `76f42fa`. The bridge still defaults
+to EAS 14.0. Real-client validation remains pending.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
 SendMail posts a full new outgoing message; SmartReply/SmartForward use
