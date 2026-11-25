@@ -437,7 +437,13 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    real OCR path on this host; a fake-tool regression verifies page and render
    bounds without requiring system OCR packages. Multi-page mixed PDFs remain
    unsupported because partial OCR would make negative Find predicates
-   inexact.
+   inexact. Deployed as `deploy-2026-11-24-eas-find-pdf-ocr-1cf7b0c`;
+   homelab commit `15cbe0d`, image
+   `sha256:b2057b47548ce45c113552e245fa70d62a89d4da22cb8f34c48755d450e686d8`,
+   started `2026-11-25T00:12:41Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Runtime checks confirmed `/usr/bin/pdftoppm`,
+   `/usr/bin/tesseract`, and the `eng` trained data. The protocol default
+   remains 14.0.
    Extracted and normalized text output is capped at 2 MiB, including bounded
    streaming output from the PDF parser and XML entity/CDATA decoding. RFC 822 and
    Outlook message decoding are capped at the same 2 MiB extracted-text limit;
