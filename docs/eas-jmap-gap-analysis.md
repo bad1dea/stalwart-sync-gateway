@@ -70,6 +70,12 @@ image `sha256:76ecbdf2069b4204e1e32f6c429497ab33b360a40e604b76b8f709bb1f31ac3a`,
 started `2026-11-25T02:18:04Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. Production retains the 14.0 protocol default.
 
+Generic ZIP Find now also extracts common source-code files such as `.rs`,
+`.py`, `.js`, `.ts`, `.go`, and `.java`, under the same archive expansion and
+text-output bounds. The exact-search extraction regression verifies source
+files are included while binary files remain skipped. The full suite passes 404
+tests (75 ignored), strict Clippy passes, and formatting and diff checks pass.
+
 Remaining 16.1 readiness backlog (ordered by runtime impact):
 
 1. **Real-client 16.1 validation.** Exercise negotiation, Tasks, BodyPart,
@@ -90,7 +96,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    production endpoint continues to use the tested 14.0 default.
 2. **Find content coverage.** Current bounded extraction supports legacy `.xls`,
    `.ppt`, and `.doc`, EPUB, macro-enabled OOXML, RFC 822 messages, Outlook `.msg`
-   attachments, ordinary ZIP archives with allowlisted text/config files, and
+   attachments, ordinary ZIP archives with allowlisted text/config/source
+   files, and
    Word, Excel, and PowerPoint package comment text, plus
    MIME-declared charsets for text attachments and XML declaration encodings.
    Scanned-only PDFs with up to five image-only pages use resource-bounded

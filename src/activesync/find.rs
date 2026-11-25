@@ -794,6 +794,27 @@ fn extract_archive_text(bytes: &[u8], media_type: &str) -> Option<String> {
                         | "conf"
                         | "properties"
                         | "rtf"
+                        | "rs"
+                        | "py"
+                        | "js"
+                        | "jsx"
+                        | "ts"
+                        | "tsx"
+                        | "sh"
+                        | "bash"
+                        | "c"
+                        | "h"
+                        | "cc"
+                        | "cpp"
+                        | "hpp"
+                        | "java"
+                        | "kt"
+                        | "kts"
+                        | "go"
+                        | "rb"
+                        | "php"
+                        | "cs"
+                        | "swift"
                 )
             })
         }
@@ -3196,13 +3217,16 @@ mod tests {
         )
         .unwrap();
         zip.write_all(b"gamma: delta").unwrap();
+        zip.start_file("src/main.rs", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"// theta iota source code").unwrap();
         zip.start_file("images/logo.png", zip::write::SimpleFileOptions::default())
             .unwrap();
         zip.write_all(b"binary image data is skipped").unwrap();
         let zip = zip.finish().unwrap().into_inner();
         assert_eq!(
             extract_find_attachment_text("application/zip", &zip),
-            Some("alpha beta from a ZIP readme gamma: delta".to_owned())
+            Some("alpha beta from a ZIP readme gamma: delta // theta iota source code".to_owned())
         );
         let eml = b"From: sender@example.test\r\nSubject: alpha subject\r\nContent-Type: multipart/alternative; boundary=body\r\n\r\n--body\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nplain=20beta\r\n--body\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>html gamma</p>\r\n--body--\r\n";
         let extracted = extract_find_attachment_text("message/rfc822", eml).unwrap();
