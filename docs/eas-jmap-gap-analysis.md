@@ -1834,9 +1834,15 @@ Also completed: **EAS 16.x MeetingResponse SendResponse**. For protocol
 omitting it continues to suppress them. Recurring-series responses and
 `InstanceId` occurrence responses are now implemented; `InstanceId` is
 accepted for 14.1 and newer. A `SendResponse` with an embedded custom body and
-proposed meeting start/end times remain unsupported. The behavior follows the
+proposed meeting start/end times remain unsupported. JSCalendar's
+`participationComment` is a note explaining RSVP status, not the custom email
+body carried by EAS `SendResponse`; mapping the two directly would lose the
+requested message semantics. Supporting that body needs a verified path that
+includes it in the actual reply message. No JMAP mapping for the proposed
+start/end fields is established yet. The behavior follows the
 [MS-ASCMD MeetingResponse rules](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/42ececcd-37df-4340-aa50-783ba714facb)
-and [SendResponse definition](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/128fff4c-1b97-42d8-a30f-f023327add0b).
+and [SendResponse definition](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/128fff4c-1b97-42d8-a30f-f023327add0b),
+and the distinction follows [RFC 8984 section 4.4.6](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6).
 Regression coverage asserts `sendSchedulingMessages` at the JMAP boundary and
 updates the deferred live MeetingResponse scenario. Full suite: 267 passed,
 73 ignored; clippy with warnings denied, formatting and diff checks pass.

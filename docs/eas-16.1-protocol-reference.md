@@ -211,7 +211,10 @@ series acceptance and occurrence decline. Invalid `InstanceId` formats return
 status 104, and using an `InstanceId` with a non-recurring event returns status
 146; regressions cover both. The current release is deployed as
 `deploy-2026-11-25-eas-meeting-response-instance-status-dc6df90`; real-client 16.1
-certification remains separate from handler coverage.
+certification remains separate from handler coverage. `SendResponse` with a
+custom body and proposed meeting times is not implemented. JSCalendar's
+`participationComment` is an RSVP note, not the outgoing email body, so the two
+are not treated as equivalent ([RFC 8984 §4.4.6](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6)).
 
 ResolveRecipients Availability (introduced in EAS 14.0) now uses JMAP
 `Principal/getAvailability` for exact recipients and returns the required
