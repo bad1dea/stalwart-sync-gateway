@@ -24,16 +24,16 @@ optional `Recurrences`, `Reminder`, `Sensitivity`, `BusyStatus`,
 `DisallowNewTimeProposal`, and 16.1
 `ProposedStartTime`/`ProposedEndTime` fields remain unmapped. The full suite
 passes 459 tests (77 ignored), including mailbox-query-to-JMAP-parse,
-organizer mapping, and WBXML writer regressions; strict Clippy, formatting, and
-diff checks pass. The optional `Organizer` maps the JMAP participant with the
-`owner` role to its display name, falling back to email, and emits
-Email:Organizer. `ResponseRequested` now maps the current attendee's JSCalendar
-`expectReply` boolean to EAS values 1/0, preserving omission if the property is
-missing. Commit `f063290` is deployed to Amy's isolated bridge as
-`localhost/eas16-isolated:f063290` (image
-`sha256:dd18bb428e8848ebbc8a2b8596c889b186e6280820c279c328c3e909e397139c`),
-started `2026-11-25T10:56:55.261001097Z`, with zero restarts. At
-`2026-11-25T10:57:00Z`, `/healthz` and `/readyz` returned HTTP 200 (`ok` and
+organizer and RSVP-request mapping, and WBXML writer regressions; strict
+Clippy, formatting, and diff checks pass. The optional `Organizer` maps the
+JMAP participant with the `owner` role to its display name, falling back to
+email, and emits Email:Organizer. `ResponseRequested` maps the current
+attendee's JSCalendar `expectReply` boolean to EAS values 1/0, preserving
+omission if the property is missing. Commit `f53e3bc` is deployed to Amy's
+isolated bridge as `localhost/eas16-isolated:f53e3bc` (image
+`sha256:caec6a29215417e7d66f8c3dbc5e121b536932862dbba5034750b2f510436972`),
+started `2026-11-25T11:03:30.990395848Z`, with zero restarts. At
+`2026-11-25T11:03:35Z`, `/healthz` and `/readyz` returned HTTP 200 (`ok` and
 `ready`). `EAS_MAX_PROTOCOL_VERSION` remains unset, preserving the 14.0
 default; production is untouched. Real-client validation remains pending.
 Sources: Microsoft

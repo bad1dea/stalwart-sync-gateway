@@ -19,9 +19,9 @@ The spec's own overview lays out the intended command sequence:
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
    `100.64.0.50:18090`, backed by isolated Stalwart. Its current gateway image
-   is `f063290` (`sha256:dd18bb428e8848ebbc8a2b8596c889b186e6280820c279c328c3e909e397139c`),
-   started `2026-11-25T10:56:55.261001097Z` with zero restarts. `/healthz`
-   and `/readyz` returned HTTP 200 at `10:57:00Z`; the Compose environment
+   is `f53e3bc` (`sha256:caec6a29215417e7d66f8c3dbc5e121b536932862dbba5034750b2f510436972`),
+   started `2026-11-25T11:03:30.990395848Z` with zero restarts. `/healthz`
+   and `/readyz` returned HTTP 200 at `11:03:35Z`; the Compose environment
    leaves `EAS_MAX_PROTOCOL_VERSION` unset, so it still defaults to EAS 14.0.
    Set the variable to 16.1 during the planned client test window.
 2. **Provision** — device sends its info, gets + acks security policy.
@@ -183,9 +183,9 @@ JMAP mailbox-query/CalendarEvent-parse and WBXML writer regressions pass.
 `Organizer` maps from the JMAP `owner` participant's display name (email
 fallback) to Email:Organizer. `ResponseRequested` maps the current attendee's
 JSCalendar `expectReply` value to EAS 1/0, omitting the element if unavailable.
-Both mappings are covered by parser and WBXML tests. These additions are not
-yet deployed; the bridge still defaults to EAS 14.0. Real-client validation
-remains pending.
+Both mappings are covered by parser and WBXML tests. These additions are
+deployed on the isolated bridge as `f53e3bc`; it still defaults to EAS 14.0.
+Real-client validation remains pending.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
 SendMail posts a full new outgoing message; SmartReply/SmartForward use
