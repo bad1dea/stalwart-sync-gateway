@@ -10,11 +10,11 @@ MIME policy, partial Sync/options persistence, and Sync long-poll/window
 handling. Check the current Rust implementation before treating any older
 “Missing” or “Not implemented” statement below as actionable.
 
-The functional source at `f11e05a` is deployed to Amy's isolated bridge. The
-full suite passes 482 tests (78 ignored); strict Clippy, formatting, and diff
-checks pass. The image is `localhost/eas16-isolated:f11e05a` (image
-`sha256:3491deef140a66da1b447c9f8741d4f0e9acf172994344af87c6655a09a4f3e6`),
-started `2026-11-25T16:45:21.854591658Z` with zero restarts. `/healthz` and
+The functional source at `4384040` is deployed to Amy's isolated bridge. The
+full suite passes 483 tests (79 ignored); strict Clippy, formatting, and diff
+checks pass. The image is `localhost/eas16-isolated:4384040` (image
+`sha256:db531d5c964197c68c80d5edc727b13a0fd1e2a9654431b969e26505ad66af4d`),
+started `2026-11-25T17:12:56.782442550Z` with zero restarts. `/healthz` and
 `/readyz` returned `ok` and `ready`; authenticated EAS OPTIONS advertises only
 14.0. `EAS_MAX_PROTOCOL_VERSION` remains unset, and production is untouched.
 Real-client 16.1 certification remains open.
