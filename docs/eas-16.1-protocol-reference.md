@@ -170,10 +170,14 @@ composes the quoted content; the gateway does not synthesize it from ItemId.
 
 ### ResolveRecipients / ValidateCert (§2.2.1.15/.22)
 `ResolveRecipients` resolves principals and contacts with case-insensitive
-exact-match preference, then substring matching. Certificate retrieval and
-free/busy are not provided. `ValidateCert` validates supplied certificates
-against configured trust roots and optional CRLs. These command handlers have
-end-to-end regression coverage; neither implies S/MIME message signing.
+exact-match preference, then substring matching. Certificate retrieval is not
+provided. Availability is implemented for EAS 14.0+ using JMAP
+`Principal/getAvailability`; Picture is implemented for 14.1/16.0/16.1 using
+inline JSContact media or bounded ContactCard blob downloads, with the defined
+MaxSize, per-query MaxPictures, and per-recipient status behavior.
+`ValidateCert` validates supplied certificates against configured trust roots
+and optional CRLs. These command handlers have end-to-end regression coverage;
+neither implies S/MIME message signing.
 See `src/activesync/resolve_recipients.rs` and
 `src/activesync/validate_cert.rs`.
 
@@ -211,6 +215,13 @@ ResolveRecipients Availability (introduced in EAS 14.0) now uses JMAP
 covered by regressions. The implementation is deployed in
 `deploy-2026-11-25-eas-resolve-recipient-availability-220f007`; live Stalwart
 free/busy round-trip verification remains pending.
+
+ResolveRecipients Picture is deployed in
+`deploy-2026-11-25-eas-resolve-recipient-picture-per-query-18c02ea`. A mocked
+gateway regression exercises a blob-backed ContactCard photo through the EAS
+WBXML response, including protocol 14.0 rejection. Production still
+advertises 14.0; this command implementation does not establish real-client
+16.1 certification.
 
 ## WBXML codepages (MS-ASWBXML)
 
