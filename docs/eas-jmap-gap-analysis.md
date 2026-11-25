@@ -54,11 +54,12 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    attachments, ordinary ZIP archives with allowlisted text/config files, and
    Word, Excel, and PowerPoint package comment text, plus
    MIME-declared charsets for text attachments and XML declaration encodings.
-   Scanned-only PDFs up to three pages now use resource-bounded OCR. Attachments
-   above 8 MiB, PDFs with image-only pages beyond the three-page OCR budget,
+   Scanned-only PDFs with up to three image-only pages use resource-bounded
+   OCR. Attachments above 8 MiB, PDFs with more than three image-only pages,
    and extracted text above 2 MiB remain outside exact local matching. Mixed
-   PDFs up to three pages now retain native text and OCR only pages without
-   extractable text. A regression covers native text plus an OCR-only page.
+   PDFs retain native text and OCR only pages without extractable text, even
+   when the PDF has more than three total pages. A four-page real fixture
+   covers native text plus an OCR-only page.
    The attachment input cap was raised from 4 MiB to 8 MiB
    with a regression that searches inside a 6 MiB OOXML payload; the focused
    test and full suite passed. Deployed as
@@ -421,7 +422,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    RFC 822 `message/rfc822` and `message/global` attachments (including decoded
    plain/HTML MIME bodies and embedded-message subjects), Outlook
    `application/vnd.ms-outlook` messages (subject, plain body, and HTML body),
-   text-bearing and mixed text/scanned PDFs up to three pages,
+   text-bearing PDFs plus mixed text/scanned PDFs with at most three image-only
+   pages,
    EPUB XHTML, OOXML Word/Excel/PowerPoint (including
    macro-enabled variants), and OpenDocument Text, Spreadsheet, and Presentation
    attachment containers up to 8 MiB for exact text/NEAR checks, with extracted

@@ -112,7 +112,6 @@ const SEARCHES: &str = "__find__";
 const MAX_FIND_ATTACHMENT_TEXT_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_FIND_PDF_OCR_PAGES: u32 = 3;
-const FIND_PDF_OCR_OVERFLOW_PAGE: u32 = MAX_FIND_PDF_OCR_PAGES + 1;
 const MAX_FIND_PDF_OCR_EDGE: u32 = 1600;
 const MAX_FIND_ARCHIVE_ENTRIES: usize = 4096;
 static FIND_PDF_OCR_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
@@ -983,9 +982,9 @@ fn extract_bounded_pdf_text_with_tools(
         .filter_map(|(page, text)| text.trim().is_empty().then_some(*page))
         .collect();
     if !missing_text_pages.is_empty() && allow_ocr {
-        if pages.len() > MAX_FIND_PDF_OCR_PAGES as usize {
+        if missing_text_pages.len() > MAX_FIND_PDF_OCR_PAGES as usize {
             // A textless page may contain an image. Refuse to return partial
-            // text when that page cannot be OCRed within the page budget.
+            // text when more than three pages need OCR.
             return None;
         }
         let recognized =
@@ -1052,28 +1051,6 @@ fn run_find_ocr_command(command: &mut std::process::Command, timeout: std::time:
     }
 }
 
-fn extract_scanned_pdf_text(bytes: &[u8]) -> Option<String> {
-    extract_scanned_pdf_text_with_tools(
-        bytes,
-        std::path::Path::new("pdftoppm"),
-        std::path::Path::new("tesseract"),
-    )
-}
-
-fn extract_scanned_pdf_text_with_tools(
-    bytes: &[u8],
-    pdftoppm: &std::path::Path,
-    tesseract: &std::path::Path,
-) -> Option<String> {
-    extract_pdf_pages_ocr_with_tools(bytes, &[1, 2, 3], pdftoppm, tesseract).map(|pages| {
-        pages
-            .into_iter()
-            .map(|(_, text)| text)
-            .collect::<Vec<_>>()
-            .join(" ")
-    })
-}
-
 fn extract_pdf_pages_ocr_with_tools(
     bytes: &[u8],
     pages: &[u32],
@@ -1085,44 +1062,34 @@ fn extract_pdf_pages_ocr_with_tools(
     if bytes.len() as u64 > MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES
         || pages.is_empty()
         || pages.len() > MAX_FIND_PDF_OCR_PAGES as usize
-        || pages
-            .iter()
-            .any(|page| *page == 0 || *page > MAX_FIND_PDF_OCR_PAGES)
+        || pages.contains(&0)
     {
         return None;
     }
     let temp = FindOcrTempDir::create()?;
     let input = temp.0.join("input.pdf");
-    let prefix = temp.0.join("page");
     std::fs::write(&input, bytes).ok()?;
-    let rendered = run_find_ocr_command(
-        std::process::Command::new(pdftoppm)
-            .arg("-f")
-            .arg("1")
-            .arg("-l")
-            .arg(FIND_PDF_OCR_OVERFLOW_PAGE.to_string())
-            .arg("-scale-to")
-            .arg(MAX_FIND_PDF_OCR_EDGE.to_string())
-            .arg("-gray")
-            .arg("-png")
-            .arg("-q")
-            .arg(&input)
-            .arg(&prefix),
-        Duration::from_secs(6),
-    );
-    if !rendered {
-        return None;
-    }
-    if temp
-        .0
-        .join(format!("page-{FIND_PDF_OCR_OVERFLOW_PAGE}.png"))
-        .is_file()
-    {
-        return None;
-    }
 
     let mut output = Vec::with_capacity(pages.len());
     for page in pages {
+        let prefix = temp.0.join("page");
+        if !run_find_ocr_command(
+            std::process::Command::new(pdftoppm)
+                .arg("-f")
+                .arg(page.to_string())
+                .arg("-l")
+                .arg(page.to_string())
+                .arg("-scale-to")
+                .arg(MAX_FIND_PDF_OCR_EDGE.to_string())
+                .arg("-gray")
+                .arg("-png")
+                .arg("-q")
+                .arg(&input)
+                .arg(&prefix),
+            Duration::from_secs(2),
+        ) {
+            return None;
+        }
         let image = temp.0.join(format!("page-{page}.png"));
         if !image.is_file() {
             return None;
@@ -3386,7 +3353,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn scanned_pdf_ocr_limits_pages_and_bounds_tool_execution() {
-        use super::{extract_scanned_pdf_text_with_tools, FindOcrTempDir};
+        use super::{extract_pdf_pages_ocr_with_tools, FindOcrTempDir};
         use std::{fs, os::unix::fs::PermissionsExt};
 
         let tools = FindOcrTempDir::create().unwrap();
@@ -3396,7 +3363,7 @@ mod tests {
         fs::write(
             &renderer,
             format!(
-                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > '{}'\nprefix=\nfor arg in \"$@\"; do prefix=\"$arg\"; done\nfor page in 1 2 3; do printf image > \"$prefix-$page.png\"; done\n",
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> '{}'\nprefix=\npage=\nprevious=\nfor arg in \"$@\"; do [ \"$previous\" != -f ] || page=\"$arg\"; prefix=\"$arg\"; previous=\"$arg\"; done\nprintf image > \"$prefix-$page.png\"\n",
                 render_args.display()
             ),
         )
@@ -3412,8 +3379,14 @@ mod tests {
             fs::set_permissions(tool, permissions).unwrap();
         }
 
-        let text = extract_scanned_pdf_text_with_tools(b"bounded test PDF", &renderer, &ocr)
-            .expect("bounded OCR pipeline should extract the fake page text");
+        let pages =
+            extract_pdf_pages_ocr_with_tools(b"bounded test PDF", &[1, 2, 3], &renderer, &ocr)
+                .expect("bounded OCR pipeline should extract the fake page text");
+        let text = pages
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>()
+            .join(" ");
         assert_eq!(
             super::normalize_find_attachment_text(&text),
             Some("scan alpha beta ignored page".to_owned())
@@ -3421,19 +3394,14 @@ mod tests {
         let args = fs::read_to_string(render_args).unwrap();
         let args: Vec<_> = args.lines().collect();
         let page_limit = args.iter().position(|arg| *arg == "-l").unwrap();
-        assert_eq!(args[page_limit + 1], "4");
+        assert_eq!(args[page_limit + 1], "1");
         let scale_limit = args.iter().position(|arg| *arg == "-scale-to").unwrap();
         assert_eq!(args[scale_limit + 1], "1600");
 
-        fs::write(
-            &renderer,
-            "#!/bin/sh\nset -eu\nprefix=\nfor arg in \"$@\"; do prefix=\"$arg\"; done\nfor page in 1 2 3 4; do printf image > \"$prefix-$page.png\"; done\n",
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&renderer).unwrap().permissions();
-        permissions.set_mode(0o700);
-        fs::set_permissions(&renderer, permissions).unwrap();
-        assert!(extract_scanned_pdf_text_with_tools(b"four-page PDF", &renderer, &ocr).is_none());
+        assert!(
+            extract_pdf_pages_ocr_with_tools(b"four-page PDF", &[1, 2, 3, 4], &renderer, &ocr,)
+                .is_none()
+        );
 
         let slow = tools.0.join("slow-tool");
         fs::write(&slow, "#!/bin/sh\nwhile :; do :; done\n").unwrap();
