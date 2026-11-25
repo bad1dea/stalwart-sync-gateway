@@ -1850,8 +1850,12 @@ suppressed so the counter is not duplicated. JMAP calendar mutation and mail
 submission are separate calls; if submission fails after the RSVP has
 persisted, the command returns a server error and a client retry may submit
 another reply. A live Stalwart and client verification remains to be done.
-Series-wide counter proposals for recurring events fail closed; an occurrence
-counter uses the request's UTC `InstanceId` as `RECURRENCE-ID`.
+Recurring-series counters now include an RRULE translated from supported
+JSCalendar rules. They fail closed for named local time zones and series with
+recurrence exceptions, because this MIME path does not yet emit a matching
+VTIMEZONE or exception set. An occurrence counter uses the request's UTC
+`InstanceId` as `RECURRENCE-ID`. This source change is not deployed or live
+validated yet.
 JSCalendar's
 `participationComment` is a note explaining RSVP status, not the custom email
 body carried by EAS `SendResponse`; mapping the two directly would lose the
@@ -1861,9 +1865,10 @@ The behavior follows the
 [MS-ASCMD MeetingResponse rules](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/42ececcd-37df-4340-aa50-783ba714facb)
 and [SendResponse definition](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/128fff4c-1b97-42d8-a30f-f023327add0b),
 and the distinction follows [RFC 8984 section 4.4.6](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6).
-Regression coverage asserts `sendSchedulingMessages` at the JMAP boundary and
-updates the deferred live MeetingResponse scenario. Current full suite: 431
-passed, 77 ignored; strict Clippy, formatting, and diff checks pass. The custom
+Regression coverage asserts `sendSchedulingMessages` at the JMAP boundary,
+RRULE mapping, and the series-counter timezone/exception guard, and updates the
+deferred live MeetingResponse scenario. Current full suite: 433 passed, 77
+ignored; strict Clippy, formatting, and diff checks pass. The custom
 reply and counter paths are on `main` but are not deployed yet. Earlier empty
 `SendResponse` behavior was deployed as
 `deploy-2026-11-22-eas-16-meeting-send-response-1109860`; Hermes

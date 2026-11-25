@@ -3298,10 +3298,11 @@ impl JmapClient {
         if event["@type"] != "Event" || event["calendarIds"][calendar_id] != true {
             return Ok("2");
         }
-        if proposed_times.is_some() && !event["recurrenceRule"].is_null() && instance_id.is_none() {
-            // An RFC 5546 COUNTER for an entire series must include its
-            // recurrence description. Until the JSCalendar→iCalendar RRULE
-            // mapping is available here, don't send a misleading one-off.
+        if proposed_times.is_some()
+            && instance_id.is_none()
+            && event["recurrenceRule"].is_object()
+            && !series_counter_supported(event)
+        {
             return Ok("4");
         }
         let instance_key = if let Some(instance_id) = instance_id {
@@ -3396,6 +3397,9 @@ impl JmapClient {
                     title: event["title"].as_str().unwrap_or(""),
                     description: event["description"].as_str(),
                     sequence: event["sequence"].as_u64().unwrap_or(0),
+                    recurrence_rule: event["recurrenceRule"]
+                        .as_object()
+                        .map(|_| &event["recurrenceRule"]),
                 },
             )?)
         } else {
@@ -7330,6 +7334,101 @@ struct MeetingResponseMimeContext<'a> {
     title: &'a str,
     description: Option<&'a str>,
     sequence: u64,
+    recurrence_rule: Option<&'a serde_json::Value>,
+}
+
+fn series_counter_supported(event: &serde_json::Value) -> bool {
+    let utc_series = event["timeZone"]
+        .as_str()
+        .is_none_or(|zone| matches!(zone, "UTC" | "Etc/UTC" | "GMT" | "Etc/GMT"));
+    let has_exceptions = event["recurrenceOverrides"]
+        .as_object()
+        .is_some_and(|overrides| !overrides.is_empty());
+    // The counter MIME emits UTC DTSTART/DTEND and RRULE, but cannot preserve
+    // local wall time or per-instance exceptions yet.
+    utc_series && !has_exceptions
+}
+
+fn counter_recurrence_rule(
+    value: &serde_json::Value,
+    time_zone: Option<&str>,
+) -> anyhow::Result<String> {
+    let recurrence = crate::jmap::calendar_recurrence::from_jscalendar(value, time_zone)?;
+    let (frequency, weekday_mask) = match recurrence.kind {
+        0 if recurrence.day_of_week.is_some() => ("WEEKLY", recurrence.day_of_week),
+        0 => ("DAILY", None),
+        1 => ("WEEKLY", recurrence.day_of_week),
+        2 | 3 => ("MONTHLY", recurrence.day_of_week),
+        5 | 6 => ("YEARLY", recurrence.day_of_week),
+        _ => anyhow::bail!("unsupported recurrence for time counter"),
+    };
+    let mut fields = vec![format!("FREQ={frequency}")];
+    if let Some(interval) = recurrence.interval.filter(|interval| *interval != 1) {
+        fields.push(format!("INTERVAL={interval}"));
+    }
+    if let Some(mask) = weekday_mask {
+        const DAYS: [(u8, &str); 7] = [
+            (1, "SU"),
+            (2, "MO"),
+            (4, "TU"),
+            (8, "WE"),
+            (16, "TH"),
+            (32, "FR"),
+            (64, "SA"),
+        ];
+        let days: Vec<_> = DAYS
+            .iter()
+            .filter(|(bit, _)| mask & bit != 0)
+            .map(|(_, day)| *day)
+            .collect();
+        anyhow::ensure!(!days.is_empty(), "empty recurrence weekday mask");
+        fields.push(format!("BYDAY={}", days.join(",")));
+    }
+    if let Some(day) = recurrence.day_of_month {
+        fields.push(format!("BYMONTHDAY={day}"));
+    }
+    if let Some(month) = recurrence.month_of_year {
+        fields.push(format!("BYMONTH={month}"));
+    }
+    if let Some(position) = recurrence
+        .week_of_month
+        .filter(|_| matches!(recurrence.kind, 3 | 6))
+    {
+        if recurrence.day_of_week == Some(127) {
+            fields.push(format!("BYMONTHDAY={position}"));
+        } else {
+            fields.push(format!(
+                "BYSETPOS={}",
+                if position == 5 { -1 } else { position as i8 }
+            ));
+        }
+    }
+    if let Some(first_day) = recurrence.first_day_of_week {
+        let week_start = match first_day {
+            0 => "SU",
+            1 => "MO",
+            2 => "TU",
+            3 => "WE",
+            4 => "TH",
+            5 => "FR",
+            6 => "SA",
+            _ => anyhow::bail!("invalid first day of week"),
+        };
+        fields.push(format!("WKST={week_start}"));
+    }
+    if let Some(count) = recurrence.occurrences {
+        fields.push(format!("COUNT={count}"));
+    }
+    if let Some(until) = recurrence.until.as_deref() {
+        let parsed = chrono::DateTime::parse_from_rfc3339(until)
+            .map(|value| value.with_timezone(&chrono::Utc))
+            .or_else(|_| {
+                chrono::NaiveDateTime::parse_from_str(until, "%Y%m%dT%H%M%SZ")
+                    .map(|value| value.and_utc())
+            })?;
+        fields.push(format!("UNTIL={}", parsed.format("%Y%m%dT%H%M%SZ")));
+    }
+    Ok(fields.join(";"))
 }
 
 impl AuthenticatedSession {
@@ -7403,6 +7502,7 @@ fn meeting_response_mime(
         title,
         description,
         sequence,
+        recurrence_rule,
     } = context;
     anyhow::ensure!(
         body.is_some() || proposal.is_some(),
@@ -7447,6 +7547,14 @@ fn meeting_response_mime(
                 "DESCRIPTION:{}\r\n",
                 calendar_text_escape(description)
             ));
+        }
+        if instance_id.is_none() {
+            if let Some(recurrence_rule) = recurrence_rule {
+                calendar.push_str(&format!(
+                    "RRULE:{}\r\n",
+                    counter_recurrence_rule(recurrence_rule, time_zone)?
+                ));
+            }
         }
     }
     if proposal.is_some() {
@@ -12738,6 +12846,7 @@ mod meeting_response_send_tests {
                 title: "Planning",
                 description: Some("Details"),
                 sequence: 0,
+                recurrence_rule: None,
             },
         )
         .unwrap();
@@ -12766,6 +12875,7 @@ mod meeting_response_send_tests {
                 title: "Planning",
                 description: None,
                 sequence: 0,
+                recurrence_rule: None,
             },
         )
         .unwrap();
@@ -12793,6 +12903,7 @@ mod meeting_response_send_tests {
                 title: "Planning",
                 description: Some("Discuss budget"),
                 sequence: 3,
+                recurrence_rule: None,
             },
         )
         .unwrap();
@@ -12805,6 +12916,63 @@ mod meeting_response_send_tests {
         assert!(mime.contains("DESCRIPTION:Discuss budget"));
         assert!(mime.contains("RECURRENCE-ID:20261125T150000Z\r\n"));
         assert!(!mime.contains("RECURRENCE-ID;TZID="));
+    }
+
+    #[test]
+    fn counter_recurrence_maps_supported_jscalendar_rules_to_ical_rrule() {
+        let rule = serde_json::json!({
+            "@type":"RecurrenceRule","frequency":"weekly","interval":2,
+            "byDay":[{"@type":"NDay","day":"mo"},{"@type":"NDay","day":"we"}],
+            "firstDayOfWeek":"mo","count":5
+        });
+        assert_eq!(
+            counter_recurrence_rule(&rule, None).unwrap(),
+            "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE;WKST=MO;COUNT=5"
+        );
+        let mime = meeting_response_mime(
+            None,
+            Some(&MeetingResponseProposal {
+                start: "2026-11-25T15:00:00Z".parse().unwrap(),
+                end: "2026-11-25T16:00:00Z".parse().unwrap(),
+            }),
+            MeetingResponseMimeContext {
+                uid: "event@example.test",
+                organizer: "owner@example.test",
+                attendee: "user@example.test",
+                participation: "tentative",
+                recurrence_key: None,
+                instance_id: None,
+                time_zone: Some("UTC"),
+                title: "Weekly review",
+                description: None,
+                sequence: 1,
+                recurrence_rule: Some(&rule),
+            },
+        )
+        .unwrap();
+        assert!(String::from_utf8(mime)
+            .unwrap()
+            .contains("RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE;WKST=MO;COUNT=5\r\n"));
+    }
+
+    #[test]
+    fn series_counter_requires_utc_and_no_recurrence_exceptions() {
+        let base = serde_json::json!({
+            "timeZone":"UTC",
+            "recurrenceOverrides":{},
+        });
+        assert!(series_counter_supported(&base));
+        assert!(series_counter_supported(&serde_json::json!({
+            "recurrenceOverrides":{}
+        })));
+        assert!(!series_counter_supported(&serde_json::json!({
+            "timeZone":"America/Toronto",
+            "recurrenceOverrides":{}
+        })));
+        assert!(!series_counter_supported(&serde_json::json!({
+            "timeZone":"UTC",
+            "recurrenceOverrides":{"2026-11-25T15:00:00":{"excluded":true}}
+        })));
     }
 
     #[tokio::test]

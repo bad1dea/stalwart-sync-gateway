@@ -209,12 +209,15 @@ responses update the master participant plus existing attendee overrides;
 preserve other participant data and verify readback. Mocked regressions cover
 series acceptance and occurrence decline. Invalid `InstanceId` formats return
 status 104, and using an `InstanceId` with a non-recurring event returns status
-146; regressions cover both. The current release is deployed as
-`deploy-2026-11-25-eas-meeting-response-instance-status-dc6df90`; real-client 16.1
-certification remains separate from handler coverage. `SendResponse` with a
-custom body and proposed meeting times is not implemented. JSCalendar's
-`participationComment` is an RSVP note, not the outgoing email body, so the two
-are not treated as equivalent ([RFC 8984 §4.4.6](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6)).
+146; regressions cover both. The current base release is deployed as
+`deploy-2026-11-25-eas-meeting-response-instance-status-dc6df90`; custom
+`SendResponse` bodies (plain text, HTML, or RTF) and proposed meeting times now
+compose MIME replies with iTIP `REPLY` or `COUNTER` data and are implemented in
+source, pending deployment and live-client validation. UTC recurring-series
+counters include the supported JSCalendar recurrence rule; local-time zones
+and series exceptions fail closed. JSCalendar's `participationComment` is an
+RSVP note, not the outgoing email body, so the two are not treated as
+equivalent ([RFC 8984 §4.4.6](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6)).
 
 ResolveRecipients Availability (introduced in EAS 14.0) now uses JMAP
 `Principal/getAvailability` for exact recipients and returns the required
