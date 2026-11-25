@@ -2908,7 +2908,12 @@ async fn sync_mail(
         Err(status) => return sync_request::error(state, command, status),
     };
     let document = &effective;
-    let collections = wbxml::eas::sync_collections(document);
+    let recurrence_type_optional =
+        matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1);
+    let collections = wbxml::eas::sync_collections_with_optional_recurrence_type(
+        document,
+        recurrence_type_optional,
+    );
     for c in &collections {
         tracing::debug!(
             collection_id = c.collection_id,
@@ -2949,7 +2954,12 @@ async fn sync_mail(
             Err(status) => return sync_request::error(state, command, status),
         };
     let document = &effective;
-    let collections = wbxml::eas::sync_collections(document);
+    let recurrence_type_optional =
+        matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1);
+    let collections = wbxml::eas::sync_collections_with_optional_recurrence_type(
+        document,
+        recurrence_type_optional,
+    );
     let mut remaining = match sync_request::global_window(document) {
         Ok(window) => window,
         Err(status) => return sync_request::error(state, command, status),

@@ -331,7 +331,10 @@ session's fixes were, not against spec-reading alone.
 - Recurrence — common EAS event/task rules map to Stalwart's singular
   `recurrenceRule`; EAS `WeekOfMonth=5` with `DayOfWeek=127` maps to the last
   day of the month for monthly and yearly rules. Unsupported patterns fail
-  closed. Task-specific backend
+  closed. Calendar Sync accepts an omitted `Recurrence/Type` at 16.0/16.1 and
+  infers the supported pattern from its selectors; Task recurrence still
+  requires `Type` per MS-ASTASK. Yearly Type 6 with no `DayOfWeek` remains
+  unsupported pending an unambiguous mapping to JSCalendar. Task-specific backend
   create/get has passed the isolated E2E regression. Real-client recurrence
   behavior remains to be checked. Sensitivity cannot be patched per occurrence
   under RFC 8984.

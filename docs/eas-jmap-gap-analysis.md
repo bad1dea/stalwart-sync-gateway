@@ -14,9 +14,22 @@ Current prioritized work:
 
 Legacy EAS Search GAL now has a WBXML regression for the same multi-token
 ANR prefix matching used by 16.1 Find: `Michael A.` returns `Michael
-Alexander`. The full suite passes 440 tests (77 ignored); strict Clippy,
+Alexander`. The full suite passes 443 tests (77 ignored); strict Clippy,
 formatting, and diff checks pass. This confirms existing runtime behavior;
 the test and comment change do not alter the deployed binary.
+
+Calendar Sync now accepts an omitted recurrence `Type` for 16.0/16.1 and
+infers the common daily, weekly, monthly, and yearly patterns from their
+selector fields. Legacy protocol versions still require `Type`; Task
+recurrence continues to require it at every version, matching the task XML
+schema. Regressions cover all six representable patterns, strict legacy
+rejection, the Calendar Sync parser path, and Task rejection. The full suite
+passes 443 tests (77 ignored); strict Clippy, formatting, and diff checks
+pass. Microsoft specifies Calendar `Type` as optional in 16.0/16.1 requests
+in [MS-ASCAL Recurrence](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascal/dabc38cf-7f14-4f98-9eaf-05e1ff723f4a),
+while [MS-ASTASK Appendix A](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-astask/c16a3dcb-de5b-4de9-9026-232654d0628d)
+requires Task `Type`. A yearly Type 6 pattern that omits `DayOfWeek` remains
+unsupported until its meaning can be represented without guessing.
 
 Calendar recurrence reads now reject present `interval` and `count` values
 that are strings, negative numbers, or outside the unsigned 32-bit range;
