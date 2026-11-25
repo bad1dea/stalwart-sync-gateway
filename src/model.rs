@@ -95,6 +95,9 @@ pub struct EmailMeetingRequest {
     pub busy_status: Option<u8>,
     pub reminder_seconds: Option<u64>,
     pub recurrence: Option<crate::wbxml::eas::CalendarRecurrence>,
+    /// Original occurrence start for a meeting invitation to one recurring
+    /// instance, in EAS compact UTC DateTime form.
+    pub recurrence_id: Option<String>,
     pub disallow_new_time_proposal: Option<bool>,
     pub dtstamp: String,
     pub start: Option<String>,

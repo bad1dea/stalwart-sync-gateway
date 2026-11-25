@@ -198,6 +198,10 @@ relative-to-start display alert; unsupported alert kinds are skipped.
 Supported JSCalendar recurrence rules map into Email:Recurrences, with a
 required recurrence interval emitted even when the source uses its default.
 `InstanceType` is 0 for a single event and 1 for a recurring master.
+For a request representing one recurring occurrence, JSCalendar `recurrenceId`
+maps to Email `RecurrenceId` in every supported EAS version; local recurrence
+keys are converted using the event time zone, and the master invitation omits
+the field.
 `DisallowNewTimeProposal` reads `X-MICROSOFT-DISALLOW-COUNTER` from the source
 iCalendar blob, bounded to 256 KiB, and maps its boolean value to EAS 0/1.
 Unsupported recurrence rules suppress structured meeting-request metadata.

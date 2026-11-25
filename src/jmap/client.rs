@@ -8556,6 +8556,9 @@ fn email_meeting_request_from_event(
             .then(|| calendar_end_utc(start, Some(&time_zone), duration))
             .flatten()
         });
+    let recurrence_id = event["recurrenceId"]
+        .as_str()
+        .and_then(|value| calendar_event_time_to_eas(value, &time_zone));
     let location = event["locations"].as_object().and_then(|locations| {
         locations
             .values()
@@ -8569,6 +8572,7 @@ fn email_meeting_request_from_event(
         busy_status,
         reminder_seconds,
         recurrence,
+        recurrence_id,
         disallow_new_time_proposal: None,
         dtstamp,
         start,
@@ -8769,6 +8773,27 @@ mod meeting_request_conversion_tests {
         });
         let request = email_meeting_request_from_event(&fallback, "attendee@example.test").unwrap();
         assert_eq!(request.organizer.as_deref(), Some("host@example.test"));
+    }
+
+    #[test]
+    fn maps_recurring_instance_id_to_meeting_request_recurrence_id() {
+        let event = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"u",
+            "updated":"2026-11-25T14:00:00Z", "timeZone":"America/Toronto",
+            "recurrenceId":"2026-12-01T10:30:00",
+            "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}}
+        });
+        let request = email_meeting_request_from_event(&event, "attendee@example.test").unwrap();
+        assert_eq!(request.recurrence_id.as_deref(), Some("20261201T153000Z"));
+
+        let mut master = event;
+        master.as_object_mut().unwrap().remove("recurrenceId");
+        assert_eq!(
+            email_meeting_request_from_event(&master, "attendee@example.test")
+                .unwrap()
+                .recurrence_id,
+            None
+        );
     }
 
     #[test]

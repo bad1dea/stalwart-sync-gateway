@@ -28,6 +28,22 @@ also map to `Forwardees`; EAS 16.0 emits names only and 16.1 emits names and
 emails. AirSyncBase locations now also carry JSCalendar description and
 validated `geo:` latitude/longitude, altitude, and uncertainty values.
 The optional 16.1 `ProposedStartTime`/`ProposedEndTime` fields remain unmapped.
+Microsoft defines these as attendee-specific new-time proposals in both the
+email `MeetingRequest` and calendar `Attendee` response fields. JSCalendar
+participants have no corresponding standard properties, and an event's own
+start/end are not a valid substitute: multiple attendees can propose distinct
+times. The bridge does implement outgoing `MeetingResponse` counter proposals
+from explicit client-supplied times; exporting stored attendee proposals needs
+a backend representation that preserves the proposal and its attendee
+identity. Do not infer proposal values from the event start/end. Sources:
+Microsoft [ProposedStartTime](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/85189499-d911-40ae-885d-a55f2cd70c9d)
+and JSCalendar [Participant properties](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6).
+Meeting invitations for one occurrence of a recurring series now preserve the
+JSCalendar `recurrenceId` as EAS `Email:RecurrenceId`, converted from the
+series time zone to compact UTC. Series invitations omit it. Regression tests
+cover local-time conversion and 14.x/16.x WBXML output. Microsoft defines this
+field as the identifier for a specific recurring instance in
+[MS-ASEMAIL MeetingRequest](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/0bc0a4c7-2391-428d-b2c1-471c6695d1df).
 The full suite passes 466 tests (77 ignored), including
 legacy GlobalObjId compatibility, 16.x writer, and JMAP conversion regressions;
 strict Clippy, formatting, and diff checks pass. Commit `eccb319` is deployed to

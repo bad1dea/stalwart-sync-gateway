@@ -5241,6 +5241,9 @@ fn write_email_meeting_request(
     if let Some(organizer) = &meeting.organizer {
         builder.leaf(mail::ORGANIZER, organizer.clone());
     }
+    if let Some(recurrence_id) = &meeting.recurrence_id {
+        builder.leaf(mail::RECURRENCE_ID, eas_datetime(recurrence_id));
+    }
     if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1)
         && !meeting.forwardees.is_empty()
     {
@@ -10921,6 +10924,7 @@ mod tests {
                     occurrences: Some(6),
                     ..Default::default()
                 }),
+                recurrence_id: Some("20261201T150000Z".to_owned()),
                 disallow_new_time_proposal: Some(true),
                 dtstamp: "2026-11-25T14:00:00Z".to_owned(),
                 start: Some("2026-12-01T15:00:00Z".to_owned()),
@@ -10969,6 +10973,10 @@ mod tests {
         assert_eq!(
             eas::find_text_after(&document, mail::ORGANIZER),
             Some("Meeting Host")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, mail::RECURRENCE_ID),
+            Some("20261201T150000Z")
         );
         assert_eq!(
             eas::find_text_after(&document, mail::RESPONSE_REQUESTED),
@@ -11066,6 +11074,10 @@ mod tests {
         assert_eq!(
             eas::find_text_after(&legacy, mail::GLOBAL_OBJ_ID),
             Some("040000008200E00074C5B7101A82E0080000000000000000000000000000000000000000250000007643616C2D556964010000006D656574696E672D756964406578616D706C652E7465737400")
+        );
+        assert_eq!(
+            eas::find_text_after(&legacy, mail::RECURRENCE_ID),
+            Some("20261201T150000Z")
         );
         assert_eq!(
             eas::find_text_after(&legacy, mail::LOCATION),
