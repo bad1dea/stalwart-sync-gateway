@@ -37,12 +37,11 @@ excluded, and invitations without such a display alert omit the field.
 Supported JSCalendar recurrence rules now map through the existing Calendar
 recurrence converter to Email:Recurrences; the required EAS interval defaults
 to 1, and unsupported recurrence rules fail closed by omitting structured
-meeting-request metadata. This addition is awaiting deployment. Commit
-`517f510` is deployed to Amy's isolated bridge as
-`localhost/eas16-isolated:517f510` (image
-`sha256:50b4931a6aba7b9b3be6f864de2fd92fe1dfc8ebe7a94f1237290227e9cd5b3e`),
-started `2026-11-25T11:15:05.396385651Z`, with zero restarts. At
-`2026-11-25T11:15:10Z`, `/healthz` and `/readyz` returned HTTP 200 (`ok` and
+meeting-request metadata. Commit `4a52a89` is deployed to Amy's isolated
+bridge as `localhost/eas16-isolated:4a52a89` (image
+`sha256:904d005201ccf454b567355db166f088223a13b7a75757d9f261ac9a1d87e8eb`),
+started `2026-11-25T11:22:36.910938357Z`, with zero restarts. At
+`2026-11-25T11:22:45Z`, `/healthz` and `/readyz` returned HTTP 200 (`ok` and
 `ready`). `EAS_MAX_PROTOCOL_VERSION` remains unset, preserving the 14.0
 default; production is untouched. Real-client validation remains pending.
 Sources: Microsoft
