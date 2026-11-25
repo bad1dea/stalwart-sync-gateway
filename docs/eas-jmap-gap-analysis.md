@@ -17,8 +17,8 @@ merge `X-MICROSOFT-DISALLOW-COUNTER` into Stalwart's retained iCalendar
 extension without dropping existing properties, and verify the value through
 `CalendarEvent/get` after create/update. The write uses the existing
 `ifInState` guard for updates and fails the operation if readback does not
-match. Parser, merge, and mocked JMAP create/update/readback regressions pass.
-Full suite: 410 passed, 76 ignored; strict Clippy, formatting, and diff checks
+match. Parser, merge, mocked JMAP create/update/readback, and rejected-readback
+regressions pass. Full suite: 411 passed, 76 ignored; strict Clippy, formatting, and diff checks
 pass. Deployed as
 `deploy-2026-11-24-eas-disallow-new-time-proposal-write-721f7f2`; Homelab
 commit `cb27e07`, image

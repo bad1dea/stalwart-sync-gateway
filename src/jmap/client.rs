@@ -10709,6 +10709,75 @@ mod calendar_update_state_tests {
     }
 
     #[tokio::test]
+    async fn calendar_update_rejects_unretained_disallow_new_time_proposal() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = requests.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(request): Json<serde_json::Value>| {
+                let request_count = request_count.clone();
+                async move {
+                    let call = &request["methodCalls"][0];
+                    match request_count.fetch_add(1, Ordering::SeqCst) {
+                        0 => Json(serde_json::json!({"methodResponses":[[
+                            "CalendarEvent/get", {"state":"state-1", "list":[{
+                                "id":"event-1", "timeZone":"Etc/UTC",
+                                "iCalendar":{"properties":[]}
+                            }]}, "state"
+                        ]]})),
+                        1 => {
+                            assert_eq!(call[0], "CalendarEvent/set");
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/set", {"updated":{"event-1":null}}, "0"
+                            ]]}))
+                        }
+                        2 => Json(serde_json::json!({"methodResponses":[[
+                            "CalendarEvent/get", {"list":[{
+                                "id":"event-1", "iCalendar":{"properties":[]}
+                            }]}, "verify-disallow-counter"
+                        ]]})),
+                        _ => panic!("unexpected JMAP call"),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CALENDARS:"a"},
+            "apiUrl":url, "downloadUrl":url, "uploadUrl":url, "username":"user", "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let fields = crate::wbxml::eas::CalendarFields {
+            disallow_new_time_proposal: Some(true),
+            ..Default::default()
+        };
+        let error = client
+            .save_calendar_event(&auth, "calendar", Some("event-1"), None, &fields, false)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("did not retain DisallowNewTimeProposal"));
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn calendar_create_persists_and_verifies_disallow_new_time_proposal() {
         let requests = Arc::new(AtomicUsize::new(0));
         let request_count = requests.clone();
