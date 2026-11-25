@@ -10,12 +10,12 @@ MIME policy, partial Sync/options persistence, and Sync long-poll/window
 handling. Check the current Rust implementation before treating any older
 “Missing” or “Not implemented” statement below as actionable.
 
-Current source `main` is `67577f2`. The full suite passes 478 tests (77
+Current source `main` is `d73d09a`. The full suite passes 478 tests (77
 ignored); strict Clippy, formatting, and diff checks pass. This build is
 deployed to Amy's isolated bridge as
-`localhost/eas16-isolated:67577f2` (image
-`sha256:a4cb64d003842669d7f1596f2b961cbfaa664b5783e6b945ab5d0f2105f688f2`),
-started `2026-11-25T14:21:00.669931031Z` with zero restarts. `/healthz` and
+`localhost/eas16-isolated:d73d09a` (image
+`sha256:94ec1df3758572a201c5bfcfce4da503ea2f9d7886cc7d879973b28170557fb4`),
+started `2026-11-25T14:29:39.642047439Z` with zero restarts. `/healthz` and
 `/readyz` returned `ok` and `ready`. `EAS_MAX_PROTOCOL_VERSION` remains
 omitted, so the isolated bridge still defaults to 14.0; production is
 untouched. Real-client 16.1 certification remains open.
@@ -44,8 +44,10 @@ counter proposals. The gateway stores each pair in JSCalendar's iCalendar
 extension properties, keyed by attendee address and (for recurring events)
 recurrence key, then emits the pair only in 16.1 Calendar Sync. Matching mail
 `MeetingRequest` objects also receive the pair from that attendee's unique
-stored CalendarEvent, queried by UID; ambiguous events, attendees, or absent
-proposal pairs are omitted. This is a gateway-owned extension because
+stored CalendarEvent, queried by UID and scoped by exact JSCalendar
+`recurrenceId` when the invitation targets an occurrence. Series and occurrence
+proposals never substitute for one another. Ambiguous events, attendees, or
+absent scoped pairs are omitted. This is a gateway-owned extension because
 JSCalendar participants have no standard proposal properties. The event's own
 start/end are never used as proposal values, because different attendees may
 propose different times. Sources:
@@ -121,12 +123,15 @@ Microsoft [Recurrences](https://learn.microsoft.com/en-us/openspecs/exchange_ser
 and [Recurrence](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/a033deda-0745-428d-b9ca-d08f3e6febcd).
 Microsoft [InstanceType](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/a4d48239-6936-4b22-9267-623ecdb49b5e)
 defines 0 as a single appointment and 1 as a recurring master.
-Commit `67577f2` adds that MeetingRequest mapping. The full suite passes 478
-tests (77 ignored), with strict Clippy, formatting, and diff checks passing.
-The commit is deployed to Amy's isolated bridge as
-`localhost/eas16-isolated:67577f2` (image
-`sha256:a4cb64d003842669d7f1596f2b961cbfaa664b5783e6b945ab5d0f2105f688f2`),
-started `2026-11-25T14:21:00.669931031Z` with zero restarts; `/healthz` and
+Commit `d73d09a` fixes occurrence-scoped proposal lookup in the MeetingRequest
+path. A recurring invitation carries its exact JSCalendar recurrence key
+through the internal model and reads only the attendee's pair at that scope;
+the regression fixture gives the series and occurrence different times. The
+full suite passes 478 tests (77 ignored), with strict Clippy, formatting, and
+diff checks passing. The commit is deployed to Amy's isolated bridge as
+`localhost/eas16-isolated:d73d09a` (image
+`sha256:94ec1df3758572a201c5bfcfce4da503ea2f9d7886cc7d879973b28170557fb4`),
+started `2026-11-25T14:29:39.642047439Z` with zero restarts; `/healthz` and
 `/readyz` returned `ok` and `ready`. `EAS_MAX_PROTOCOL_VERSION` remains
 omitted; production is untouched. Real-client validation remains pending.
 `DisallowNewTimeProposal` is now read from the bounded (256 KiB) source

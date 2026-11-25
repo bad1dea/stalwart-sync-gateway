@@ -19,9 +19,9 @@ The spec's own overview lays out the intended command sequence:
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
    `100.64.0.50:18090`, backed by isolated Stalwart. Its current source is
-   `7e6769d`, image `localhost/eas16-isolated:7e6769d`
-   (`sha256:6fc022f20edb23d19a69f84efebdf51449c3d4fca12955e9e3ee43faf4338023`),
-   started `2026-11-25T14:05:35.18567853Z` with zero restarts. `/healthz`
+   `d73d09a`, image `localhost/eas16-isolated:d73d09a`
+   (`sha256:94ec1df3758572a201c5bfcfce4da503ea2f9d7886cc7d879973b28170557fb4`),
+   started `2026-11-25T14:29:39.642047439Z` with zero restarts. `/healthz`
    and `/readyz` returned HTTP 200; the Compose environment leaves
    `EAS_MAX_PROTOCOL_VERSION` unset, so it still defaults to EAS 14.0.
    Set the variable to 16.1 during the planned client test window.
@@ -188,8 +188,10 @@ ordinary requests map to type 1. It is omitted for 14.0. Optional
 recurrence, reminder, sensitivity, busy status, and
 `DisallowNewTimeProposal` are mapped from the JMAP calendar data. In EAS 16.1,
 `ProposedStartTime` and `ProposedEndTime` come from a saved counter proposal
-for the authenticated attendee on a unique CalendarEvent with the same UID;
-the gateway omits them when that source is missing or ambiguous. JSCalendar delegation also maps to
+for the authenticated attendee on a unique CalendarEvent with the same UID
+and the same recurrence key when the request targets one occurrence; the
+gateway omits them when that scoped source is missing or ambiguous. JSCalendar
+delegation also maps to
 `Forwardees` in 16.0/16.1, with recipient email emitted only for 16.1. Mocked
 JMAP mailbox-query/CalendarEvent-parse and WBXML writer regressions pass.
 The writer order follows the schema: the version-appropriate `GlobalObjId` or
@@ -301,8 +303,9 @@ gateway-owned iCalendar extension properties on the corresponding
 CalendarEvent. Each pair is keyed by attendee and series/occurrence, read back
 before the reply is sent, and emitted as Calendar `Attendee` proposal fields
 only for EAS 16.1. Matching incoming mail `MeetingRequest` values use the
-proposal saved for the authenticated attendee; the event's own start/end are
-never substituted for proposal times.
+proposal saved for the authenticated attendee and exact recurrence key; the
+event's own start/end and series-level proposal are never substituted for an
+occurrence proposal.
 
 ResolveRecipients Availability (introduced in EAS 14.0) now uses JMAP
 `Principal/getAvailability` for exact recipients and returns the required
