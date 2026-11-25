@@ -10,15 +10,26 @@ MIME policy, partial Sync/options persistence, and Sync long-poll/window
 handling. Check the current Rust implementation before treating any older
 “Missing” or “Not implemented” statement below as actionable.
 
-Current source `main` is `d73d09a`. The full suite passes 478 tests (77
+Current source `main` is `0fd628a`. The full suite passes 478 tests (77
 ignored); strict Clippy, formatting, and diff checks pass. This build is
 deployed to Amy's isolated bridge as
-`localhost/eas16-isolated:d73d09a` (image
-`sha256:94ec1df3758572a201c5bfcfce4da503ea2f9d7886cc7d879973b28170557fb4`),
-started `2026-11-25T14:29:39.642047439Z` with zero restarts. `/healthz` and
-`/readyz` returned `ok` and `ready`. `EAS_MAX_PROTOCOL_VERSION` remains
-omitted, so the isolated bridge still defaults to 14.0; production is
-untouched. Real-client 16.1 certification remains open.
+`localhost/eas16-isolated:0fd628a` (image
+`sha256:16053bfda191308720423dbb20a6b5a3eee355313aafa78905866eac95293a00`),
+started `2026-11-25T15:33:07.816566936Z` with zero restarts. After the live
+test, `/healthz` and `/readyz` returned `ok` and `ready`. The isolated bridge
+still defaults to EAS 14.0; production is untouched. Real-client 16.1
+certification remains open.
+
+EAS `ResolveRecipients` Availability now preserves the saved EAS free, tentative,
+busy, and out-of-office values when Stalwart exposes event details. The bridge
+requests the supported event ID projection, then fetches `freeBusyStatus` with
+`CalendarEvent/get`; it uses JMAP's `busyStatus` when event details are not
+available. The live `e2e_calendar_busy_status_round_trips_between_devices`
+test passes against isolated Stalwart at protocol 14.0, checking all four
+statuses through ResolveRecipients and Sync on two devices. Its temporary
+account was removed after the run. The server's rejected `freeBusyStatus`
+event projection and omitted availability `accountId` are both covered by the
+request path and regression tests.
 
 Current prioritized work:
 
