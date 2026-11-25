@@ -111,7 +111,7 @@ fn same_search(session: &SearchState, filter: &Value, search_text: &str) -> bool
 const SEARCHES: &str = "__find__";
 const MAX_FIND_ATTACHMENT_TEXT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_FIND_PDF_OCR_PAGES: u32 = 20;
+const MAX_FIND_PDF_OCR_PAGES: u32 = 100;
 const MAX_FIND_PDF_OCR_RUNTIME: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_FIND_PDF_OCR_EDGE: u32 = 1600;
 const MAX_FIND_ARCHIVE_ENTRIES: usize = 4096;
@@ -1018,7 +1018,7 @@ fn extract_bounded_pdf_text_with_tools(
     if !missing_text_pages.is_empty() && allow_ocr {
         if missing_text_pages.len() > MAX_FIND_PDF_OCR_PAGES as usize {
             // A textless page may contain an image. Refuse to return partial
-            // text when more than twenty pages need OCR.
+            // text when more than one hundred pages need OCR.
             return None;
         }
         let recognized =
@@ -3437,7 +3437,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn scanned_pdf_ocr_allows_twenty_pages_with_a_total_runtime_budget() {
+    fn scanned_pdf_ocr_allows_one_hundred_pages_with_a_total_runtime_budget() {
         use super::{extract_pdf_pages_ocr_with_tools, FindOcrTempDir};
         use std::{fs, os::unix::fs::PermissionsExt};
 
@@ -3479,15 +3479,10 @@ mod tests {
             fs::set_permissions(tool, permissions).unwrap();
         }
 
-        let pages = extract_pdf_pages_ocr_with_tools(
-            b"bounded test PDF",
-            &[
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-            ],
-            &renderer,
-            &ocr,
-        )
-        .expect("bounded OCR pipeline should extract the fake page text");
+        let page_numbers: Vec<_> = (1..=100).collect();
+        let pages =
+            extract_pdf_pages_ocr_with_tools(b"bounded test PDF", &page_numbers, &renderer, &ocr)
+                .expect("bounded OCR pipeline should extract the fake page text");
         let text = pages
             .into_iter()
             .map(|(_, text)| text)
@@ -3497,7 +3492,7 @@ mod tests {
             super::normalize_find_attachment_text(&text),
             Some(format!(
                 "scan alpha beta {}",
-                ["ignored page"; 18].join(" ")
+                ["ignored page"; 98].join(" ")
             ))
         );
         let args = fs::read_to_string(render_args).unwrap();
@@ -3507,9 +3502,10 @@ mod tests {
         let scale_limit = args.iter().position(|arg| *arg == "-scale-to").unwrap();
         assert_eq!(args[scale_limit + 1], "1600");
 
+        let too_many_pages: Vec<_> = (1..=101).collect();
         assert!(extract_pdf_pages_ocr_with_tools(
-            b"twenty-one-page PDF",
-            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,],
+            b"one-hundred-one-page PDF",
+            &too_many_pages,
             &renderer,
             &ocr,
         )
