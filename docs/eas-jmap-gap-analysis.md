@@ -42,7 +42,11 @@ plain text and HTML bodies are absent. The compressed and declared output sizes
 are checked against the existing 16 MiB limits before decompression. An
 upstream Outlook fixture verifies RTF text extraction and rejection of an
 oversized declared output. The focused regression and strict Clippy pass; the
-full suite passes 406 tests (76 ignored). Deployment verification will follow.
+full suite passes 406 tests (76 ignored). Deployed as
+`deploy-2026-11-24-eas-find-outlook-rtf-1b666af`; Homelab commit `93cce16`,
+image `sha256:da8f53bdcb9abde4adf2926605e84d122ca3ec9d5e40ae2a9bec41da3b8c4dab`,
+started `2026-11-25T03:45:09Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. Production remains at the 14.0 protocol default.
 
 Completed since reconciliation: **Task recurrence Add/Fetch**, including
 the encoded Sync command parser path, is now live-verified against the
