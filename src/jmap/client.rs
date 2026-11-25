@@ -1167,8 +1167,10 @@ impl JmapClient {
                             "id": principal_id,
                             "utcStart": utc_start,
                             "utcEnd": utc_end,
-                            "showDetails": true,
-                            "eventProperties": ["freeBusyStatus"]
+                            // The bridge consumes only BusyPeriod.busyStatus; suppress
+                            // event details instead of requesting a Stalwart-unsupported
+                            // CalendarEvent projection such as `freeBusyStatus`.
+                            "showDetails": false
                         }),
                         &format!("availability-{index}"),
                     )
@@ -15313,8 +15315,8 @@ mod meeting_response_send_tests {
                     .iter()
                     .any(|cap| cap == capabilities::PRINCIPALS_AVAILABILITY));
                 assert_eq!(calls[0][0], "Principal/getAvailability");
-                assert_eq!(calls[0][1]["showDetails"], true);
-                assert_eq!(calls[0][1]["eventProperties"], serde_json::json!(["freeBusyStatus"]));
+                assert_eq!(calls[0][1]["showDetails"], false);
+                assert!(calls[0][1].get("eventProperties").is_none());
                     let response = match call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
                         0 => {
                             assert_eq!(calls[0][1]["id"], "p1");
