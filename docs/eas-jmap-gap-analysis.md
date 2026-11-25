@@ -489,10 +489,11 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    unary-minus and explicit `NOT` boolean alternatives. Flat explicit
    AND/OR expressions over phrases and supported boolean restrictions honor
    AND precedence through exact local evaluation, including explicitly
-   parenthesized groups and implicit groups around explicit operators when
-   supported properties occur once. Repeated properties in mixed explicit
-   AND/OR expressions and unsupported qualifiers remain rejected. Regression
-   coverage checks read,
+   parenthesized groups and implicit groups around explicit operators. Repeated
+   properties are supported where the parser preserves their grouping,
+   including repeated subject phrases mixed with boolean predicates; an
+   end-to-end regression checks result IDs and totals. Unsupported qualifiers
+   and ambiguous ungrouped forms remain rejected. Regression coverage checks read,
    flagged, multiple boolean branches, and multiple phrase branches while
    excluding reversed phrase candidates. Deployed as
    `deploy-2026-11-24-eas-kql-negated-bool-or-81fdc6c`; homelab commit
