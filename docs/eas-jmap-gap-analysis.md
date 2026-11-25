@@ -23,8 +23,10 @@ include UTC `DtStamp`, start/end, all-day state, and the required 172-byte
 `TimeZone`; `MeetingMessageType` is emitted for 14.1 and 16.x (1 for a new
 request, 2 when the JMAP sequence is nonzero, 5 for a delegator copy, and 6
 for a delegated request that must not be answered); the field is omitted for
-14.0 where it is unavailable. The optional 16.1 `ProposedStartTime`/`ProposedEndTime`
-fields remain unmapped. The full suite passes 465 tests (77 ignored), including
+14.0 where it is unavailable. In 16.0/16.1, JSCalendar `delegatedTo` recipients
+also map to `Forwardees`; EAS 16.0 emits names only and 16.1 emits names and
+emails. The optional 16.1 `ProposedStartTime`/`ProposedEndTime` fields remain
+unmapped. The full suite passes 465 tests (77 ignored), including
 legacy GlobalObjId compatibility, 16.x writer, and JMAP conversion regressions;
 strict Clippy, formatting, and diff checks pass. Commit `eccb319` is deployed to
 Amy's isolated bridge as `localhost/eas16-isolated:eccb319` (image
@@ -47,13 +49,13 @@ recurrence converter to Email:Recurrences; the required EAS interval defaults
 to 1, and unsupported recurrence rules fail closed by omitting structured
 meeting-request metadata. `InstanceType` now reports 0 for a single event and
 1 for a recurring master based on the parsed recurrence rule. Commit
-The follow-up maps JSCalendar `delegatedFrom` to type 6 and `delegatedTo` to
-type 5, while preserving sequence-based types for ordinary requests. Full suite:
+The follow-up maps JSCalendar `delegatedFrom` to type 6, `delegatedTo` to type
+5, and delegate recipients to the versioned `Forwardees` fields. Full suite:
 465 passed, 77 ignored; strict Clippy, formatting, and diff checks pass.
-Commit `3cb4c26` is deployed to Amy's isolated bridge as
-`localhost/eas16-isolated:3cb4c26` (image
-`sha256:5fd3077994e1b5799cd0addf1b08fdf42c907c348eb26fdd0288bf8d5b9e6d9e`),
-started `2026-11-25T11:51:50.539552284Z`, with zero restarts. `/healthz` and
+Commit `41379d4` is deployed to Amy's isolated bridge as
+`localhost/eas16-isolated:41379d4` (image
+`sha256:ef0d4e1d43d85328038b1293480926a50c308e2ab355de5f0553ba54d61e7e2d`),
+started `2026-11-25T12:04:02.600937012Z`, with zero restarts. `/healthz` and
 `/readyz` returned HTTP 200 (`ok` and `ready`). `EAS_MAX_PROTOCOL_VERSION`
 remains unset, preserving the 14.0 default; production is untouched. Real-client
 validation remains pending. Sources: Microsoft [MeetingMessageType](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/861c5d27-e5d6-4e1e-a61a-37c9e84f0ded)

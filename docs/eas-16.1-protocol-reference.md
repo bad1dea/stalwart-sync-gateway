@@ -19,8 +19,8 @@ The spec's own overview lays out the intended command sequence:
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
    `100.64.0.50:18090`, backed by isolated Stalwart. Its current gateway image
-   is `3cb4c26` (`sha256:5fd3077994e1b5799cd0addf1b08fdf42c907c348eb26fdd0288bf8d5b9e6d9e`),
-   started `2026-11-25T11:51:50.539552284Z` with zero restarts. `/healthz`
+   is `41379d4` (`sha256:ef0d4e1d43d85328038b1293480926a50c308e2ab355de5f0553ba54d61e7e2d`),
+   started `2026-11-25T12:04:02.600937012Z` with zero restarts. `/healthz`
    and `/readyz` returned HTTP 200; the Compose environment leaves
    `EAS_MAX_PROTOCOL_VERSION` unset, so it still defaults to EAS 14.0.
    Set the variable to 16.1 during the planned client test window.
@@ -181,9 +181,11 @@ available in 14.1 and 16.x, where a nonzero JMAP sequence maps to message type
 ordinary requests map to type 1. It is omitted for 14.0. Optional
 recurrence, reminder, sensitivity, busy status, and
 `DisallowNewTimeProposal` are mapped from the JMAP calendar data; proposed-time
-fields in EAS 16.1 remain unsupported. Mocked JMAP mailbox-query/CalendarEvent-
-parse and WBXML writer regressions pass. Commit `3cb4c26` is deployed to Amy's
-isolated bridge as `localhost/eas16-isolated:3cb4c26`; `/healthz` and `/readyz`
+fields in EAS 16.1 remain unsupported. JSCalendar delegation also maps to
+`Forwardees` in 16.0/16.1, with recipient email emitted only for 16.1. Mocked
+JMAP mailbox-query/CalendarEvent-parse and WBXML writer regressions pass. Commit
+`41379d4` is deployed to Amy's isolated bridge as
+`localhost/eas16-isolated:41379d4`; `/healthz` and `/readyz`
 both returned HTTP 200, and the bridge still defaults to EAS 14.0.
 `Organizer` maps from the JMAP `owner` participant's display name (email
 fallback) to Email:Organizer. `ResponseRequested` maps the current attendee's
