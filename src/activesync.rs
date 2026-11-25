@@ -5238,46 +5238,55 @@ fn write_email_meeting_request(
             "0"
         },
     );
+    // MS-ASEMAIL's MeetingRequest sequence places either Email:Location or
+    // AirSyncBase:Location immediately after InstanceType.
+    if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
+        if let Some(location) = &meeting.location {
+            if location.display_name.is_some()
+                || location.annotation.is_some()
+                || location.latitude.is_some()
+                || location.longitude.is_some()
+            {
+                builder.start(base::LOCATION);
+                if let Some(display_name) = &location.display_name {
+                    builder.leaf(base::DISPLAY_NAME, display_name.clone());
+                }
+                if let Some(annotation) = &location.annotation {
+                    builder.leaf(base::ANNOTATION, annotation.clone());
+                }
+                if let Some(latitude) = &location.latitude {
+                    builder.leaf(base::LATITUDE, latitude.clone());
+                }
+                if let Some(longitude) = &location.longitude {
+                    builder.leaf(base::LONGITUDE, longitude.clone());
+                }
+                if let Some(accuracy) = &location.accuracy {
+                    builder.leaf(base::ACCURACY, accuracy.clone());
+                }
+                if let Some(altitude) = &location.altitude {
+                    builder.leaf(base::ALTITUDE, altitude.clone());
+                }
+                builder.end();
+            }
+        }
+    } else if let Some(location) = &meeting.location {
+        if let Some(text) = legacy_email_meeting_location(location) {
+            builder.leaf(mail::LOCATION, text.clone());
+        }
+    }
     if let Some(organizer) = &meeting.organizer {
         builder.leaf(mail::ORGANIZER, organizer.clone());
     }
     if let Some(recurrence_id) = &meeting.recurrence_id {
         builder.leaf(mail::RECURRENCE_ID, eas_datetime(recurrence_id));
     }
-    if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1)
-        && !meeting.forwardees.is_empty()
-    {
-        builder.start(compose::FORWARDEES);
-        for forwardee in &meeting.forwardees {
-            builder.start(compose::FORWARDEE);
-            builder.leaf(compose::NAME, forwardee.name.clone());
-            // Email is not supported on Sync responses in protocol 16.0.
-            if version == ProtocolVersion::V16_1 {
-                builder.leaf(compose::EMAIL, forwardee.email.clone());
-            }
-            builder.end();
-        }
-        builder.end();
+    if let Some(reminder_seconds) = meeting.reminder_seconds {
+        builder.leaf(mail::REMINDER, reminder_seconds.to_string());
     }
     if let Some(response_requested) = meeting.response_requested {
         builder.leaf(
             mail::RESPONSE_REQUESTED,
             if response_requested { "1" } else { "0" },
-        );
-    }
-    if let Some(sensitivity) = meeting.sensitivity {
-        builder.leaf(mail::SENSITIVITY, sensitivity.to_string());
-    }
-    if let Some(busy_status) = meeting.busy_status {
-        builder.leaf(mail::BUSY_STATUS, busy_status.to_string());
-    }
-    if let Some(reminder_seconds) = meeting.reminder_seconds {
-        builder.leaf(mail::REMINDER, reminder_seconds.to_string());
-    }
-    if let Some(disallow) = meeting.disallow_new_time_proposal {
-        builder.leaf(
-            mail::DISALLOW_NEW_TIME_PROPOSAL,
-            if disallow { "1" } else { "0" },
         );
     }
     if let Some(recurrence) = &meeting.recurrence {
@@ -5312,47 +5321,24 @@ fn write_email_meeting_request(
         builder.end();
         builder.end();
     }
-    if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
-        if let Some(location) = &meeting.location {
-            if location.display_name.is_some()
-                || location.annotation.is_some()
-                || location.latitude.is_some()
-                || location.longitude.is_some()
-            {
-                builder.start(base::LOCATION);
-                if let Some(display_name) = &location.display_name {
-                    builder.leaf(base::DISPLAY_NAME, display_name.clone());
-                }
-                if let Some(annotation) = &location.annotation {
-                    builder.leaf(base::ANNOTATION, annotation.clone());
-                }
-                if let Some(latitude) = &location.latitude {
-                    builder.leaf(base::LATITUDE, latitude.clone());
-                }
-                if let Some(longitude) = &location.longitude {
-                    builder.leaf(base::LONGITUDE, longitude.clone());
-                }
-                if let Some(accuracy) = &location.accuracy {
-                    builder.leaf(base::ACCURACY, accuracy.clone());
-                }
-                if let Some(altitude) = &location.altitude {
-                    builder.leaf(base::ALTITUDE, altitude.clone());
-                }
-                builder.end();
-            }
-        }
-        builder.leaf(calendar::UID, meeting.uid.clone());
-    } else {
-        if let Some(location) = &meeting.location {
-            if let Some(text) = legacy_email_meeting_location(location) {
-                builder.leaf(mail::LOCATION, text.clone());
-            }
-        }
+    if let Some(sensitivity) = meeting.sensitivity {
+        builder.leaf(mail::SENSITIVITY, sensitivity.to_string());
+    }
+    if let Some(busy_status) = meeting.busy_status {
+        builder.leaf(mail::BUSY_STATUS, busy_status.to_string());
+    }
+    builder.leaf(mail::TIME_ZONE, time_zone.to_owned());
+    if matches!(version, ProtocolVersion::V14_0 | ProtocolVersion::V14_1) {
         if let Some(global_obj_id) = eas_global_obj_id(&meeting.uid) {
             builder.leaf(mail::GLOBAL_OBJ_ID, global_obj_id);
         }
     }
-    builder.leaf(mail::TIME_ZONE, time_zone.to_owned());
+    if let Some(disallow) = meeting.disallow_new_time_proposal {
+        builder.leaf(
+            mail::DISALLOW_NEW_TIME_PROPOSAL,
+            if disallow { "1" } else { "0" },
+        );
+    }
     if matches!(
         version,
         ProtocolVersion::V14_1 | ProtocolVersion::V16_0 | ProtocolVersion::V16_1
@@ -5361,6 +5347,22 @@ fn write_email_meeting_request(
             email2::MEETING_MESSAGE_TYPE,
             meeting.meeting_message_type.to_string(),
         );
+    }
+    if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
+        builder.leaf(calendar::UID, meeting.uid.clone());
+        if !meeting.forwardees.is_empty() {
+            builder.start(compose::FORWARDEES);
+            for forwardee in &meeting.forwardees {
+                builder.start(compose::FORWARDEE);
+                builder.leaf(compose::NAME, forwardee.name.clone());
+                // Email is not supported on Sync responses in protocol 16.0.
+                if version == ProtocolVersion::V16_1 {
+                    builder.leaf(compose::EMAIL, forwardee.email.clone());
+                }
+                builder.end();
+            }
+            builder.end();
+        }
     }
     builder.end();
 }
@@ -10958,6 +10960,60 @@ mod tests {
             ProtocolVersion::V16_1,
         );
         let document = builder.finish();
+        let meeting_request_children = |document: &crate::wbxml::Document| {
+            let start = document
+                .nodes
+                .iter()
+                .position(|node| {
+                    matches!(node,
+                        Node::Start(token) if token == &mail::MEETING_REQUEST
+                    )
+                })
+                .expect("meeting request container");
+            let mut depth = 0;
+            let mut children = Vec::new();
+            for node in &document.nodes[start + 1..] {
+                match node {
+                    Node::Start(token) if depth == 0 => {
+                        children.push((token.code_page, token.token));
+                        if token.has_content {
+                            depth = 1;
+                        }
+                    }
+                    Node::Start(token) => {
+                        if token.has_content {
+                            depth += 1;
+                        }
+                    }
+                    Node::End if depth == 0 => break,
+                    Node::End => depth -= 1,
+                    _ => {}
+                }
+            }
+            children
+        };
+        assert_eq!(
+            meeting_request_children(&document),
+            [
+                mail::START_TIME,
+                mail::DTSTAMP,
+                mail::END_TIME,
+                mail::INSTANCE_TYPE,
+                base::LOCATION,
+                mail::ORGANIZER,
+                mail::RECURRENCE_ID,
+                mail::REMINDER,
+                mail::RESPONSE_REQUESTED,
+                mail::RECURRENCES,
+                mail::SENSITIVITY,
+                mail::BUSY_STATUS,
+                mail::TIME_ZONE,
+                mail::DISALLOW_NEW_TIME_PROPOSAL,
+                email2::MEETING_MESSAGE_TYPE,
+                calendar::UID,
+            ]
+            .map(|token| (token.code_page, token.token))
+        );
         assert_eq!(
             eas::find_text_after(&document, mail::MESSAGE_CLASS),
             Some("IPM.Schedule.Meeting.Request")
@@ -11068,6 +11124,27 @@ mod tests {
         );
         let legacy = legacy_builder.finish();
         assert_eq!(
+            meeting_request_children(&legacy),
+            [
+                mail::START_TIME,
+                mail::DTSTAMP,
+                mail::END_TIME,
+                mail::INSTANCE_TYPE,
+                mail::LOCATION,
+                mail::ORGANIZER,
+                mail::RECURRENCE_ID,
+                mail::REMINDER,
+                mail::RESPONSE_REQUESTED,
+                mail::RECURRENCES,
+                mail::SENSITIVITY,
+                mail::BUSY_STATUS,
+                mail::TIME_ZONE,
+                mail::GLOBAL_OBJ_ID,
+                mail::DISALLOW_NEW_TIME_PROPOSAL,
+            ]
+            .map(|token| (token.code_page, token.token))
+        );
+        assert_eq!(
             eas::find_text_after(&legacy, mail::MESSAGE_CLASS),
             Some("IPM.Schedule.Meeting.Request")
         );
@@ -11171,6 +11248,18 @@ mod tests {
                 version,
             );
             let forwarded = forwarded_builder.finish();
+            let order = meeting_request_children(&forwarded);
+            assert_eq!(
+                order.last(),
+                Some(&(
+                    compose_mail::FORWARDEES.code_page,
+                    compose_mail::FORWARDEES.token
+                ))
+            );
+            assert_eq!(
+                order[order.len() - 2],
+                (calendar::UID.code_page, calendar::UID.token)
+            );
             assert!(forwarded.nodes.iter().any(
                 |node| matches!(node, Node::Start(token) if token == &compose_mail::FORWARDEES)
             ));
