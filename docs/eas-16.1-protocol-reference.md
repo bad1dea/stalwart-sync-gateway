@@ -19,8 +19,8 @@ The spec's own overview lays out the intended command sequence:
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
    `100.64.0.50:18090`, backed by isolated Stalwart. Its current gateway image
-   is `ae1a0a9` (`sha256:03d914f779e77fd37781884e6d60281f457077d5102cb01d7b7ff9f05b0e2f93`),
-   started `2026-11-25T12:53:21.254236014Z` with zero restarts. `/healthz`
+   is `9376225` (`sha256:37a56bccbfa4bd88c0cf63c563877da9748728a358b2bc23a9c4d9d63cc781cc`),
+   started `2026-11-25T13:11:21.51806027Z` with zero restarts. `/healthz`
    and `/readyz` returned HTTP 200; the Compose environment leaves
    `EAS_MAX_PROTOCOL_VERSION` unset, so it still defaults to EAS 14.0.
    Set the variable to 16.1 during the planned client test window.
@@ -80,6 +80,10 @@ this iPad) send a *different* BodyPreference per context: list-sync asks
 Type=1 (plain) with a small TruncationSize; opening a message via a
 Sync-embedded `<Fetch>` asks Type=4 (MIME) with MimeSupport=2 — this
 gateway now (as of `deploy-2026-08-25o`) handles both.
+Mail Categories also round-trip between EAS `Email:Categories` and JMAP
+custom Email keywords. Find emits categories in results and supports KQL
+`Category:` keyword searches; JMAP's ASCII keyword restrictions limit which
+category labels can be written back.
 
 ### Ping (§2.2.1.13)
 Long-poll heartbeat: client sends a HeartbeatInterval + a set of folders
@@ -192,9 +196,9 @@ The writer order follows the schema: the version-appropriate `GlobalObjId` or
 JSCalendar location descriptions and valid `geo:` coordinates also map into
 the AirSyncBase location structure for 16.x. Legacy Email `Location` is omitted
 above the 32,768-character schema limit; this restriction does not apply to
-the 16.x AirSyncBase location encoding. Commit `ae1a0a9` is deployed to
-Amy's isolated bridge as `localhost/eas16-isolated:ae1a0a9`; `/healthz` and
-`/readyz` both returned HTTP 200, and the bridge still defaults to EAS 14.0.
+the 16.x AirSyncBase location encoding. Commit `9376225` is deployed to
+Amy's isolated bridge as `localhost/eas16-isolated:9376225`; `/healthz` and
+`/readyz` both return HTTP 200, and the bridge still defaults to EAS 14.0.
 `Organizer` maps from the JMAP `owner` participant's display name (email
 fallback) to Email:Organizer. `ResponseRequested` maps the current attendee's
 JSCalendar `expectReply` value to EAS 1/0, omitting the element if unavailable.
