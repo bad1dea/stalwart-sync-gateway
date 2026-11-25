@@ -218,7 +218,10 @@ supported JSCalendar recurrence rules. Stable IANA zones emit VTIMEZONE and
 use local wall time; recurrence exceptions and irregular or unknown zones fail
 closed. Excluded instances map to EXDATE; positive recurrence overrides fail
 closed pending exception VEVENT serialization. VTIMEZONE and EXDATE support
-are deployed to the isolated bridge at the 14.0 default. JSCalendar's
+are deployed to the isolated bridge at the 14.0 default. Custom replies now
+include attendees with supported participation statuses; unsupported statuses
+fail closed. This attendee-list change is in source and awaiting deployment.
+JSCalendar's
 `participationComment` is an RSVP note, not the
 outgoing email body, so the two are not treated as equivalent
 ([RFC 8984 §4.4.6](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6)).

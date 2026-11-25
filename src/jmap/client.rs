@@ -3408,6 +3408,8 @@ impl JmapClient {
                         .as_object()
                         .map(|_| &event["recurrenceRule"]),
                     recurrence_exclusions: &recurrence_exclusions,
+                    participants: effective_participants,
+                    responding_attendee: attendee,
                 },
             ) {
                 Ok(mime) => mime,
@@ -7352,6 +7354,8 @@ struct MeetingResponseMimeContext<'a> {
     sequence: u64,
     recurrence_rule: Option<&'a serde_json::Value>,
     recurrence_exclusions: &'a [String],
+    participants: &'a serde_json::Value,
+    responding_attendee: &'a str,
 }
 
 fn counter_event_location(locations: &serde_json::Value) -> Option<String> {
@@ -7556,6 +7560,8 @@ fn meeting_response_mime(
         sequence,
         recurrence_rule,
         recurrence_exclusions,
+        participants,
+        responding_attendee,
     } = context;
     anyhow::ensure!(
         body.is_some() || proposal.is_some(),
@@ -7636,11 +7642,46 @@ fn meeting_response_mime(
         calendar.push_str(&timezone_component);
     }
     calendar.push_str(&format!(
-        "BEGIN:VEVENT\r\nUID:{}\r\nDTSTAMP:{now}\r\nORGANIZER:mailto:{}\r\nATTENDEE;PARTSTAT={partstat}:mailto:{}\r\n",
+        "BEGIN:VEVENT\r\nUID:{}\r\nDTSTAMP:{now}\r\nORGANIZER:mailto:{}\r\n",
         calendar_text_escape(uid),
         calendar_text_escape(organizer),
-        calendar_text_escape(attendee)
     ));
+    let participants = participants
+        .as_object()
+        .context("invalid meeting participants")?;
+    let mut emitted_responding_attendee = false;
+    for participant in participants.values() {
+        if participant["roles"]["owner"] == true {
+            continue;
+        }
+        let email = participant["email"]
+            .as_str()
+            .context("meeting attendee email is missing")?;
+        anyhow::ensure!(is_safe_mailbox(email), "invalid meeting attendee address");
+        let attendee_partstat = if email.eq_ignore_ascii_case(responding_attendee) {
+            emitted_responding_attendee = true;
+            partstat
+        } else {
+            match participant["participationStatus"]
+                .as_str()
+                .unwrap_or("needs-action")
+            {
+                "needs-action" => "NEEDS-ACTION",
+                "accepted" => "ACCEPTED",
+                "declined" => "DECLINED",
+                "tentative" => "TENTATIVE",
+                _ => anyhow::bail!("unsupported meeting attendee status"),
+            }
+        };
+        calendar.push_str(&format!(
+            "ATTENDEE;PARTSTAT={attendee_partstat}:mailto:{}\r\n",
+            calendar_text_escape(email)
+        ));
+    }
+    anyhow::ensure!(
+        emitted_responding_attendee,
+        "responding attendee is absent from meeting participants"
+    );
     if let Some(proposal) = proposal {
         let local_series_zone = if instance_id.is_none() && recurrence_rule.is_some() {
             local_time_zone.zip(time_zone)
@@ -12973,8 +13014,16 @@ mod meeting_response_send_tests {
     use axum::{routing::post, Json, Router};
     use std::sync::Arc;
 
+    fn test_participants() -> serde_json::Value {
+        serde_json::json!({
+            "self":{"email":"attendee@example.test","roles":{"attendee":true},"participationStatus":"needs-action"},
+            "other":{"email":"other@example.test","roles":{"attendee":true},"participationStatus":"tentative"}
+        })
+    }
+
     #[test]
     fn custom_meeting_reply_includes_body_and_targets_organizer() {
+        let participants = test_participants();
         let mime = meeting_response_mime(
             Some(&MeetingResponseBody {
                 kind: 1,
@@ -12995,6 +13044,8 @@ mod meeting_response_send_tests {
                 sequence: 0,
                 recurrence_rule: None,
                 recurrence_exclusions: &[],
+                participants: &participants,
+                responding_attendee: "attendee@example.test",
             },
         )
         .unwrap();
@@ -13003,6 +13054,7 @@ mod meeting_response_send_tests {
         assert!(mime.contains("Content-Type: text/plain; charset=utf-8"));
         assert!(mime.contains("METHOD:REPLY\r\n"));
         assert!(mime.contains("ATTENDEE;PARTSTAT=ACCEPTED:mailto:attendee@example.test"));
+        assert!(mime.contains("ATTENDEE;PARTSTAT=TENTATIVE:mailto:other@example.test"));
         assert!(mime.contains("RECURRENCE-ID;TZID=America/Toronto:20261125T100000"));
         assert!(mime.contains("BEGIN:VTIMEZONE\r\nTZID:America/Toronto\r\n"));
         assert!(mime.contains(&STANDARD.encode("I will attend")));
@@ -13027,6 +13079,8 @@ mod meeting_response_send_tests {
                 sequence: 0,
                 recurrence_rule: None,
                 recurrence_exclusions: &[],
+                participants: &participants,
+                responding_attendee: "attendee@example.test",
             },
         )
         .unwrap();
@@ -13037,6 +13091,7 @@ mod meeting_response_send_tests {
 
     #[test]
     fn proposed_time_email_uses_counter_method_and_event_sequence() {
+        let participants = test_participants();
         let mime = meeting_response_mime(
             None,
             Some(&MeetingResponseProposal {
@@ -13057,6 +13112,8 @@ mod meeting_response_send_tests {
                 sequence: 3,
                 recurrence_rule: None,
                 recurrence_exclusions: &[],
+                participants: &participants,
+                responding_attendee: "attendee@example.test",
             },
         )
         .unwrap();
@@ -13068,12 +13125,45 @@ mod meeting_response_send_tests {
         assert!(mime.contains("SEQUENCE:3\r\nSUMMARY:Planning"));
         assert!(mime.contains("DESCRIPTION:Discuss budget"));
         assert!(mime.contains("LOCATION:Room\\; Floor 2\r\n"));
+        assert!(mime.contains("ATTENDEE;PARTSTAT=TENTATIVE:mailto:other@example.test"));
         assert!(mime.contains("RECURRENCE-ID:20261125T150000Z\r\n"));
         assert!(!mime.contains("RECURRENCE-ID;TZID="));
     }
 
     #[test]
+    fn meeting_reply_rejects_unrepresentable_attendee_status() {
+        let mut participants = test_participants();
+        participants["other"]["participationStatus"] = serde_json::json!("in-process");
+        let result = meeting_response_mime(
+            Some(&MeetingResponseBody {
+                kind: 1,
+                data: "Reply".into(),
+            }),
+            None,
+            MeetingResponseMimeContext {
+                uid: "event-uid@example.test",
+                organizer: "organizer@example.test",
+                attendee: "attendee@example.test",
+                participation: "accepted",
+                recurrence_key: None,
+                instance_id: None,
+                time_zone: None,
+                title: "Planning",
+                description: None,
+                location: None,
+                sequence: 0,
+                recurrence_rule: None,
+                recurrence_exclusions: &[],
+                participants: &participants,
+                responding_attendee: "attendee@example.test",
+            },
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn counter_recurrence_maps_supported_jscalendar_rules_to_ical_rrule() {
+        let participants = test_participants();
         let exclusions = vec!["2026-11-30T10:00:00".to_owned()];
         let rule = serde_json::json!({
             "@type":"RecurrenceRule","frequency":"weekly","interval":2,
@@ -13104,6 +13194,8 @@ mod meeting_response_send_tests {
                 sequence: 1,
                 recurrence_rule: Some(&rule),
                 recurrence_exclusions: &exclusions,
+                participants: &participants,
+                responding_attendee: "attendee@example.test",
             },
         )
         .unwrap();

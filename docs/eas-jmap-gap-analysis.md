@@ -1848,6 +1848,8 @@ ordered UTC pair and sent as an iTIP `METHOD:COUNTER` with the event UID,
 organizer, attendee, title, description, sequence, and proposed DTSTART/DTEND.
 When the event has named JMAP locations, counters also include them as an
 escaped iCalendar `LOCATION` value.
+Custom reply calendars include every attendee and preserve supported
+participation statuses; a status without a lossless iTIP mapping fails closed.
 The RSVP update follows `UserResponse`; automatic scheduling messages are
 suppressed so the counter is not duplicated. JMAP calendar mutation and mail
 submission are separate calls; if submission fails after the RSVP has
@@ -1890,9 +1892,10 @@ and [SendResponse definition](https://learn.microsoft.com/en-us/openspecs/exchan
 and the distinction follows [RFC 8984 section 4.4.6](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6).
 Regression coverage asserts `sendSchedulingMessages` at the JMAP boundary,
 RRULE mapping, VTIMEZONE generation, local-time counter serialization, EXDATE
-generation, and fail-closed positive-exception handling, and updates the
+generation, attendee/status serialization, and fail-closed positive-exception
+and attendee-status handling, and updates the
 deferred live MeetingResponse
-scenario. Current full suite: 436 passed, 77
+scenario. Current full suite: 437 passed, 77
 ignored; strict Clippy, formatting, and diff checks pass. The custom
 reply and counter paths are on `main` and deployed to the isolated bridge with
 the 14.0 default; real-client 16.1 testing remains open. Earlier empty
@@ -1902,6 +1905,8 @@ Compose built image
 `sha256:3e60bf151cf5b386a50cb564f9f899e8f327f8bf3b84070c2dee11908045e9d8`.
 The container started at `2026-11-23T03:25:57Z` with restart count zero; mesh
 `/healthz` returned `ok` and `/readyz` returned `ready`.
+Attendee preservation is implemented in source and is awaiting isolated
+deployment; the current bridge remains at the 14.0 protocol default.
 
 Also completed: **ActiveSync contact account name**. Contacts2 `AccountName`
 round-trips as a separately labeled JSContact `onlineServices` user entry
