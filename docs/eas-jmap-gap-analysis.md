@@ -71,15 +71,21 @@ and 16.1. It validates `MaxSize` (0–102400 bytes) and `MaxPictures`, returns
 the specified per-picture statuses for missing, oversized, and over-limit
 photos, and includes photos from inline JSContact media URIs or bounded JMAP
 contact-photo blob downloads. Duplicate principal/contact addresses retain
-the directory result and merge in the saved contact photo. Focused parser,
-photo-limit, deduplication, and blob-ID mapping regressions pass; full suite:
-423 passed, 76 ignored; strict Clippy, formatting, and diff checks pass. This
-Deployed as `deploy-2026-11-25-eas-resolve-recipient-picture-3ee5628`;
-Homelab commit `e75d177`, image
-`sha256:cc4607aa8758702f9085002fbec40ef997c576e24918e263663968c31aa16cf6`,
-started `2026-11-25T05:51:14Z`, restart count zero, mesh `/healthz` and
+the directory result and merge in the saved contact photo. `MaxPictures` is
+optional and its limit is applied independently to each `To` query, matching
+the protocol. Focused parser, per-query photo limit, status, deduplication,
+and blob-ID mapping regressions pass; full suite: 423 passed, 76 ignored;
+strict Clippy, formatting, and diff checks pass. The per-query correction is
+deployed as
+`deploy-2026-11-25-eas-resolve-recipient-picture-per-query-18c02ea`; Homelab
+commit `dd7d248`, image
+`sha256:ecb7a89318b665b426dfd594f65968a1465c4044b490808853b08e91480e4ad2`,
+started `2026-11-25T05:59:12Z`, restart count zero, mesh `/healthz` and
 `/readyz` healthy, and public `/healthz` healthy. Production remains at EAS
-14.0; isolated 16.1 client certification remains open.
+14.0; isolated 16.1 client certification remains open. See Microsoft
+[MaxPictures](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/e105f19c-ae94-4a19-b7a3-7df8b31ef06b),
+[MaxSize](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/b4f7c3f6-aea7-4267-ac87-fa7d565a18ae),
+and [Picture](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/58e18516-d6b0-4d56-b6e0-efe2c54b0f0e).
 
 Find now extracts Excel Binary Workbook (`.xlsb`) cell values through the
 existing vendored Calamine parser, including its registered macro-enabled
