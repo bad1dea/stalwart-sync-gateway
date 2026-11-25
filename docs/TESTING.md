@@ -84,3 +84,29 @@ returns once `/healthz` answers.
 Last full run (2026-11-12, 1:30 am ET): all 9 pass, random test at 100 steps; at `E2E_N=5000` (5000 messages in 50
 rounds, ~4 s; new mail -> both Pings answered in ~0.28 s; 120 s Ping held
 120.0 s). These are protocol results, not real-device verification.
+
+## Manual real-client EAS 16.1 pass
+
+Run this only against a dedicated test gateway and test account. The normal
+Compose configuration defaults to 14.0; setting
+`EAS_MAX_PROTOCOL_VERSION=16.1` opts that container into 16.1. Confirm the
+resolved configuration before starting it:
+
+```bash
+EAS_MAX_PROTOCOL_VERSION=16.1 podman-compose -f docker-compose.yml config
+```
+
+On the test device, add the account using the isolated gateway URL, then
+exercise each path and capture the device OS/client version plus the gateway
+request logs for any failure:
+
+1. Negotiate 16.1, complete Provision and FolderSync, then sync mail.
+2. Open a message through BodyPartPreference and fetch the full item.
+3. Run mailbox Find and GAL Find with a unique test phrase.
+4. Create and fetch a recurring Task; update its completion state.
+5. Enable scheduled Oof, then read back the schedule and audience-specific
+   messages.
+6. Resolve a test contact with a photo and request free/busy for a known test
+   event.
+
+Keep the production endpoint at 14.0 until the device pass is reviewed.
