@@ -21,8 +21,12 @@ Sync's omitted-Type inference, yearly conversion, and JMAP creation with a
 matching start. MS-ASCAL makes `DayOfWeek` optional for Type 6 without defining
 the omission default, so interpreting it as the start weekday is an inference
 pending real-client confirmation. Full suite: 448 passed, 77 ignored; strict
-Clippy, formatting, and diff checks pass. Isolated deployment follows;
-production remains unchanged.
+Clippy, formatting, and diff checks pass. Commit `0ccc794` is deployed to Amy's
+isolated bridge as `localhost/eas16-isolated:0ccc794` (image
+`sha256:ca1b4dad7f63842eacda81f0f470db7113935b4ec8e1edf9aa922f6910814525`),
+started `2026-11-25T09:51:26.192273972Z`, with zero restarts. `/healthz` and
+`/readyz` both return HTTP 200 (`ok` and `ready`). `EAS_MAX_PROTOCOL_VERSION`
+remains unset, preserving the 14.0 default; production is untouched.
 
 GAL Find's EAS 16.1 `Picture` option now joins matching Principal results to
 saved ContactCards by exact email address. Matching inline or bounded blob
