@@ -504,6 +504,10 @@ pub struct Attendee {
     /// `"optional"` -- maps to MS-ASCAL AttendeeType 2 (Optional) instead
     /// of the default 1 (Required).
     pub optional: bool,
+    /// EAS 16.1 attendee-specific counter proposal, stored by this gateway
+    /// as an iCalendar extension because JSCalendar has no standard field.
+    pub proposed_start_time: Option<String>,
+    pub proposed_end_time: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -186,6 +186,10 @@ pub mod calendar {
     pub const ATTENDEE_STATUS: Token = tag(0x29, false);
     /// 12.0+ only.
     pub const ATTENDEE_TYPE: Token = tag(0x2a, false);
+    /// 16.1 attendee-specific proposed meeting time (codepage 8).
+    pub const PROPOSED_START_TIME: Token = super::meeting_response::PROPOSED_START_TIME;
+    /// 16.1 attendee-specific proposed meeting time (codepage 8).
+    pub const PROPOSED_END_TIME: Token = super::meeting_response::PROPOSED_END_TIME;
     /// 14.0+ only.
     pub const DISALLOW_NEW_TIME_PROPOSAL: Token = tag(0x33, false);
     /// 14.0+ only.

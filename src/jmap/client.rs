@@ -3387,7 +3387,7 @@ impl JmapClient {
         ];
         let response: JmapResponse<serde_json::Value> = self.api_call(auth, &using,
             vec![MethodCall::new("CalendarEvent/get", serde_json::json!({"accountId":account,
-                "ids":[event_id],"properties":["id","uid","title","description","locations","sequence","@type","calendarIds","participants","replyTo","timeZone","recurrenceRule","recurrenceOverrides"]}), "get")]).await?;
+                "ids":[event_id],"properties":["id","uid","title","description","locations","sequence","@type","calendarIds","participants","replyTo","timeZone","recurrenceRule","recurrenceOverrides","iCalendar"]}), "get")]).await?;
         let result = response
             .method_responses
             .iter()
@@ -3672,6 +3672,20 @@ impl JmapClient {
                 }
             }
         }
+        if proposed_times.is_some() || event.get("iCalendar").is_some() {
+            let attendee_email = participant["email"]
+                .as_str()
+                .context("meeting attendee email missing")?;
+            update.insert(
+                "iCalendar".to_owned(),
+                calendar_icalendar_with_proposed_times(
+                    event.get("iCalendar"),
+                    attendee_email,
+                    instance_key.as_deref(),
+                    proposed_times.as_ref(),
+                )?,
+            );
+        }
         let response: JmapResponse<serde_json::Value> = self
             .api_call(
                 auth,
@@ -3703,7 +3717,7 @@ impl JmapClient {
                 vec![MethodCall::new(
                     "CalendarEvent/get",
                     serde_json::json!({"accountId":account,
-                "ids":[event_id],"properties":["id","participants","recurrenceOverrides"]}),
+                "ids":[event_id],"properties":["id","participants","recurrenceOverrides","iCalendar"]}),
                     "verify",
                 )],
             )
@@ -3715,6 +3729,23 @@ impl JmapClient {
             .and_then(|method| method.1["list"].as_array())
             .and_then(|items| items.iter().find(|event| event["id"] == event_id))
             .context("meeting response verification failed")?;
+        if let Some(proposal) = proposed_times.as_ref() {
+            let email = participant["email"]
+                .as_str()
+                .context("meeting attendee email missing")?;
+            let expected = (
+                Some(proposal.start.format("%Y%m%dT%H%M%SZ").to_string()),
+                Some(proposal.end.format("%Y%m%dT%H%M%SZ").to_string()),
+            );
+            anyhow::ensure!(
+                calendar_proposed_times_from_icalendar(
+                    verified_event.get("iCalendar"),
+                    email,
+                    instance_key.as_deref(),
+                ) == expected,
+                "calendar counter proposal was not retained"
+            );
+        }
         let verified_participants = instance_key
             .as_deref()
             .and_then(|key| verified_event["recurrenceOverrides"][key].get("participants"))
@@ -9871,6 +9902,127 @@ fn calendar_disallow_new_time_proposal(icalendar: Option<&serde_json::Value>) ->
         })
 }
 
+fn eas_proposed_time_property_name(
+    email: &str,
+    recurrence_key: Option<&str>,
+    edge: &str,
+) -> String {
+    let email_hex = email
+        .to_ascii_lowercase()
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let recurrence_hex = recurrence_key
+        .map(|key| {
+            key.bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        })
+        .unwrap_or_else(|| "series".to_owned());
+    format!("X-EAS-PROPOSED-{email_hex}-{recurrence_hex}-{edge}")
+}
+
+fn calendar_icalendar_with_proposed_times(
+    existing: Option<&serde_json::Value>,
+    email: &str,
+    recurrence_key: Option<&str>,
+    proposal: Option<&MeetingResponseProposal>,
+) -> anyhow::Result<serde_json::Value> {
+    let mut icalendar = match existing {
+        Some(value) if value.is_object() => value.clone(),
+        Some(serde_json::Value::Null) | None => serde_json::json!({}),
+        Some(_) => anyhow::bail!("invalid JMAP iCalendar extension"),
+    };
+    let properties = icalendar
+        .as_object_mut()
+        .context("invalid JMAP iCalendar extension")?
+        .entry("properties")
+        .or_insert_with(|| serde_json::json!([]));
+    let properties = properties
+        .as_array_mut()
+        .context("invalid JMAP iCalendar properties")?;
+    let start_name = eas_proposed_time_property_name(email, recurrence_key, "START");
+    let end_name = eas_proposed_time_property_name(email, recurrence_key, "END");
+    properties.retain(|property| {
+        let name = property
+            .as_array()
+            .and_then(|property| property.first())
+            .and_then(serde_json::Value::as_str);
+        !name.is_some_and(|name| {
+            name.eq_ignore_ascii_case(&start_name) || name.eq_ignore_ascii_case(&end_name)
+        })
+    });
+    if let Some(proposal) = proposal {
+        anyhow::ensure!(
+            proposal.end > proposal.start,
+            "invalid proposed meeting interval"
+        );
+        for (name, value) in [
+            (
+                start_name,
+                proposal
+                    .start
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            ),
+            (
+                end_name,
+                proposal
+                    .end
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            ),
+        ] {
+            properties.push(serde_json::json!([name, {}, "date-time", value]));
+        }
+    }
+    Ok(icalendar)
+}
+
+fn calendar_proposed_times_from_icalendar(
+    icalendar: Option<&serde_json::Value>,
+    email: &str,
+    recurrence_key: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let Some(properties) = icalendar
+        .and_then(|value| value.get("properties"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return (None, None);
+    };
+    let read = |edge: &str| {
+        let expected = eas_proposed_time_property_name(email, recurrence_key, edge);
+        let mut found = properties.iter().filter(|property| {
+            property
+                .as_array()
+                .and_then(|property| property.first())
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| name.eq_ignore_ascii_case(&expected))
+        });
+        let property = found.next()?.as_array()?;
+        if found.next().is_some() {
+            return None;
+        }
+        let value = property.get(3)?.as_str()?;
+        let datetime = chrono::DateTime::parse_from_rfc3339(value).ok()?;
+        Some(
+            datetime
+                .with_timezone(&chrono::Utc)
+                .format("%Y%m%dT%H%M%SZ")
+                .to_string(),
+        )
+    };
+    let start = read("START");
+    let end = read("END");
+    match (&start, &end) {
+        (Some(start), Some(end))
+            if chrono::NaiveDateTime::parse_from_str(start, "%Y%m%dT%H%M%SZ").ok()
+                < chrono::NaiveDateTime::parse_from_str(end, "%Y%m%dT%H%M%SZ").ok() =>
+        {
+            (Some(start.clone()), Some(end.clone()))
+        }
+        _ => (None, None),
+    }
+}
+
 fn calendar_icalendar_with_disallow_new_time_proposal(
     existing: Option<&serde_json::Value>,
     value: bool,
@@ -10033,6 +10185,7 @@ struct CalendarExceptionContext<'a> {
     base_participants: Option<&'a BTreeMap<String, ParticipantObject>>,
     base_links: Option<&'a BTreeMap<String, serde_json::Value>>,
     base_virtual_locations: Option<&'a BTreeMap<String, serde_json::Value>>,
+    base_icalendar: Option<&'a serde_json::Value>,
     current_user: Option<&'a str>,
     timezone: Option<&'a str>,
     event_duration: Option<&'a str>,
@@ -10047,6 +10200,7 @@ fn calendar_recurrence_exceptions(
         base_participants,
         base_links,
         base_virtual_locations,
+        base_icalendar,
         current_user,
         timezone,
         event_duration,
@@ -10247,6 +10401,8 @@ fn calendar_recurrence_exceptions(
                     base_participants,
                     patch,
                     current_user,
+                    base_icalendar,
+                    Some(local_start),
                 )?;
                 (Some(attendees), reply_time)
             } else {
@@ -10416,6 +10572,8 @@ fn calendar_recurrence_exception_attendees(
     base: Option<&BTreeMap<String, ParticipantObject>>,
     override_patch: &serde_json::Map<String, serde_json::Value>,
     current_user: Option<&str>,
+    icalendar: Option<&serde_json::Value>,
+    recurrence_key: Option<&str>,
 ) -> anyhow::Result<(Vec<crate::model::Attendee>, Option<String>)> {
     fn unescape(token: &str) -> anyhow::Result<String> {
         let mut result = String::new();
@@ -10549,6 +10707,8 @@ fn calendar_recurrence_exception_attendees(
                 Some("tentative") => Some("tentative".to_owned()),
                 Some(_) => anyhow::bail!("unsupported recurrence attendee status"),
             };
+            let (proposed_start_time, proposed_end_time) =
+                calendar_proposed_times_from_icalendar(icalendar, &email, recurrence_key);
             Ok(crate::model::Attendee {
                 email,
                 name: value
@@ -10557,6 +10717,8 @@ fn calendar_recurrence_exception_attendees(
                     .map(str::to_owned),
                 participation_status,
                 optional: roles.get("optional").and_then(serde_json::Value::as_bool) == Some(true),
+                proposed_start_time,
+                proposed_end_time,
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -10759,6 +10921,7 @@ fn calendar_event_from(value: CalendarEventObject, current_user: Option<&str>) -
             base_participants: value.participants.as_ref(),
             base_links: value.links.as_ref(),
             base_virtual_locations: value.virtual_locations.as_ref(),
+            base_icalendar: value.i_calendar.as_ref(),
             current_user,
             timezone: recurrence_time_zone.as_deref(),
             event_duration: value.duration.as_deref(),
@@ -10870,11 +11033,15 @@ fn calendar_event_from(value: CalendarEventObject, current_user: Option<&str>) -
             organizer_email = Some(email);
             organizer_name = participant.name;
         } else {
+            let (proposed_start_time, proposed_end_time) =
+                calendar_proposed_times_from_icalendar(value.i_calendar.as_ref(), &email, None);
             attendees.push(crate::model::Attendee {
                 email,
                 name: participant.name,
                 participation_status: participant.participation_status,
                 optional: participant.roles.get("optional").copied().unwrap_or(false),
+                proposed_start_time,
+                proposed_end_time,
             });
         }
     }
@@ -11445,6 +11612,142 @@ mod tests {
     }
 
     #[test]
+    fn attendee_counter_proposal_properties_are_scoped_and_lossless() {
+        let proposal = super::MeetingResponseProposal {
+            start: "2026-11-25T15:00:00Z".parse().unwrap(),
+            end: "2026-11-25T16:00:00Z".parse().unwrap(),
+        };
+        let existing = serde_json::json!({
+            "properties": [["X-OTHER-PROPERTY", {}, "text", "retained"]],
+            "components": [["VALARM", [], []]]
+        });
+        let saved = super::calendar_icalendar_with_proposed_times(
+            Some(&existing),
+            "Guest@example.test",
+            None,
+            Some(&proposal),
+        )
+        .unwrap();
+        assert_eq!(saved["properties"].as_array().unwrap().len(), 3);
+        assert_eq!(saved["properties"][0], existing["properties"][0]);
+        assert_eq!(saved["components"], existing["components"]);
+        assert_eq!(
+            super::calendar_proposed_times_from_icalendar(Some(&saved), "guest@EXAMPLE.test", None),
+            (
+                Some("20261125T150000Z".to_owned()),
+                Some("20261125T160000Z".to_owned())
+            )
+        );
+        assert_eq!(
+            super::calendar_proposed_times_from_icalendar(
+                Some(&saved),
+                "guest@example.test",
+                Some("2026-11-25T15:00:00")
+            ),
+            (None, None)
+        );
+        let occurrence = super::calendar_icalendar_with_proposed_times(
+            Some(&saved),
+            "guest@example.test",
+            Some("2026-11-25T15:00:00"),
+            Some(&proposal),
+        )
+        .unwrap();
+        assert_eq!(occurrence["properties"].as_array().unwrap().len(), 5);
+        assert_eq!(
+            super::calendar_proposed_times_from_icalendar(
+                Some(&occurrence),
+                "guest@example.test",
+                Some("2026-11-25T15:00:00")
+            ),
+            (
+                Some("20261125T150000Z".to_owned()),
+                Some("20261125T160000Z".to_owned())
+            )
+        );
+        let duplicate = serde_json::json!({"properties":[
+            [saved["properties"][1][0].clone(), {}, "date-time", "2026-11-25T15:00:00Z"],
+            [saved["properties"][1][0].clone(), {}, "date-time", "2026-11-25T15:00:00Z"],
+            saved["properties"][2]
+        ]});
+        assert_eq!(
+            super::calendar_proposed_times_from_icalendar(
+                Some(&duplicate),
+                "guest@example.test",
+                None
+            ),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn counter_proposal_metadata_maps_to_calendar_attendees_and_occurrences() {
+        let series_start =
+            super::eas_proposed_time_property_name("guest@example.test", None, "START");
+        let series_end = super::eas_proposed_time_property_name("guest@example.test", None, "END");
+        let occurrence_start = super::eas_proposed_time_property_name(
+            "guest@example.test",
+            Some("2026-11-25T15:00:00"),
+            "START",
+        );
+        let occurrence_end = super::eas_proposed_time_property_name(
+            "guest@example.test",
+            Some("2026-11-25T15:00:00"),
+            "END",
+        );
+        let event: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
+            "id":"event","@type":"Event","start":"2026-11-25T15:00:00",
+            "timeZone":"Etc/UTC","duration":"PT1H",
+            "participants":{
+                "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                "guest":{"email":"guest@example.test","roles":{"attendee":true}}
+            },
+            "iCalendar":{"properties":[
+                [series_start, {}, "date-time", "2026-11-25T15:00:00Z"],
+                [series_end, {}, "date-time", "2026-11-25T16:00:00Z"],
+                [occurrence_start, {}, "date-time", "2026-11-26T17:00:00Z"],
+                [occurrence_end, {}, "date-time", "2026-11-26T18:00:00Z"]
+            ]},
+            "recurrenceRule":{"frequency":"daily"},
+            "recurrenceOverrides":{"2026-11-25T15:00:00":{
+                "title":"Changed",
+                "participants":{
+                    "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                    "guest":{"email":"guest@example.test","roles":{"attendee":true}}
+                }
+            }}
+        }))
+        .unwrap();
+        let converted = super::calendar_event_from(event, Some("guest@example.test"));
+        assert_eq!(
+            converted.attendees[0].proposed_start_time.as_deref(),
+            Some("20261125T150000Z")
+        );
+        assert_eq!(
+            converted.attendees[0].proposed_end_time.as_deref(),
+            Some("20261125T160000Z")
+        );
+        assert_eq!(
+            converted.recurrence_exceptions[0]
+                .attendees
+                .as_ref()
+                .unwrap()[0]
+                .proposed_start_time
+                .as_deref(),
+            Some("20261126T170000Z")
+        );
+        assert_eq!(
+            converted.recurrence_exceptions[0]
+                .attendees
+                .as_ref()
+                .unwrap()[0]
+                .proposed_end_time
+                .as_deref(),
+            Some("20261126T180000Z")
+        );
+    }
+
+    #[test]
     fn appointment_reply_time_uses_only_the_unique_authenticated_attendee() {
         let participants: std::collections::BTreeMap<String, super::ParticipantObject> =
             serde_json::from_value(serde_json::json!({
@@ -11541,6 +11844,7 @@ mod tests {
                 base_participants: None,
                 base_links: None,
                 base_virtual_locations: Some(&base),
+                base_icalendar: None,
                 current_user: None,
                 timezone: Some("Etc/UTC"),
                 event_duration: Some("PT1H"),
@@ -11582,6 +11886,7 @@ mod tests {
                 base_participants: Some(&participants),
                 base_links: None,
                 base_virtual_locations: None,
+                base_icalendar: None,
                 current_user: Some("guest@example.test"),
                 timezone: Some("Etc/UTC"),
                 event_duration: Some("PT1H"),
@@ -11877,6 +12182,8 @@ mod tests {
                 name: Some("Guest".to_owned()),
                 participation_status: Some("declined".to_owned()),
                 optional: true,
+                proposed_start_time: None,
+                proposed_end_time: None,
             }])
         );
         assert_eq!(
@@ -12079,6 +12386,8 @@ mod tests {
                 name: None,
                 participation_status: None,
                 optional: false,
+                proposed_start_time: None,
+                proposed_end_time: None,
             }],
             ..Default::default()
         };

@@ -7462,6 +7462,15 @@ fn write_calendar_fields(
                             cal::ATTENDEE_TYPE,
                             if attendee.optional { "2" } else { "1" },
                         );
+                        if version == ProtocolVersion::V16_1 {
+                            if let (Some(start), Some(end)) = (
+                                attendee.proposed_start_time.as_deref(),
+                                attendee.proposed_end_time.as_deref(),
+                            ) {
+                                builder.leaf(cal::PROPOSED_START_TIME, eas_datetime(start));
+                                builder.leaf(cal::PROPOSED_END_TIME, eas_datetime(end));
+                            }
+                        }
                         builder.end();
                     }
                     builder.end();
@@ -7607,6 +7616,15 @@ fn write_calendar_fields(
                 cal::ATTENDEE_TYPE,
                 if attendee.optional { "2" } else { "1" },
             );
+            if version == ProtocolVersion::V16_1 {
+                if let (Some(start), Some(end)) = (
+                    attendee.proposed_start_time.as_deref(),
+                    attendee.proposed_end_time.as_deref(),
+                ) {
+                    builder.leaf(cal::PROPOSED_START_TIME, eas_datetime(start));
+                    builder.leaf(cal::PROPOSED_END_TIME, eas_datetime(end));
+                }
+            }
             builder.end();
         }
         builder.end();
@@ -9588,6 +9606,8 @@ mod tests {
                     name: Some("Guest".to_owned()),
                     participation_status: Some("tentative".to_owned()),
                     optional: true,
+                    proposed_start_time: None,
+                    proposed_end_time: None,
                 }]),
                 attachments: Some(vec![crate::model::CalendarAttachment {
                     blob_id: "blob-123".to_owned(),
@@ -10343,6 +10363,8 @@ mod tests {
                 name: None,
                 participation_status: None,
                 optional: false,
+                proposed_start_time: Some("2026-11-25T15:00:00Z".into()),
+                proposed_end_time: Some("2026-11-25T16:00:00Z".into()),
             }],
             ..Default::default()
         };
@@ -10367,6 +10389,40 @@ mod tests {
                 Some(expected)
             );
         }
+        let mut builder = DocumentBuilder::new();
+        super::write_calendar_command(
+            &mut builder,
+            air::CHANGE,
+            &event,
+            super::ProtocolVersion::V16_1,
+            &[],
+        );
+        let wire = builder.finish();
+        assert_eq!(
+            crate::wbxml::eas::find_text_after(&wire, cal::PROPOSED_START_TIME),
+            Some("20261125T150000Z")
+        );
+        assert_eq!(
+            crate::wbxml::eas::find_text_after(&wire, cal::PROPOSED_END_TIME),
+            Some("20261125T160000Z")
+        );
+        let mut builder = DocumentBuilder::new();
+        super::write_calendar_command(
+            &mut builder,
+            air::CHANGE,
+            &event,
+            super::ProtocolVersion::V16_0,
+            &[],
+        );
+        let legacy_wire = builder.finish();
+        assert!(!crate::wbxml::eas::contains_token(
+            &legacy_wire,
+            cal::PROPOSED_START_TIME
+        ));
+        assert!(!crate::wbxml::eas::contains_token(
+            &legacy_wire,
+            cal::PROPOSED_END_TIME
+        ));
     }
 
     #[test]
