@@ -2,6 +2,7 @@ pub mod calendar_recurrence;
 pub mod calendar_reminder;
 pub mod capabilities;
 pub mod client;
+pub mod ical_timezone;
 pub mod notes;
 pub mod session;
 pub mod task_reminder;

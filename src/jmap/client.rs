@@ -3384,7 +3384,7 @@ impl JmapClient {
                 return Ok("4");
             };
             let location = counter_event_location(&event["locations"]);
-            Some(meeting_response_mime(
+            let mime = match meeting_response_mime(
                 custom_body.as_ref(),
                 proposed_times.as_ref(),
                 MeetingResponseMimeContext {
@@ -3403,7 +3403,14 @@ impl JmapClient {
                         .as_object()
                         .map(|_| &event["recurrenceRule"]),
                 },
-            )?)
+            ) {
+                Ok(mime) => mime,
+                Err(error) => {
+                    tracing::warn!(%error, "rejecting unsupported EAS meeting response MIME");
+                    return Ok("4");
+                }
+            };
+            Some(mime)
         } else {
             None
         };
@@ -7358,15 +7365,10 @@ fn counter_event_location(locations: &serde_json::Value) -> Option<String> {
 }
 
 fn series_counter_supported(event: &serde_json::Value) -> bool {
-    let utc_series = event["timeZone"]
-        .as_str()
-        .is_none_or(|zone| matches!(zone, "UTC" | "Etc/UTC" | "GMT" | "Etc/GMT"));
     let has_exceptions = event["recurrenceOverrides"]
         .as_object()
         .is_some_and(|overrides| !overrides.is_empty());
-    // The counter MIME emits UTC DTSTART/DTEND and RRULE, but cannot preserve
-    // local wall time or per-instance exceptions yet.
-    utc_series && !has_exceptions
+    !has_exceptions
 }
 
 fn counter_recurrence_rule(
@@ -7484,6 +7486,18 @@ fn fold_ical_lines(value: &str) -> String {
     folded
 }
 
+fn compact_recurrence_key(value: &str) -> anyhow::Result<String> {
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        Ok(date.format("%Y%m%d").to_string())
+    } else {
+        Ok(
+            chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S")?
+                .format("%Y%m%dT%H%M%S")
+                .to_string(),
+        )
+    }
+}
+
 fn wrap_mime_base64(data: &[u8]) -> String {
     data.chunks(57)
         .map(|line| STANDARD.encode(line))
@@ -7511,6 +7525,8 @@ fn meeting_response_mime(
     proposal: Option<&MeetingResponseProposal>,
     context: MeetingResponseMimeContext<'_>,
 ) -> anyhow::Result<Vec<u8>> {
+    use chrono::Datelike;
+
     let MeetingResponseMimeContext {
         uid,
         organizer,
@@ -7550,17 +7566,76 @@ fn meeting_response_mime(
     } else {
         "REPLY"
     };
+    let local_time_zone = time_zone
+        .filter(|zone| !zone.is_empty())
+        .filter(|zone| !matches!(*zone, "UTC" | "Etc/UTC" | "GMT" | "Etc/GMT"))
+        .map(str::parse::<chrono_tz::Tz>)
+        .transpose()?;
+    let proposal_year = proposal
+        .zip(local_time_zone)
+        .map(|(proposal, zone)| proposal.start.with_timezone(&zone).year());
+    let recurrence_year = recurrence_key.and_then(|key| {
+        chrono::NaiveDateTime::parse_from_str(key, "%Y-%m-%dT%H:%M:%S")
+            .ok()
+            .map(|value| value.year())
+            .or_else(|| {
+                chrono::NaiveDate::parse_from_str(key, "%Y-%m-%d")
+                    .ok()
+                    .map(|value| value.year())
+            })
+    });
+    let timezone_year = match (proposal_year, recurrence_year) {
+        (Some(proposal), Some(recurrence)) => Some(proposal.min(recurrence)),
+        (Some(year), None) | (None, Some(year)) => Some(year),
+        (None, None) => None,
+    };
+    let needs_timezone = local_time_zone.is_some()
+        && (recurrence_key.is_some_and(|key| key.contains('T'))
+            || proposal.is_some() && (instance_id.is_some() || recurrence_rule.is_some()));
+    let timezone_component = if needs_timezone {
+        Some(
+            crate::jmap::ical_timezone::component(
+                time_zone.context("meeting timezone is missing")?,
+                timezone_year.context("meeting timezone year is unavailable")?,
+            )
+            .context("meeting timezone cannot be represented in iCalendar")?,
+        )
+    } else {
+        None
+    };
     let mut calendar = format!(
-        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//EAS JMAP Gateway//Meeting Response//EN\r\nMETHOD:{method}\r\nBEGIN:VEVENT\r\nUID:{}\r\nDTSTAMP:{now}\r\nORGANIZER:mailto:{}\r\nATTENDEE;PARTSTAT={partstat}:mailto:{}\r\n",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//EAS JMAP Gateway//Meeting Response//EN\r\nMETHOD:{method}\r\n"
+    );
+    if let Some(timezone_component) = timezone_component {
+        calendar.push_str(&timezone_component);
+    }
+    calendar.push_str(&format!(
+        "BEGIN:VEVENT\r\nUID:{}\r\nDTSTAMP:{now}\r\nORGANIZER:mailto:{}\r\nATTENDEE;PARTSTAT={partstat}:mailto:{}\r\n",
         calendar_text_escape(uid),
         calendar_text_escape(organizer),
         calendar_text_escape(attendee)
-    );
+    ));
     if let Some(proposal) = proposal {
+        let local_series_zone = if instance_id.is_none() && recurrence_rule.is_some() {
+            local_time_zone.zip(time_zone)
+        } else {
+            None
+        };
+        if let Some((zone, time_zone)) = local_series_zone {
+            calendar.push_str(&format!(
+                "DTSTART;TZID={time_zone}:{}\r\nDTEND;TZID={time_zone}:{}\r\n",
+                proposal.start.with_timezone(&zone).format("%Y%m%dT%H%M%S"),
+                proposal.end.with_timezone(&zone).format("%Y%m%dT%H%M%S"),
+            ));
+        } else {
+            calendar.push_str(&format!(
+                "DTSTART:{}\r\nDTEND:{}\r\n",
+                proposal.start.format("%Y%m%dT%H%M%SZ"),
+                proposal.end.format("%Y%m%dT%H%M%SZ"),
+            ));
+        }
         calendar.push_str(&format!(
-            "DTSTART:{}\r\nDTEND:{}\r\nSEQUENCE:{sequence}\r\nSUMMARY:{}\r\n",
-            proposal.start.format("%Y%m%dT%H%M%SZ"),
-            proposal.end.format("%Y%m%dT%H%M%SZ"),
+            "SEQUENCE:{sequence}\r\nSUMMARY:{}\r\n",
             calendar_text_escape(title),
         ));
         if let Some(description) = description {
@@ -7583,10 +7658,20 @@ fn meeting_response_mime(
     }
     if proposal.is_some() {
         if let Some(instance_id) = instance_id {
-            let occurrence = chrono::DateTime::parse_from_rfc3339(instance_id)?
-                .with_timezone(&chrono::Utc)
-                .format("%Y%m%dT%H%M%SZ");
-            calendar.push_str(&format!("RECURRENCE-ID:{occurrence}\r\n"));
+            if let (Some(key), Some(zone_name)) = (
+                recurrence_key.filter(|key| key.contains('T')),
+                time_zone.filter(|_| local_time_zone.is_some()),
+            ) {
+                calendar.push_str(&format!(
+                    "RECURRENCE-ID;TZID={zone_name}:{}\r\n",
+                    compact_recurrence_key(key)?
+                ));
+            } else {
+                let occurrence = chrono::DateTime::parse_from_rfc3339(instance_id)?
+                    .with_timezone(&chrono::Utc)
+                    .format("%Y%m%dT%H%M%SZ");
+                calendar.push_str(&format!("RECURRENCE-ID:{occurrence}\r\n"));
+            }
         }
     } else if let Some(recurrence_key) = recurrence_key {
         anyhow::ensure!(
@@ -7595,22 +7680,17 @@ fn meeting_response_mime(
                 .any(|byte| matches!(byte, b'\r' | b'\n' | b';')),
             "invalid meeting recurrence key"
         );
-        let compact =
-            if let Ok(date) = chrono::NaiveDate::parse_from_str(recurrence_key, "%Y-%m-%d") {
-                date.format("%Y%m%d").to_string()
+        let compact = compact_recurrence_key(recurrence_key)?;
+        if compact.len() == 15 {
+            if let Some(time_zone) = time_zone.filter(|_| local_time_zone.is_some()) {
+                calendar.push_str(&format!("RECURRENCE-ID;TZID={time_zone}:{compact}\r\n"));
+            } else if time_zone
+                .is_some_and(|zone| matches!(zone, "UTC" | "Etc/UTC" | "GMT" | "Etc/GMT"))
+            {
+                calendar.push_str(&format!("RECURRENCE-ID:{compact}Z\r\n"));
             } else {
-                chrono::NaiveDateTime::parse_from_str(recurrence_key, "%Y-%m-%dT%H:%M:%S")?
-                    .format("%Y%m%dT%H%M%S")
-                    .to_string()
-            };
-        if let Some(time_zone) = time_zone.filter(|zone| !zone.is_empty()) {
-            anyhow::ensure!(
-                time_zone.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-' | b'+')
-                }),
-                "invalid meeting time zone"
-            );
-            calendar.push_str(&format!("RECURRENCE-ID;TZID={time_zone}:{compact}\r\n"));
+                calendar.push_str(&format!("RECURRENCE-ID:{compact}\r\n"));
+            }
         } else {
             calendar.push_str(&format!("RECURRENCE-ID:{compact}\r\n"));
         }
@@ -12881,6 +12961,7 @@ mod meeting_response_send_tests {
         assert!(mime.contains("METHOD:REPLY\r\n"));
         assert!(mime.contains("ATTENDEE;PARTSTAT=ACCEPTED:mailto:attendee@example.test"));
         assert!(mime.contains("RECURRENCE-ID;TZID=America/Toronto:20261125T100000"));
+        assert!(mime.contains("BEGIN:VTIMEZONE\r\nTZID:America/Toronto\r\n"));
         assert!(mime.contains(&STANDARD.encode("I will attend")));
 
         let rtf = meeting_response_mime(
@@ -12970,7 +13051,7 @@ mod meeting_response_send_tests {
                 participation: "tentative",
                 recurrence_key: None,
                 instance_id: None,
-                time_zone: Some("UTC"),
+                time_zone: Some("America/Toronto"),
                 title: "Weekly review",
                 description: None,
                 location: None,
@@ -12979,13 +13060,40 @@ mod meeting_response_send_tests {
             },
         )
         .unwrap();
-        assert!(String::from_utf8(mime)
-            .unwrap()
-            .contains("RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE;WKST=MO;COUNT=5\r\n"));
+        let text = String::from_utf8(mime).unwrap();
+        assert!(text.contains("RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE;WKST=MO;COUNT=5\r\n"));
+        assert!(text.contains("BEGIN:VTIMEZONE\r\nTZID:America/Toronto\r\n"));
+        assert!(text.contains("DTSTART;TZID=America/Toronto:20261125T100000\r\nDTEND;TZID=America/Toronto:20261125T110000\r\n"));
+
+        let rules = [
+            (
+                serde_json::json!({"frequency":"daily","interval":2}),
+                "FREQ=DAILY;INTERVAL=2",
+            ),
+            (
+                serde_json::json!({"frequency":"monthly","byMonthDay":[15]}),
+                "FREQ=MONTHLY;BYMONTHDAY=15",
+            ),
+            (
+                serde_json::json!({"frequency":"monthly","byDay":[{"day":"tu"}],"bySetPosition":[2]}),
+                "FREQ=MONTHLY;BYDAY=TU;BYSETPOS=2",
+            ),
+            (
+                serde_json::json!({"frequency":"yearly","byMonth":["3"],"byMonthDay":[12]}),
+                "FREQ=YEARLY;BYMONTHDAY=12;BYMONTH=3",
+            ),
+            (
+                serde_json::json!({"frequency":"yearly","byMonth":["3"],"byDay":[{"day":"tu"}],"bySetPosition":[2]}),
+                "FREQ=YEARLY;BYDAY=TU;BYMONTH=3;BYSETPOS=2",
+            ),
+        ];
+        for (rule, expected) in rules {
+            assert_eq!(counter_recurrence_rule(&rule, None).unwrap(), expected);
+        }
     }
 
     #[test]
-    fn series_counter_requires_utc_and_no_recurrence_exceptions() {
+    fn series_counter_allows_local_zones_but_rejects_recurrence_exceptions() {
         let base = serde_json::json!({
             "timeZone":"UTC",
             "recurrenceOverrides":{},
@@ -12994,7 +13102,7 @@ mod meeting_response_send_tests {
         assert!(series_counter_supported(&serde_json::json!({
             "recurrenceOverrides":{}
         })));
-        assert!(!series_counter_supported(&serde_json::json!({
+        assert!(series_counter_supported(&serde_json::json!({
             "timeZone":"America/Toronto",
             "recurrenceOverrides":{}
         })));
