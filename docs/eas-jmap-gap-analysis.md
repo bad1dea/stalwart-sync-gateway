@@ -37,6 +37,13 @@ started `2026-11-25T03:29:02Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. The container reports Tesseract `eng` and `osd` language
 data. Production remains at the 14.0 protocol default.
 
+Outlook `.msg` Find now falls back to bounded compressed-RTF decoding when
+plain text and HTML bodies are absent. The compressed and declared output sizes
+are checked against the existing 16 MiB limits before decompression. An
+upstream Outlook fixture verifies RTF text extraction and rejection of an
+oversized declared output. The focused regression and strict Clippy pass; the
+full suite passes 406 tests (76 ignored). Deployment verification will follow.
+
 Completed since reconciliation: **Task recurrence Add/Fetch**, including
 the encoded Sync command parser path, is now live-verified against the
 isolated Stalwart bridge. EAS Add creates a Task with the expected daily
@@ -140,7 +147,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
 2. **Find content coverage.** Current bounded extraction supports legacy `.xls`,
    binary Excel `.xlsb`,
    `.ppt`, and `.doc`, EPUB, macro-enabled OOXML, RFC 822 messages, Outlook `.msg`
-   attachments, ordinary ZIP archives with allowlisted text/config/source
+   attachments including compressed-RTF fallback, ordinary ZIP archives with allowlisted text/config/source
    files, and
    Word, Excel, and PowerPoint package comment text, plus
    MIME-declared charsets for text attachments and XML declaration encodings.

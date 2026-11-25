@@ -743,8 +743,50 @@ fn extract_outlook_msg_text(bytes: &[u8]) -> Option<String> {
     append_find_text(&mut output, &message.body)?;
     if !message.html.is_empty() {
         append_find_text(&mut output, &mail_parser::html_to_text(&message.html))?;
+    } else if message.body.is_empty() && !message.rtf_compressed.is_empty() {
+        append_find_text(&mut output, &extract_outlook_rtf_text(&message)?)?;
     }
     Some(output)
+}
+
+fn extract_outlook_rtf_text(message: &msg_parser::Outlook) -> Option<String> {
+    let rtf = decode_bounded_outlook_rtf(message)?;
+    if let Some(html) = message.html_from_rtf() {
+        Some(mail_parser::html_to_text(&html))
+    } else {
+        Some(super::rtf_to_plain_text(&String::from_utf8_lossy(&rtf)))
+    }
+}
+
+fn decode_bounded_outlook_rtf(message: &msg_parser::Outlook) -> Option<Vec<u8>> {
+    let hex_data = &message.rtf_compressed;
+    if hex_data.is_empty()
+        || !hex_data.len().is_multiple_of(2)
+        || hex_data.len() / 2 > MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES as usize
+    {
+        return None;
+    }
+    let mut compressed = Vec::with_capacity(hex_data.len() / 2);
+    let bytes = hex_data.as_bytes();
+    for index in (0..bytes.len()).step_by(2) {
+        let high = (bytes[index] as char).to_digit(16)? as u8;
+        let low = (bytes[index + 1] as char).to_digit(16)? as u8;
+        compressed.push((high << 4) | low);
+    }
+    if compressed.len() < 16 {
+        return None;
+    }
+    let compressed_size = u32::from_le_bytes(compressed[0..4].try_into().ok()?) as usize;
+    let uncompressed_size = u32::from_le_bytes(compressed[4..8].try_into().ok()?) as usize;
+    let magic = u32::from_le_bytes(compressed[8..12].try_into().ok()?);
+    if uncompressed_size > MAX_FIND_ATTACHMENT_TEXT_BYTES as usize
+        || compressed_size > compressed.len().saturating_sub(4)
+        || !matches!(magic, 0x7546_5A4C | 0x414C_454D)
+    {
+        return None;
+    }
+    let decompressed = message.rtf_decompressed()?;
+    (decompressed.len() <= MAX_FIND_ATTACHMENT_TEXT_BYTES as usize).then_some(decompressed)
 }
 
 fn append_find_text(output: &mut String, text: &str) -> Option<()> {
@@ -3380,6 +3422,29 @@ mod tests {
         let extracted = extract_find_attachment_text("application/vnd.ms-outlook", outlook)
             .expect("valid Outlook message should expose its subject");
         assert!(extracted.contains("creating an outlook message file"));
+        let parsed = msg_parser::Outlook::from_slice(outlook).unwrap();
+        let rtf = decode_bounded_outlook_rtf(&parsed)
+            .expect("fixture's compressed RTF should be decoded within limits");
+        assert!(String::from_utf8_lossy(&rtf)
+            .to_ascii_lowercase()
+            .contains("this message is created by aspose.email"));
+        assert!(extract_outlook_rtf_text(&parsed)
+            .unwrap()
+            .contains("This message is created by Aspose.Email"));
+        let mut oversized_header = Vec::new();
+        oversized_header.extend_from_slice(&12u32.to_le_bytes());
+        oversized_header
+            .extend_from_slice(&((MAX_FIND_ATTACHMENT_TEXT_BYTES as u32) + 1).to_le_bytes());
+        oversized_header.extend_from_slice(&0x7546_5A4Cu32.to_le_bytes());
+        oversized_header.extend_from_slice(&0u32.to_le_bytes());
+        let oversized_hex: String = oversized_header
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let mut oversized_value = serde_json::to_value(&parsed).unwrap();
+        oversized_value["rtf_compressed"] = serde_json::Value::String(oversized_hex);
+        let oversized: msg_parser::Outlook = serde_json::from_value(oversized_value).unwrap();
+        assert!(decode_bounded_outlook_rtf(&oversized).is_none());
         let extracted = extract_find_attachment_text(
             "message/global",
             b"From: sender@example.test\r\nSubject: delta\r\n\r\nbody epsilon",
