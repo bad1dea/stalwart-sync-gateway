@@ -87,7 +87,11 @@ Find's extracted-text and generic ZIP expansion limits now both match the
 16 MiB attachment download ceiling. Exact 16 MiB and over-limit boundaries
 are tested; EAS Find matches exact NEAR terms in 12 MiB plain-text and expanded
 ZIP attachments. The full suite, strict Clippy, formatting, and diff checks
-pass.
+pass. Deployed as `deploy-2026-11-25-eas-find-16mb-extract-1730245`;
+Homelab commit `4c22112`, image
+`sha256:0d757e377c26519c0c080d231304335fcace4e700981cc527536f30d4c4cdb33`,
+started `2026-11-25T02:42:18Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. Production retains the 14.0 protocol default.
 
 Remaining 16.1 readiness backlog (ordered by runtime impact):
 
