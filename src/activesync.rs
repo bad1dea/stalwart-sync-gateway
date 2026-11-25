@@ -4972,7 +4972,10 @@ fn write_email_fields(
     let meeting_request = email
         .meeting_request
         .as_ref()
-        .filter(|_| matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1))
+        .filter(|meeting| {
+            matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1)
+                || eas_global_obj_id(&meeting.uid).is_some()
+        })
         .and_then(|meeting| {
             calendar_time_zone_blob(&meeting.time_zone, meeting.start.as_deref())
                 .map(|time_zone| (meeting, time_zone))
@@ -4990,7 +4993,7 @@ fn write_email_fields(
         },
     );
     if let Some((meeting_request, time_zone)) = meeting_request {
-        write_email_meeting_request(builder, meeting_request, &time_zone);
+        write_email_meeting_request(builder, meeting_request, &time_zone, version);
     }
     if !email.reply_to.is_empty() {
         builder.leaf(mail::REPLY_TO, email.reply_to);
@@ -5210,6 +5213,7 @@ fn write_email_meeting_request(
     builder: &mut wbxml::eas::DocumentBuilder,
     meeting: &crate::model::EmailMeetingRequest,
     time_zone: &str,
+    version: ProtocolVersion,
 ) {
     use wbxml::eas::{airsync_base as base, calendar, email as mail, email2};
 
@@ -5288,18 +5292,60 @@ fn write_email_meeting_request(
         builder.end();
         builder.end();
     }
-    if let Some(location) = &meeting.location {
-        builder.start(base::LOCATION);
-        builder.leaf(base::DISPLAY_NAME, location.clone());
-        builder.end();
+    if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
+        if let Some(location) = &meeting.location {
+            builder.start(base::LOCATION);
+            builder.leaf(base::DISPLAY_NAME, location.clone());
+            builder.end();
+        }
+        builder.leaf(calendar::UID, meeting.uid.clone());
+    } else {
+        if let Some(location) = &meeting.location {
+            builder.leaf(mail::LOCATION, location.clone());
+        }
+        if let Some(global_obj_id) = eas_global_obj_id(&meeting.uid) {
+            builder.leaf(mail::GLOBAL_OBJ_ID, global_obj_id);
+        }
     }
     builder.leaf(mail::TIME_ZONE, time_zone.to_owned());
-    builder.leaf(calendar::UID, meeting.uid.clone());
-    builder.leaf(
-        email2::MEETING_MESSAGE_TYPE,
-        meeting.meeting_message_type.to_string(),
-    );
+    if matches!(
+        version,
+        ProtocolVersion::V14_1 | ProtocolVersion::V16_0 | ProtocolVersion::V16_1
+    ) {
+        builder.leaf(
+            email2::MEETING_MESSAGE_TYPE,
+            meeting.meeting_message_type.to_string(),
+        );
+    }
     builder.end();
+}
+
+fn eas_global_obj_id(uid: &str) -> Option<String> {
+    const CLASS_ID: [u8; 16] = [
+        0x04, 0x00, 0x00, 0x00, 0x82, 0x00, 0xe0, 0x00, 0x74, 0xc5, 0xb7, 0x10, 0x1a, 0x82, 0xe0,
+        0x08,
+    ];
+    const VCAL_UID: &[u8] = b"vCal-Uid";
+    const VERSION: [u8; 4] = [1, 0, 0, 0];
+    // Bound data derived from a remote calendar before allocating/encoding it.
+    if uid.is_empty() || uid.len() > 65_535 {
+        return None;
+    }
+    let data_len = VCAL_UID
+        .len()
+        .checked_add(VERSION.len())?
+        .checked_add(uid.len())?
+        .checked_add(1)?;
+    let data_len = u32::try_from(data_len).ok()?;
+    let mut bytes = Vec::with_capacity(40 + data_len as usize);
+    bytes.extend_from_slice(&CLASS_ID);
+    bytes.extend_from_slice(&[0; 20]); // master instance date and stable vCal timestamp/reserved bytes
+    bytes.extend_from_slice(&data_len.to_le_bytes());
+    bytes.extend_from_slice(VCAL_UID);
+    bytes.extend_from_slice(&VERSION);
+    bytes.extend_from_slice(uid.as_bytes());
+    bytes.push(0);
+    Some(bytes.iter().map(|byte| format!("{byte:02X}")).collect())
 }
 
 /// See the call site's doc comment in `write_email_fields` for the full
@@ -10786,7 +10832,7 @@ mod tests {
     }
 
     #[test]
-    fn meeting_request_writes_required_16x_fields_and_is_omitted_on_14() {
+    fn meeting_request_writes_versioned_fields_for_16x_and_14x() {
         use crate::wbxml::eas::{self, airsync_base as base, calendar, email as mail, email2};
         use base64::Engine as _;
 
@@ -10934,19 +10980,68 @@ mod tests {
         write_email_fields(
             &mut legacy_builder,
             "invitation",
-            email,
+            email.clone(),
             None,
             ProtocolVersion::V14_0,
         );
         let legacy = legacy_builder.finish();
         assert_eq!(
             eas::find_text_after(&legacy, mail::MESSAGE_CLASS),
-            Some("IPM.Note")
+            Some("IPM.Schedule.Meeting.Request")
         );
-        assert!(!legacy
+        assert!(legacy
             .nodes
             .iter()
             .any(|node| matches!(node, Node::Start(token) if token == &mail::MEETING_REQUEST)));
+        assert_eq!(
+            eas::find_text_after(&legacy, mail::GLOBAL_OBJ_ID),
+            Some("040000008200E00074C5B7101A82E0080000000000000000000000000000000000000000250000007643616C2D556964010000006D656574696E672D756964406578616D706C652E7465737400")
+        );
+        assert_eq!(
+            eas::find_text_after(&legacy, mail::LOCATION),
+            Some("Room 42")
+        );
+        assert_eq!(eas::find_text_after(&legacy, calendar::UID), None);
+        assert_eq!(
+            eas::find_text_after(&legacy, email2::MEETING_MESSAGE_TYPE),
+            None
+        );
+        assert!(!legacy.nodes.iter().any(|node| matches!(node,
+            Node::Start(token) if token == &base::LOCATION
+        )));
+
+        let mut v141_builder = DocumentBuilder::new();
+        write_email_fields(
+            &mut v141_builder,
+            "invitation",
+            email,
+            None,
+            ProtocolVersion::V14_1,
+        );
+        let v141 = v141_builder.finish();
+        assert_eq!(
+            eas::find_text_after(&v141, email2::MEETING_MESSAGE_TYPE),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn eas_global_obj_id_matches_microsoft_vcal_uid_example_and_rejects_unbounded_uid() {
+        use base64::Engine as _;
+
+        let uid = "{81412D3C-2A24-4E9D-B20E-11F7BBE92799}";
+        let expected = base64::engine::general_purpose::STANDARD
+            .decode("BAAAAIIA4AB0xbcQGoLgCAAAAAAAAAAAAAAAAAAAAAAAAAAAMwAAAHZDYWwtVWlkAQAAAHs4MTQxMkQzQy0yQTI0LTRFOUQtQjIwRS0xMUY3QkJFOTI3OTl9AA==")
+            .unwrap()
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<String>();
+        assert_eq!(
+            super::eas_global_obj_id(uid).as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(super::eas_global_obj_id(""), None);
+        assert_eq!(super::eas_global_obj_id(&"x".repeat(65_536)), None);
     }
 
     #[test]
