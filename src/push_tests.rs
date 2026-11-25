@@ -14244,6 +14244,21 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         .write_all(b"sierra tango from a source archive")
         .unwrap();
     let zip_attachment = zip_archive.finish().unwrap().into_inner();
+    let mut expanded_zip_archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    expanded_zip_archive
+        .start_file(
+            "project/README.md",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+    expanded_zip_archive
+        .write_all(&vec![b'x'; 3 * 1024 * 1024])
+        .unwrap();
+    expanded_zip_archive
+        .write_all(b" victor whiskey beyond the old ZIP budget")
+        .unwrap();
+    let expanded_zip_attachment = expanded_zip_archive.finish().unwrap().into_inner();
+    assert!(expanded_zip_attachment.len() < 16 * 1024 * 1024);
     let mut epub_archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     epub_archive
         .start_file(
@@ -14281,6 +14296,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     env.mock.add_mail("inbox", "outlook-msg-attachment");
     env.mock.add_mail("inbox", "yaml-attachment");
     env.mock.add_mail("inbox", "zip-attachment");
+    env.mock.add_mail("inbox", "expanded-zip-attachment");
     env.mock.mail_bodies.lock().unwrap().insert(
         "text-attachment".to_owned(),
         ("unrelated body".to_owned(), false),
@@ -14516,6 +14532,21 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         "zip-blob".to_owned(),
         ("application/zip".to_owned(), zip_attachment),
     );
+    env.mock.mail_bodies.lock().unwrap().insert(
+        "expanded-zip-attachment".to_owned(),
+        ("unrelated body".to_owned(), false),
+    );
+    env.mock.mail_attachments.lock().unwrap().insert(
+        "expanded-zip-attachment".to_owned(),
+        vec![serde_json::json!({
+            "blobId":"expanded-zip-blob", "name":"expanded-project.zip",
+            "type":"application/zip", "size":expanded_zip_attachment.len()
+        })],
+    );
+    env.mock.download_blobs.lock().unwrap().insert(
+        "expanded-zip-blob".to_owned(),
+        ("application/zip".to_owned(), expanded_zip_attachment),
+    );
     let mut oversized_text = vec![b'x'; 2 * 1024 * 1024 + 1];
     oversized_text[..10].copy_from_slice(b"alpha beta");
     env.mock.download_blobs.lock().unwrap().insert(
@@ -14584,6 +14615,25 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     assert_eq!(
         eas::find_all_text_after(&doc, air::SERVER_ID),
         vec!["zip-attachment"]
+    );
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "30000000-0000-4000-8000-000000000097",
+            "victor NEAR(0) whiskey",
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["expanded-zip-attachment"]
     );
 
     let response = env

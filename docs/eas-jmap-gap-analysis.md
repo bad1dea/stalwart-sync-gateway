@@ -28,11 +28,12 @@ started `2026-11-25T01:44:23Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. Production has no protocol-version override and retains the
 14.0 default.
 
-Find permits up to 8 MiB of extracted attachment text and downloads attachments
-up to 8 MiB; generic ZIP expansion remains 2 MiB. Exact and over-limit text
-boundaries are covered, and a 6 MiB plain-text attachment is found by an exact
-NEAR query. The full suite passes 404 tests (75 ignored), strict Clippy passes,
-and the real scanned-PDF OCR test passes. Deployed as
+Find permits up to 8 MiB of extracted attachment text, downloads attachments
+up to 16 MiB, and expands generic ZIP entries up to 8 MiB. Exact and over-limit
+text boundaries are covered, and a 6 MiB plain-text attachment is found by an
+exact NEAR query. The full suite passes 404 tests (75 ignored), strict Clippy
+passes, and the real scanned-PDF OCR test passes. The text-cap change is
+deployed as
 `deploy-2026-11-25-eas-find-8mb-text-0f5c90c`; Homelab commit `589dbd9`, image
 `sha256:18092476150a2781c8bc06424780f7eb50bdf66c32cdd99f387ea8893248cf6a`,
 started `2026-11-25T01:53:44Z`, restart count zero, `/healthz` `ok`, and
@@ -42,7 +43,17 @@ The download ceiling is now 16 MiB while extracted text remains capped at
 8 MiB. A 12 MiB OOXML package is searchable, while a metadata-declared
 attachment above 16 MiB is verified to be skipped before download. The full
 suite passes 404 tests (75 ignored); strict Clippy, formatting, and diff checks
-pass.
+pass. Deployed as `deploy-2026-11-25-eas-find-16mb-input-a569207`; Homelab
+commit `65735eb`, image
+`sha256:d4f8502b4a4e4b9c3cc04f57fb08cc89a953ed8fefbef9c49763d4f8a5ee6611`,
+started `2026-11-25T02:00:32Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. Production retains the 14.0 protocol default.
+
+Generic ZIP extraction now permits up to 8 MiB of expanded allowlisted content,
+matching the extracted-text ceiling. Exact and over-limit archive boundaries
+are tested, and a 3 MiB expanded ZIP is searchable through Find. The full suite
+passes 404 tests (75 ignored), strict Clippy passes, and formatting and diff
+checks pass.
 
 Remaining 16.1 readiness backlog (ordered by runtime impact):
 

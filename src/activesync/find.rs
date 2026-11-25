@@ -114,7 +114,7 @@ const MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FIND_PDF_OCR_PAGES: u32 = 3;
 const MAX_FIND_PDF_OCR_EDGE: u32 = 1600;
 const MAX_FIND_ARCHIVE_ENTRIES: usize = 4096;
-const MAX_FIND_ARCHIVE_EXPANDED_BYTES: usize = 2 * 1024 * 1024;
+const MAX_FIND_ARCHIVE_EXPANDED_BYTES: usize = 8 * 1024 * 1024;
 static FIND_PDF_OCR_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 pub(super) async fn handle(
@@ -837,7 +837,18 @@ fn extract_archive_text(bytes: &[u8], media_type: &str) -> Option<String> {
         } else {
             extract_xml_text(&xml)?
         };
-        output.push(' ');
+        let separator_bytes = usize::from(!output.is_empty());
+        if output
+            .len()
+            .saturating_add(separator_bytes)
+            .saturating_add(text.len())
+            > MAX_FIND_ATTACHMENT_TEXT_BYTES as usize
+        {
+            return None;
+        }
+        if separator_bytes != 0 {
+            output.push(' ');
+        }
         output.push_str(&text);
     }
     found.then_some(output)
@@ -3354,8 +3365,23 @@ mod tests {
     }
 
     #[test]
-    fn generic_zip_expansion_limit_is_independent_of_text_output_limit() {
+    fn generic_zip_expansion_limit_matches_text_output_limit() {
         use std::io::Write;
+
+        let mut exact_zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        exact_zip
+            .start_file("exact.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        exact_zip
+            .write_all(&vec![b'x'; MAX_FIND_ARCHIVE_EXPANDED_BYTES])
+            .unwrap();
+        let exact_zip = exact_zip.finish().unwrap().into_inner();
+        assert_eq!(
+            extract_archive_text(&exact_zip, "application/zip")
+                .unwrap()
+                .len(),
+            MAX_FIND_ARCHIVE_EXPANDED_BYTES
+        );
 
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         zip.start_file("large.txt", zip::write::SimpleFileOptions::default())
