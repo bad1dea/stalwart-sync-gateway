@@ -20,15 +20,19 @@ all-day state, the required 172-byte `TimeZone`, `Calendar:UID`,
 `AirSyncBase:Location`, and `MeetingMessageType` (1 for a new request, 2 when
 the JMAP sequence is nonzero). Older protocol versions keep the normal email
 shape because the legacy `GlobalObjId` conversion is not implemented. The
-optional `Organizer`, `Recurrences`, `Reminder`, `ResponseRequested`,
+optional `Recurrences`, `Reminder`, `ResponseRequested`,
 `Sensitivity`, `BusyStatus`, `DisallowNewTimeProposal`, and 16.1
 `ProposedStartTime`/`ProposedEndTime` fields remain unmapped. The full suite
-passes 457 tests (77 ignored), including mailbox-query-to-JMAP-parse and WBXML
-writer regressions; strict Clippy, formatting, and diff checks pass. Isolated
-deployment and real-client validation are still pending. Sources: Microsoft
+passes 458 tests (77 ignored), including mailbox-query-to-JMAP-parse,
+organizer mapping, and WBXML writer regressions; strict Clippy, formatting, and
+diff checks pass. The optional `Organizer` maps the JMAP participant with the
+`owner` role to its display name, falling back to email, and emits
+Email:Organizer. This addition is awaiting deployment; real-client validation
+remains pending. Sources: Microsoft
 [Receiving and Accepting Meeting
 Requests](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/9e79c273-3d4e-4b42-a635-d7b11266ab59)
-and [MS-ASEMAIL MeetingRequest](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/0bc0a4c7-2391-428d-b2c1-471c6695d1df).
+and [MS-ASEMAIL MeetingRequest](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/0bc0a4c7-2391-428d-b2c1-471c6695d1df),
+which defines Organizer as an optional string element.
 
 MeetingResponse now gates `ProposedStartTime` and `ProposedEndTime` to EAS
 16.1. `SendResponse` remains available in 16.0 and 16.1, but a proposal on
@@ -410,8 +414,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    2026-11-25 found the isolated gateway on Amy at `100.64.0.50:18090`, backed
    by `eas16-clean-stalwart` on its separate `eas16-interop-net`; `/healthz`
    and `/readyz` returned `ok` and `ready`, with zero restarts. The running
-   latest image is `localhost/eas16-isolated:0ccc794`, started
-   `2026-11-25T09:51:26.192273972Z`, with zero restarts. Its Compose environment omits
+   latest image was `localhost/eas16-isolated:0ccc794`, started
+   `2026-11-25T09:51:26.192273972Z`, with zero restarts. Its Compose environment omitted
    `EAS_MAX_PROTOCOL_VERSION`, so the gateway defaults to 14.0. The former Homelab test service was
    decommissioned in commit `6051729`; the live temporary stack is outside
    that checkout. Before real-client validation, explicitly set the isolated

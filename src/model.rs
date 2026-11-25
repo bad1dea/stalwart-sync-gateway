@@ -89,6 +89,7 @@ pub struct Email {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmailMeetingRequest {
     pub uid: String,
+    pub organizer: Option<String>,
     pub dtstamp: String,
     pub start: Option<String>,
     pub end: Option<String>,

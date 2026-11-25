@@ -5224,6 +5224,9 @@ fn write_email_meeting_request(
     if let Some(end) = &meeting.end {
         builder.leaf(mail::END_TIME, eas_datetime(end));
     }
+    if let Some(organizer) = &meeting.organizer {
+        builder.leaf(mail::ORGANIZER, organizer.clone());
+    }
     if let Some(location) = &meeting.location {
         builder.start(base::LOCATION);
         builder.leaf(base::DISPLAY_NAME, location.clone());
@@ -10750,6 +10753,7 @@ mod tests {
             thread_id: None,
             meeting_request: Some(crate::model::EmailMeetingRequest {
                 uid: "meeting-uid@example.test".to_owned(),
+                organizer: Some("Meeting Host".to_owned()),
                 dtstamp: "2026-11-25T14:00:00Z".to_owned(),
                 start: Some("2026-12-01T15:00:00Z".to_owned()),
                 end: Some("2026-12-01T16:00:00Z".to_owned()),
@@ -10781,6 +10785,10 @@ mod tests {
         assert_eq!(
             eas::find_text_after(&document, mail::DTSTAMP),
             Some("20261125T140000Z")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, mail::ORGANIZER),
+            Some("Meeting Host")
         );
         assert_eq!(
             eas::find_text_after(&document, email2::MEETING_MESSAGE_TYPE),

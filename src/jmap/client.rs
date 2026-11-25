@@ -8424,6 +8424,17 @@ fn email_meeting_request_from_event(
     }) {
         return None;
     }
+    let organizer = participants.values().find_map(|participant| {
+        (participant["roles"]["owner"] == true)
+            .then(|| {
+                participant["name"]
+                    .as_str()
+                    .filter(|name| !name.trim().is_empty())
+                    .or_else(|| participant["email"].as_str())
+                    .map(str::to_owned)
+            })
+            .flatten()
+    });
     let dtstamp = calendar_event_time_to_eas(event["updated"].as_str()?, "Etc/UTC")?;
     let start_value = event["start"].as_str();
     let time_zone = match event["timeZone"].as_str() {
@@ -8452,6 +8463,7 @@ fn email_meeting_request_from_event(
     });
     Some(EmailMeetingRequest {
         uid: uid.to_owned(),
+        organizer,
         dtstamp,
         start,
         end,
@@ -8483,6 +8495,7 @@ mod meeting_request_conversion_tests {
         });
         let request = email_meeting_request_from_event(&event, "attendee@example.test").unwrap();
         assert_eq!(request.uid, "meeting@example.test");
+        assert_eq!(request.organizer, None);
         assert_eq!(request.dtstamp, "20261125T140000Z");
         assert_eq!(request.start.as_deref(), Some("20261201T150000Z"));
         assert_eq!(request.end.as_deref(), Some("20261201T160000Z"));
@@ -8504,6 +8517,31 @@ mod meeting_request_conversion_tests {
                 .meeting_message_type,
             2
         );
+    }
+
+    #[test]
+    fn maps_calendar_owner_to_meeting_request_organizer() {
+        let event = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"u",
+            "updated":"2026-11-25T14:00:00Z", "timeZone":"Etc/UTC",
+            "participants":{
+                "owner":{"name":"Meeting Host","email":"host@example.test","roles":{"owner":true}},
+                "attendee":{"email":"attendee@example.test","roles":{"attendee":true}}
+            }
+        });
+        let request = email_meeting_request_from_event(&event, "attendee@example.test").unwrap();
+        assert_eq!(request.organizer.as_deref(), Some("Meeting Host"));
+
+        let fallback = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"u",
+            "updated":"2026-11-25T14:00:00Z", "timeZone":"Etc/UTC",
+            "participants":{
+                "owner":{"email":"host@example.test","roles":{"owner":true}},
+                "attendee":{"email":"attendee@example.test","roles":{"attendee":true}}
+            }
+        });
+        let request = email_meeting_request_from_event(&fallback, "attendee@example.test").unwrap();
+        assert_eq!(request.organizer.as_deref(), Some("host@example.test"));
     }
 
     #[test]
