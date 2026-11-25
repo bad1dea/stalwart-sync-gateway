@@ -4339,68 +4339,22 @@ impl JmapClient {
         uid: &str,
         recurrence_key: Option<&str>,
     ) -> anyhow::Result<Option<(String, String)>> {
-        let account_id = auth
-            .session
-            .primary_account_for(capabilities::CALENDARS)
-            .context("JMAP Calendars capability is unavailable")?;
-        let response: JmapResponse<serde_json::Value> = self
-            .api_call(
+        let events: Vec<CalendarEventObject> = self
+            .query_objects(
                 auth,
-                &[
-                    capabilities::CORE.to_owned(),
-                    capabilities::CALENDARS.to_owned(),
-                ],
-                vec![
-                    MethodCall::new(
-                        "CalendarEvent/query",
-                        serde_json::json!({"accountId":account_id,"filter":{"uid":uid},"limit":2}),
-                        "q",
-                    ),
-                    MethodCall::new(
-                        "CalendarEvent/get",
-                        serde_json::json!({
-                            "accountId":account_id,
-                            "#ids":{"resultOf":"q","name":"CalendarEvent/query","path":"/ids"},
-                            "properties":["id","@type","participants","iCalendar"]
-                        }),
-                        "g",
-                    ),
-                ],
+                capabilities::CALENDARS,
+                "CalendarEvent",
+                serde_json::json!({"uid":uid}),
+                Some(&["id", "@type", "uid", "participants", "iCalendar"]),
+                2,
             )
             .await?;
-        let query = response
-            .method_responses
-            .iter()
-            .find(|method| method.0 == "CalendarEvent/query")
-            .context("calendar proposal query failed")?;
-        let ids = query.1["ids"]
-            .as_array()
-            .context("calendar proposal query omitted ids")?;
-        if ids.len() != 1 {
-            return Ok(None);
+        match events.as_slice() {
+            [event] if event.uid.as_deref() == Some(uid) => Ok(
+                calendar_counter_proposal_from_event(event, auth.username(), recurrence_key),
+            ),
+            [] | [_] | [_, _, ..] => Ok(None),
         }
-        let event_id = ids[0]
-            .as_str()
-            .context("calendar proposal query returned an invalid id")?;
-        let get = response
-            .method_responses
-            .iter()
-            .find(|method| method.0 == "CalendarEvent/get")
-            .context("calendar proposal read failed")?;
-        let events: Vec<CalendarEventObject> = serde_json::from_value(
-            get.1
-                .get("list")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!([])),
-        )?;
-        let Some(event) = events.iter().find(|event| event.id == event_id) else {
-            return Ok(None);
-        };
-        Ok(calendar_counter_proposal_from_event(
-            event,
-            auth.username(),
-            recurrence_key,
-        ))
     }
 
     async fn verify_calendar_coordinates(
@@ -9637,20 +9591,30 @@ mod email_meeting_request_fetch_tests {
                         2 => {
                             assert_eq!(call[0], "CalendarEvent/query");
                             assert_eq!(call[1]["filter"]["uid"], "meeting@example.test");
-                            assert_eq!(request["methodCalls"][1][0], "CalendarEvent/get");
-                            Json(serde_json::json!({"methodResponses":[
-                                ["CalendarEvent/query", {"ids":["event"],"queryState":"q"}, "q"],
-                                ["CalendarEvent/get", {"list":[{
-                                    "id":"event","@type":"Event","uid":"meeting@example.test",
-                                    "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}},
-                                    "iCalendar":{"properties":[
-                                        [proposal_start_name, {}, "date-time", "2026-12-01T15:30:00Z"],
-                                        [proposal_end_name, {}, "date-time", "2026-12-01T16:30:00Z"],
-                                        [occurrence_start_name, {}, "date-time", "2026-12-01T17:30:00Z"],
-                                        [occurrence_end_name, {}, "date-time", "2026-12-01T18:30:00Z"]
-                                    ]}
-                                }]}, "g"]
-                            ]}))
+                            Json(serde_json::json!({"methodResponses":[[
+                                "error", {"type":"serverUnavailable"}, "q"
+                            ]]}))
+                        }
+                        3 => {
+                            assert_eq!(call[0], "CalendarEvent/get");
+                            assert!(call[1]["ids"].is_null());
+                            assert!(call[1]["properties"].as_array().unwrap().contains(&
+                                serde_json::json!("iCalendar")
+                            ));
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/get", {"list":[
+                                    {
+                                        "id":"event","@type":"Event","uid":"meeting@example.test",
+                                        "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}},
+                                        "iCalendar":{"properties":[
+                                            [proposal_start_name, {}, "date-time", "2026-12-01T15:30:00Z"],
+                                            [proposal_end_name, {}, "date-time", "2026-12-01T16:30:00Z"],
+                                            [occurrence_start_name, {}, "date-time", "2026-12-01T17:30:00Z"],
+                                            [occurrence_end_name, {}, "date-time", "2026-12-01T18:30:00Z"]
+                                        ]}
+                                    }
+                                ]}, "all"
+                            ]]}))
                         }
                         _ => panic!("unexpected JMAP call: {}", request["methodCalls"]),
                     }
@@ -9720,7 +9684,7 @@ mod email_meeting_request_fetch_tests {
             Some("Room 42")
         );
         assert_eq!(request.disallow_new_time_proposal, Some(true));
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
         server.abort();
     }
 }
