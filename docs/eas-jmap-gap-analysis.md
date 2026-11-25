@@ -32,6 +32,11 @@ suite: 439 passed, 77 ignored; strict Clippy, formatting, and diff checks pass.
 This enforces the schema's single-value limits in Microsoft's
 [OofState](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/6703328d-6828-457f-ba98-2b6df712775c)
 and [EndTime](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/6ee7533d-303d-4967-b0d8-82a3b51ce242) definitions.
+Deployed to the isolated Amy bridge as
+`localhost/eas16-isolated:e089eed` (image
+`sha256:8444c477eb92c22f1b6ac501d19e16354adf9a4665a5de222ed6073760453ff9`),
+started `2026-11-25T08:59:18.03984349Z`, restart count zero, `/healthz` `ok`,
+and `/readyz` `ready`. The protocol override remains unset, preserving 14.0.
 
 Calendar recurrence mapping now treats EAS `WeekOfMonth=5` with
 `DayOfWeek=127` as the last day of the month for both monthly and yearly
@@ -300,8 +305,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    2026-11-25 found the isolated gateway on Amy at `100.64.0.50:18090`, backed
    by `eas16-clean-stalwart` on its separate `eas16-interop-net`; `/healthz`
    and `/readyz` returned `ok` and `ready`, with zero restarts. The running
-   latest image was `localhost/eas16-isolated:e89bd36`, started
-   `2026-11-25T08:47:17.399590203Z`. Its Compose environment omits
+   latest image is `localhost/eas16-isolated:e089eed`, started
+   `2026-11-25T08:59:18.03984349Z`, with zero restarts. Its Compose environment omits
    `EAS_MAX_PROTOCOL_VERSION`, so the gateway defaults to 14.0. The former Homelab test service was
    decommissioned in commit `6051729`; the live temporary stack is outside
    that checkout. Before real-client validation, explicitly set the isolated
