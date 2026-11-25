@@ -18,9 +18,10 @@ The spec's own overview lays out the intended command sequence:
    Autodiscover and advertises the configured `EAS_PUBLIC_URL`. The former
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
-   `100.64.0.50:18090`, backed by isolated Stalwart. Its current gateway image
-   is `4446b80` (`sha256:5d16a76bcbc9ae089cd33bf299cd5f24d7ac528fbf9fb6b1445b831ce5e9b7e9`),
-   started `2026-11-25T13:45:33.108547343Z` with zero restarts. `/healthz`
+   `100.64.0.50:18090`, backed by isolated Stalwart. Its current source is
+   `7e6769d`, image `localhost/eas16-isolated:7e6769d`
+   (`sha256:6fc022f20edb23d19a69f84efebdf51449c3d4fca12955e9e3ee43faf4338023`),
+   started `2026-11-25T14:05:35.18567853Z` with zero restarts. `/healthz`
    and `/readyz` returned HTTP 200; the Compose environment leaves
    `EAS_MAX_PROTOCOL_VERSION` unset, so it still defaults to EAS 14.0.
    Set the variable to 16.1 during the planned client test window.
@@ -293,6 +294,13 @@ JSCalendar's
 `participationComment` is an RSVP note, not the
 outgoing email body, so the two are not treated as equivalent
 ([RFC 8984 §4.4.6](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6)).
+Counter proposals submitted through `MeetingResponse` are now retained as
+gateway-owned iCalendar extension properties on the corresponding
+CalendarEvent. Each pair is keyed by attendee and series/occurrence, read back
+before the reply is sent, and emitted as Calendar `Attendee` proposal fields
+only for EAS 16.1. The incoming mail `MeetingRequest` proposal fields still
+have no source mapping; event start/end are not substituted for attendee
+proposals.
 
 ResolveRecipients Availability (introduced in EAS 14.0) now uses JMAP
 `Principal/getAvailability` for exact recipients and returns the required
