@@ -220,7 +220,8 @@ closed. Excluded instances map to EXDATE; positive recurrence overrides fail
 closed pending exception VEVENT serialization. VTIMEZONE and EXDATE support
 are deployed to the isolated bridge at the 14.0 default. Custom replies now
 include attendees with supported participation statuses; unsupported statuses
-fail closed. This attendee-list change is in source and awaiting deployment.
+fail closed. The attendee-list update is deployed to the isolated bridge at the
+14.0 default.
 JSCalendar's
 `participationComment` is an RSVP note, not the
 outgoing email body, so the two are not treated as equivalent

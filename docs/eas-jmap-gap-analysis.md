@@ -1905,8 +1905,11 @@ Compose built image
 `sha256:3e60bf151cf5b386a50cb564f9f899e8f327f8bf3b84070c2dee11908045e9d8`.
 The container started at `2026-11-23T03:25:57Z` with restart count zero; mesh
 `/healthz` returned `ok` and `/readyz` returned `ready`.
-Attendee preservation is implemented in source and is awaiting isolated
-deployment; the current bridge remains at the 14.0 protocol default.
+Attendee preservation is deployed to the isolated Amy bridge as
+`localhost/eas16-isolated:4b1d70e` (image
+`sha256:a3b1a00a4038a876198c5d42c38683b0ad702f4fb77b78c095472ab1eba60395`),
+started `2026-11-25T08:06:11Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. The Compose environment still omits a protocol override.
 
 Also completed: **ActiveSync contact account name**. Contacts2 `AccountName`
 round-trips as a separately labeled JSContact `onlineServices` user entry
