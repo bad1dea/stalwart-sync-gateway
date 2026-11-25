@@ -164,6 +164,8 @@ remain unsupported. `Regenerate=0` is accepted and omitted on response, which
 means the protocol default; `Regenerate=1` is rejected because JSCalendar has
 no matching regeneration behavior. A completed recurring Task requires a
 nonzero `DeadOccur`, and the response includes `DeadOccur=1` for that case.
+Partial completion changes that omit `Recurrence` also check the stored JMAP
+Task's recurrence rule and fail without writing if it is recurring.
 
 ## Notes (MS-ASNOTE, WBXML codepage 23)
 

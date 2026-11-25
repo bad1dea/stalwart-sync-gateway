@@ -5565,7 +5565,8 @@ impl JmapClient {
             || fields.utc_start_date.is_some()
             || fields.reminder_set.is_some()
             || fields.reminder_time.is_some()
-            || fields.recurrence_present;
+            || fields.recurrence_present
+            || (fields.complete == Some(true) && !fields.recurrence_present);
         let mut timezone = None;
         let mut current_alerts = serde_json::Value::Null;
         let mut use_default_alerts = false;
@@ -5580,7 +5581,7 @@ impl JmapClient {
                     vec![MethodCall::new(
                         "CalendarEvent/get",
                         serde_json::json!({
-                            "accountId":account_id,"ids":[id],"properties":["id","timeZone","alerts","useDefaultAlerts"]
+                            "accountId":account_id,"ids":[id],"properties":["id","timeZone","alerts","useDefaultAlerts","progress","recurrenceRule"]
                         }),
                         "0",
                     )],
@@ -5601,6 +5602,11 @@ impl JmapClient {
                 .as_array()
                 .and_then(|list| list.iter().find(|item| item["id"] == id))
                 .context("task not found")?;
+            validate_task_completion_recurrence(
+                fields,
+                item.get("progress").and_then(serde_json::Value::as_str),
+                item.get("recurrenceRule"),
+            )?;
             timezone = match item.get("timeZone") {
                 None | Some(serde_json::Value::Null) => None,
                 Some(zone) => Some(zone.as_str().context("invalid task time zone")?.to_owned()),
@@ -10175,6 +10181,21 @@ fn try_task_from_object(value: TaskObject) -> anyhow::Result<Task> {
     })
 }
 
+fn validate_task_completion_recurrence(
+    fields: &crate::wbxml::eas::TaskFields,
+    existing_progress: Option<&str>,
+    existing_recurrence: Option<&serde_json::Value>,
+) -> anyhow::Result<()> {
+    if fields.complete == Some(true)
+        && existing_progress != Some("completed")
+        && !fields.recurrence_present
+        && existing_recurrence.is_some_and(|rule| !rule.is_null())
+    {
+        anyhow::bail!("completing a recurring Task requires Recurrence/DeadOccur");
+    }
+    Ok(())
+}
+
 fn eas_importance_to_jmap(importance: &str) -> Option<u8> {
     match importance {
         "0" => Some(9),
@@ -10765,6 +10786,43 @@ mod tests {
         }))
         .unwrap();
         assert!(super::try_task_from_object(task).is_err());
+    }
+
+    #[test]
+    fn completing_stored_recurring_task_requires_recurrence_block() {
+        let recurring = serde_json::json!({"frequency":"weekly"});
+        let fields = crate::wbxml::eas::TaskFields {
+            complete: Some(true),
+            ..Default::default()
+        };
+        assert!(super::validate_task_completion_recurrence(
+            &fields,
+            Some("needs-action"),
+            Some(&recurring)
+        )
+        .is_err());
+
+        assert!(super::validate_task_completion_recurrence(
+            &fields,
+            Some("completed"),
+            Some(&recurring)
+        )
+        .is_ok());
+        assert!(
+            super::validate_task_completion_recurrence(&fields, Some("needs-action"), None).is_ok()
+        );
+
+        let explicit_recurrence = crate::wbxml::eas::TaskFields {
+            complete: Some(true),
+            recurrence_present: true,
+            ..Default::default()
+        };
+        assert!(super::validate_task_completion_recurrence(
+            &explicit_recurrence,
+            Some("needs-action"),
+            Some(&recurring)
+        )
+        .is_ok());
     }
 
     #[test]

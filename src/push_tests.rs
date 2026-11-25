@@ -17006,6 +17006,105 @@ async fn task_add_recurrence_round_trips_through_sync_and_jmap() {
 }
 
 #[tokio::test]
+async fn recurring_task_completion_change_requires_dead_occur() {
+    use eas::{airsync as air, tasks};
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 1);
+    {
+        let mut items = env.mock.groupware.lock().unwrap();
+        let task = items
+            .get_mut("calendar")
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["id"] == "t0000")
+            .unwrap();
+        task["recurrenceRule"] = serde_json::json!({"frequency":"daily"});
+    }
+
+    let prime = item_sync(&env, "ipad", "task_calendar", "0", "100").await;
+    let initial = item_sync(&env, "ipad", "task_calendar", &sync_key(&prime), "100").await;
+
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, sync_key(&initial));
+    b.leaf(air::COLLECTION_ID, "task_calendar");
+    b.empty_tag(air::GET_CHANGES);
+    b.start(air::COMMANDS);
+    b.start(air::CHANGE);
+    b.leaf(air::SERVER_ID, "t0000");
+    b.start(air::APPLICATION_DATA);
+    b.leaf(tasks::COMPLETE, "1");
+    for _ in 0..6 {
+        b.end();
+    }
+    let response = env
+        .req("Sync", "ipad")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let rejected = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        eas::find_all_text_after(&rejected, air::STATUS),
+        vec!["1", "5"]
+    );
+    {
+        let items = env.mock.groupware.lock().unwrap();
+        let task = items
+            .get("calendar")
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == "t0000")
+            .unwrap();
+        assert_eq!(task["progress"], "needs-action");
+    }
+
+    let mut b = eas::DocumentBuilder::new();
+    b.start(air::SYNC);
+    b.start(air::COLLECTIONS);
+    b.start(air::COLLECTION);
+    b.leaf(air::SYNC_KEY, sync_key(&rejected));
+    b.leaf(air::COLLECTION_ID, "task_calendar");
+    b.empty_tag(air::GET_CHANGES);
+    b.start(air::COMMANDS);
+    b.start(air::CHANGE);
+    b.leaf(air::SERVER_ID, "t0000");
+    b.start(air::APPLICATION_DATA);
+    b.leaf(tasks::COMPLETE, "1");
+    b.start(tasks::RECURRENCE);
+    b.leaf(tasks::START, "2026-11-24T09:00:00.000Z");
+    b.leaf(tasks::TYPE, "0");
+    b.leaf(tasks::DEAD_OCCUR, "1");
+    b.end();
+    for _ in 0..6 {
+        b.end();
+    }
+    let response = env
+        .req("Sync", "ipad")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let accepted = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        eas::find_all_text_after(&accepted, air::STATUS),
+        vec!["1", "1"]
+    );
+    let items = env.mock.groupware.lock().unwrap();
+    let task = items
+        .get("calendar")
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "t0000")
+        .unwrap();
+    assert_eq!(task["progress"], "completed");
+}
+
+#[tokio::test]
 async fn task_description_changes_are_synced() {
     use eas::{airsync as air, airsync_base as base, tasks};
     let env = start_env(Opts::default()).await;
