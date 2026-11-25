@@ -44,12 +44,12 @@ series time zone to compact UTC. Series invitations omit it. Regression tests
 cover local-time conversion and 14.x/16.x WBXML output. Microsoft defines this
 field as the identifier for a specific recurring instance in
 [MS-ASEMAIL MeetingRequest](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/0bc0a4c7-2391-428d-b2c1-471c6695d1df).
-The full suite passes 466 tests (77 ignored), including
+The full suite passes 467 tests (77 ignored), including
 legacy GlobalObjId compatibility, 16.x writer, and JMAP conversion regressions;
-strict Clippy, formatting, and diff checks pass. Commit `eccb319` is deployed to
-Amy's isolated bridge as `localhost/eas16-isolated:eccb319` (image
-`sha256:144582a56094e51a9f16ecf4ee2813f47f89cae5f7feca9478e6bc05fa2cb1c9`),
-started `2026-11-25T11:44:17.804425523Z`, with zero restarts. At verification,
+strict Clippy, formatting, and diff checks pass. Commit `b50b5b2` is deployed to
+Amy's isolated bridge as `localhost/eas16-isolated:b50b5b2` (image
+`sha256:e97de751f66c12e3513945c2ce51ab1f082feb7ca210a520b07d7e552fdab39c`),
+started `2026-11-25T12:25:08.580853114Z`, with zero restarts. At verification,
 `/healthz` and `/readyz` returned HTTP 200 (`ok` and `ready`);
 `EAS_MAX_PROTOCOL_VERSION` remains unset, preserving the 14.0 default, and
 production is untouched. The optional `Organizer` maps the

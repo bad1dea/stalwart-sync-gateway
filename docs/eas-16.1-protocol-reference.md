@@ -185,9 +185,9 @@ fields in EAS 16.1 remain unsupported. JSCalendar delegation also maps to
 `Forwardees` in 16.0/16.1, with recipient email emitted only for 16.1. Mocked
 JMAP mailbox-query/CalendarEvent-parse and WBXML writer regressions pass.
 JSCalendar location descriptions and valid `geo:` coordinates also map into
-the AirSyncBase location structure for 16.x. Commit `a85c183` is deployed to
-Amy's isolated bridge as `localhost/eas16-isolated:a85c183`; `/healthz` and `/readyz`
-both returned HTTP 200, and the bridge still defaults to EAS 14.0.
+the AirSyncBase location structure for 16.x. Commit `b50b5b2` is deployed to
+Amy's isolated bridge as `localhost/eas16-isolated:b50b5b2`; `/healthz` and
+`/readyz` both returned HTTP 200, and the bridge still defaults to EAS 14.0.
 `Organizer` maps from the JMAP `owner` participant's display name (email
 fallback) to Email:Organizer. `ResponseRequested` maps the current attendee's
 JSCalendar `expectReply` value to EAS 1/0, omitting the element if unavailable.
