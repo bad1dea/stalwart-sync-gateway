@@ -90,6 +90,7 @@ pub struct Email {
 pub struct EmailMeetingRequest {
     pub uid: String,
     pub organizer: Option<String>,
+    pub response_requested: Option<bool>,
     pub dtstamp: String,
     pub start: Option<String>,
     pub end: Option<String>,

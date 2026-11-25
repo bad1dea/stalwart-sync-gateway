@@ -8414,16 +8414,16 @@ fn email_meeting_request_from_event(
         return None;
     }
     let participants = event["participants"].as_object()?;
-    if !participants.values().any(|participant| {
+    let attendee = participants.values().find(|participant| {
         let is_attendee =
             participant["roles"]["attendee"] == true || participant["roles"]["optional"] == true;
         is_attendee
             && participant["email"]
                 .as_str()
                 .is_some_and(|email| email.eq_ignore_ascii_case(attendee_email))
-    }) {
-        return None;
-    }
+    });
+    let attendee = attendee?;
+    let response_requested = attendee["expectReply"].as_bool();
     let organizer = participants.values().find_map(|participant| {
         (participant["roles"]["owner"] == true)
             .then(|| {
@@ -8464,6 +8464,7 @@ fn email_meeting_request_from_event(
     Some(EmailMeetingRequest {
         uid: uid.to_owned(),
         organizer,
+        response_requested,
         dtstamp,
         start,
         end,
@@ -8542,6 +8543,29 @@ mod meeting_request_conversion_tests {
         });
         let request = email_meeting_request_from_event(&fallback, "attendee@example.test").unwrap();
         assert_eq!(request.organizer.as_deref(), Some("host@example.test"));
+    }
+
+    #[test]
+    fn maps_attendee_expect_reply_to_meeting_request_response_requested() {
+        let event = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"u",
+            "updated":"2026-11-25T14:00:00Z", "timeZone":"Etc/UTC",
+            "participants":{
+                "attendee":{"email":"attendee@example.test","expectReply":true,"roles":{"attendee":true}}
+            }
+        });
+        let request = email_meeting_request_from_event(&event, "attendee@example.test").unwrap();
+        assert_eq!(request.response_requested, Some(true));
+
+        let no_reply = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"u",
+            "updated":"2026-11-25T14:00:00Z", "timeZone":"Etc/UTC",
+            "participants":{
+                "attendee":{"email":"attendee@example.test","expectReply":false,"roles":{"attendee":true}}
+            }
+        });
+        let request = email_meeting_request_from_event(&no_reply, "attendee@example.test").unwrap();
+        assert_eq!(request.response_requested, Some(false));
     }
 
     #[test]

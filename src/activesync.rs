@@ -5227,6 +5227,12 @@ fn write_email_meeting_request(
     if let Some(organizer) = &meeting.organizer {
         builder.leaf(mail::ORGANIZER, organizer.clone());
     }
+    if let Some(response_requested) = meeting.response_requested {
+        builder.leaf(
+            mail::RESPONSE_REQUESTED,
+            if response_requested { "1" } else { "0" },
+        );
+    }
     if let Some(location) = &meeting.location {
         builder.start(base::LOCATION);
         builder.leaf(base::DISPLAY_NAME, location.clone());
@@ -10754,6 +10760,7 @@ mod tests {
             meeting_request: Some(crate::model::EmailMeetingRequest {
                 uid: "meeting-uid@example.test".to_owned(),
                 organizer: Some("Meeting Host".to_owned()),
+                response_requested: Some(true),
                 dtstamp: "2026-11-25T14:00:00Z".to_owned(),
                 start: Some("2026-12-01T15:00:00Z".to_owned()),
                 end: Some("2026-12-01T16:00:00Z".to_owned()),
@@ -10789,6 +10796,10 @@ mod tests {
         assert_eq!(
             eas::find_text_after(&document, mail::ORGANIZER),
             Some("Meeting Host")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, mail::RESPONSE_REQUESTED),
+            Some("1")
         );
         assert_eq!(
             eas::find_text_after(&document, email2::MEETING_MESSAGE_TYPE),

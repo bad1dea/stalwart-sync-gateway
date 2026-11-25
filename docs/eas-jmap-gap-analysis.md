@@ -20,14 +20,16 @@ all-day state, the required 172-byte `TimeZone`, `Calendar:UID`,
 `AirSyncBase:Location`, and `MeetingMessageType` (1 for a new request, 2 when
 the JMAP sequence is nonzero). Older protocol versions keep the normal email
 shape because the legacy `GlobalObjId` conversion is not implemented. The
-optional `Recurrences`, `Reminder`, `ResponseRequested`,
-`Sensitivity`, `BusyStatus`, `DisallowNewTimeProposal`, and 16.1
+optional `Recurrences`, `Reminder`, `Sensitivity`, `BusyStatus`,
+`DisallowNewTimeProposal`, and 16.1
 `ProposedStartTime`/`ProposedEndTime` fields remain unmapped. The full suite
-passes 458 tests (77 ignored), including mailbox-query-to-JMAP-parse,
+passes 459 tests (77 ignored), including mailbox-query-to-JMAP-parse,
 organizer mapping, and WBXML writer regressions; strict Clippy, formatting, and
 diff checks pass. The optional `Organizer` maps the JMAP participant with the
 `owner` role to its display name, falling back to email, and emits
-Email:Organizer. Commit `f063290` is deployed to Amy's isolated bridge as
+Email:Organizer. `ResponseRequested` now maps the current attendee's JSCalendar
+`expectReply` boolean to EAS values 1/0, preserving omission if the property is
+missing. Commit `f063290` is deployed to Amy's isolated bridge as
 `localhost/eas16-isolated:f063290` (image
 `sha256:dd18bb428e8848ebbc8a2b8596c889b186e6280820c279c328c3e909e397139c`),
 started `2026-11-25T10:56:55.261001097Z`, with zero restarts. At
@@ -38,7 +40,10 @@ Sources: Microsoft
 [Receiving and Accepting Meeting
 Requests](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/9e79c273-3d4e-4b42-a635-d7b11266ab59)
 and [MS-ASEMAIL MeetingRequest](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/0bc0a4c7-2391-428d-b2c1-471c6695d1df),
-which defines Organizer as an optional string element.
+which defines Organizer as an optional string element and ResponseRequested as
+an optional 0/1 value. JSCalendar
+[Participant.expectReply](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.4)
+defines whether the organizer expects a response from that participant.
 
 MeetingResponse now gates `ProposedStartTime` and `ProposedEndTime` to EAS
 16.1. `SendResponse` remains available in 16.0 and 16.1, but a proposal on
