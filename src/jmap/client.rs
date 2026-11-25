@@ -8448,6 +8448,13 @@ fn email_meeting_request_from_event(
     };
     let reminder_seconds = crate::jmap::calendar_reminder::read_reminder(&event["alerts"])
         .map(|minutes| u64::from(minutes) * 60);
+    let recurrence = match event.get("recurrenceRule").filter(|rule| !rule.is_null()) {
+        Some(rule) => Some(
+            crate::jmap::calendar_recurrence::from_jscalendar(rule, event["timeZone"].as_str())
+                .ok()?,
+        ),
+        None => None,
+    };
     let dtstamp = calendar_event_time_to_eas(event["updated"].as_str()?, "Etc/UTC")?;
     let start_value = event["start"].as_str();
     let time_zone = match event["timeZone"].as_str() {
@@ -8481,6 +8488,7 @@ fn email_meeting_request_from_event(
         sensitivity,
         busy_status,
         reminder_seconds,
+        recurrence,
         dtstamp,
         start,
         end,
@@ -8619,6 +8627,35 @@ mod meeting_request_conversion_tests {
         });
         let request = email_meeting_request_from_event(&event, "attendee@example.test").unwrap();
         assert_eq!(request.reminder_seconds, Some(900));
+    }
+
+    #[test]
+    fn maps_supported_recurrence_rule_and_fails_closed_for_unsupported_rule() {
+        let event = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"u",
+            "updated":"2026-11-25T14:00:00Z", "timeZone":"Etc/UTC",
+            "recurrenceRule":{
+                "@type":"RecurrenceRule", "frequency":"weekly", "interval":2,
+                "byDay":[{"@type":"NDay","day":"tu"}], "count":6,
+                "firstDayOfWeek":"mo"
+            },
+            "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}}
+        });
+        let request = email_meeting_request_from_event(&event, "attendee@example.test").unwrap();
+        let recurrence = request.recurrence.unwrap();
+        assert_eq!(recurrence.kind, 1);
+        assert_eq!(recurrence.interval, Some(2));
+        assert_eq!(recurrence.day_of_week, Some(4));
+        assert_eq!(recurrence.occurrences, Some(6));
+        assert_eq!(recurrence.first_day_of_week, Some(1));
+
+        let unsupported = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"u",
+            "updated":"2026-11-25T14:00:00Z", "timeZone":"Etc/UTC",
+            "recurrenceRule":{"@type":"RecurrenceRule","frequency":"hourly"},
+            "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}}
+        });
+        assert!(email_meeting_request_from_event(&unsupported, "attendee@example.test").is_none());
     }
 
     #[test]

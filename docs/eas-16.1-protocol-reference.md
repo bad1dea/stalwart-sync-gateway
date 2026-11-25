@@ -186,9 +186,12 @@ JSCalendar `expectReply` value to EAS 1/0, omitting the element if unavailable.
 `Sensitivity` maps JSCalendar `privacy` public/private/secret to EAS
 0/2/3. `BusyStatus` maps free/busy to 0/2 and applies JSCalendar's default of
 busy when omitted. EAS `Reminder` maps seconds from the nearest supported
-relative-to-start display alert; unsupported alert kinds are skipped. These
-mappings are covered by parser and WBXML tests and are deployed on the
-isolated bridge as `517f510`. It still defaults to EAS 14.0. Real-client
+relative-to-start display alert; unsupported alert kinds are skipped.
+Supported JSCalendar recurrence rules map into Email:Recurrences, with a
+required recurrence interval emitted even when the source uses its default.
+Unsupported recurrence rules suppress structured meeting-request metadata.
+Parser and WBXML regressions cover the mappings. The recurrence addition is
+not yet deployed; the bridge still defaults to EAS 14.0. Real-client
 validation remains pending.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)

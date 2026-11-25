@@ -20,9 +20,9 @@ all-day state, the required 172-byte `TimeZone`, `Calendar:UID`,
 `AirSyncBase:Location`, and `MeetingMessageType` (1 for a new request, 2 when
 the JMAP sequence is nonzero). Older protocol versions keep the normal email
 shape because the legacy `GlobalObjId` conversion is not implemented. The
-optional `Recurrences`, `DisallowNewTimeProposal`, and 16.1
+optional `DisallowNewTimeProposal` and 16.1
 `ProposedStartTime`/`ProposedEndTime` fields remain unmapped. The full suite
-passes 461 tests (77 ignored), including mailbox-query-to-JMAP-parse,
+passes 462 tests (77 ignored), including mailbox-query-to-JMAP-parse,
 organizer and RSVP-request mapping, and WBXML writer regressions; strict
 Clippy, formatting, and diff checks pass. The optional `Organizer` maps the
 JMAP participant with the `owner` role to its display name, falling back to
@@ -33,7 +33,11 @@ omission if the property is missing. Sensitivity maps JSCalendar privacy
 uses JSCalendar's default `busy` when omitted. These values are included only
 when recognized. EAS `Reminder` now uses seconds from the nearest supported
 relative-to-start display alert; email alerts and absolute triggers are
-excluded, and invitations without such a display alert omit the field. Commit
+excluded, and invitations without such a display alert omit the field.
+Supported JSCalendar recurrence rules now map through the existing Calendar
+recurrence converter to Email:Recurrences; the required EAS interval defaults
+to 1, and unsupported recurrence rules fail closed by omitting structured
+meeting-request metadata. This addition is awaiting deployment. Commit
 `517f510` is deployed to Amy's isolated bridge as
 `localhost/eas16-isolated:517f510` (image
 `sha256:50b4931a6aba7b9b3be6f864de2fd92fe1dfc8ebe7a94f1237290227e9cd5b3e`),
@@ -52,6 +56,9 @@ defines whether the organizer expects a response from that participant.
 JSCalendar [privacy](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.3)
 and [freeBusyStatus](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.2)
 provide the calendar values used for the EAS sensitivity and busy status.
+The recurrence container and its required pattern fields are specified by
+Microsoft [Recurrences](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/8722b485-daac-45ae-a640-35241de8233c)
+and [Recurrence](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/a033deda-0745-428d-b9ca-d08f3e6febcd).
 
 MeetingResponse now gates `ProposedStartTime` and `ProposedEndTime` to EAS
 16.1. `SendResponse` remains available in 16.0 and 16.1, but a proposal on

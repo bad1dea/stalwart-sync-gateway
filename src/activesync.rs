@@ -5242,6 +5242,38 @@ fn write_email_meeting_request(
     if let Some(reminder_seconds) = meeting.reminder_seconds {
         builder.leaf(mail::REMINDER, reminder_seconds.to_string());
     }
+    if let Some(recurrence) = &meeting.recurrence {
+        builder.start(mail::RECURRENCES);
+        builder.start(mail::RECURRENCE);
+        builder.leaf(mail::RECURRENCE_TYPE, recurrence.kind.to_string());
+        if matches!(recurrence.kind, 2 | 3 | 5 | 6) {
+            builder.leaf(email2::CALENDAR_TYPE, "1");
+        }
+        builder.leaf(mail::INTERVAL, recurrence.interval.unwrap_or(1).to_string());
+        if let Some(until) = &recurrence.until {
+            builder.leaf(mail::UNTIL, until.clone());
+        }
+        if let Some(occurrences) = recurrence.occurrences {
+            builder.leaf(mail::OCCURRENCES, occurrences.to_string());
+        }
+        if let Some(day_of_week) = recurrence.day_of_week {
+            builder.leaf(mail::DAY_OF_WEEK, day_of_week.to_string());
+        }
+        if let Some(day_of_month) = recurrence.day_of_month {
+            builder.leaf(mail::DAY_OF_MONTH, day_of_month.to_string());
+        }
+        if let Some(week_of_month) = recurrence.week_of_month {
+            builder.leaf(mail::WEEK_OF_MONTH, week_of_month.to_string());
+        }
+        if let Some(month_of_year) = recurrence.month_of_year {
+            builder.leaf(mail::MONTH_OF_YEAR, month_of_year.to_string());
+        }
+        if let Some(first_day) = recurrence.first_day_of_week {
+            builder.leaf(email2::FIRST_DAY_OF_WEEK, first_day.to_string());
+        }
+        builder.end();
+        builder.end();
+    }
     if let Some(location) = &meeting.location {
         builder.start(base::LOCATION);
         builder.leaf(base::DISPLAY_NAME, location.clone());
@@ -10773,6 +10805,14 @@ mod tests {
                 sensitivity: Some(2),
                 busy_status: Some(2),
                 reminder_seconds: Some(900),
+                recurrence: Some(crate::wbxml::eas::CalendarRecurrence {
+                    kind: 1,
+                    interval: Some(2),
+                    day_of_week: Some(4),
+                    first_day_of_week: Some(1),
+                    occurrences: Some(6),
+                    ..Default::default()
+                }),
                 dtstamp: "2026-11-25T14:00:00Z".to_owned(),
                 start: Some("2026-12-01T15:00:00Z".to_owned()),
                 end: Some("2026-12-01T16:00:00Z".to_owned()),
@@ -10822,6 +10862,15 @@ mod tests {
             Some("2")
         );
         assert_eq!(eas::find_text_after(&document, mail::REMINDER), Some("900"));
+        assert_eq!(
+            eas::find_text_after(&document, mail::RECURRENCE_TYPE),
+            Some("1")
+        );
+        assert_eq!(eas::find_text_after(&document, mail::INTERVAL), Some("2"));
+        assert_eq!(
+            eas::find_text_after(&document, email2::FIRST_DAY_OF_WEEK),
+            Some("1")
+        );
         assert_eq!(
             eas::find_text_after(&document, email2::MEETING_MESSAGE_TYPE),
             Some("1")

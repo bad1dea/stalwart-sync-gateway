@@ -94,6 +94,7 @@ pub struct EmailMeetingRequest {
     pub sensitivity: Option<u8>,
     pub busy_status: Option<u8>,
     pub reminder_seconds: Option<u64>,
+    pub recurrence: Option<crate::wbxml::eas::CalendarRecurrence>,
     pub dtstamp: String,
     pub start: Option<String>,
     pub end: Option<String>,
