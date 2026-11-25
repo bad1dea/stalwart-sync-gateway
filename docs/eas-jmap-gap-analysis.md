@@ -21,9 +21,10 @@ GlobalObjId uses the deterministic `vCal-Uid` form, has a bounded UID input,
 and matches Microsoft's published byte-vector example. The common fields
 include UTC `DtStamp`, start/end, all-day state, and the required 172-byte
 `TimeZone`; `MeetingMessageType` is emitted for 14.1 and 16.x (1 for a new
-request, 2 when the JMAP sequence is nonzero), and omitted for 14.0 where that
-field is unavailable. The optional 16.1 `ProposedStartTime`/`ProposedEndTime`
-fields remain unmapped. The full suite passes 464 tests (77 ignored), including
+request, 2 when the JMAP sequence is nonzero, 5 for a delegator copy, and 6
+for a delegated request that must not be answered); the field is omitted for
+14.0 where it is unavailable. The optional 16.1 `ProposedStartTime`/`ProposedEndTime`
+fields remain unmapped. The full suite passes 465 tests (77 ignored), including
 legacy GlobalObjId compatibility, 16.x writer, and JMAP conversion regressions;
 strict Clippy, formatting, and diff checks pass. Commit `eccb319` is deployed to
 Amy's isolated bridge as `localhost/eas16-isolated:eccb319` (image
@@ -46,13 +47,17 @@ recurrence converter to Email:Recurrences; the required EAS interval defaults
 to 1, and unsupported recurrence rules fail closed by omitting structured
 meeting-request metadata. `InstanceType` now reports 0 for a single event and
 1 for a recurring master based on the parsed recurrence rule. Commit
-`9ceb978` is deployed to Amy's isolated bridge as
-`localhost/eas16-isolated:9ceb978` (image
-`sha256:527c632cfade1a8aaba28ca5f26da1c7fccf1641a33a41b7ebfe930144f3d09d`),
-started `2026-11-25T11:34:50.524479504Z`, with zero restarts. At
-`2026-11-25T11:34:55Z`, `/healthz` and `/readyz` returned HTTP 200 (`ok` and
-`ready`). `EAS_MAX_PROTOCOL_VERSION` remains unset, preserving the 14.0
-default; production is untouched. Real-client validation remains pending.
+The follow-up maps JSCalendar `delegatedFrom` to type 6 and `delegatedTo` to
+type 5, while preserving sequence-based types for ordinary requests. Full suite:
+465 passed, 77 ignored; strict Clippy, formatting, and diff checks pass.
+Commit `3cb4c26` is deployed to Amy's isolated bridge as
+`localhost/eas16-isolated:3cb4c26` (image
+`sha256:5fd3077994e1b5799cd0addf1b08fdf42c907c348eb26fdd0288bf8d5b9e6d9e`),
+started `2026-11-25T11:51:50.539552284Z`, with zero restarts. `/healthz` and
+`/readyz` returned HTTP 200 (`ok` and `ready`). `EAS_MAX_PROTOCOL_VERSION`
+remains unset, preserving the 14.0 default; production is untouched. Real-client
+validation remains pending. Sources: Microsoft [MeetingMessageType](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/861c5d27-e5d6-4e1e-a61a-37c9e84f0ded)
+and JSCalendar [Participant delegation](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6).
 Sources: Microsoft
 [Receiving and Accepting Meeting
 Requests](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/9e79c273-3d4e-4b42-a635-d7b11266ab59)

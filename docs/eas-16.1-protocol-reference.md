@@ -19,8 +19,8 @@ The spec's own overview lays out the intended command sequence:
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
    `100.64.0.50:18090`, backed by isolated Stalwart. Its current gateway image
-   is `eccb319` (`sha256:144582a56094e51a9f16ecf4ee2813f47f89cae5f7feca9478e6bc05fa2cb1c9`),
-   started `2026-11-25T11:44:17.804425523Z` with zero restarts. `/healthz`
+   is `3cb4c26` (`sha256:5fd3077994e1b5799cd0addf1b08fdf42c907c348eb26fdd0288bf8d5b9e6d9e`),
+   started `2026-11-25T11:51:50.539552284Z` with zero restarts. `/healthz`
    and `/readyz` returned HTTP 200; the Compose environment leaves
    `EAS_MAX_PROTOCOL_VERSION` unset, so it still defaults to EAS 14.0.
    Set the variable to 16.1 during the planned client test window.
@@ -177,12 +177,13 @@ For 14.0/14.1 it uses Email `GlobalObjId` (the bounded deterministic
 `vCal-Uid` representation) and Email `Location`; for 16.0/16.1 it uses
 `Calendar:UID` and `AirSyncBase:Location`. `Email2:MeetingMessageType` is
 available in 14.1 and 16.x, where a nonzero JMAP sequence maps to message type
-2 and otherwise to type 1; it is omitted for 14.0. Optional
+2, JSCalendar `delegatedTo` maps to type 5, and `delegatedFrom` maps to type 6;
+ordinary requests map to type 1. It is omitted for 14.0. Optional
 recurrence, reminder, sensitivity, busy status, and
 `DisallowNewTimeProposal` are mapped from the JMAP calendar data; proposed-time
 fields in EAS 16.1 remain unsupported. Mocked JMAP mailbox-query/CalendarEvent-
-parse and WBXML writer regressions pass. Commit `eccb319` is deployed to Amy's
-isolated bridge as `localhost/eas16-isolated:eccb319`; `/healthz` and `/readyz`
+parse and WBXML writer regressions pass. Commit `3cb4c26` is deployed to Amy's
+isolated bridge as `localhost/eas16-isolated:3cb4c26`; `/healthz` and `/readyz`
 both returned HTTP 200, and the bridge still defaults to EAS 14.0.
 `Organizer` maps from the JMAP `owner` participant's display name (email
 fallback) to Email:Organizer. `ResponseRequested` maps the current attendee's
