@@ -80,6 +80,15 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `sha256:9699a05e302248912a5fc228be3b9ab53aeac297ed8e55d46c254f03ced6e763`,
    started `2026-11-25T00:53:12Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Production continues to advertise 14.0 by default.
+   The exact extracted-text cap is now 4 MiB; generic ZIP expansion remains
+   independently capped at 2 MiB. Regressions cover exact/over-limit text and
+   the unchanged ZIP expansion bound. The full suite passes 403 tests (75
+   ignored), strict Clippy and formatting pass, and real OCR passes on the
+   four-page mixed fixture. Deployed as
+   `deploy-2026-11-24-eas-find-4mb-text-2195aae`; homelab commit `e1c08ab`,
+   image `sha256:12c48fd5d38edf55c83b8cfb3fdcf8a388c78fa84c2b67cf1127d2a0993d0e79`,
+   started `2026-11-25T01:02:10Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Production remains at the 14.0 protocol default.
 
 1. **BodyPartPreference / BodyPart response path — implemented and deployed.**
    Request parsing and independent Sync option
