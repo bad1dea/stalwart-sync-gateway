@@ -57,7 +57,13 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    Scanned-only PDFs up to three pages now use resource-bounded OCR. Attachments
    above 8 MiB, scanned PDFs above three pages, PDFs mixing scanned and
    selectable-text pages, and extracted text above 2 MiB remain outside exact
-   local matching.
+   local matching. The attachment input cap was raised from 4 MiB to 8 MiB
+   with a regression that searches inside a 6 MiB OOXML payload; the focused
+   test and full suite passed. Deployed as
+   `deploy-2026-11-24-eas-find-8mb-bedb85e`; homelab commit `a4a3ab9`, image
+   `sha256:9df94985f6eb239b3f8bd17bdf397a9c8df465c97744ea09934ac423d48f2206`,
+   started `2026-11-25T00:29:19Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Protocol advertisement remains at the 14.0 default.
 
 1. **BodyPartPreference / BodyPart response path — implemented and deployed.**
    Request parsing and independent Sync option
