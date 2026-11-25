@@ -887,75 +887,123 @@ fn append_find_extracted_text(output: &mut String, text: &str) -> Option<()> {
 }
 
 fn extract_bounded_pdf_text_with_ocr(bytes: &[u8], allow_ocr: bool) -> Option<String> {
-    struct BoundedOutput {
-        text: String,
+    extract_bounded_pdf_text_with_tools(
+        bytes,
+        allow_ocr,
+        std::path::Path::new("pdftoppm"),
+        std::path::Path::new("tesseract"),
+    )
+}
+
+struct BoundedPdfOutput {
+    text: String,
+}
+
+impl pdf_extract::OutputDev for BoundedPdfOutput {
+    fn begin_page(
+        &mut self,
+        _page_num: u32,
+        _media_box: &pdf_extract::MediaBox,
+        _art_box: Option<(f64, f64, f64, f64)>,
+    ) -> Result<(), pdf_extract::OutputError> {
+        Ok(())
     }
 
-    impl pdf_extract::OutputDev for BoundedOutput {
-        fn begin_page(
-            &mut self,
-            _page_num: u32,
-            _media_box: &pdf_extract::MediaBox,
-            _art_box: Option<(f64, f64, f64, f64)>,
-        ) -> Result<(), pdf_extract::OutputError> {
-            Ok(())
-        }
-
-        fn end_page(&mut self) -> Result<(), pdf_extract::OutputError> {
-            self.push(" ")
-        }
-
-        fn output_character(
-            &mut self,
-            _trm: &pdf_extract::Transform,
-            _width: f64,
-            _spacing: f64,
-            _font_size: f64,
-            character: &str,
-        ) -> Result<(), pdf_extract::OutputError> {
-            self.push(character)
-        }
-
-        fn begin_word(&mut self) -> Result<(), pdf_extract::OutputError> {
-            if !self.text.is_empty() && !self.text.chars().last().is_some_and(char::is_whitespace) {
-                self.push(" ")?;
-            }
-            Ok(())
-        }
-
-        fn end_word(&mut self) -> Result<(), pdf_extract::OutputError> {
-            Ok(())
-        }
-
-        fn end_line(&mut self) -> Result<(), pdf_extract::OutputError> {
-            self.push(" ")
-        }
+    fn end_page(&mut self) -> Result<(), pdf_extract::OutputError> {
+        self.push(" ")
     }
 
-    impl BoundedOutput {
-        fn push(&mut self, value: &str) -> Result<(), pdf_extract::OutputError> {
-            if self.text.len().saturating_add(value.len()) > MAX_FIND_ATTACHMENT_TEXT_BYTES as usize
-            {
-                return Err(pdf_extract::OutputError::FormatError(std::fmt::Error));
-            }
-            self.text.push_str(value);
-            Ok(())
-        }
+    fn output_character(
+        &mut self,
+        _trm: &pdf_extract::Transform,
+        _width: f64,
+        _spacing: f64,
+        _font_size: f64,
+        character: &str,
+    ) -> Result<(), pdf_extract::OutputError> {
+        self.push(character)
     }
 
+    fn begin_word(&mut self) -> Result<(), pdf_extract::OutputError> {
+        if !self.text.is_empty() && !self.text.chars().last().is_some_and(char::is_whitespace) {
+            self.push(" ")?;
+        }
+        Ok(())
+    }
+
+    fn end_word(&mut self) -> Result<(), pdf_extract::OutputError> {
+        Ok(())
+    }
+
+    fn end_line(&mut self) -> Result<(), pdf_extract::OutputError> {
+        self.push(" ")
+    }
+}
+
+impl BoundedPdfOutput {
+    fn push(&mut self, value: &str) -> Result<(), pdf_extract::OutputError> {
+        if self.text.len().saturating_add(value.len()) > MAX_FIND_ATTACHMENT_TEXT_BYTES as usize {
+            return Err(pdf_extract::OutputError::FormatError(std::fmt::Error));
+        }
+        self.text.push_str(value);
+        Ok(())
+    }
+}
+
+fn extract_bounded_pdf_text_with_tools(
+    bytes: &[u8],
+    allow_ocr: bool,
+    pdftoppm: &std::path::Path,
+    tesseract: &std::path::Path,
+) -> Option<String> {
     let document = pdf_extract::Document::load_mem(bytes).ok()?;
     if document.is_encrypted() {
         return None;
     }
-    let mut output = BoundedOutput {
-        text: String::new(),
-    };
-    pdf_extract::output_doc(&document, &mut output).ok()?;
-    if output.text.trim().is_empty() && allow_ocr {
-        extract_scanned_pdf_text(bytes)
-    } else {
-        Some(output.text)
+    let pages = document.get_pages();
+    if pages.is_empty() {
+        return None;
     }
+    let mut page_text = Vec::with_capacity(pages.len());
+    let mut extracted_bytes = 0usize;
+    for page_num in pages.keys().copied() {
+        let mut output = BoundedPdfOutput {
+            text: String::new(),
+        };
+        pdf_extract::output_doc_page(&document, &mut output, page_num).ok()?;
+        extracted_bytes = extracted_bytes.saturating_add(output.text.len());
+        if extracted_bytes > MAX_FIND_ATTACHMENT_TEXT_BYTES as usize {
+            return None;
+        }
+        page_text.push((page_num, output.text));
+    }
+
+    let missing_text_pages: Vec<_> = page_text
+        .iter()
+        .filter_map(|(page, text)| text.trim().is_empty().then_some(*page))
+        .collect();
+    if !missing_text_pages.is_empty() && allow_ocr {
+        if pages.len() > MAX_FIND_PDF_OCR_PAGES as usize {
+            // A textless page may contain an image. Refuse to return partial
+            // text when that page cannot be OCRed within the page budget.
+            return None;
+        }
+        let recognized =
+            extract_pdf_pages_ocr_with_tools(bytes, &missing_text_pages, pdftoppm, tesseract)?;
+        let recognized: std::collections::HashMap<_, _> = recognized.into_iter().collect();
+        for (page, text) in &mut page_text {
+            if text.trim().is_empty() {
+                *text = recognized.get(page)?.clone();
+            }
+        }
+    }
+
+    let mut output = String::new();
+    for (_, page) in page_text {
+        append_find_extracted_text(&mut output, &page)?;
+        append_find_extracted_text(&mut output, " ")?;
+    }
+    Some(output)
 }
 
 struct FindOcrTempDir(std::path::PathBuf);
@@ -1017,9 +1065,30 @@ fn extract_scanned_pdf_text_with_tools(
     pdftoppm: &std::path::Path,
     tesseract: &std::path::Path,
 ) -> Option<String> {
+    extract_pdf_pages_ocr_with_tools(bytes, &[1, 2, 3], pdftoppm, tesseract).map(|pages| {
+        pages
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
+}
+
+fn extract_pdf_pages_ocr_with_tools(
+    bytes: &[u8],
+    pages: &[u32],
+    pdftoppm: &std::path::Path,
+    tesseract: &std::path::Path,
+) -> Option<Vec<(u32, String)>> {
     use std::time::Duration;
 
-    if bytes.len() as u64 > MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES {
+    if bytes.len() as u64 > MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES
+        || pages.is_empty()
+        || pages.len() > MAX_FIND_PDF_OCR_PAGES as usize
+        || pages
+            .iter()
+            .any(|page| *page == 0 || *page > MAX_FIND_PDF_OCR_PAGES)
+    {
         return None;
     }
     let temp = FindOcrTempDir::create()?;
@@ -1052,14 +1121,11 @@ fn extract_scanned_pdf_text_with_tools(
         return None;
     }
 
-    let mut output = String::new();
-    for page in 1..=MAX_FIND_PDF_OCR_PAGES {
+    let mut output = Vec::with_capacity(pages.len());
+    for page in pages {
         let image = temp.0.join(format!("page-{page}.png"));
         if !image.is_file() {
-            if page == 1 {
-                return None;
-            }
-            break;
+            return None;
         }
         let output_base = temp.0.join(format!("recognized-{page}"));
         if !run_find_ocr_command(
@@ -1076,15 +1142,13 @@ fn extract_scanned_pdf_text_with_tools(
         }
         let text_path = output_base.with_extension("txt");
         let size = std::fs::metadata(&text_path).ok()?.len();
-        if size > MAX_FIND_ATTACHMENT_TEXT_BYTES
-            || output.len().saturating_add(size as usize) > MAX_FIND_ATTACHMENT_TEXT_BYTES as usize
-        {
+        if size > MAX_FIND_ATTACHMENT_TEXT_BYTES {
             return None;
         }
         let text = std::fs::read_to_string(text_path).ok()?;
-        append_find_text(&mut output, &text)?;
+        output.push((*page, text));
     }
-    (!output.trim().is_empty()).then_some(output)
+    Some(output)
 }
 
 fn extract_legacy_xls_text(bytes: &[u8]) -> Option<String> {
@@ -3382,6 +3446,39 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn mixed_pdf_ocr_adds_image_page_text_without_losing_native_text() {
+        use super::{extract_bounded_pdf_text_with_tools, FindOcrTempDir};
+        use std::{fs, os::unix::fs::PermissionsExt};
+
+        let tools = FindOcrTempDir::create().unwrap();
+        let renderer = tools.0.join("pdftoppm");
+        let ocr = tools.0.join("tesseract");
+        fs::write(
+            &renderer,
+            "#!/bin/sh\nset -eu\nprefix=\nfor arg in \"$@\"; do prefix=\"$arg\"; done\nprintf image > \"$prefix-1.png\"\nprintf image > \"$prefix-2.png\"\n",
+        )
+        .unwrap();
+        fs::write(
+            &ocr,
+            "#!/bin/sh\nset -eu\ncase \"$1\" in *page-2.png) text='scanned alpha';; *) text='wrong page';; esac\nprintf '%s\\n' \"$text\" > \"$2.txt\"\n",
+        )
+        .unwrap();
+        for tool in [&renderer, &ocr] {
+            let mut permissions = fs::metadata(tool).unwrap().permissions();
+            permissions.set_mode(0o700);
+            fs::set_permissions(tool, permissions).unwrap();
+        }
+
+        let pdf = test_pdf_with_mixed_text_and_image_page("native bravo");
+        let text = extract_bounded_pdf_text_with_tools(&pdf, true, &renderer, &ocr)
+            .expect("native and scanned page text should both be available");
+        assert!(text.contains("native bravo"), "{text}");
+        assert!(text.contains("scanned alpha"), "{text}");
+        assert!(!text.contains("wrong page"), "{text}");
+    }
+
     #[test]
     #[ignore = "requires Poppler and Tesseract OCR runtime packages"]
     fn scanned_pdf_attachment_ocr_extracts_page_text() {
@@ -3517,6 +3614,39 @@ mod tests {
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_owned(),
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
             format!("<< /Length {} >>\nstream\n{}\nendstream", stream.len(), stream),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{}\nendobj\n", index + 1, object).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    fn test_pdf_with_mixed_text_and_image_page(text: &str) -> Vec<u8> {
+        let stream = format!("BT /F1 12 Tf 72 720 Td ({text}) Tj ET");
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Contents 5 0 R >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{}\nendstream", stream.len(), stream),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
         ];
         let mut pdf = b"%PDF-1.4\n".to_vec();
         let mut offsets = Vec::new();

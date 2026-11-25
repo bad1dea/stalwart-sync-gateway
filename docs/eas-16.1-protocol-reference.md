@@ -142,9 +142,11 @@ Legacy `.xls` workbooks are also parsed
 with a 250,000-cell dense-range limit to prevent oversized worksheet coordinates
 from causing large allocations. Legacy binary Word and PowerPoint formats,
 Word/Excel/PowerPoint package comments are included within the XML budget.
-Scanned-only PDFs of up to three pages now use bounded Poppler rendering and
-English Tesseract OCR. Mixed text/scanned PDFs and scanned PDFs above three
-pages remain unsupported to avoid partial-content false matches. Attachments
+Scanned-only PDFs of up to three pages use bounded Poppler rendering and
+English Tesseract OCR. PDFs up to three pages that mix selectable text and
+scanned pages retain native text and OCR only pages without extractable text.
+PDFs with image-only pages beyond the three-page OCR budget remain unsupported
+to avoid partial-content false matches. Attachments
 larger than 8 MiB also remain outside exact matching. These extraction changes
 are source-tested; real-client validation remains open. Find is
 protocol-version gated to 16.1 and is not advertised while production negotiates
