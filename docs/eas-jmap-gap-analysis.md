@@ -73,8 +73,10 @@ started `2026-11-25T02:18:04Z`, restart count zero, `/healthz` `ok`, and
 Generic ZIP Find now also extracts common source-code files such as `.rs`,
 `.py`, `.js`, `.ts`, `.go`, and `.java`, under the same archive expansion and
 text-output bounds. The exact-search extraction regression verifies source
-files are included while binary files remain skipped. The full suite passes 404
-tests (75 ignored), strict Clippy passes, and formatting and diff checks pass.
+files are included while binary files remain skipped. An EAS Find regression
+also finds a unique phrase inside a Rust source file in a ZIP attachment. The
+full suite passes 404 tests (75 ignored), strict Clippy passes, and formatting
+and diff checks pass.
 Deployed as `deploy-2026-11-25-eas-find-zip-source-adf5a0d`; Homelab commit
 `4cc4b37`, image
 `sha256:2b0061d9d30ec8d7a9f6dcb8b09248972d388ba26b63a288c7ce9895c4982992`,

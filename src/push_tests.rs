@@ -14243,6 +14243,12 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     zip_archive
         .write_all(b"sierra tango from a source archive")
         .unwrap();
+    zip_archive
+        .start_file("src/lib.rs", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip_archive
+        .write_all(b"// xenon yodel Rust source")
+        .unwrap();
     let zip_attachment = zip_archive.finish().unwrap().into_inner();
     let mut expanded_zip_archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     expanded_zip_archive
@@ -14604,6 +14610,25 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         .body(find_body(
             "30000000-0000-4000-8000-000000000090",
             "sierra NEAR(0) tango",
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["zip-attachment"]
+    );
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "30000000-0000-4000-8000-000000000096",
+            "xenon NEAR(0) yodel",
             None,
             "0-9",
         ))
