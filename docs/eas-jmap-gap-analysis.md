@@ -10,12 +10,13 @@ MIME policy, partial Sync/options persistence, and Sync long-poll/window
 handling. Check the current Rust implementation before treating any older
 “Missing” or “Not implemented” statement below as actionable.
 
-Current source `main` is `d83dccb`. The full suite passes 480 tests (77
-ignored); strict Clippy, formatting, and diff checks pass. This build is
-deployed to Amy's isolated bridge as
-`localhost/eas16-isolated:d83dccb` (image
-`sha256:8e5b614c12fc1696c9215333670cf22e15ac362c8407756122ed44a155ea41fb`),
-started `2026-11-25T15:54:12.503077309Z` with zero restarts. `/healthz` and
+Current source `main` is `f5d0c0d`; its last change adds an ignored live-test
+only. The full suite passes 480 tests (78 ignored); strict Clippy, formatting,
+and diff checks pass. The functional code at `412c9c6` is deployed to Amy's
+isolated bridge as
+`localhost/eas16-isolated:412c9c6` (image
+`sha256:a5d4f838b19ea1dd3dc0b19e74a25a40d9151a70275f0ee5afb892b982ba8766`),
+started `2026-11-25T16:02:33.647341854Z` with zero restarts. `/healthz` and
 `/readyz` returned HTTP 200 with `ok` and `ready`. The isolated bridge still
 defaults to EAS 14.0; production is untouched. Real-client 16.1 certification
 remains open.
@@ -41,6 +42,21 @@ writing, Sync fingerprinting, JMAP readback, update, and clear behavior have
 regression coverage. The current full suite passes 480 tests (77 ignored).
 The deployment runs on the isolated test bridge only; no real contact was
 modified.
+
+The same JSContact vendor-property approach now covers EAS Contacts2
+`CustomerId`, `GovernmentId`, and `ManagerName` as
+`khuo.ng:easCustomerId`, `khuo.ng:easGovernmentId`, and
+`khuo.ng:easManagerName`. These preserve the literal identifier or manager
+distinguished-name string; empty Change fields clear them. Parser, writer,
+fingerprint, readback, update, and clear regressions pass. Strict Clippy,
+formatting, and diff checks pass. The change is deployed to the isolated
+bridge as `localhost/eas16-isolated:412c9c6`; `/healthz` and `/readyz` returned
+HTTP 200, with zero container restarts. The environment continues to omit
+`EAS_MAX_PROTOCOL_VERSION`, so it defaults to 14.0. Production was not changed.
+An ignored live-Stalwart regression now covers vendor-property creation,
+readback, partial update, clear, and cleanup. Its first run received HTTP 401
+from the JMAP session endpoint using the stored remote test credentials, before
+creating or changing any contact. Re-run it with valid disposable credentials.
 
 Current prioritized work:
 
@@ -538,14 +554,15 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    replace checking the enabled state with a real client. Ignored real-Stalwart
    E2E tests now cover ResolveRecipients free/busy values through the EAS
    response and a contact-photo response through a real ContactCard. They
-   compile here but have not been run against real Stalwart because no `E2E_*`
-   credentials are configured in this workspace. A runtime check on
+   compile here. The contact vendor-property E2E was attempted against live
+   Stalwart, but the stored remote test account credentials received HTTP 401
+   during session creation, before any data was changed. A runtime check on
    2026-11-25 found the isolated gateway on Amy at `100.64.0.50:18090`, backed
    by `eas16-clean-stalwart` on its separate `eas16-interop-net`; `/healthz`
    and `/readyz` returned `ok` and `ready`, with zero restarts. The running
-   latest image is `localhost/eas16-isolated:d83dccb` (image
-   `sha256:8e5b614c12fc1696c9215333670cf22e15ac362c8407756122ed44a155ea41fb`),
-   started `2026-11-25T15:54:12.503077309Z`, with zero restarts. Its Compose
+   latest image is `localhost/eas16-isolated:412c9c6` (image
+   `sha256:a5d4f838b19ea1dd3dc0b19e74a25a40d9151a70275f0ee5afb892b982ba8766`),
+   started `2026-11-25T16:02:33.647341854Z`, with zero restarts. Its Compose
    environment omits `EAS_MAX_PROTOCOL_VERSION`, so the gateway defaults to
    14.0. The former Homelab test service was
    decommissioned in commit `6051729`; the live temporary stack is outside
