@@ -17,8 +17,10 @@ existing vendored Calamine parser, including its registered macro-enabled
 content type. A real Calamine XLSB fixture verifies extraction of worksheet
 cells; malformed or unsupported workbooks fail closed. Regression and full
 suite: 405 passed, 75 ignored; strict Clippy, formatting, and diff checks
-pass. This change is not deployed yet. The runtime image remains unchanged
-until deployment verification is recorded below.
+pass. Deployed as `deploy-2026-11-24-eas-find-xlsb-c11b2cd`; Homelab commit
+`31ed9de`, image `sha256:cac5c117d2da26f63c8564d83bf78e613b03eaf7ab372cf3e17d1497fc2e2bb2`,
+started `2026-11-25T03:17:44Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. Production remains at the 14.0 protocol default.
 
 Completed since reconciliation: **Task recurrence Add/Fetch**, including
 the encoded Sync command parser path, is now live-verified against the
