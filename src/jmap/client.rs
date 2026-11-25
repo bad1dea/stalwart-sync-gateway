@@ -7381,6 +7381,8 @@ fn counter_recurrence_exclusions(overrides: &serde_json::Value) -> Option<Vec<St
     };
     let mut excluded = Vec::with_capacity(overrides.len());
     for (key, value) in overrides {
+        // iTIP COUNTER is constrained to one VEVENT (RFC 5546 §3.2.7), so
+        // positive per-instance patches cannot be preserved in this message.
         if value["excluded"] != true {
             return None;
         }
@@ -13322,6 +13324,7 @@ mod meeting_response_send_tests {
                         "CalendarEvent/get", {"state":"s1","list":[{
                             "id":"e","uid":"event@example.test","@type":"Event",
                             "calendarIds":{"cal":true},"recurrenceRule":{"frequency":"weekly"},
+                            "recurrenceOverrides":{"2026-12-02T10:00:00":{"title":"Changed instance"}},
                             "participants":{
                                 "owner":{"email":"owner@example.test","roles":{"owner":true}},
                                 "self":{"email":"user@example.test","roles":{"attendee":true}}

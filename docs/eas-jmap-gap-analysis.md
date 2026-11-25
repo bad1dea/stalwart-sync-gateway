@@ -252,21 +252,23 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    the isolated gateway on Amy at `100.64.0.50:18090`, backed by
    `eas16-clean-stalwart` on its separate `eas16-interop-net`; `/healthz` and
    `/readyz` return `ok` and `ready`, and the public test hostname routes to
-   it. Its image is still `localhost/eas16-isolated:task-recurrence-debug` and
-   its Compose environment omits `EAS_MAX_PROTOCOL_VERSION`, so the gateway
-   currently defaults to 14.0. The former Homelab test service was
+   it. Its current image is `localhost/eas16-isolated:4b1d70e` and its Compose
+   environment omits `EAS_MAX_PROTOCOL_VERSION`, so the gateway currently
+   defaults to 14.0. The former Homelab test service was
    decommissioned in commit `6051729`; the live temporary stack is outside
-   that checkout. Before real-client validation, refresh the isolated image
-   from this source and explicitly set its protocol ceiling to 16.1. Production
-   remains on 14.0. The full local suite passes 425 tests (77 ignored); strict
+   that checkout. Before real-client validation, explicitly set the isolated
+   bridge's protocol ceiling to 16.1 during the planned test window. Production
+   remains on 14.0. The full local suite passes 437 tests (77 ignored); strict
    Clippy, formatting, and diff checks pass.
    Deployed with that production default as
    `deploy-2026-11-24-eas-16.1-opt-in-13bea13`; homelab commit `fcb698e`, image
    `sha256:902bfe01a2ec516b68b7517f9a38ba730bfafdeb66eb5cd5ec85822ef4e44b0d`,
    started `2026-11-24T23:30:09Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. The isolated Amy bridge has since been refreshed from
-   `main` through commit `eb9ccc5`, with no protocol override, so it remains on
-   the 14.0 default. Real-client certification remains a separate step.
+   `main` through commit `4b1d70e`, image
+   `sha256:a3b1a00a4038a876198c5d42c38683b0ad702f4fb77b78c095472ab1eba60395`,
+   with no protocol override, so it remains on the 14.0 default. Real-client
+   certification remains a separate step.
 2. **Find content coverage — code paths complete within explicit resource
    budgets.** Bounded extraction supports legacy `.xls`,
    binary Excel `.xlsb`,
@@ -1861,8 +1863,9 @@ and proposal DTSTART/DTEND use local wall time so the recurrence remains at the
 event's local time across daylight changes. Stable recurring transitions and
 fixed-offset zones are supported; irregular or unknown zones return status 4
 before the RSVP write. Excluded occurrences are serialized as EXDATE; positive
-recurrence overrides still fail closed until their full VEVENT exception
-components can be preserved. Occurrence counters use the original local
+recurrence overrides fail closed because iTIP COUNTER is constrained to one
+VEVENT, so separate per-occurrence VEVENT components would be non-conformant.
+Occurrence counters use the original local
 recurrence key with TZID, while UTC instance counters remain in UTC. The
 RRULE/location implementation is deployed to the isolated Amy bridge
 as `localhost/eas16-isolated:23f4cbc` (image
@@ -1885,8 +1888,11 @@ JSCalendar's
 `participationComment` is a note explaining RSVP status, not the custom email
 body carried by EAS `SendResponse`; mapping the two directly would lose the
 requested message semantics, so the custom text is carried in the reply MIME
-instead. The counter follows [RFC 5546 section 3.2.7](https://www.rfc-editor.org/rfc/rfc5546.html#section-3.2.7).
-The behavior follows the
+instead. RFC 5546 section 3.2.7 constrains COUNTER to one VEVENT component;
+positive recurrence overrides therefore cannot be represented as separate
+exception components in a conformant COUNTER, as specified by
+[RFC 5546 section 3.2.7](https://www.rfc-editor.org/rfc/rfc5546.html#section-3.2.7).
+The behavior also follows the
 [MS-ASCMD MeetingResponse rules](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/42ececcd-37df-4340-aa50-783ba714facb)
 and [SendResponse definition](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/128fff4c-1b97-42d8-a30f-f023327add0b),
 and the distinction follows [RFC 8984 section 4.4.6](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6).

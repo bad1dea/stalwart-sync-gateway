@@ -215,9 +215,10 @@ compose MIME replies with iTIP `REPLY` or `COUNTER` data and are implemented in
 source and deployed to the isolated Amy bridge using the 14.0 default; live
 client validation remains open. Counters include named event locations and
 supported JSCalendar recurrence rules. Stable IANA zones emit VTIMEZONE and
-use local wall time; recurrence exceptions and irregular or unknown zones fail
-closed. Excluded instances map to EXDATE; positive recurrence overrides fail
-closed pending exception VEVENT serialization. VTIMEZONE and EXDATE support
+use local wall time; irregular or unknown zones fail closed. Excluded
+instances map to EXDATE. Positive recurrence overrides fail closed because
+iTIP COUNTER permits one VEVENT; extra exception components would not conform.
+VTIMEZONE and EXDATE support
 are deployed to the isolated bridge at the 14.0 default. Custom replies now
 include attendees with supported participation statuses; unsupported statuses
 fail closed. The attendee-list update is deployed to the isolated bridge at the
