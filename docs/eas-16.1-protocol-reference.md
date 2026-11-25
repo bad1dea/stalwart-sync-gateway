@@ -19,7 +19,7 @@ The spec's own overview lays out the intended command sequence:
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
    `100.64.0.50:18090`, backed by isolated Stalwart. Health and readiness pass;
-   its current gateway image is `19fa96a` and it still defaults to EAS 14.0.
+   its current gateway image is `74f0c3f` and it still defaults to EAS 14.0.
    Set `EAS_MAX_PROTOCOL_VERSION` to 16.1 during the planned client test window.
 2. **Provision** — device sends its info, gets + acks security policy.
 3. **FolderSync** — retrieves the folder hierarchy.
@@ -221,7 +221,10 @@ status 104, and using an `InstanceId` with a non-recurring event returns status
 `SendResponse` bodies (plain text, HTML, or RTF) and proposed meeting times now
 compose MIME replies with iTIP `REPLY` or `COUNTER` data and are implemented in
 source and deployed to the isolated Amy bridge using the 14.0 default; live
-client validation remains open. Counters include named event locations and
+client validation remains open. `SendResponse` is supported in protocol 16.0
+and 16.1; its `ProposedStartTime` and `ProposedEndTime` children are gated to
+16.1, with a regression that rejects proposal requests at 16.0. Counters
+include named event locations and
 supported JSCalendar recurrence rules. Stable IANA zones emit VTIMEZONE and
 use local wall time; irregular or unknown zones fail closed. Excluded
 instances map to EXDATE. Positive recurrence overrides fail closed because
