@@ -19,9 +19,13 @@ the protocol's `PictureTooLarge` and `PictureLimitReached` statuses, while
 missing photos still return `NoPicture`. Regression coverage exercises a
 real WBXML Find request with two contacts, photo bytes, and the picture limit.
 The full suite passes 446 tests (77 ignored); strict Clippy, formatting, and
-diff checks pass. Isolated deployment and runtime verification are the next
-steps; production remains at EAS 14.0. Real-client 16.1 validation remains
-open. Source: Microsoft [Find MaxPictures](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/d61e9985-bf59-4dcf-a76f-74d810742775).
+diff checks pass. Commit `19fa96a` is deployed on Amy's isolated bridge as
+`localhost/eas16-isolated:19fa96a` (image
+`sha256:f1d4c0797cf7ea3351e71a2f476fba992b99085a2b67042c6d0258b30932d70b`),
+started `2026-11-25T09:40:05Z`, with zero restarts. `/healthz` and `/readyz`
+both return HTTP 200 (`ok` and `ready`). `EAS_MAX_PROTOCOL_VERSION` remains
+unset, preserving the 14.0 default; production is untouched. Real-client 16.1
+validation remains open. Source: Microsoft [Find MaxPictures](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/d61e9985-bf59-4dcf-a76f-74d810742775).
 
 Legacy EAS Search GAL now has a WBXML regression for the same multi-token
 ANR prefix matching used by 16.1 Find: `Michael A.` returns `Michael
