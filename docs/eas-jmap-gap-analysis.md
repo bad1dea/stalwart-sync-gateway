@@ -19,8 +19,14 @@ extension without dropping existing properties, and verify the value through
 `ifInState` guard for updates and fails the operation if readback does not
 match. Parser, merge, and mocked JMAP create/update/readback regressions pass.
 Full suite: 410 passed, 76 ignored; strict Clippy, formatting, and diff checks
-pass. This source change is not yet committed or deployed; live Stalwart
-storage behavior remains to be confirmed during rollout.
+pass. Deployed as
+`deploy-2026-11-24-eas-disallow-new-time-proposal-write-721f7f2`; Homelab
+commit `cb27e07`, image
+`sha256:e78d31cd50c83c5328b6e9ea2cfc6595321d71ad673b27395bedbf528bd4b1a2`,
+started `2026-11-25T04:39:53Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. Production still advertises EAS 14.0. Runtime health is
+verified; exercising an actual calendar write against Stalwart and testing
+with a real 16.1 client remain separate validation steps.
 
 Find now extracts Excel Binary Workbook (`.xlsb`) cell values through the
 existing vendored Calamine parser, including its registered macro-enabled
@@ -1045,8 +1051,10 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    iCalendar extension and verify persistence by reading the event back after
    create/update; a mismatch fails the operation. Regression tests cover
    read conversion, versioned response serialization, hash changes, and
-   request rejection. Full suite: 327 passed, 73 ignored; strict Clippy,
-   formatting, and diff checks pass. Deployed as
+   request rejection. The write path and mocked create/update/readback
+   regressions were added later; see the current deployment record at the top
+   of this document. Earlier validation had 327 passed, 73 ignored; strict
+   Clippy, formatting, and diff checks passed. Originally deployed as
    `deploy-2026-11-24-eas-disallow-new-time-proposal-c01b548`; homelab commit
    `5a2f1de`, image
    `sha256:26b6d582f7f89b745a51cc2493f959723fc51d1ddb69739626d7168160597d37`,
