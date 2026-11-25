@@ -61,14 +61,15 @@ started `2026-11-25T02:10:46Z`, restart count zero, `/healthz` `ok`, and
 
 PDF Find OCR now permits twenty image-only pages per attachment with a
 30-second total runtime budget. The synthetic tool regression proves twenty
-pages are extracted, twenty-one are refused, and each render/OCR subprocess is bounded by
+pages are extracted, twenty-one are refused, and each render/OCR subprocess
+is bounded by
 both its per-command timeout and remaining total budget; existing real scanned
 and mixed-PDF fixtures cover the installed Poppler/Tesseract path. The full
 suite passes 404 tests (75 ignored), strict Clippy passes, and formatting and
 diff checks pass. Deployed as
-`deploy-2026-11-25-eas-find-ocr-10pages-937d6a1`; Homelab commit `e427f79`,
-image `sha256:1680ca7b41ea185fe3ae76521b9f97f648362c37c9d723e69fc57485b82bd9ac`,
-started `2026-11-25T02:50:16Z`, restart count zero, `/healthz` `ok`, and
+`deploy-2026-11-25-eas-find-ocr-20pages-741a405`; Homelab commit `6ded2ad`,
+image `sha256:bfa2416bc574d4ff8276563f3076f1f3f6be25c009efe34215ad2aa32b42ffc4`,
+started `2026-11-25T02:57:14Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. Production retains the 14.0 protocol default.
 
 Generic ZIP Find now also extracts common source-code files such as `.rs`,
