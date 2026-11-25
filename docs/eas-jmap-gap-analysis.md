@@ -62,14 +62,13 @@ started `2026-11-25T02:10:46Z`, restart count zero, `/healthz` `ok`, and
 PDF Find OCR now permits one hundred image-only pages per attachment with a
 30-second total runtime budget. The synthetic tool regression proves one
 hundred pages are extracted, 101 are refused, and each render/OCR subprocess
-is bounded by
-both its per-command timeout and remaining total budget; existing real scanned
-and mixed-PDF fixtures cover the installed Poppler/Tesseract path. The full
+is bounded by both its per-command timeout and remaining total budget; existing
+real scanned and mixed-PDF fixtures cover the installed Poppler/Tesseract path. The full
 suite passes 404 tests (75 ignored), strict Clippy passes, and formatting and
 diff checks pass. Deployed as
-`deploy-2026-11-25-eas-find-ocr-20pages-741a405`; Homelab commit `6ded2ad`,
-image `sha256:bfa2416bc574d4ff8276563f3076f1f3f6be25c009efe34215ad2aa32b42ffc4`,
-started `2026-11-25T02:57:14Z`, restart count zero, `/healthz` `ok`, and
+`deploy-2026-11-25-eas-find-ocr-100pages-16eff40`; Homelab commit `b36691a`,
+image `sha256:977e1b49ad33b669a509cf55f1b9a20c1caffef5201c1cb0fe604f53ed39b840`,
+started `2026-11-25T03:04:16Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. Production retains the 14.0 protocol default.
 
 Generic ZIP Find now also extracts common source-code files such as `.rs`,
@@ -120,7 +119,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    Word, Excel, and PowerPoint package comment text, plus
    MIME-declared charsets for text attachments and XML declaration encodings.
    Scanned-only PDFs with up to one hundred image-only pages use resource-bounded
-   OCR. Attachments above 16 MiB and PDFs with more than one hundred image-only pages
+   OCR. Attachments above 16 MiB and PDFs with more than one hundred image-only
    remain outside exact local matching. Mixed
    PDFs retain native text and OCR only pages without extractable text, even
    when the PDF has more than three total pages. A four-page real fixture
