@@ -28,7 +28,12 @@ WebP. Image dimensions are checked before decoding (12,000 pixels per edge,
 to a 1,600-pixel edge, and Tesseract has a five-second budget. A regression
 uses a generated PNG and a controlled OCR executable, plus malformed and
 over-dimension inputs; the full suite passes 406 tests (75 ignored), strict
-Clippy, formatting, and diff checks. The change is queued for deployment.
+Clippy, formatting, and diff checks. Deployed as
+`deploy-2026-11-24-eas-find-image-ocr-1218602`; Homelab commit `ccb35a7`,
+image `sha256:c5abe248397812ef210d416435b1406dc29ba50f3202bd13fc0323dfd2cd6e2f`,
+started `2026-11-25T03:29:02Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. The container reports Tesseract `eng` and `osd` language
+data. Production remains at the 14.0 protocol default.
 
 Completed since reconciliation: **Task recurrence Add/Fetch**, including
 the encoded Sync command parser path, is now live-verified against the
