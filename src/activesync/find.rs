@@ -3488,6 +3488,14 @@ mod tests {
         assert!(text.contains("scanned"), "{text}");
         assert!(text.contains("alpha"), "{text}");
         assert!(text.contains("beta"), "{text}");
+
+        let mixed = include_bytes!("../../tests/fixtures/mixed-native-scanned.pdf");
+        let text = extract_find_attachment_text("application/pdf", mixed)
+            .expect("mixed native/scanned PDF should extract both pages");
+        assert!(text.contains("native bravo"), "{text}");
+        assert!(text.contains("scanned"), "{text}");
+        assert!(text.contains("alpha"), "{text}");
+        assert!(text.contains("beta"), "{text}");
     }
 
     #[test]

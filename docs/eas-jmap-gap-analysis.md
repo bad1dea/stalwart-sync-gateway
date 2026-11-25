@@ -71,7 +71,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    image `sha256:584e54604e4d29893254533e60fe59ccc9fd00f3507aa9acb7c73bf7c813dfb4`,
    started `2026-11-25T00:39:31Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. The expanded suite passes 402 tests (75 ignored), strict
-   Clippy and formatting pass, and the real scanned-PDF OCR test passes.
+   Clippy and formatting pass. Real OCR passes against both the scanned-only
+   fixture and a two-page mixed native/scanned fixture.
 
 1. **BodyPartPreference / BodyPart response path — implemented and deployed.**
    Request parsing and independent Sync option
