@@ -74,9 +74,12 @@ contact-photo blob downloads. Duplicate principal/contact addresses retain
 the directory result and merge in the saved contact photo. Focused parser,
 photo-limit, deduplication, and blob-ID mapping regressions pass; full suite:
 423 passed, 76 ignored; strict Clippy, formatting, and diff checks pass. This
-source change has not yet been deployed. The current environment does not
-contain the Homelab compose checkout or deployment secrets. Production remains
-at EAS 14.0; isolated 16.1 client certification remains open.
+Deployed as `deploy-2026-11-25-eas-resolve-recipient-picture-3ee5628`;
+Homelab commit `e75d177`, image
+`sha256:cc4607aa8758702f9085002fbec40ef997c576e24918e263663968c31aa16cf6`,
+started `2026-11-25T05:51:14Z`, restart count zero, mesh `/healthz` and
+`/readyz` healthy, and public `/healthz` healthy. Production remains at EAS
+14.0; isolated 16.1 client certification remains open.
 
 Find now extracts Excel Binary Workbook (`.xlsb`) cell values through the
 existing vendored Calamine parser, including its registered macro-enabled
