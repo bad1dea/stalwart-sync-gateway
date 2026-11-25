@@ -12,6 +12,17 @@ handling. Check the current Rust implementation before treating any older
 
 Current prioritized work:
 
+MeetingResponse now accepts `InstanceId` for recurring invitations on 14.1,
+16.0, and 16.1, maps the original UTC occurrence start to the parent event's
+local JSCalendar recurrence key, and changes only that occurrence's attendee
+status. Responses without `InstanceId` apply to the series and update any
+existing attendee overrides as well. Both paths use `ifInState` and verify
+persisted participant state; declining one occurrence leaves the series
+intact. Mocked JMAP regressions cover occurrence decline and whole-series
+acceptance while preserving organizer and attendee data. Full suite: 413
+passed, 76 ignored; strict Clippy, formatting, and diff checks pass. This
+source change is validated but not yet deployed.
+
 Calendar `DisallowNewTimeProposal` client writes now parse the EAS boolean,
 merge `X-MICROSOFT-DISALLOW-COUNTER` into Stalwart's retained iCalendar
 extension without dropping existing properties, and verify the value through
@@ -869,10 +880,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    the inherited endpoint when only one is changed, derive the new duration,
    and reject negative durations. All-day flags are occurrence-specific.
    Sensitivity is not mapped inside recurrence overrides because RFC 8984
-   prohibits `privacy` patches there. DisallowNewTimeProposal is read-only and
-   maps Stalwart's retained `X-MICROSOFT-DISALLOW-COUNTER` iCalendar property;
-   client writes fail closed because JSCalendar has no standard property for
-   this Exchange setting.
+   prohibits `privacy` patches there. DisallowNewTimeProposal reads and writes
+   Stalwart's retained `X-MICROSOFT-DISALLOW-COUNTER` iCalendar property; the
+   current deployed behavior is recorded at the top of this document.
    Top-level and recurring-exception AppointmentReplyTime values are mapped
    from the authenticated participant's unique `scheduleUpdated` value.
    Read-only
@@ -1753,9 +1763,10 @@ The container started at `2026-11-23T03:34:12Z` with restart count zero; mesh
 
 Also completed: **EAS 16.x MeetingResponse SendResponse**. For protocol
 16.0/16.1, an empty `SendResponse` now requests JMAP scheduling messages;
-omitting it continues to suppress them. A `SendResponse` with an embedded
-custom body remains unsupported, as do `InstanceId` and proposed meeting
-start/end times. The behavior follows the
+omitting it continues to suppress them. Recurring-series responses and
+`InstanceId` occurrence responses are now implemented; `InstanceId` is
+accepted for 14.1 and newer. A `SendResponse` with an embedded custom body and
+proposed meeting start/end times remain unsupported. The behavior follows the
 [MS-ASCMD MeetingResponse rules](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/42ececcd-37df-4340-aa50-783ba714facb)
 and [SendResponse definition](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/128fff4c-1b97-42d8-a30f-f023327add0b).
 Regression coverage asserts `sendSchedulingMessages` at the JMAP boundary and
@@ -2004,24 +2015,17 @@ read/reply/send, plus calendar/contacts/notes sync.
    the Attendees row in the status table above for what got built and
    how it was verified (including against the user's own real invite).
 
-   **What's still NOT done: MeetingResponse (Accept/Decline/Tentative).**
-   This is a real, separate gap with a real, separate reason, found by
-   actually reading the MS-ASCMD spec text rather than assuming it
-   follows from the participants fix: *"When protocol versions 2.5,
-   12.0, 12.1, or 14.0 are used, MeetingResponse cannot be used to modify
-   meeting requests in the Calendar folder"* — only the Inbox
-   meeting-request email. This gateway advertises `12.0,12.1,14.0`
-   (fixed, not touched per the standing hard boundary), so a real device
-   negotiating with it can only Accept/Decline through Mail, never by
-   tapping a button directly on the Calendar event. Building this needs:
-   (a) understanding how Stalwart's iTip pipeline surfaces an incoming
-   meeting-request email over JMAP (does it auto-create a placeholder
-   `CalendarEvent`? via `autoAddInvitations`? is there a stable
-   correlation id between the email and the event?), and (b) mapping a
-   MeetingResponse `Request`'s Inbox `CollectionId`+`RequestId` back to
-   the right `CalendarEvent` to patch. Neither is investigated yet. Not
-   guessable from here — needs its own session with a real inbound
-   invite to test against.
+   **MeetingResponse recurring responses are implemented.** The protocol
+   restriction still applies: Calendar-folder targets are rejected for
+   protocol 14.0, while 14.1, 16.0, and 16.1 allow them. `InstanceId` targets
+   one occurrence; omitting it responds to the full series, including explicit
+   attendee-status overrides. The JMAP updates preserve other participant
+   fields and verify readback. The version rule is specified by
+   [MS-ASCMD MeetingResponse](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/42ececcd-37df-4340-aa50-783ba714facb),
+   and `InstanceId`'s occurrence-start semantics are specified by
+   [MS-ASCMD InstanceId](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/05c577a1-99f2-4afa-83bc-c1acacb80a1c).
+   Mocked JMAP tests cover the occurrence and series write paths; real-client
+   16.1 validation remains part of the readiness backlog above.
 4. ✅ **DONE (verification only, no code change needed) — SmartReply/
    SmartForward threading fidelity.** Live-tested this session: a
    self-addressed test message (no third party involved — sent

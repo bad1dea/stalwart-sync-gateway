@@ -3109,9 +3109,13 @@ impl JmapClient {
         calendar_id: &str,
         event_id: &str,
         participation: &str,
-        expected_organizer: Option<&str>,
-        send_response: bool,
+        options: MeetingResponseOptions<'_>,
     ) -> anyhow::Result<bool> {
+        let MeetingResponseOptions {
+            expected_organizer,
+            send_response,
+            instance_id,
+        } = options;
         let account = auth
             .session
             .primary_account_for(capabilities::CALENDARS)
@@ -3122,7 +3126,7 @@ impl JmapClient {
         ];
         let response: JmapResponse<serde_json::Value> = self.api_call(auth, &using,
             vec![MethodCall::new("CalendarEvent/get", serde_json::json!({"accountId":account,
-                "ids":[event_id],"properties":["id","@type","calendarIds","participants","replyTo","recurrenceRule","recurrenceOverrides"]}), "get")]).await?;
+                "ids":[event_id],"properties":["id","@type","calendarIds","participants","replyTo","timeZone","recurrenceRule","recurrenceOverrides"]}), "get")]).await?;
         let result = response
             .method_responses
             .iter()
@@ -3137,14 +3141,24 @@ impl JmapClient {
         if event["@type"] != "Event" || event["calendarIds"][calendar_id] != true {
             return Ok(false);
         }
-        if !event["recurrenceRule"].is_null()
-            || event["recurrenceOverrides"]
-                .as_object()
-                .is_some_and(|overrides| !overrides.is_empty())
-        {
-            anyhow::bail!("recurring meeting responses are not supported");
-        }
-        let Some(participants) = event["participants"].as_object() else {
+        let instance_key = if let Some(instance_id) = instance_id {
+            if event["recurrenceRule"].is_null() {
+                return Ok(false);
+            }
+            let key = recurrence_override_key(instance_id, event["timeZone"].as_str())?;
+            anyhow::ensure!(
+                event["recurrenceOverrides"][&key]["excluded"] != true,
+                "cannot respond to a deleted meeting occurrence"
+            );
+            Some(key)
+        } else {
+            None
+        };
+        let effective_participants = instance_key
+            .as_deref()
+            .and_then(|key| event["recurrenceOverrides"][key].get("participants"))
+            .unwrap_or(&event["participants"]);
+        let Some(participants) = effective_participants.as_object() else {
             return Ok(false);
         };
         let owners: Vec<_> = participants
@@ -3182,7 +3196,7 @@ impl JmapClient {
         let state = result.1["state"]
             .as_str()
             .context("calendar state missing")?;
-        if participation == "declined" {
+        if participation == "declined" && instance_key.is_none() {
             if auth.capabilities.submission {
                 let identities = self.mail_identities(auth).await?;
                 if identities.iter().any(|identity| {
@@ -3276,12 +3290,67 @@ impl JmapClient {
         let participant_id = (*key).clone();
         let original_roles = participant["roles"].clone();
         let owner_email = owners[0]["email"].clone();
-        let key = key.replace('~', "~0").replace('/', "~1");
-        let path = format!("participants/{key}/participationStatus");
-        let response: JmapResponse<serde_json::Value> = self.api_call(auth, &using,
-            vec![MethodCall::new("CalendarEvent/set", serde_json::json!({"accountId":account,
+        let participant_path = key.replace('~', "~0").replace('/', "~1");
+        let mut update = serde_json::Map::new();
+        let mut exception_statuses = Vec::new();
+        if let Some(instance_key) = instance_key.as_deref() {
+            let mut occurrence_participants = participants.clone();
+            occurrence_participants
+                .get_mut(&participant_id)
+                .context("meeting attendee disappeared")?["participationStatus"] =
+                serde_json::json!(participation);
+            let path = format!("recurrenceOverrides/{instance_key}/participants");
+            update.insert(path, serde_json::Value::Object(occurrence_participants));
+            exception_statuses.push((instance_key.to_owned(), participant_id.clone()));
+        } else {
+            let path = format!("participants/{participant_path}/participationStatus");
+            update.insert(path, serde_json::json!(participation));
+            update.insert(
+                format!("participants/{participant_path}/roles"),
+                participant["roles"].clone(),
+            );
+            if let Some(overrides) = event["recurrenceOverrides"].as_object() {
+                for (key, override_value) in overrides {
+                    let Some(override_participants) = override_value
+                        .get("participants")
+                        .and_then(|value| value.as_object())
+                    else {
+                        continue;
+                    };
+                    let Some((override_id, _)) = override_participants.iter().find(|(_, value)| {
+                        value["email"]
+                            .as_str()
+                            .is_some_and(|email| email.eq_ignore_ascii_case(auth.username()))
+                    }) else {
+                        continue;
+                    };
+                    let mut updated_participants = override_participants.clone();
+                    updated_participants
+                        .get_mut(override_id)
+                        .context("occurrence attendee disappeared")?["participationStatus"] =
+                        serde_json::json!(participation);
+                    let key = key.replace('~', "~0").replace('/', "~1");
+                    update.insert(
+                        format!("recurrenceOverrides/{key}/participants"),
+                        serde_json::Value::Object(updated_participants),
+                    );
+                    exception_statuses.push((key, override_id.clone()));
+                }
+            }
+        }
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &using,
+                vec![MethodCall::new(
+                    "CalendarEvent/set",
+                    serde_json::json!({"accountId":account,
                 "ifInState":state,"sendSchedulingMessages":send_response,
-                "update":{event_id:{path:participation, format!("participants/{key}/roles"):participant["roles"].clone()}}}), "set")]).await?;
+                "update":{event_id:update}}),
+                    "set",
+                )],
+            )
+            .await?;
         let result = response
             .method_responses
             .iter()
@@ -3300,18 +3369,24 @@ impl JmapClient {
                 vec![MethodCall::new(
                     "CalendarEvent/get",
                     serde_json::json!({"accountId":account,
-                "ids":[event_id],"properties":["id","participants"]}),
+                "ids":[event_id],"properties":["id","participants","recurrenceOverrides"]}),
                     "verify",
                 )],
             )
             .await?;
-        let participants = response
+        let verified_event = response
             .method_responses
             .iter()
             .find(|method| method.0 == "CalendarEvent/get")
             .and_then(|method| method.1["list"].as_array())
             .and_then(|items| items.iter().find(|event| event["id"] == event_id))
-            .and_then(|event| event["participants"].as_object())
+            .context("meeting response verification failed")?;
+        let verified_participants = instance_key
+            .as_deref()
+            .and_then(|key| verified_event["recurrenceOverrides"][key].get("participants"))
+            .unwrap_or(&verified_event["participants"]);
+        let participants = verified_participants
+            .as_object()
             .context("meeting response verification failed")?;
         let attendee = participants
             .get(&participant_id)
@@ -3320,6 +3395,15 @@ impl JmapClient {
             attendee["participationStatus"] == participation && attendee["roles"] == original_roles,
             "meeting attendee state was not retained"
         );
+        for (key, participant_id) in exception_statuses {
+            let key = key.replace('~', "~0").replace('/', "~1");
+            anyhow::ensure!(
+                verified_event["recurrenceOverrides"][key]["participants"][participant_id]
+                    ["participationStatus"]
+                    == participation,
+                "meeting occurrence response was not retained"
+            );
+        }
         let owners: Vec<_> = participants
             .values()
             .filter(|p| p["roles"]["owner"] == true)
@@ -6985,6 +7069,13 @@ impl JmapClient {
 
         response.json().await.context("invalid JMAP API JSON")
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MeetingResponseOptions<'a> {
+    pub expected_organizer: Option<&'a str>,
+    pub send_response: bool,
+    pub instance_id: Option<&'a str>,
 }
 
 impl AuthenticatedSession {
@@ -12253,7 +12344,189 @@ mod meeting_response_send_tests {
         )
         .unwrap();
         assert!(client
-            .respond_calendar_event(&auth, "cal", "e", "accepted", None, true)
+            .respond_calendar_event(
+                &auth,
+                "cal",
+                "e",
+                "accepted",
+                MeetingResponseOptions {
+                    send_response: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn meeting_response_updates_only_the_requested_occurrence() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let captured = calls.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(request): Json<serde_json::Value>| {
+                let calls = captured.clone();
+                async move {
+                    let call = &request["methodCalls"][0];
+                    match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                        0 => Json(serde_json::json!({"methodResponses":[[
+                            "CalendarEvent/get", {"state":"s1","list":[{
+                                "id":"e","@type":"Event","calendarIds":{"cal":true},
+                                "timeZone":"Etc/UTC","recurrenceRule":{"frequency":"daily"},
+                                "recurrenceOverrides":{},"participants":{
+                                    "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                                    "self":{"email":"user@example.test","roles":{"attendee":true},"participationStatus":"needs-action"}
+                                }
+                            }]}, "get"
+                        ]]})),
+                        1 => {
+                            assert_eq!(call[0], "CalendarEvent/set");
+                            assert_eq!(call[1]["ifInState"], "s1");
+                            let patch = &call[1]["update"]["e"];
+                            let path = "recurrenceOverrides/2026-11-25T15:00:00/participants";
+                            assert_eq!(patch[path]["self"]["participationStatus"], "declined");
+                            assert!(call[1].get("destroy").is_none());
+                            assert!(patch["participants/self/participationStatus"].is_null());
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/set", {"updated":{"e":null}}, "set"
+                            ]]}))
+                        }
+                        2 => Json(serde_json::json!({"methodResponses":[[
+                            "CalendarEvent/get", {"state":"s2","list":[{
+                                "id":"e","participants":{
+                                    "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                                    "self":{"email":"user@example.test","roles":{"attendee":true},"participationStatus":"needs-action"}
+                                },"recurrenceOverrides":{"2026-11-25T15:00:00":{"participants":{
+                                    "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                                    "self":{"email":"user@example.test","roles":{"attendee":true},"participationStatus":"declined"}
+                                }}}
+                            }]}, "verify"
+                        ]]})),
+                        _ => panic!("unexpected JMAP request"),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CALENDARS:"a"}, "apiUrl":url,
+            "downloadUrl":url,"uploadUrl":url,"username":"user@example.test","state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user@example.test".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        assert!(client
+            .respond_calendar_event(
+                &auth,
+                "cal",
+                "e",
+                "declined",
+                MeetingResponseOptions {
+                    send_response: true,
+                    instance_id: Some("2026-11-25T15:00:00.000Z"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn meeting_response_to_series_updates_existing_attendee_overrides() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let captured = calls.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(request): Json<serde_json::Value>| {
+                let calls = captured.clone();
+                async move {
+                    let call = &request["methodCalls"][0];
+                    match calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                        0 => Json(serde_json::json!({"methodResponses":[[
+                            "CalendarEvent/get", {"state":"s1","list":[{
+                                "id":"e","@type":"Event","calendarIds":{"cal":true},
+                                "recurrenceRule":{"frequency":"daily"},"recurrenceOverrides":{
+                                    "2026-11-25T15:00:00":{"participants":{
+                                        "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                                        "self":{"email":"user@example.test","roles":{"attendee":true},"participationStatus":"tentative"}
+                                    }}
+                                },"participants":{
+                                    "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                                    "self":{"email":"user@example.test","roles":{"attendee":true},"participationStatus":"needs-action"}
+                                }
+                            }]}, "get"
+                        ]]})),
+                        1 => {
+                            assert_eq!(call[0], "CalendarEvent/set");
+                            let patch = &call[1]["update"]["e"];
+                            assert_eq!(patch["participants/self/participationStatus"], "accepted");
+                            assert_eq!(patch["recurrenceOverrides/2026-11-25T15:00:00/participants"]["self"]["participationStatus"], "accepted");
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/set", {"updated":{"e":null}}, "set"
+                            ]]}))
+                        }
+                        2 => Json(serde_json::json!({"methodResponses":[[
+                            "CalendarEvent/get", {"list":[{
+                                "id":"e","participants":{
+                                    "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                                    "self":{"email":"user@example.test","roles":{"attendee":true},"participationStatus":"accepted"}
+                                },"recurrenceOverrides":{"2026-11-25T15:00:00":{"participants":{
+                                    "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                                    "self":{"email":"user@example.test","roles":{"attendee":true},"participationStatus":"accepted"}
+                                }}}
+                            }]}, "verify"
+                        ]]})),
+                        _ => panic!("unexpected JMAP request"),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CALENDARS:"a"}, "apiUrl":url,
+            "downloadUrl":url,"uploadUrl":url,"username":"user@example.test","state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user@example.test".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        assert!(client
+            .respond_calendar_event(
+                &auth,
+                "cal",
+                "e",
+                "accepted",
+                MeetingResponseOptions::default()
+            )
             .await
             .unwrap());
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
