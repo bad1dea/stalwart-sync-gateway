@@ -12,6 +12,14 @@ handling. Check the current Rust implementation before treating any older
 
 Current prioritized work:
 
+Calendar recurrence reads now reject present `interval` and `count` values
+that are strings, negative numbers, or outside the unsigned 32-bit range;
+intervals above EAS's 999 limit also fail closed. This prevents malformed
+JMAP recurrence metadata from being silently emitted to clients as though the
+field were absent. Regressions cover invalid types, negative and overflow
+values, the 999 interval boundary, and the largest valid count. Full suite:
+438 passed, 77 ignored; strict Clippy, formatting, and diff checks pass.
+
 MeetingResponse now accepts `InstanceId` for recurring invitations on 14.1,
 16.0, and 16.1, maps the original UTC occurrence start to the parent event's
 local JSCalendar recurrence key, and changes only that occurrence's attendee

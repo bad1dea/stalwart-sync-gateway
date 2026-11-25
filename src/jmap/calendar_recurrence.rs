@@ -210,7 +210,7 @@ pub fn from_jscalendar(
         .context("recurrence frequency missing")?;
     let interval = optional_u32(rule, "interval")?;
     anyhow::ensure!(
-        interval.is_none_or(|value| value > 0),
+        interval.is_none_or(|value| (1..=999).contains(&value)),
         "invalid recurrence interval"
     );
     let occurrences = optional_u32(rule, "count")?;
@@ -383,8 +383,10 @@ fn number_array(rule: &Value, key: &str) -> anyhow::Result<Vec<i64>> {
 }
 fn optional_u32(rule: &Value, key: &str) -> anyhow::Result<Option<u32>> {
     rule.get(key)
-        .and_then(Value::as_u64)
-        .map(|value| u32::try_from(value).context("invalid recurrence number"))
+        .map(|value| {
+            let value = value.as_u64().context("invalid recurrence number")?;
+            u32::try_from(value).context("invalid recurrence number")
+        })
         .transpose()
 }
 fn parse_month(value: &str) -> anyhow::Result<u8> {
@@ -529,5 +531,32 @@ mod tests {
         ] {
             assert!(from_jscalendar(&rule, None).is_err(), "{rule}");
         }
+    }
+
+    #[test]
+    fn recurrence_interval_and_count_must_be_unsigned_32_bit_integers() {
+        for (field, value) in [
+            ("interval", json!("2")),
+            ("interval", json!(-1)),
+            ("interval", json!(1000)),
+            ("interval", json!(4294967296u64)),
+            ("count", json!("5")),
+            ("count", json!(-1)),
+            ("count", json!(4294967296u64)),
+        ] {
+            let rule = json!({"frequency":"daily", field:value});
+            assert!(from_jscalendar(&rule, None).is_err(), "{rule}");
+        }
+
+        let max_interval = json!({"frequency":"daily","interval":999});
+        assert_eq!(
+            from_jscalendar(&max_interval, None).unwrap().interval,
+            Some(999)
+        );
+        let rule = json!({"frequency":"daily","interval":1,"count":4294967295u64});
+        assert_eq!(
+            from_jscalendar(&rule, None).unwrap().occurrences,
+            Some(u32::MAX)
+        );
     }
 }
