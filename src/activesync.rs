@@ -6159,6 +6159,9 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.radio_phone.hash(&mut hasher);
     contact.web_page.hash(&mut hasher);
     contact.assistant_phone.hash(&mut hasher);
+    contact.assistant_name.hash(&mut hasher);
+    contact.spouse.hash(&mut hasher);
+    contact.children.hash(&mut hasher);
     contact.company_name.hash(&mut hasher);
     contact.department.hash(&mut hasher);
     contact.job_title.hash(&mut hasher);
@@ -6357,6 +6360,24 @@ fn write_contact_fields(
     }
     if let Some(assistant_phone) = &contact.assistant_phone {
         builder.leaf(c::ASSISTANT_PHONE_NUMBER, assistant_phone.clone());
+    }
+    for (token, value) in [
+        (c::ASSISTANT_NAME, contact.assistant_name.as_ref()),
+        (c::SPOUSE, contact.spouse.as_ref()),
+    ] {
+        match value {
+            Some(value) if value.is_empty() => builder.empty_tag(token),
+            Some(value) => builder.leaf(token, value.clone()),
+            None if is_change => builder.empty_tag(token),
+            None => {}
+        }
+    }
+    if !contact.children.is_empty() || is_change {
+        builder.start(c::CHILDREN);
+        for child in &contact.children {
+            builder.leaf(c::CHILD, child.clone());
+        }
+        builder.end();
     }
     write_contact_address_fields(builder, contact.other_address.as_ref(), "other", is_change);
 }
@@ -9961,6 +9982,9 @@ mod tests {
             car_phone: Some("555-0107".into()),
             radio_phone: Some("555-0108".into()),
             assistant_phone: Some("555-0110".into()),
+            assistant_name: Some("Grace Hopper".into()),
+            spouse: Some("Alex Lovelace".into()),
+            children: vec!["Byron Ada".into(), "Byron Ralph".into()],
             web_page: Some("https://example.com/ada".into()),
             business_address: Some(crate::model::ContactAddress {
                 city: Some("Toronto".into()),
@@ -10064,6 +10088,15 @@ mod tests {
             Some("555-0110")
         );
         assert_eq!(
+            eas::find_text_after(&doc, c::ASSISTANT_NAME),
+            Some("Grace Hopper")
+        );
+        assert_eq!(eas::find_text_after(&doc, c::SPOUSE), Some("Alex Lovelace"));
+        assert_eq!(
+            eas::find_all_text_after(&doc, c::CHILD),
+            vec!["Byron Ada", "Byron Ralph"]
+        );
+        assert_eq!(
             eas::find_text_after(&doc, c::YOMI_FIRST_NAME),
             Some("エイダ")
         );
@@ -10107,6 +10140,12 @@ mod tests {
             Some("18")
         );
         contact.assistant_phone = Some("555-0111".into());
+        assert_ne!(super::contact_hash(&contact), before);
+        contact.assistant_name = Some("Katherine Johnson".into());
+        assert_ne!(super::contact_hash(&contact), before);
+        contact.spouse = Some("Changed spouse".into());
+        assert_ne!(super::contact_hash(&contact), before);
+        contact.children.push("Byron George".into());
         assert_ne!(super::contact_hash(&contact), before);
         contact.yomi_first_name = Some("エイダ改".into());
         assert_ne!(super::contact_hash(&contact), before);

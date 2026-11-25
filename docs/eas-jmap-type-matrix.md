@@ -68,7 +68,7 @@ cleanly by how well JSContact (RFC 9553) covers them:
 | Field group | Status | JSContact mechanism | Notes |
 |---|---|---|---|
 | Anniversary, Birthday | ✅ (`deploy-2026-11-22-eas-contact-dates-5f03d66`) | JSContact `anniversaries` (`wedding`/`birth`) | Strict `YYYYMMDD` values map to full PartialDates; partial updates preserve the other kind under `ifInState`. |
-| AssistantName | ⛔ | No semantics-preserving standard JSContact property | The EAS assistant name cannot be retained without inventing a relationship or extension. |
+| AssistantName | ✅ | JSContact vendor property `khuo.ng:easAssistantName` | Preserved as the literal EAS field; empty Change values clear it. This avoids inventing a relationship target. |
 | AssistantPhoneNumber | ✅ | JSContact `phones` with the `assistant` label | Labeled assistant phone entries round-trip independently of other phone kinds. |
 | Body/BodySize/BodyTruncated | ✅ (AirSyncBase:Body) | JSContact `notes` | Plain-text notes map through the `eas_notes` note key. Body preferences control output and truncation metadata; unsupported HTML input is rejected to avoid lossy conversion. Legacy Contacts:Body in EAS 2.5 is not used because this gateway advertises 14.0. |
 | Business2PhoneNumber, BusinessFaxNumber, Home2PhoneNumber | ✅ (`deploy-2026-11-22-eas-contact-secondary-phones-6c3d00d`, business fax `deploy-2026-11-22-eas-contact-business-fax-78425f9`) | JSContact `phones` with work/private contexts and `fax` feature | Secondary numbers and business fax remain separate entries; partial updates merge the existing phone map under `ifInState`. |
@@ -76,11 +76,11 @@ cleanly by how well JSContact (RFC 9553) covers them:
 | CarPhoneNumber, RadioPhoneNumber | ✅ (`deploy-2026-11-22-eas-contact-car-radio-60e5eca`) | JSContact `phones[].label` (`car`, `radio`) | Custom phone labels retain the EAS-specific phone kind across reads and writes. |
 | Business/Home/Other Address{City,Country,PostalCode,State,Street} (15 fields total) | ✅ (`deploy-2026-11-22-eas-contact-addresses-0e8a071`) | JSContact `addresses` with `components` and work/private/other contexts | All three EAS address groups map to JSContact components; partial updates merge existing components under `ifInState`, and empty tags remove individual components. |
 | Categories/Category | ✅ (`deploy-2026-11-22-eas-contact-categories-79585fc`) | JSContact `keywords` | Values round-trip; absent field leaves existing keywords untouched and an empty field clears them. |
-| Children/Child | ⛔ *(today)* / 🟡 | No direct JSContact property — closest is a `relatedTo` entry per child, if named at all | ❓ unsurveyed. |
+| Children/Child | ✅ | JSContact vendor property `khuo.ng:easChildren` (array of names) | Preserves EAS child names and ordering; an empty Children container clears the list. |
 | Department | ✅ (`deploy-2026-11-22-eas-contact-department-6708d25`) | JSContact `organizations[].units[]` | Maps to the last unit in the organization hierarchy; partial edits preserve company and other organization fields. |
 | OfficeLocation | ✅ | JSContact `addresses` entry labeled `office location` | The full office-location string is retained separately from structured postal addresses. |
 | MiddleName, Suffix | ✅ (`deploy-2026-11-22-eas-contact-name-parts-c3f4378`) | JSContact `name.components` (`given2`, `generation`) | Partial edits merge the existing components under a JMAP state guard; empty fields clear the selected component. |
-| Spouse | ⛔ *(today)* / 🟡 | `relatedTo` entry with relation type `"spouse"` | |
+| Spouse | ✅ | JSContact vendor property `khuo.ng:easSpouse` | Preserves the name-only EAS value without fabricating a related contact card. Empty Change values clear it. |
 | Title | ✅ (`deploy-2026-11-22-eas-contact-name-prefix-c48ee61c`) | JSContact `name.components` (`prefix`) | Partial edits preserve other name components under `ifInState`. `JobTitle` continues to map separately to JSContact `titles`. |
 | WebPage | ✅ (`deploy-2026-11-22-eas-contact-web-page-d97a2d2`) | JSContact `links[].uri` | HTTP(S) website links are emitted as EAS `WebPage`; updates preserve unrelated links. |
 | YomiCompanyName, YomiFirstName, YomiLastName | ✅ | JSContact phonetic `name.components` and organization `sortAs` | Phonetic name parts and company reading round-trip through the backend's JSContact fields. |

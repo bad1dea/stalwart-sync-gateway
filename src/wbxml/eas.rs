@@ -1470,6 +1470,9 @@ pub struct ContactFields {
     pub radio_phone_number: Option<String>,
     pub web_page: Option<String>,
     pub assistant_phone_number: Option<String>,
+    pub assistant_name: Option<String>,
+    pub spouse: Option<String>,
+    pub children: Option<Vec<String>>,
     pub company_name: Option<String>,
     pub department: Option<String>,
     pub job_title: Option<String>,
@@ -2537,6 +2540,9 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                 if same_token(*token, contacts::CATEGORY) {
                     category_buf = None;
                 }
+                if same_token(*token, contacts::CHILDREN) {
+                    fields.children.get_or_insert_with(Vec::new);
+                }
                 if !token.has_content {
                     let empty = Some(String::new());
                     if same_token(*token, contacts::BUSINESS_ADDRESS_CITY) {
@@ -2623,6 +2629,19 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                         fields.web_page = empty;
                     } else if same_token(*token, contacts::ASSISTANT_PHONE_NUMBER) {
                         fields.assistant_phone_number = empty;
+                    } else if same_token(*token, contacts::ASSISTANT_NAME) {
+                        fields.assistant_name = empty;
+                    } else if same_token(*token, contacts::SPOUSE) {
+                        fields.spouse = empty;
+                    } else if same_token(*token, contacts::CHILD)
+                        && path
+                            .last()
+                            .is_some_and(|parent| same_token(*parent, contacts::CHILDREN))
+                    {
+                        fields
+                            .children
+                            .get_or_insert_with(Vec::new)
+                            .push(String::new());
                     }
                 }
                 path.push(*token);
@@ -2699,6 +2718,18 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                     fields.web_page = Some(text.clone());
                 } else if same_token(top, contacts::ASSISTANT_PHONE_NUMBER) {
                     fields.assistant_phone_number = Some(text.clone());
+                } else if same_token(top, contacts::ASSISTANT_NAME) {
+                    fields.assistant_name = Some(text.clone());
+                } else if same_token(top, contacts::SPOUSE) {
+                    fields.spouse = Some(text.clone());
+                } else if same_token(top, contacts::CHILD)
+                    && path.len() >= 2
+                    && same_token(path[path.len() - 2], contacts::CHILDREN)
+                {
+                    fields
+                        .children
+                        .get_or_insert_with(Vec::new)
+                        .push(text.clone());
                 } else if same_token(top, contacts::COMPANY_NAME) {
                     fields.company_name = Some(text.clone());
                 } else if same_token(top, contacts::DEPARTMENT) {
@@ -4165,6 +4196,12 @@ mod tests {
         builder.leaf(contacts::CAR_PHONE_NUMBER, "555-0107");
         builder.leaf(contacts::RADIO_PHONE_NUMBER, "555-0108");
         builder.leaf(contacts::ASSISTANT_PHONE_NUMBER, "555-0110");
+        builder.leaf(contacts::ASSISTANT_NAME, "Grace Hopper");
+        builder.leaf(contacts::SPOUSE, "Alex Lovelace");
+        builder.start(contacts::CHILDREN);
+        builder.leaf(contacts::CHILD, "Byron Ada");
+        builder.leaf(contacts::CHILD, "Byron Ralph");
+        builder.end();
         builder.leaf(contacts::WEB_PAGE, "https://example.com/ada");
         builder.leaf(contacts::COMPANY_NAME, "Analytical Engines Ltd");
         builder.leaf(contacts::DEPARTMENT, "Research");
@@ -4252,6 +4289,15 @@ mod tests {
             Some("555-0110")
         );
         assert_eq!(
+            command.contact.assistant_name.as_deref(),
+            Some("Grace Hopper")
+        );
+        assert_eq!(command.contact.spouse.as_deref(), Some("Alex Lovelace"));
+        assert_eq!(
+            command.contact.children,
+            Some(vec!["Byron Ada".into(), "Byron Ralph".into()])
+        );
+        assert_eq!(
             command.contact.web_page.as_deref(),
             Some("https://example.com/ada")
         );
@@ -4287,6 +4333,19 @@ mod tests {
             command.contact.categories.as_deref(),
             Some(&["Work".to_owned(), "Friends".to_owned()][..])
         );
+    }
+
+    #[test]
+    fn parses_empty_contact_assistant_relationship_fields_as_clears() {
+        let mut builder = DocumentBuilder::new();
+        builder.empty_tag(contacts::ASSISTANT_NAME);
+        builder.empty_tag(contacts::SPOUSE);
+        builder.start(contacts::CHILDREN);
+        builder.end();
+        let fields = extract_contact_fields(&builder.finish().nodes);
+        assert_eq!(fields.assistant_name.as_deref(), Some(""));
+        assert_eq!(fields.spouse.as_deref(), Some(""));
+        assert_eq!(fields.children, Some(Vec::new()));
     }
 
     #[test]

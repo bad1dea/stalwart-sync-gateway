@@ -19,6 +19,10 @@ use crate::{
     },
 };
 
+const EAS_ASSISTANT_NAME_PROPERTY: &str = "khuo.ng:easAssistantName";
+const EAS_SPOUSE_PROPERTY: &str = "khuo.ng:easSpouse";
+const EAS_CHILDREN_PROPERTY: &str = "khuo.ng:easChildren";
+
 #[derive(Debug, thiserror::Error)]
 #[error("JMAP email state changed")]
 struct EmailStateMismatch;
@@ -2007,7 +2011,7 @@ impl JmapClient {
                 MethodCall::new("ContactCard/get", serde_json::json!({
                     "accountId":account, "#ids":{"resultOf":"q","name":"ContactCard/query","path":"/ids"},
                     "properties":["id","addressBookIds","name","emails","phones","organizations",
-                        "titles","nicknames","addresses","anniversaries","notes","onlineServices","media","links","keywords"]
+                        "titles","nicknames","addresses","anniversaries","notes","onlineServices","media","links","keywords","khuo.ng:easAssistantName","khuo.ng:easSpouse","khuo.ng:easChildren"]
                 }), "g"),
             ]).await?;
             let query = response
@@ -2139,7 +2143,7 @@ impl JmapClient {
                     "ContactCard/get",
                     serde_json::json!({
                         "accountId":account, "ids":[id],
-                        "properties":["id","addressBookIds","name","emails","phones","organizations","titles","keywords","anniversaries","links","notes"]
+                        "properties":["id","addressBookIds","name","emails","phones","organizations","titles","keywords","anniversaries","links","notes","khuo.ng:easAssistantName","khuo.ng:easSpouse","khuo.ng:easChildren"]
                     }),
                     "g",
                 )],
@@ -2201,6 +2205,26 @@ impl JmapClient {
         };
 
         let mut card = serde_json::Map::new();
+        for (property, requested) in [
+            (EAS_ASSISTANT_NAME_PROPERTY, &fields.assistant_name),
+            (EAS_SPOUSE_PROPERTY, &fields.spouse),
+        ] {
+            if let Some(value) = requested {
+                if value.is_empty() {
+                    if id.is_some() {
+                        card.insert(property.to_owned(), serde_json::Value::Null);
+                    }
+                } else {
+                    card.insert(property.to_owned(), serde_json::json!(value));
+                }
+            }
+        }
+        if let Some(children) = &fields.children {
+            card.insert(
+                EAS_CHILDREN_PROPERTY.to_owned(),
+                serde_json::json!(children),
+            );
+        }
 
         let mut components = Vec::new();
         let yomi_first = fields
@@ -2571,6 +2595,9 @@ impl JmapClient {
                 || has_links_update
                 || !addresses.is_empty()
                 || has_office_location_update
+                || fields.assistant_name.is_some()
+                || fields.spouse.is_some()
+                || fields.children.is_some()
         }) {
             let mut properties = vec!["id"];
             if has_name_update {
@@ -9712,6 +9739,12 @@ struct ContactCardObject {
     links: BTreeMap<String, ContactCardLink>,
     #[serde(default)]
     notes: BTreeMap<String, ContactCardNote>,
+    #[serde(default, rename = "khuo.ng:easAssistantName")]
+    eas_assistant_name: Option<String>,
+    #[serde(default, rename = "khuo.ng:easSpouse")]
+    eas_spouse: Option<String>,
+    #[serde(default, rename = "khuo.ng:easChildren")]
+    eas_children: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -10104,6 +10137,9 @@ impl From<ContactCardObject> for Contact {
             car_phone,
             radio_phone,
             assistant_phone,
+            assistant_name: value.eas_assistant_name,
+            spouse: value.eas_spouse,
+            children: value.eas_children,
             company_main_phone,
             mms,
             account_name,
@@ -14040,6 +14076,24 @@ mod calendar_update_state_tests {
 #[cfg(test)]
 mod contact_address_tests {
     use super::*;
+
+    #[test]
+    fn eas_contact_relationship_extension_reads_names_without_fabricating_related_cards() {
+        let card: ContactCardObject = serde_json::from_value(serde_json::json!({
+            "id":"c",
+            "khuo.ng:easAssistantName":"Grace Hopper",
+            "khuo.ng:easSpouse":"Alex Lovelace",
+            "khuo.ng:easChildren":["Byron Ada","Byron Ralph"]
+        }))
+        .unwrap();
+        let contact = Contact::from(card);
+        assert_eq!(contact.assistant_name.as_deref(), Some("Grace Hopper"));
+        assert_eq!(contact.spouse.as_deref(), Some("Alex Lovelace"));
+        assert_eq!(
+            contact.children,
+            vec!["Byron Ada".to_owned(), "Byron Ralph".to_owned()]
+        );
+    }
     use axum::{routing::post, Json, Router};
     use std::sync::Arc;
 
@@ -14237,6 +14291,29 @@ mod contact_address_tests {
                                 "other_note":{"@type":"Note","note":"Keep this text"},
                                 "eas_notes":{"@type":"Note","note":"Updated contact note"}
                             }));
+                            assert_eq!(call[1]["update"]["contact-1"][EAS_ASSISTANT_NAME_PROPERTY], "Grace Hopper");
+                            assert_eq!(call[1]["update"]["contact-1"][EAS_SPOUSE_PROPERTY], "Alex Lovelace");
+                            assert_eq!(call[1]["update"]["contact-1"][EAS_CHILDREN_PROPERTY], serde_json::json!(["Byron Ada", "Byron Ralph"]));
+                            assert!(call[1]["update"]["contact-1"].get("relatedTo").is_none());
+                            serde_json::json!(["ContactCard/set", {"updated":{"contact-1":null}}, "0"])
+                        }
+                        2 => {
+                            assert_eq!(call[0], "ContactCard/get");
+                            serde_json::json!(["ContactCard/get", {
+                                "state":"after",
+                                "list":[{"id":"contact-1",
+                                    "khuo.ng:easAssistantName":"Grace Hopper",
+                                    "khuo.ng:easSpouse":"Alex Lovelace",
+                                    "khuo.ng:easChildren":["Byron Ada","Byron Ralph"]
+                                }]
+                            }, "address-state"])
+                        }
+                        3 => {
+                            assert_eq!(call[0], "ContactCard/set");
+                            assert_eq!(call[1]["ifInState"], "after");
+                            assert!(call[1]["update"]["contact-1"][EAS_ASSISTANT_NAME_PROPERTY].is_null());
+                            assert!(call[1]["update"]["contact-1"][EAS_SPOUSE_PROPERTY].is_null());
+                            assert_eq!(call[1]["update"]["contact-1"][EAS_CHILDREN_PROPERTY], serde_json::json!([]));
                             serde_json::json!(["ContactCard/set", {"updated":{"contact-1":null}}, "0"])
                         }
                         _ => panic!("unexpected JMAP request"),
@@ -14268,6 +14345,9 @@ mod contact_address_tests {
         .unwrap();
         let fields = crate::wbxml::eas::ContactFields {
             notes: Some("Updated contact note".into()),
+            assistant_name: Some("Grace Hopper".into()),
+            spouse: Some("Alex Lovelace".into()),
+            children: Some(vec!["Byron Ada".into(), "Byron Ralph".into()]),
             ..Default::default()
         };
         assert_eq!(
@@ -14277,7 +14357,20 @@ mod contact_address_tests {
                 .unwrap(),
             "contact-1"
         );
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let clear_fields = crate::wbxml::eas::ContactFields {
+            assistant_name: Some(String::new()),
+            spouse: Some(String::new()),
+            children: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert_eq!(
+            client
+                .save_contact(&auth, "book", Some("contact-1"), &clear_fields)
+                .await
+                .unwrap(),
+            "contact-1"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
         server.abort();
     }
 
