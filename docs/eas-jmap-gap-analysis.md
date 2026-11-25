@@ -33,12 +33,12 @@ omission if the property is missing. Sensitivity maps JSCalendar privacy
 uses JSCalendar's default `busy` when omitted. These values are included only
 when recognized. EAS `Reminder` now uses seconds from the nearest supported
 relative-to-start display alert; email alerts and absolute triggers are
-excluded, and invitations without such a display alert omit the field. This
-addition is awaiting deployment. Commit `76f42fa` is deployed to Amy's isolated bridge as
-`localhost/eas16-isolated:76f42fa` (image
-`sha256:91ae5608d72e1b00ebaea32bf154af023c59fdabf1386ed99e8a76959c32741e`),
-started `2026-11-25T11:09:19.139520784Z`, with zero restarts. At
-`2026-11-25T11:09:23Z`, `/healthz` and `/readyz` returned HTTP 200 (`ok` and
+excluded, and invitations without such a display alert omit the field. Commit
+`517f510` is deployed to Amy's isolated bridge as
+`localhost/eas16-isolated:517f510` (image
+`sha256:50b4931a6aba7b9b3be6f864de2fd92fe1dfc8ebe7a94f1237290227e9cd5b3e`),
+started `2026-11-25T11:15:05.396385651Z`, with zero restarts. At
+`2026-11-25T11:15:10Z`, `/healthz` and `/readyz` returned HTTP 200 (`ok` and
 `ready`). `EAS_MAX_PROTOCOL_VERSION` remains unset, preserving the 14.0
 default; production is untouched. Real-client validation remains pending.
 Sources: Microsoft
