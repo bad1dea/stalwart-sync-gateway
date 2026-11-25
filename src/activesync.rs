@@ -4969,14 +4969,29 @@ fn write_email_fields(
     }
     builder.leaf(mail::IMPORTANCE, email.importance.to_string());
     builder.leaf(mail::READ, if email.read { "1" } else { "0" });
+    let meeting_request = email
+        .meeting_request
+        .as_ref()
+        .filter(|_| matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1))
+        .and_then(|meeting| {
+            calendar_time_zone_blob(&meeting.time_zone, meeting.start.as_deref())
+                .map(|time_zone| (meeting, time_zone))
+        });
     builder.leaf(
         mail::MESSAGE_CLASS,
-        match email.smime {
-            Some(crate::model::SmimeKind::Opaque) => "IPM.Note.SMIME",
-            Some(crate::model::SmimeKind::MultipartSigned) => "IPM.Note.SMIME.MultipartSigned",
-            None => "IPM.Note",
+        if meeting_request.is_some() {
+            "IPM.Schedule.Meeting.Request"
+        } else {
+            match email.smime {
+                Some(crate::model::SmimeKind::Opaque) => "IPM.Note.SMIME",
+                Some(crate::model::SmimeKind::MultipartSigned) => "IPM.Note.SMIME.MultipartSigned",
+                None => "IPM.Note",
+            }
         },
     );
+    if let Some((meeting_request, time_zone)) = meeting_request {
+        write_email_meeting_request(builder, meeting_request, &time_zone);
+    }
     if !email.reply_to.is_empty() {
         builder.leaf(mail::REPLY_TO, email.reply_to);
     }
@@ -5189,6 +5204,38 @@ fn write_email_fields(
             },
         );
     }
+}
+
+fn write_email_meeting_request(
+    builder: &mut wbxml::eas::DocumentBuilder,
+    meeting: &crate::model::EmailMeetingRequest,
+    time_zone: &str,
+) {
+    use wbxml::eas::{airsync_base as base, calendar, email as mail, email2};
+
+    builder.start(mail::MEETING_REQUEST);
+    if meeting.all_day {
+        builder.leaf(mail::ALL_DAY_EVENT, "1");
+    }
+    if let Some(start) = &meeting.start {
+        builder.leaf(mail::START_TIME, eas_datetime(start));
+    }
+    builder.leaf(mail::DTSTAMP, eas_datetime(&meeting.dtstamp));
+    if let Some(end) = &meeting.end {
+        builder.leaf(mail::END_TIME, eas_datetime(end));
+    }
+    if let Some(location) = &meeting.location {
+        builder.start(base::LOCATION);
+        builder.leaf(base::DISPLAY_NAME, location.clone());
+        builder.end();
+    }
+    builder.leaf(mail::TIME_ZONE, time_zone.to_owned());
+    builder.leaf(calendar::UID, meeting.uid.clone());
+    builder.leaf(
+        email2::MEETING_MESSAGE_TYPE,
+        meeting.meeting_message_type.to_string(),
+    );
+    builder.end();
 }
 
 /// See the call site's doc comment in `write_email_fields` for the full
@@ -10636,6 +10683,8 @@ mod tests {
             }],
             blob_id: None,
             thread_id: None,
+            meeting_request: None,
+            calendar_blob_ids: vec![],
         };
         let mut builder = DocumentBuilder::new();
         write_email_fields(&mut builder, "email-1", email, None, ProtocolVersion::V14_0);
@@ -10670,6 +10719,107 @@ mod tests {
             })
             .collect();
         assert_eq!(actual_order, expected_order);
+    }
+
+    #[test]
+    fn meeting_request_writes_required_16x_fields_and_is_omitted_on_14() {
+        use crate::wbxml::eas::{self, airsync_base as base, calendar, email as mail, email2};
+        use base64::Engine as _;
+
+        let email = Email {
+            draft_revision: None,
+            id: "invitation".to_owned(),
+            mailbox_ids: vec![],
+            subject: "Planning".to_owned(),
+            received_at: None,
+            sent_at: None,
+            size: 0,
+            keywords: vec![],
+            from: "organizer@example.test".to_owned(),
+            to: "attendee@example.test".to_owned(),
+            cc: String::new(),
+            bcc: String::new(),
+            reply_to: String::new(),
+            importance: 1,
+            preview: None,
+            read: false,
+            body: None,
+            smime: None,
+            attachments: vec![],
+            blob_id: None,
+            thread_id: None,
+            meeting_request: Some(crate::model::EmailMeetingRequest {
+                uid: "meeting-uid@example.test".to_owned(),
+                dtstamp: "2026-11-25T14:00:00Z".to_owned(),
+                start: Some("2026-12-01T15:00:00Z".to_owned()),
+                end: Some("2026-12-01T16:00:00Z".to_owned()),
+                time_zone: "America/Toronto".to_owned(),
+                location: Some("Room 42".to_owned()),
+                all_day: false,
+                meeting_message_type: 1,
+            }),
+            calendar_blob_ids: vec![],
+        };
+
+        let mut builder = DocumentBuilder::new();
+        write_email_fields(
+            &mut builder,
+            "invitation",
+            email.clone(),
+            None,
+            ProtocolVersion::V16_1,
+        );
+        let document = builder.finish();
+        assert_eq!(
+            eas::find_text_after(&document, mail::MESSAGE_CLASS),
+            Some("IPM.Schedule.Meeting.Request")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, calendar::UID),
+            Some("meeting-uid@example.test")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, mail::DTSTAMP),
+            Some("20261125T140000Z")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, email2::MEETING_MESSAGE_TYPE),
+            Some("1")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, base::DISPLAY_NAME),
+            Some("Room 42")
+        );
+        let time_zone = eas::find_text_after(&document, mail::TIME_ZONE).unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(time_zone)
+                .unwrap()
+                .len(),
+            172
+        );
+        assert!(!document.nodes.iter().any(|node| matches!(
+            node,
+            Node::Start(token) if token == &mail::GLOBAL_OBJ_ID || token == &mail::LOCATION
+        )));
+
+        let mut legacy_builder = DocumentBuilder::new();
+        write_email_fields(
+            &mut legacy_builder,
+            "invitation",
+            email,
+            None,
+            ProtocolVersion::V14_0,
+        );
+        let legacy = legacy_builder.finish();
+        assert_eq!(
+            eas::find_text_after(&legacy, mail::MESSAGE_CLASS),
+            Some("IPM.Note")
+        );
+        assert!(!legacy
+            .nodes
+            .iter()
+            .any(|node| matches!(node, Node::Start(token) if token == &mail::MEETING_REQUEST)));
     }
 
     #[test]
@@ -10722,6 +10872,8 @@ mod tests {
             attachments: vec![],
             blob_id: None,
             thread_id: Some("thread-abc".to_owned()),
+            meeting_request: None,
+            calendar_blob_ids: vec![],
         };
         let mut builder = DocumentBuilder::new();
         write_email_fields(
@@ -10774,6 +10926,8 @@ mod tests {
             attachments: vec![],
             blob_id: None,
             thread_id: None,
+            meeting_request: None,
+            calendar_blob_ids: vec![],
         };
         let mut builder2 = DocumentBuilder::new();
         write_email_fields(
@@ -10828,6 +10982,8 @@ mod tests {
             attachments: vec![],
             blob_id: None,
             thread_id: None,
+            meeting_request: None,
+            calendar_blob_ids: vec![],
         };
         let mut builder = DocumentBuilder::new();
         write_email_fields(&mut builder, "email-1", email, None, ProtocolVersion::V14_0);
@@ -10894,6 +11050,8 @@ mod tests {
             attachments: vec![],
             blob_id: None,
             thread_id: None,
+            meeting_request: None,
+            calendar_blob_ids: vec![],
         };
         let preference = super::BodyPreference {
             body_part: Some(super::PreparedBodyPart {
@@ -11020,6 +11178,8 @@ mod tests {
             }],
             blob_id: None,
             thread_id: None,
+            meeting_request: None,
+            calendar_blob_ids: vec![],
         };
         let mut builder = DocumentBuilder::new();
         write_email_fields(&mut builder, "email-1", email, None, ProtocolVersion::V14_0);

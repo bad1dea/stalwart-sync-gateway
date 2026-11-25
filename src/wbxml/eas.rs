@@ -313,6 +313,34 @@ pub mod email {
     pub const CC: Token = tag(0x17, false);
     pub const FROM: Token = tag(0x18, false);
     pub const REPLY_TO: Token = tag(0x19, false);
+    pub const ALL_DAY_EVENT: Token = tag(0x1a, false);
+    pub const CATEGORIES: Token = tag(0x1b, true);
+    pub const CATEGORY: Token = tag(0x1c, false);
+    pub const DTSTAMP: Token = tag(0x1d, false);
+    pub const END_TIME: Token = tag(0x1e, false);
+    pub const INSTANCE_TYPE: Token = tag(0x1f, false);
+    pub const BUSY_STATUS: Token = tag(0x20, false);
+    pub const LOCATION: Token = tag(0x21, false);
+    pub const MEETING_REQUEST: Token = tag(0x22, true);
+    pub const ORGANIZER: Token = tag(0x23, true);
+    pub const RECURRENCE_ID: Token = tag(0x24, false);
+    pub const REMINDER: Token = tag(0x25, false);
+    pub const RESPONSE_REQUESTED: Token = tag(0x26, false);
+    pub const RECURRENCES: Token = tag(0x27, true);
+    pub const RECURRENCE: Token = tag(0x28, true);
+    pub const RECURRENCE_TYPE: Token = tag(0x29, false);
+    pub const UNTIL: Token = tag(0x2a, false);
+    pub const OCCURRENCES: Token = tag(0x2b, false);
+    pub const INTERVAL: Token = tag(0x2c, false);
+    pub const DAY_OF_WEEK: Token = tag(0x2d, false);
+    pub const DAY_OF_MONTH: Token = tag(0x2e, false);
+    pub const WEEK_OF_MONTH: Token = tag(0x2f, false);
+    pub const MONTH_OF_YEAR: Token = tag(0x30, false);
+    pub const START_TIME: Token = tag(0x31, false);
+    pub const SENSITIVITY: Token = tag(0x32, false);
+    pub const TIME_ZONE: Token = tag(0x33, false);
+    pub const GLOBAL_OBJ_ID: Token = tag(0x34, false);
+    pub const DISALLOW_NEW_TIME_PROPOSAL: Token = tag(0x3f, false);
     pub const FLAG: Token = tag(0x3a, false);
     pub const FLAG_STATUS: Token = tag(0x3b, false);
     pub const COMPLETE_TIME: Token = tag(0x3e, false);
@@ -5086,6 +5114,19 @@ mod tests {
     fn email_complete_time_uses_the_microsoft_wbxml_token() {
         assert_eq!(email::COMPLETE_TIME.code_page, 2);
         assert_eq!(email::COMPLETE_TIME.token, 0x3e);
+    }
+
+    #[test]
+    fn meeting_request_wbxml_tokens_match_the_email_namespace() {
+        assert_eq!(email::MEETING_REQUEST, email::tag(0x22, true));
+        assert_eq!(email::DTSTAMP, email::tag(0x1d, false));
+        assert_eq!(email::START_TIME, email::tag(0x31, false));
+        assert_eq!(email::END_TIME, email::tag(0x1e, false));
+        assert_eq!(email::TIME_ZONE, email::tag(0x33, false));
+        assert_eq!(email::GLOBAL_OBJ_ID, email::tag(0x34, false));
+        assert_eq!(calendar::UID, calendar::tag(0x28, false));
+        assert_eq!(airsync_base::LOCATION, airsync_base::tag(0x20, true));
+        assert_eq!(email2::MEETING_MESSAGE_TYPE, email2::tag(0x13, false));
     }
 
     #[test]

@@ -165,6 +165,20 @@ the configured protocol ceiling is 16.1; the default 14.0 production mode does
 not advertise it. Mailbox results include the EAS `Importance` response property in
 low/normal/high wire values.
 
+### MeetingRequest in Email Sync (§2.2.2.48)
+For 16.0/16.1 mail Sync, a parsed `METHOD:REQUEST` calendar part is returned as
+`IPM.Schedule.Meeting.Request` with an `Email:MeetingRequest` container when the
+authenticated user appears as an attendee. The current writer emits the
+required `DtStamp`, 172-byte `TimeZone`, `Calendar:UID`, and
+`Email2:MeetingMessageType`, plus available start/end, all-day, and
+`AirSyncBase:Location` values. A nonzero JMAP sequence maps to message type 2;
+otherwise it maps to type 1. EAS 14.x keeps the ordinary `IPM.Note` response,
+because legacy `GlobalObjId` conversion is not implemented. Optional
+organizer, recurrence, reminder, response-request, sensitivity, busy status,
+proposal-policy, and 16.1 proposed-time fields remain unsupported. Mocked
+JMAP mailbox-query/CalendarEvent-parse and WBXML writer regressions pass; the
+isolated deployment and real-client check remain pending.
+
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
 SendMail posts a full new outgoing message; SmartReply/SmartForward use
 the same transport but the client supplies the reply/forward MIME. From EAS 14.0

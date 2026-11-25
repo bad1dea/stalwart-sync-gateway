@@ -14,7 +14,7 @@ use crate::{
     },
     model::{
         eas_folder_type, CalendarEvent, Collection, CollectionKind, Contact, Email, EmailBody,
-        EmailBodyType, EmailState, Task,
+        EmailBodyType, EmailMeetingRequest, EmailState, Task,
     },
 };
 
@@ -565,12 +565,13 @@ impl JmapClient {
                 "Email/get" => {
                     let get: GetResponse<EmailObject> =
                         serde_json::from_value(method.1).context("invalid Email/get response")?;
-                    let emails: Vec<Email> = get
+                    let mut emails: Vec<Email> = get
                         .list
                         .into_iter()
                         .map(Email::from)
                         .map(|email| identities.email(email))
                         .collect();
+                    self.enrich_meeting_requests(auth, &mut emails).await?;
                     let has_more = total.is_some_and(|total| total as usize > limit);
                     return Ok((emails, has_more));
                 }
@@ -715,10 +716,10 @@ impl JmapClient {
                 "Email/get" => {
                     let get: GetResponse<EmailObject> =
                         serde_json::from_value(method.1).context("invalid Email/get response")?;
-                    let mut by_id: BTreeMap<String, Email> = get
-                        .list
+                    let mut emails: Vec<Email> = get.list.into_iter().map(Email::from).collect();
+                    self.enrich_meeting_requests(auth, &mut emails).await?;
+                    let mut by_id: BTreeMap<String, Email> = emails
                         .into_iter()
-                        .map(Email::from)
                         .map(|email| identities.email(email))
                         .map(|e| (e.id.clone(), e))
                         .collect();
@@ -729,6 +730,86 @@ impl JmapClient {
             }
         }
         Ok(Vec::new())
+    }
+
+    async fn enrich_meeting_requests(
+        &self,
+        auth: &AuthenticatedSession,
+        emails: &mut [Email],
+    ) -> anyhow::Result<()> {
+        let blob_ids: Vec<_> = emails
+            .iter()
+            .flat_map(|email| email.calendar_blob_ids.iter().cloned())
+            .collect();
+        let requests = self
+            .meeting_requests_by_calendar_blob(auth, &blob_ids)
+            .await?;
+        for email in emails {
+            if let [blob] = email.calendar_blob_ids.as_slice() {
+                email.meeting_request = requests.get(blob).cloned();
+            }
+        }
+        Ok(())
+    }
+
+    async fn meeting_requests_by_calendar_blob(
+        &self,
+        auth: &AuthenticatedSession,
+        blob_ids: &[String],
+    ) -> anyhow::Result<BTreeMap<String, EmailMeetingRequest>> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::CALENDARS) else {
+            return Ok(BTreeMap::new());
+        };
+        let blob_ids: Vec<_> = blob_ids
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if blob_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let response: JmapResponse<serde_json::Value> = match self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CALENDARS.to_owned(),
+                ],
+                vec![MethodCall::new(
+                    "CalendarEvent/parse",
+                    serde_json::json!({"accountId":account_id,"blobIds":blob_ids}),
+                    "meeting-requests",
+                )],
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(%error, "could not parse calendar data for mail invitations");
+                return Ok(BTreeMap::new());
+            }
+        };
+        let Some(parsed) = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/parse")
+            .and_then(|method| method.1.get("parsed"))
+        else {
+            tracing::warn!("CalendarEvent/parse response missing while enriching mail invitations");
+            return Ok(BTreeMap::new());
+        };
+        let mut requests = BTreeMap::new();
+        for blob in blob_ids {
+            let Some(events) = parsed.get(blob).and_then(serde_json::Value::as_array) else {
+                continue;
+            };
+            if let [event] = events.as_slice() {
+                if let Some(request) = email_meeting_request_from_event(event, auth.username()) {
+                    requests.insert(blob.to_owned(), request);
+                }
+            }
+        }
+        Ok(requests)
     }
 
     /// Backs EAS `Search` (MS-ASCMD 2.2.1.16) for `Store>Name == "Mailbox"`
@@ -866,7 +947,7 @@ impl JmapClient {
                         .map(|email| identities.email(email))
                         .map(|email| (email.id.clone(), email))
                         .collect();
-                    let emails: Vec<Email> = query_ids
+                    let mut emails: Vec<Email> = query_ids
                         .iter()
                         .filter_map(|id| by_id.remove(identities.stable(id)))
                         .collect();
@@ -874,6 +955,7 @@ impl JmapClient {
                         emails.len() == query_ids.len() && by_id.is_empty(),
                         "Email search changed during fetch"
                     );
+                    self.enrich_meeting_requests(auth, &mut emails).await?;
                     return Ok(EmailSearchPage {
                         emails,
                         total,
@@ -5859,12 +5941,12 @@ impl JmapClient {
                 "Email/get" => {
                     let get: GetResponse<EmailObject> =
                         serde_json::from_value(method.1).context("invalid Email/get response")?;
-                    return Ok(get
-                        .list
-                        .into_iter()
-                        .next()
-                        .map(Email::from)
-                        .map(|email| identities.email(email)));
+                    let Some(mut email) = get.list.into_iter().next().map(Email::from) else {
+                        return Ok(None);
+                    };
+                    self.enrich_meeting_requests(auth, std::slice::from_mut(&mut email))
+                        .await?;
+                    return Ok(Some(identities.email(email)));
                 }
                 "error" => anyhow::bail!("JMAP method error in email fetch"),
                 _ => {}
@@ -8187,6 +8269,17 @@ impl MimePart {
             None
         }
     }
+
+    fn calendar_blobs(&self, blobs: &mut Vec<String>) {
+        if self.content_type.eq_ignore_ascii_case("text/calendar") {
+            if let Some(blob_id) = &self.blob_id {
+                blobs.push(blob_id.clone());
+            }
+        }
+        for part in self.sub_parts.as_deref().unwrap_or_default() {
+            part.calendar_blobs(blobs);
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -8234,8 +8327,10 @@ impl From<EmailObject> for Email {
     fn from(mut value: EmailObject) -> Self {
         let body = select_body(&mut value);
         let mut part_ids = BTreeMap::new();
+        let mut calendar_blob_ids = Vec::new();
         if let Some(body_structure) = &value.body_structure {
             body_structure.part_ids_by_blob(&mut part_ids);
+            body_structure.calendar_blobs(&mut calendar_blob_ids);
         }
         let attachments = value
             .attachments
@@ -8301,8 +8396,264 @@ impl From<EmailObject> for Email {
             attachments,
             blob_id: value.blob_id,
             thread_id: value.thread_id,
+            meeting_request: None,
+            calendar_blob_ids,
         }
     }
+}
+
+fn email_meeting_request_from_event(
+    event: &serde_json::Value,
+    attendee_email: &str,
+) -> Option<EmailMeetingRequest> {
+    if event["@type"] != "Event" || !event["method"].as_str()?.eq_ignore_ascii_case("request") {
+        return None;
+    }
+    let uid = event["uid"].as_str()?.trim();
+    if uid.is_empty() {
+        return None;
+    }
+    let participants = event["participants"].as_object()?;
+    if !participants.values().any(|participant| {
+        let is_attendee =
+            participant["roles"]["attendee"] == true || participant["roles"]["optional"] == true;
+        is_attendee
+            && participant["email"]
+                .as_str()
+                .is_some_and(|email| email.eq_ignore_ascii_case(attendee_email))
+    }) {
+        return None;
+    }
+    let dtstamp = calendar_event_time_to_eas(event["updated"].as_str()?, "Etc/UTC")?;
+    let start_value = event["start"].as_str();
+    let time_zone = match event["timeZone"].as_str() {
+        Some(zone) if zone.parse::<chrono_tz::Tz>().is_ok() => zone.to_owned(),
+        Some(_) => return None,
+        None if start_value.is_none_or(|start| start.ends_with(['Z', 'z'])) => "Etc/UTC".to_owned(),
+        None => return None,
+    };
+    let start = start_value.and_then(|start| calendar_event_time_to_eas(start, &time_zone));
+    let end = event["end"]
+        .as_str()
+        .and_then(|end| calendar_event_time_to_eas(end, &time_zone))
+        .or_else(|| {
+            let (start, duration) = (start_value?, event["duration"].as_str()?);
+            (!start.ends_with(['Z', 'z'])
+                && !start.contains('+')
+                && !start.rfind('-').is_some_and(|index| index > 10))
+            .then(|| calendar_end_utc(start, Some(&time_zone), duration))
+            .flatten()
+        });
+    let location = event["locations"].as_object().and_then(|locations| {
+        locations
+            .values()
+            .find_map(|location| location["name"].as_str())
+            .map(str::to_owned)
+    });
+    Some(EmailMeetingRequest {
+        uid: uid.to_owned(),
+        dtstamp,
+        start,
+        end,
+        time_zone,
+        location,
+        all_day: event["showWithoutTime"] == true,
+        meeting_message_type: if event["sequence"].as_u64().unwrap_or_default() > 0 {
+            2
+        } else {
+            1
+        },
+    })
+}
+
+#[cfg(test)]
+mod meeting_request_conversion_tests {
+    use super::*;
+
+    #[test]
+    fn converts_calendar_request_dates_and_optional_fields_for_eas() {
+        let event = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"meeting@example.test",
+            "updated":"2026-11-25T14:00:00Z", "start":"2026-12-01T10:00:00",
+            "duration":"PT3600S", "timeZone":"America/Toronto",
+            "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}},
+            "sequence":0,
+            "showWithoutTime":false,
+            "locations":{"room":{"name":"Room 42"}}
+        });
+        let request = email_meeting_request_from_event(&event, "attendee@example.test").unwrap();
+        assert_eq!(request.uid, "meeting@example.test");
+        assert_eq!(request.dtstamp, "20261125T140000Z");
+        assert_eq!(request.start.as_deref(), Some("20261201T150000Z"));
+        assert_eq!(request.end.as_deref(), Some("20261201T160000Z"));
+        assert_eq!(request.time_zone, "America/Toronto");
+        assert_eq!(request.location.as_deref(), Some("Room 42"));
+        assert!(!request.all_day);
+        assert_eq!(request.meeting_message_type, 1);
+        assert!(email_meeting_request_from_event(&event, "someone-else@example.test").is_none());
+
+        let update = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"meeting@example.test",
+            "updated":"2026-11-25T14:00:00Z", "start":"2026-12-01T10:00:00",
+            "timeZone":"America/Toronto", "sequence":1,
+            "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}}
+        });
+        assert_eq!(
+            email_meeting_request_from_event(&update, "attendee@example.test")
+                .unwrap()
+                .meeting_message_type,
+            2
+        );
+    }
+
+    #[test]
+    fn does_not_invent_timezone_or_accept_non_request_calendar_messages() {
+        let missing_zone = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"u",
+            "updated":"2026-11-25T14:00:00Z", "start":"2026-12-01T10:00:00",
+            "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}}
+        });
+        assert!(email_meeting_request_from_event(&missing_zone, "attendee@example.test").is_none());
+        let reply = serde_json::json!({
+            "@type":"Event", "method":"reply", "uid":"u",
+            "updated":"2026-11-25T14:00:00Z", "start":"2026-12-01T10:00:00Z"
+        });
+        assert!(email_meeting_request_from_event(&reply, "attendee@example.test").is_none());
+    }
+
+    #[test]
+    fn discovers_nested_text_calendar_parts() {
+        let part: MimePart = serde_json::from_value(serde_json::json!({
+            "type":"multipart/mixed", "subParts":[
+                {"type":"text/plain", "blobId":"plain"},
+                {"type":"multipart/alternative", "subParts":[
+                    {"type":"text/calendar", "blobId":"calendar"}
+                ]}
+            ]
+        }))
+        .unwrap();
+        let mut blobs = Vec::new();
+        part.calendar_blobs(&mut blobs);
+        assert_eq!(blobs, ["calendar"]);
+    }
+}
+
+#[cfg(test)]
+mod email_meeting_request_fetch_tests {
+    use super::*;
+    use axum::{routing::post, Json, Router};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[tokio::test]
+    async fn mailbox_sync_query_enriches_calendar_invitation_from_jmap_parse() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let call_count = calls.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(request): Json<serde_json::Value>| {
+                let call_count = call_count.clone();
+                async move {
+                    let call = &request["methodCalls"][0];
+                    match call_count.fetch_add(1, Ordering::SeqCst) {
+                        0 => {
+                            assert_eq!(call[0], "Email/query");
+                            assert_eq!(request["methodCalls"][1][0], "Email/get");
+                            Json(serde_json::json!({"methodResponses":[
+                                ["Email/query", {"ids":["invite"], "total":1, "queryState":"q"}, "q"],
+                                ["Email/get", {"list":[{
+                                    "id":"invite", "mailboxIds":{"inbox":true},
+                                    "subject":"Planning", "receivedAt":"2026-11-25T14:01:00Z",
+                                    "from":[{"email":"organizer@example.test"}],
+                                    "to":[{"email":"attendee@example.test"}],
+                                    "bodyStructure":{"type":"multipart/mixed","subParts":[
+                                        {"type":"text/plain","blobId":"text-blob"},
+                                        {"type":"text/calendar","blobId":"invite-blob"}
+                                    ]}
+                                }]}, "g"]
+                            ]}))
+                        }
+                        1 => {
+                            assert_eq!(call[0], "CalendarEvent/parse");
+                            assert_eq!(call[1]["blobIds"][0], "invite-blob");
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/parse", {"parsed":{"invite-blob":[{
+                                    "@type":"Event", "method":"request",
+                                    "uid":"meeting@example.test",
+                                    "updated":"2026-11-25T14:00:00Z",
+                                    "start":"2026-12-01T10:00:00", "duration":"PT3600S",
+                                    "timeZone":"America/Toronto",
+                                    "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}},
+                                    "sequence":0,
+                                    "locations":{"room":{"name":"Room 42"}}
+                                }]}}, "meeting-requests"
+                            ]]}))
+                        }
+                        _ => panic!("unexpected JMAP call"),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{},
+            "primaryAccounts":{
+                "urn:ietf:params:jmap:mail":"mail-account",
+                "urn:ietf:params:jmap:calendars":"calendar-account"
+            },
+            "apiUrl":url, "downloadUrl":url, "uploadUrl":url,
+            "username":"attendee@example.test", "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "attendee@example.test".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let (emails, has_more) = client.emails_in_mailbox(&auth, "inbox", 10).await.unwrap();
+        assert!(!has_more);
+        let request = emails[0].meeting_request.as_ref().unwrap();
+        assert_eq!(request.uid, "meeting@example.test");
+        assert_eq!(request.start.as_deref(), Some("20261201T150000Z"));
+        assert_eq!(request.end.as_deref(), Some("20261201T160000Z"));
+        assert_eq!(request.location.as_deref(), Some("Room 42"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+}
+
+fn calendar_event_time_to_eas(value: &str, timezone: &str) -> Option<String> {
+    if value.ends_with(['Z', 'z'])
+        || value.contains('+')
+        || value.rfind('-').is_some_and(|index| index > 10)
+    {
+        return chrono::DateTime::parse_from_rfc3339(value)
+            .ok()
+            .map(|datetime| {
+                datetime
+                    .with_timezone(&chrono::Utc)
+                    .format("%Y%m%dT%H%M%SZ")
+                    .to_string()
+            });
+    }
+    let local = if value.len() == 10 {
+        format!("{value}T00:00:00")
+    } else {
+        value.to_owned()
+    };
+    local_to_utc_eas(&local, Some(timezone))
 }
 
 fn select_body(email: &mut EmailObject) -> Option<EmailBody> {

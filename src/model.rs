@@ -78,6 +78,24 @@ pub struct Email {
     /// attempt tried that -- commit `d199d37` -- and caused a real,
     /// device-visible sync error).
     pub thread_id: Option<String>,
+    /// Parsed invitation data used for the 16.0+ Email:MeetingRequest
+    /// response container. Normal mail leaves this empty.
+    pub meeting_request: Option<EmailMeetingRequest>,
+    /// Calendar MIME blobs from Email/bodyStructure, retained so mail query
+    /// paths can enrich invitations without another Email/get round-trip.
+    pub calendar_blob_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmailMeetingRequest {
+    pub uid: String,
+    pub dtstamp: String,
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub time_zone: String,
+    pub location: Option<String>,
+    pub all_day: bool,
+    pub meeting_message_type: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

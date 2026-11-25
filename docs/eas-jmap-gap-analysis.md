@@ -12,6 +12,24 @@ handling. Check the current Rust implementation before treating any older
 
 Current prioritized work:
 
+Mail Sync now parses a unique `text/calendar` MIME part through
+`CalendarEvent/parse` and emits the base `Email:MeetingRequest` response for
+protocol 16.0/16.1 only when the authenticated user is an attendee. The writer
+uses `MessageClass=IPM.Schedule.Meeting.Request`, UTC `DtStamp`, start/end,
+all-day state, the required 172-byte `TimeZone`, `Calendar:UID`,
+`AirSyncBase:Location`, and `MeetingMessageType` (1 for a new request, 2 when
+the JMAP sequence is nonzero). Older protocol versions keep the normal email
+shape because the legacy `GlobalObjId` conversion is not implemented. The
+optional `Organizer`, `Recurrences`, `Reminder`, `ResponseRequested`,
+`Sensitivity`, `BusyStatus`, `DisallowNewTimeProposal`, and 16.1
+`ProposedStartTime`/`ProposedEndTime` fields remain unmapped. The full suite
+passes 457 tests (77 ignored), including mailbox-query-to-JMAP-parse and WBXML
+writer regressions; strict Clippy, formatting, and diff checks pass. Isolated
+deployment and real-client validation are still pending. Sources: Microsoft
+[Receiving and Accepting Meeting
+Requests](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/9e79c273-3d4e-4b42-a635-d7b11266ab59)
+and [MS-ASEMAIL MeetingRequest](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/0bc0a4c7-2391-428d-b2c1-471c6695d1df).
+
 MeetingResponse now gates `ProposedStartTime` and `ProposedEndTime` to EAS
 16.1. `SendResponse` remains available in 16.0 and 16.1, but a proposal on
 16.0 is rejected. A regression verifies the 16.0 rejection, 16.1 acceptance,
