@@ -8435,6 +8435,17 @@ fn email_meeting_request_from_event(
             })
             .flatten()
     });
+    let sensitivity = match event["privacy"].as_str().unwrap_or("public") {
+        "public" => Some(0),
+        "private" => Some(2),
+        "secret" => Some(3),
+        _ => None,
+    };
+    let busy_status = match event["freeBusyStatus"].as_str().unwrap_or("busy") {
+        "free" => Some(0),
+        "busy" => Some(2),
+        _ => None,
+    };
     let dtstamp = calendar_event_time_to_eas(event["updated"].as_str()?, "Etc/UTC")?;
     let start_value = event["start"].as_str();
     let time_zone = match event["timeZone"].as_str() {
@@ -8465,6 +8476,8 @@ fn email_meeting_request_from_event(
         uid: uid.to_owned(),
         organizer,
         response_requested,
+        sensitivity,
+        busy_status,
         dtstamp,
         start,
         end,
@@ -8566,6 +8579,28 @@ mod meeting_request_conversion_tests {
         });
         let request = email_meeting_request_from_event(&no_reply, "attendee@example.test").unwrap();
         assert_eq!(request.response_requested, Some(false));
+    }
+
+    #[test]
+    fn maps_calendar_privacy_and_free_busy_status_to_eas_values() {
+        let event = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"u",
+            "updated":"2026-11-25T14:00:00Z", "timeZone":"Etc/UTC",
+            "privacy":"secret", "freeBusyStatus":"free",
+            "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}}
+        });
+        let request = email_meeting_request_from_event(&event, "attendee@example.test").unwrap();
+        assert_eq!(request.sensitivity, Some(3));
+        assert_eq!(request.busy_status, Some(0));
+
+        let defaults = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"u",
+            "updated":"2026-11-25T14:00:00Z", "timeZone":"Etc/UTC",
+            "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}}
+        });
+        let request = email_meeting_request_from_event(&defaults, "attendee@example.test").unwrap();
+        assert_eq!(request.sensitivity, Some(0));
+        assert_eq!(request.busy_status, Some(2));
     }
 
     #[test]

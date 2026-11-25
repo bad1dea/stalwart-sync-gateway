@@ -183,8 +183,10 @@ JMAP mailbox-query/CalendarEvent-parse and WBXML writer regressions pass.
 `Organizer` maps from the JMAP `owner` participant's display name (email
 fallback) to Email:Organizer. `ResponseRequested` maps the current attendee's
 JSCalendar `expectReply` value to EAS 1/0, omitting the element if unavailable.
-Both mappings are covered by parser and WBXML tests. These additions are
-deployed on the isolated bridge as `f53e3bc`; it still defaults to EAS 14.0.
+`Sensitivity` maps JSCalendar `privacy` public/private/secret to EAS
+0/2/3. `BusyStatus` maps free/busy to 0/2 and applies JSCalendar's default of
+busy when omitted. These mappings are covered by parser and WBXML tests; the
+latest additions are not yet deployed. The bridge still defaults to EAS 14.0.
 Real-client validation remains pending.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)

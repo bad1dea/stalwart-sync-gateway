@@ -20,17 +20,19 @@ all-day state, the required 172-byte `TimeZone`, `Calendar:UID`,
 `AirSyncBase:Location`, and `MeetingMessageType` (1 for a new request, 2 when
 the JMAP sequence is nonzero). Older protocol versions keep the normal email
 shape because the legacy `GlobalObjId` conversion is not implemented. The
-optional `Recurrences`, `Reminder`, `Sensitivity`, `BusyStatus`,
-`DisallowNewTimeProposal`, and 16.1
+optional `Recurrences`, `Reminder`, `DisallowNewTimeProposal`, and 16.1
 `ProposedStartTime`/`ProposedEndTime` fields remain unmapped. The full suite
-passes 459 tests (77 ignored), including mailbox-query-to-JMAP-parse,
+passes 460 tests (77 ignored), including mailbox-query-to-JMAP-parse,
 organizer and RSVP-request mapping, and WBXML writer regressions; strict
 Clippy, formatting, and diff checks pass. The optional `Organizer` maps the
 JMAP participant with the `owner` role to its display name, falling back to
 email, and emits Email:Organizer. `ResponseRequested` maps the current
 attendee's JSCalendar `expectReply` boolean to EAS values 1/0, preserving
-omission if the property is missing. Commit `f53e3bc` is deployed to Amy's
-isolated bridge as `localhost/eas16-isolated:f53e3bc` (image
+omission if the property is missing. Sensitivity maps JSCalendar privacy
+`public`/`private`/`secret` to EAS 0/2/3; BusyStatus maps free/busy to 0/2 and
+uses JSCalendar's default `busy` when omitted. These values are included only
+when recognized. This addition is awaiting deployment. Commit `f53e3bc` is
+deployed to Amy's isolated bridge as `localhost/eas16-isolated:f53e3bc` (image
 `sha256:caec6a29215417e7d66f8c3dbc5e121b536932862dbba5034750b2f510436972`),
 started `2026-11-25T11:03:30.990395848Z`, with zero restarts. At
 `2026-11-25T11:03:35Z`, `/healthz` and `/readyz` returned HTTP 200 (`ok` and
@@ -44,6 +46,9 @@ which defines Organizer as an optional string element and ResponseRequested as
 an optional 0/1 value. JSCalendar
 [Participant.expectReply](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.4)
 defines whether the organizer expects a response from that participant.
+JSCalendar [privacy](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.3)
+and [freeBusyStatus](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.2)
+provide the calendar values used for the EAS sensitivity and busy status.
 
 MeetingResponse now gates `ProposedStartTime` and `ProposedEndTime` to EAS
 16.1. `SendResponse` remains available in 16.0 and 16.1, but a proposal on

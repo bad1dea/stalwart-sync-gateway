@@ -91,6 +91,8 @@ pub struct EmailMeetingRequest {
     pub uid: String,
     pub organizer: Option<String>,
     pub response_requested: Option<bool>,
+    pub sensitivity: Option<u8>,
+    pub busy_status: Option<u8>,
     pub dtstamp: String,
     pub start: Option<String>,
     pub end: Option<String>,
