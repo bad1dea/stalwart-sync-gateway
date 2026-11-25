@@ -185,7 +185,9 @@ fields in EAS 16.1 remain unsupported. JSCalendar delegation also maps to
 `Forwardees` in 16.0/16.1, with recipient email emitted only for 16.1. Mocked
 JMAP mailbox-query/CalendarEvent-parse and WBXML writer regressions pass.
 JSCalendar location descriptions and valid `geo:` coordinates also map into
-the AirSyncBase location structure for 16.x. Commit `b50b5b2` is deployed to
+the AirSyncBase location structure for 16.x. Legacy Email `Location` is omitted
+above the 32,768-character schema limit; this restriction does not apply to
+the 16.x AirSyncBase location encoding. Commit `b50b5b2` is deployed to
 Amy's isolated bridge as `localhost/eas16-isolated:b50b5b2`; `/healthz` and
 `/readyz` both returned HTTP 200, and the bridge still defaults to EAS 14.0.
 `Organizer` maps from the JMAP `owner` participant's display name (email

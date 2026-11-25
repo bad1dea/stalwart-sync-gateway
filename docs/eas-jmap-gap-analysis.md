@@ -27,6 +27,8 @@ for a delegated request that must not be answered); the field is omitted for
 also map to `Forwardees`; EAS 16.0 emits names only and 16.1 emits names and
 emails. AirSyncBase locations now also carry JSCalendar description and
 validated `geo:` latitude/longitude, altitude, and uncertainty values.
+The legacy Email `Location` writer omits strings over its 32,768-character
+schema limit; this does not restrict the 16.x AirSyncBase location fields.
 The optional 16.1 `ProposedStartTime`/`ProposedEndTime` fields remain unmapped.
 Microsoft defines these as attendee-specific new-time proposals in both the
 email `MeetingRequest` and calendar `Attendee` response fields. JSCalendar

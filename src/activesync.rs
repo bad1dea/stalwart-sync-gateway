@@ -5344,11 +5344,7 @@ fn write_email_meeting_request(
         builder.leaf(calendar::UID, meeting.uid.clone());
     } else {
         if let Some(location) = &meeting.location {
-            if let Some(text) = location
-                .display_name
-                .as_ref()
-                .or(location.annotation.as_ref())
-            {
+            if let Some(text) = legacy_email_meeting_location(location) {
                 builder.leaf(mail::LOCATION, text.clone());
             }
         }
@@ -5367,6 +5363,14 @@ fn write_email_meeting_request(
         );
     }
     builder.end();
+}
+
+fn legacy_email_meeting_location(location: &crate::model::EmailMeetingLocation) -> Option<&String> {
+    let text = location
+        .display_name
+        .as_ref()
+        .or(location.annotation.as_ref())?;
+    (text.chars().count() <= 32_768).then_some(text)
 }
 
 fn eas_global_obj_id(uid: &str) -> Option<String> {
@@ -11083,6 +11087,43 @@ mod tests {
             eas::find_text_after(&legacy, mail::LOCATION),
             Some("Room 42")
         );
+        let mut oversized = email.clone();
+        oversized.meeting_request.as_mut().unwrap().location =
+            Some(crate::model::EmailMeetingLocation {
+                display_name: Some("x".repeat(32_769)),
+                annotation: None,
+                latitude: None,
+                longitude: None,
+                accuracy: None,
+                altitude: None,
+            });
+        let mut oversized_legacy_builder = DocumentBuilder::new();
+        write_email_fields(
+            &mut oversized_legacy_builder,
+            "oversized-invitation",
+            oversized.clone(),
+            None,
+            ProtocolVersion::V14_0,
+        );
+        assert_eq!(
+            eas::find_text_after(&oversized_legacy_builder.finish(), mail::LOCATION),
+            None,
+            "Email:Location is limited to 32768 characters"
+        );
+        let mut oversized_modern_builder = DocumentBuilder::new();
+        write_email_fields(
+            &mut oversized_modern_builder,
+            "oversized-invitation",
+            oversized,
+            None,
+            ProtocolVersion::V16_1,
+        );
+        assert_eq!(
+            eas::find_text_after(&oversized_modern_builder.finish(), base::DISPLAY_NAME)
+                .map(str::len),
+            Some(32_769),
+            "AirSyncBase Location DisplayName does not have the Email:Location limit"
+        );
         assert_eq!(
             eas::find_text_after(&legacy, base::ANNOTATION),
             None,
@@ -11163,6 +11204,27 @@ mod tests {
                 Some(if meeting_message_type == 5 { "5" } else { "6" })
             );
         }
+    }
+
+    #[test]
+    fn legacy_meeting_request_location_enforces_email_length_by_characters() {
+        let at_limit = crate::model::EmailMeetingLocation {
+            display_name: Some("é".repeat(32_768)),
+            annotation: None,
+            latitude: None,
+            longitude: None,
+            accuracy: None,
+            altitude: None,
+        };
+        assert_eq!(
+            super::legacy_email_meeting_location(&at_limit).map(|text| text.chars().count()),
+            Some(32_768)
+        );
+        let over_limit = crate::model::EmailMeetingLocation {
+            display_name: Some("é".repeat(32_769)),
+            ..at_limit
+        };
+        assert_eq!(super::legacy_email_meeting_location(&over_limit), None);
     }
 
     #[test]
