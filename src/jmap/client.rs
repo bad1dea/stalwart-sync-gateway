@@ -4324,7 +4324,7 @@ impl JmapClient {
         let items: Vec<CalendarEventObject> = self.query_objects(
             auth, capabilities::CALENDARS, "CalendarEvent",
             serde_json::json!({"operator":"AND","conditions":[{"inCalendar":calendar_id},{"uid":uid}]}),
-            Some(&["id","uid"]), 2,
+            Some(&["id", "calendarIds", "uid"]), 2,
         ).await?;
         match items.as_slice() {
             [] => Ok(None),
@@ -5985,6 +5985,7 @@ impl JmapClient {
                 serde_json::json!({ "inCalendar": calendar_id }),
                 Some(&[
                     "id",
+                    "calendarIds",
                     "@type",
                     "title",
                     "description",

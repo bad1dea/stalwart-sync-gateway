@@ -13226,6 +13226,11 @@ async fn calendar_sync_uses_get_all_when_calendar_query_is_unavailable() {
 
     assert_eq!(eas::find_text_after(&response, air::STATUS), Some("1"));
     assert_eq!(eas::find_all_text_after(&response, air::SERVER_ID).len(), 3);
+
+    let prime = item_sync(&env, "ipad", "task_calendar", "0", "100").await;
+    let response = item_sync(&env, "ipad", "task_calendar", &sync_key(&prime), "100").await;
+    assert_eq!(eas::find_text_after(&response, air::STATUS), Some("1"));
+    assert_eq!(eas::find_all_text_after(&response, air::SERVER_ID).len(), 3);
 }
 
 #[tokio::test]
