@@ -4884,6 +4884,7 @@ mod e2e {
     async fn e2e_calendar_busy_status_round_trips_between_devices() {
         use eas::{calendar as cal, resolve_recipients as rr};
         let live = Live::new("E2E_USER2").await;
+        let recipient = std::env::var("E2E_USER2_RECIPIENT").unwrap_or_else(|_| live.user.clone());
         let protocol_version =
             std::env::var("E2E_PROTOCOL_VERSION").unwrap_or_else(|_| "14.0".to_owned());
         let using = [
@@ -4978,7 +4979,7 @@ mod e2e {
             );
             let mut request = eas::DocumentBuilder::new();
             request.start(rr::RESOLVE_RECIPIENTS);
-            request.leaf(rr::TO, &live.user);
+            request.leaf(rr::TO, &recipient);
             request.start(rr::OPTIONS);
             request.start(rr::AVAILABILITY);
             request.leaf(rr::START_TIME, "2042-05-05T10:00:00Z");
