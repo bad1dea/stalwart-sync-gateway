@@ -22,6 +22,9 @@ use crate::{
 const EAS_ASSISTANT_NAME_PROPERTY: &str = "khuo.ng:easAssistantName";
 const EAS_SPOUSE_PROPERTY: &str = "khuo.ng:easSpouse";
 const EAS_CHILDREN_PROPERTY: &str = "khuo.ng:easChildren";
+const EAS_CUSTOMER_ID_PROPERTY: &str = "khuo.ng:easCustomerId";
+const EAS_GOVERNMENT_ID_PROPERTY: &str = "khuo.ng:easGovernmentId";
+const EAS_MANAGER_NAME_PROPERTY: &str = "khuo.ng:easManagerName";
 
 #[derive(Debug, thiserror::Error)]
 #[error("JMAP email state changed")]
@@ -2011,7 +2014,7 @@ impl JmapClient {
                 MethodCall::new("ContactCard/get", serde_json::json!({
                     "accountId":account, "#ids":{"resultOf":"q","name":"ContactCard/query","path":"/ids"},
                     "properties":["id","addressBookIds","name","emails","phones","organizations",
-                        "titles","nicknames","addresses","anniversaries","notes","onlineServices","media","links","keywords","khuo.ng:easAssistantName","khuo.ng:easSpouse","khuo.ng:easChildren"]
+                        "titles","nicknames","addresses","anniversaries","notes","onlineServices","media","links","keywords","khuo.ng:easAssistantName","khuo.ng:easSpouse","khuo.ng:easChildren","khuo.ng:easCustomerId","khuo.ng:easGovernmentId","khuo.ng:easManagerName"]
                 }), "g"),
             ]).await?;
             let query = response
@@ -2143,7 +2146,7 @@ impl JmapClient {
                     "ContactCard/get",
                     serde_json::json!({
                         "accountId":account, "ids":[id],
-                        "properties":["id","addressBookIds","name","emails","phones","organizations","titles","keywords","anniversaries","links","notes","khuo.ng:easAssistantName","khuo.ng:easSpouse","khuo.ng:easChildren"]
+                        "properties":["id","addressBookIds","name","emails","phones","organizations","titles","keywords","anniversaries","links","notes","khuo.ng:easAssistantName","khuo.ng:easSpouse","khuo.ng:easChildren","khuo.ng:easCustomerId","khuo.ng:easGovernmentId","khuo.ng:easManagerName"]
                     }),
                     "g",
                 )],
@@ -2208,6 +2211,9 @@ impl JmapClient {
         for (property, requested) in [
             (EAS_ASSISTANT_NAME_PROPERTY, &fields.assistant_name),
             (EAS_SPOUSE_PROPERTY, &fields.spouse),
+            (EAS_CUSTOMER_ID_PROPERTY, &fields.customer_id),
+            (EAS_GOVERNMENT_ID_PROPERTY, &fields.government_id),
+            (EAS_MANAGER_NAME_PROPERTY, &fields.manager_name),
         ] {
             if let Some(value) = requested {
                 if value.is_empty() {
@@ -2598,6 +2604,9 @@ impl JmapClient {
                 || fields.assistant_name.is_some()
                 || fields.spouse.is_some()
                 || fields.children.is_some()
+                || fields.customer_id.is_some()
+                || fields.government_id.is_some()
+                || fields.manager_name.is_some()
         }) {
             let mut properties = vec!["id"];
             if has_name_update {
@@ -9745,6 +9754,12 @@ struct ContactCardObject {
     eas_spouse: Option<String>,
     #[serde(default, rename = "khuo.ng:easChildren")]
     eas_children: Vec<String>,
+    #[serde(default, rename = "khuo.ng:easCustomerId")]
+    eas_customer_id: Option<String>,
+    #[serde(default, rename = "khuo.ng:easGovernmentId")]
+    eas_government_id: Option<String>,
+    #[serde(default, rename = "khuo.ng:easManagerName")]
+    eas_manager_name: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -10140,6 +10155,9 @@ impl From<ContactCardObject> for Contact {
             assistant_name: value.eas_assistant_name,
             spouse: value.eas_spouse,
             children: value.eas_children,
+            customer_id: value.eas_customer_id,
+            government_id: value.eas_government_id,
+            manager_name: value.eas_manager_name,
             company_main_phone,
             mms,
             account_name,
@@ -14083,7 +14101,10 @@ mod contact_address_tests {
             "id":"c",
             "khuo.ng:easAssistantName":"Grace Hopper",
             "khuo.ng:easSpouse":"Alex Lovelace",
-            "khuo.ng:easChildren":["Byron Ada","Byron Ralph"]
+            "khuo.ng:easChildren":["Byron Ada","Byron Ralph"],
+            "khuo.ng:easCustomerId":"customer-314",
+            "khuo.ng:easGovernmentId":"id-2718",
+            "khuo.ng:easManagerName":"CN=Grace Hopper,OU=People"
         }))
         .unwrap();
         let contact = Contact::from(card);
@@ -14092,6 +14113,12 @@ mod contact_address_tests {
         assert_eq!(
             contact.children,
             vec!["Byron Ada".to_owned(), "Byron Ralph".to_owned()]
+        );
+        assert_eq!(contact.customer_id.as_deref(), Some("customer-314"));
+        assert_eq!(contact.government_id.as_deref(), Some("id-2718"));
+        assert_eq!(
+            contact.manager_name.as_deref(),
+            Some("CN=Grace Hopper,OU=People")
         );
     }
     use axum::{routing::post, Json, Router};
@@ -14294,6 +14321,9 @@ mod contact_address_tests {
                             assert_eq!(call[1]["update"]["contact-1"][EAS_ASSISTANT_NAME_PROPERTY], "Grace Hopper");
                             assert_eq!(call[1]["update"]["contact-1"][EAS_SPOUSE_PROPERTY], "Alex Lovelace");
                             assert_eq!(call[1]["update"]["contact-1"][EAS_CHILDREN_PROPERTY], serde_json::json!(["Byron Ada", "Byron Ralph"]));
+                            assert_eq!(call[1]["update"]["contact-1"][EAS_CUSTOMER_ID_PROPERTY], "customer-314");
+                            assert_eq!(call[1]["update"]["contact-1"][EAS_GOVERNMENT_ID_PROPERTY], "id-2718");
+                            assert_eq!(call[1]["update"]["contact-1"][EAS_MANAGER_NAME_PROPERTY], "CN=Grace Hopper,OU=People");
                             assert!(call[1]["update"]["contact-1"].get("relatedTo").is_none());
                             serde_json::json!(["ContactCard/set", {"updated":{"contact-1":null}}, "0"])
                         }
@@ -14304,7 +14334,10 @@ mod contact_address_tests {
                                 "list":[{"id":"contact-1",
                                     "khuo.ng:easAssistantName":"Grace Hopper",
                                     "khuo.ng:easSpouse":"Alex Lovelace",
-                                    "khuo.ng:easChildren":["Byron Ada","Byron Ralph"]
+                                    "khuo.ng:easChildren":["Byron Ada","Byron Ralph"],
+                                    "khuo.ng:easCustomerId":"customer-314",
+                                    "khuo.ng:easGovernmentId":"id-2718",
+                                    "khuo.ng:easManagerName":"CN=Grace Hopper,OU=People"
                                 }]
                             }, "address-state"])
                         }
@@ -14313,6 +14346,9 @@ mod contact_address_tests {
                             assert_eq!(call[1]["ifInState"], "after");
                             assert!(call[1]["update"]["contact-1"][EAS_ASSISTANT_NAME_PROPERTY].is_null());
                             assert!(call[1]["update"]["contact-1"][EAS_SPOUSE_PROPERTY].is_null());
+                            assert!(call[1]["update"]["contact-1"][EAS_CUSTOMER_ID_PROPERTY].is_null());
+                            assert!(call[1]["update"]["contact-1"][EAS_GOVERNMENT_ID_PROPERTY].is_null());
+                            assert!(call[1]["update"]["contact-1"][EAS_MANAGER_NAME_PROPERTY].is_null());
                             assert_eq!(call[1]["update"]["contact-1"][EAS_CHILDREN_PROPERTY], serde_json::json!([]));
                             serde_json::json!(["ContactCard/set", {"updated":{"contact-1":null}}, "0"])
                         }
@@ -14348,6 +14384,9 @@ mod contact_address_tests {
             assistant_name: Some("Grace Hopper".into()),
             spouse: Some("Alex Lovelace".into()),
             children: Some(vec!["Byron Ada".into(), "Byron Ralph".into()]),
+            customer_id: Some("customer-314".into()),
+            government_id: Some("id-2718".into()),
+            manager_name: Some("CN=Grace Hopper,OU=People".into()),
             ..Default::default()
         };
         assert_eq!(
@@ -14361,6 +14400,9 @@ mod contact_address_tests {
             assistant_name: Some(String::new()),
             spouse: Some(String::new()),
             children: Some(Vec::new()),
+            customer_id: Some(String::new()),
+            government_id: Some(String::new()),
+            manager_name: Some(String::new()),
             ..Default::default()
         };
         assert_eq!(

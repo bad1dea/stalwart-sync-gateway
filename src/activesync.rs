@@ -6162,6 +6162,9 @@ fn contact_hash(contact: &crate::model::Contact) -> String {
     contact.assistant_name.hash(&mut hasher);
     contact.spouse.hash(&mut hasher);
     contact.children.hash(&mut hasher);
+    contact.customer_id.hash(&mut hasher);
+    contact.government_id.hash(&mut hasher);
+    contact.manager_name.hash(&mut hasher);
     contact.company_name.hash(&mut hasher);
     contact.department.hash(&mut hasher);
     contact.job_title.hash(&mut hasher);
@@ -6378,6 +6381,27 @@ fn write_contact_fields(
             builder.leaf(c::CHILD, child.clone());
         }
         builder.end();
+    }
+    for (token, value) in [
+        (
+            wbxml::eas::contacts2::CUSTOMER_ID,
+            contact.customer_id.as_ref(),
+        ),
+        (
+            wbxml::eas::contacts2::GOVERNMENT_ID,
+            contact.government_id.as_ref(),
+        ),
+        (
+            wbxml::eas::contacts2::MANAGER_NAME,
+            contact.manager_name.as_ref(),
+        ),
+    ] {
+        match value {
+            Some(value) if value.is_empty() => builder.empty_tag(token),
+            Some(value) => builder.leaf(token, value.clone()),
+            None if is_change => builder.empty_tag(token),
+            None => {}
+        }
     }
     write_contact_address_fields(builder, contact.other_address.as_ref(), "other", is_change);
 }
@@ -9985,6 +10009,9 @@ mod tests {
             assistant_name: Some("Grace Hopper".into()),
             spouse: Some("Alex Lovelace".into()),
             children: vec!["Byron Ada".into(), "Byron Ralph".into()],
+            customer_id: Some("customer-314".into()),
+            government_id: Some("id-2718".into()),
+            manager_name: Some("CN=Grace Hopper,OU=People".into()),
             web_page: Some("https://example.com/ada".into()),
             business_address: Some(crate::model::ContactAddress {
                 city: Some("Toronto".into()),
@@ -10097,6 +10124,18 @@ mod tests {
             vec!["Byron Ada", "Byron Ralph"]
         );
         assert_eq!(
+            eas::find_text_after(&doc, eas::contacts2::CUSTOMER_ID),
+            Some("customer-314")
+        );
+        assert_eq!(
+            eas::find_text_after(&doc, eas::contacts2::GOVERNMENT_ID),
+            Some("id-2718")
+        );
+        assert_eq!(
+            eas::find_text_after(&doc, eas::contacts2::MANAGER_NAME),
+            Some("CN=Grace Hopper,OU=People")
+        );
+        assert_eq!(
             eas::find_text_after(&doc, c::YOMI_FIRST_NAME),
             Some("エイダ")
         );
@@ -10146,6 +10185,12 @@ mod tests {
         contact.spouse = Some("Changed spouse".into());
         assert_ne!(super::contact_hash(&contact), before);
         contact.children.push("Byron George".into());
+        assert_ne!(super::contact_hash(&contact), before);
+        contact.customer_id = Some("customer-271".into());
+        assert_ne!(super::contact_hash(&contact), before);
+        contact.government_id = Some("id-314".into());
+        assert_ne!(super::contact_hash(&contact), before);
+        contact.manager_name = Some("Manager".into());
         assert_ne!(super::contact_hash(&contact), before);
         contact.yomi_first_name = Some("エイダ改".into());
         assert_ne!(super::contact_hash(&contact), before);

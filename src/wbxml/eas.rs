@@ -1473,6 +1473,9 @@ pub struct ContactFields {
     pub assistant_name: Option<String>,
     pub spouse: Option<String>,
     pub children: Option<Vec<String>>,
+    pub customer_id: Option<String>,
+    pub government_id: Option<String>,
+    pub manager_name: Option<String>,
     pub company_name: Option<String>,
     pub department: Option<String>,
     pub job_title: Option<String>,
@@ -2601,6 +2604,12 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                         fields.mms = empty;
                     } else if same_token(*token, contacts2::ACCOUNT_NAME) {
                         fields.account_name = empty;
+                    } else if same_token(*token, contacts2::CUSTOMER_ID) {
+                        fields.customer_id = empty;
+                    } else if same_token(*token, contacts2::GOVERNMENT_ID) {
+                        fields.government_id = empty;
+                    } else if same_token(*token, contacts2::MANAGER_NAME) {
+                        fields.manager_name = empty;
                     } else if same_token(*token, contacts::PICTURE) {
                         fields.picture = empty;
                     } else if same_token(*token, contacts2::IM_ADDRESS) {
@@ -2678,6 +2687,12 @@ fn extract_contact_fields(nodes: &[Node]) -> ContactFields {
                     fields.mms = Some(text.clone());
                 } else if same_token(top, contacts2::ACCOUNT_NAME) {
                     fields.account_name = Some(text.clone());
+                } else if same_token(top, contacts2::CUSTOMER_ID) {
+                    fields.customer_id = Some(text.clone());
+                } else if same_token(top, contacts2::GOVERNMENT_ID) {
+                    fields.government_id = Some(text.clone());
+                } else if same_token(top, contacts2::MANAGER_NAME) {
+                    fields.manager_name = Some(text.clone());
                 } else if same_token(top, contacts::PICTURE) {
                     fields.picture = Some(text.clone());
                 } else if same_token(top, contacts2::IM_ADDRESS) {
@@ -4198,6 +4213,9 @@ mod tests {
         builder.leaf(contacts::ASSISTANT_PHONE_NUMBER, "555-0110");
         builder.leaf(contacts::ASSISTANT_NAME, "Grace Hopper");
         builder.leaf(contacts::SPOUSE, "Alex Lovelace");
+        builder.leaf(contacts2::CUSTOMER_ID, "customer-314");
+        builder.leaf(contacts2::GOVERNMENT_ID, "id-2718");
+        builder.leaf(contacts2::MANAGER_NAME, "CN=Grace Hopper,OU=People");
         builder.start(contacts::CHILDREN);
         builder.leaf(contacts::CHILD, "Byron Ada");
         builder.leaf(contacts::CHILD, "Byron Ralph");
@@ -4293,6 +4311,12 @@ mod tests {
             Some("Grace Hopper")
         );
         assert_eq!(command.contact.spouse.as_deref(), Some("Alex Lovelace"));
+        assert_eq!(command.contact.customer_id.as_deref(), Some("customer-314"));
+        assert_eq!(command.contact.government_id.as_deref(), Some("id-2718"));
+        assert_eq!(
+            command.contact.manager_name.as_deref(),
+            Some("CN=Grace Hopper,OU=People")
+        );
         assert_eq!(
             command.contact.children,
             Some(vec!["Byron Ada".into(), "Byron Ralph".into()])
@@ -4340,11 +4364,17 @@ mod tests {
         let mut builder = DocumentBuilder::new();
         builder.empty_tag(contacts::ASSISTANT_NAME);
         builder.empty_tag(contacts::SPOUSE);
+        builder.empty_tag(contacts2::CUSTOMER_ID);
+        builder.empty_tag(contacts2::GOVERNMENT_ID);
+        builder.empty_tag(contacts2::MANAGER_NAME);
         builder.start(contacts::CHILDREN);
         builder.end();
         let fields = extract_contact_fields(&builder.finish().nodes);
         assert_eq!(fields.assistant_name.as_deref(), Some(""));
         assert_eq!(fields.spouse.as_deref(), Some(""));
+        assert_eq!(fields.customer_id.as_deref(), Some(""));
+        assert_eq!(fields.government_id.as_deref(), Some(""));
+        assert_eq!(fields.manager_name.as_deref(), Some(""));
         assert_eq!(fields.children, Some(Vec::new()));
     }
 
