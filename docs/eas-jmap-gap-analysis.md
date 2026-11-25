@@ -53,7 +53,11 @@ Generic ZIP extraction now permits up to 8 MiB of expanded allowlisted content,
 matching the extracted-text ceiling. Exact and over-limit archive boundaries
 are tested, and a 3 MiB expanded ZIP is searchable through Find. The full suite
 passes 404 tests (75 ignored), strict Clippy passes, and formatting and diff
-checks pass.
+checks pass. Deployed as `deploy-2026-11-25-eas-find-zip-8mb-702fcd9`;
+Homelab commit `f89d6f0`, image
+`sha256:68b98de476f8fd0434c2b6085968cef904bd90209bbe6bf56a0dbc5a60617c09`,
+started `2026-11-25T02:10:46Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. Production retains the 14.0 protocol default.
 
 Remaining 16.1 readiness backlog (ordered by runtime impact):
 
