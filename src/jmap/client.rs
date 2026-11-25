@@ -834,6 +834,27 @@ impl JmapClient {
                 }
             }
         }
+        let uids: BTreeSet<_> = requests
+            .values()
+            .filter(|request| {
+                request.proposed_start_time.is_none() && request.proposed_end_time.is_none()
+            })
+            .map(|request| request.uid.clone())
+            .collect();
+        for uid in uids {
+            match self.calendar_counter_proposal_for_uid(auth, &uid).await {
+                Ok(Some((start, end))) => {
+                    for request in requests.values_mut().filter(|request| request.uid == uid) {
+                        request.proposed_start_time = Some(start.clone());
+                        request.proposed_end_time = Some(end.clone());
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "could not read stored invitation counter proposal")
+                }
+            }
+        }
         Ok(requests)
     }
 
@@ -3997,6 +4018,71 @@ impl JmapClient {
             [item] if item.uid.as_deref() == Some(uid) => Ok(Some(item.id.clone())),
             _ => anyhow::bail!("ambiguous calendar UID"),
         }
+    }
+
+    async fn calendar_counter_proposal_for_uid(
+        &self,
+        auth: &AuthenticatedSession,
+        uid: &str,
+    ) -> anyhow::Result<Option<(String, String)>> {
+        let account_id = auth
+            .session
+            .primary_account_for(capabilities::CALENDARS)
+            .context("JMAP Calendars capability is unavailable")?;
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[
+                    capabilities::CORE.to_owned(),
+                    capabilities::CALENDARS.to_owned(),
+                ],
+                vec![
+                    MethodCall::new(
+                        "CalendarEvent/query",
+                        serde_json::json!({"accountId":account_id,"filter":{"uid":uid},"limit":2}),
+                        "q",
+                    ),
+                    MethodCall::new(
+                        "CalendarEvent/get",
+                        serde_json::json!({
+                            "accountId":account_id,
+                            "#ids":{"resultOf":"q","name":"CalendarEvent/query","path":"/ids"},
+                            "properties":["id","@type","participants","iCalendar"]
+                        }),
+                        "g",
+                    ),
+                ],
+            )
+            .await?;
+        let query = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/query")
+            .context("calendar proposal query failed")?;
+        let ids = query.1["ids"]
+            .as_array()
+            .context("calendar proposal query omitted ids")?;
+        if ids.len() != 1 {
+            return Ok(None);
+        }
+        let event_id = ids[0]
+            .as_str()
+            .context("calendar proposal query returned an invalid id")?;
+        let get = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/get")
+            .context("calendar proposal read failed")?;
+        let events: Vec<CalendarEventObject> = serde_json::from_value(
+            get.1
+                .get("list")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+        )?;
+        let Some(event) = events.iter().find(|event| event.id == event_id) else {
+            return Ok(None);
+        };
+        Ok(calendar_counter_proposal_from_event(event, auth.username()))
     }
 
     async fn verify_calendar_coordinates(
@@ -8536,6 +8622,8 @@ fn email_meeting_request_from_event(
                 .is_some_and(|email| email.eq_ignore_ascii_case(attendee_email))
     });
     let attendee = attendee?;
+    let (proposed_start_time, proposed_end_time) =
+        calendar_proposed_times_from_icalendar(event.get("iCalendar"), attendee_email, None);
     let meeting_message_type = if participant_has_delegation(attendee, "delegatedFrom") {
         // This copy was delegated to the authenticated attendee. EAS type 6
         // tells the client it must not respond to the original request.
@@ -8648,6 +8736,8 @@ fn email_meeting_request_from_event(
         recurrence,
         recurrence_id,
         disallow_new_time_proposal: None,
+        proposed_start_time,
+        proposed_end_time,
         dtstamp,
         start,
         end,
@@ -8927,6 +9017,37 @@ mod meeting_request_conversion_tests {
     }
 
     #[test]
+    fn maps_attendee_counter_proposals_to_meeting_request_values() {
+        let start = eas_proposed_time_property_name("attendee@example.test", None, "START");
+        let end = eas_proposed_time_property_name("attendee@example.test", None, "END");
+        let event = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"u",
+            "updated":"2026-11-25T14:00:00Z", "timeZone":"Etc/UTC",
+            "participants":{
+                "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                "attendee":{"email":"attendee@example.test","roles":{"attendee":true}},
+                "other":{"email":"other@example.test","roles":{"attendee":true}}
+            },
+            "iCalendar":{"properties":[
+                [start, {}, "date-time", "2026-12-01T15:30:00Z"],
+                [end, {}, "date-time", "2026-12-01T16:30:00Z"]
+            ]}
+        });
+        let request = email_meeting_request_from_event(&event, "attendee@example.test").unwrap();
+        assert_eq!(
+            request.proposed_start_time.as_deref(),
+            Some("20261201T153000Z")
+        );
+        assert_eq!(
+            request.proposed_end_time.as_deref(),
+            Some("20261201T163000Z")
+        );
+        let other = email_meeting_request_from_event(&event, "other@example.test").unwrap();
+        assert_eq!(other.proposed_start_time, None);
+        assert_eq!(other.proposed_end_time, None);
+    }
+
+    #[test]
     fn maps_only_valid_geo_uri_coordinates_to_meeting_location() {
         let mut event = serde_json::json!({
             "@type":"Event", "method":"request", "uid":"u",
@@ -9117,6 +9238,10 @@ mod email_meeting_request_fetch_tests {
     async fn mailbox_sync_query_enriches_calendar_invitation_from_jmap_parse() {
         let calls = Arc::new(AtomicUsize::new(0));
         let call_count = calls.clone();
+        let proposal_start_name =
+            eas_proposed_time_property_name("attendee@example.test", None, "START");
+        let proposal_end_name =
+            eas_proposed_time_property_name("attendee@example.test", None, "END");
         let app = Router::new().route(
             "/",
             post(move |Json(request): Json<serde_json::Value>| {
@@ -9157,7 +9282,23 @@ mod email_meeting_request_fetch_tests {
                                 }]}}, "meeting-requests"
                             ]]}))
                         }
-                        _ => panic!("unexpected JMAP call"),
+                        2 => {
+                            assert_eq!(call[0], "CalendarEvent/query");
+                            assert_eq!(call[1]["filter"]["uid"], "meeting@example.test");
+                            assert_eq!(request["methodCalls"][1][0], "CalendarEvent/get");
+                            Json(serde_json::json!({"methodResponses":[
+                                ["CalendarEvent/query", {"ids":["event"],"queryState":"q"}, "q"],
+                                ["CalendarEvent/get", {"list":[{
+                                    "id":"event","@type":"Event","uid":"meeting@example.test",
+                                    "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}},
+                                    "iCalendar":{"properties":[
+                                        [proposal_start_name, {}, "date-time", "2026-12-01T15:30:00Z"],
+                                        [proposal_end_name, {}, "date-time", "2026-12-01T16:30:00Z"]
+                                    ]}
+                                }]}, "g"]
+                            ]}))
+                        }
+                        _ => panic!("unexpected JMAP call: {}", request["methodCalls"]),
                     }
                 }
             }),
@@ -9205,6 +9346,14 @@ mod email_meeting_request_fetch_tests {
         assert_eq!(request.start.as_deref(), Some("20261201T150000Z"));
         assert_eq!(request.end.as_deref(), Some("20261201T160000Z"));
         assert_eq!(
+            request.proposed_start_time.as_deref(),
+            Some("20261201T153000Z")
+        );
+        assert_eq!(
+            request.proposed_end_time.as_deref(),
+            Some("20261201T163000Z")
+        );
+        assert_eq!(
             request
                 .location
                 .as_ref()
@@ -9212,7 +9361,7 @@ mod email_meeting_request_fetch_tests {
             Some("Room 42")
         );
         assert_eq!(request.disallow_new_time_proposal, Some(true));
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         server.abort();
     }
 }
@@ -9818,7 +9967,7 @@ impl From<ContactCardObject> for Contact {
 /// `chrono-tz` dependency -- getting this wrong silently shows every
 /// event at the wrong time, the same class of bug the mail DateReceived
 /// fix this session spent a long time chasing down.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CalendarEventObject {
     id: String,
@@ -10071,7 +10220,7 @@ fn calendar_icalendar_with_disallow_new_time_proposal(
     Ok(icalendar)
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 struct CalendarEventLocation {
     name: Option<String>,
     coordinates: Option<String>,
@@ -10099,6 +10248,30 @@ struct ParticipantObject {
     expect_reply: Option<bool>,
     #[serde(default)]
     schedule_updated: Option<String>,
+}
+
+fn calendar_counter_proposal_from_event(
+    event: &CalendarEventObject,
+    user: &str,
+) -> Option<(String, String)> {
+    if event.kind != "Event" {
+        return None;
+    }
+    let mut attendees = event.participants.as_ref()?.values().filter(|participant| {
+        participant.roles.get("attendee") == Some(&true)
+            && participant
+                .email
+                .as_deref()
+                .is_some_and(|email| email.eq_ignore_ascii_case(user))
+    });
+    let attendee = attendees.next()?;
+    if attendees.next().is_some() {
+        return None;
+    }
+    let email = attendee.email.as_deref()?;
+    let (start, end) =
+        calendar_proposed_times_from_icalendar(event.i_calendar.as_ref(), email, None);
+    Some((start?, end?))
 }
 
 fn calendar_appointment_reply_time(
@@ -11718,6 +11891,27 @@ mod tests {
             }}
         }))
         .unwrap();
+        assert_eq!(
+            super::calendar_counter_proposal_from_event(&event, "guest@example.test"),
+            Some(("20261125T150000Z".to_owned(), "20261125T160000Z".to_owned()))
+        );
+        assert_eq!(
+            super::calendar_counter_proposal_from_event(&event, "other@example.test"),
+            None
+        );
+        let mut ambiguous = event.clone();
+        ambiguous.participants.as_mut().unwrap().insert(
+            "duplicate".to_owned(),
+            super::ParticipantObject {
+                email: Some("guest@example.test".to_owned()),
+                roles: std::collections::BTreeMap::from([("attendee".to_owned(), true)]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            super::calendar_counter_proposal_from_event(&ambiguous, "guest@example.test"),
+            None
+        );
         let converted = super::calendar_event_from(event, Some("guest@example.test"));
         assert_eq!(
             converted.attendees[0].proposed_start_time.as_deref(),

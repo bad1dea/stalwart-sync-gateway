@@ -5241,6 +5241,7 @@ fn write_email_meeting_request(
 ) {
     use wbxml::eas::{
         airsync_base as base, calendar, compose_mail as compose, email as mail, email2,
+        meeting_response as mr,
     };
 
     builder.start(mail::MEETING_REQUEST);
@@ -5375,6 +5376,15 @@ fn write_email_meeting_request(
             email2::MEETING_MESSAGE_TYPE,
             meeting.meeting_message_type.to_string(),
         );
+    }
+    if version == ProtocolVersion::V16_1 {
+        if let (Some(start), Some(end)) = (
+            meeting.proposed_start_time.as_deref(),
+            meeting.proposed_end_time.as_deref(),
+        ) {
+            builder.leaf(mr::PROPOSED_START_TIME, eas_datetime(start));
+            builder.leaf(mr::PROPOSED_END_TIME, eas_datetime(end));
+        }
     }
     if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1)
         && !meeting.forwardees.is_empty()
@@ -11007,6 +11017,7 @@ mod tests {
     fn meeting_request_writes_versioned_fields_for_16x_and_14x() {
         use crate::wbxml::eas::{
             self, airsync_base as base, calendar, compose_mail, email as mail, email2,
+            meeting_response as mr,
         };
         use base64::Engine as _;
 
@@ -11049,6 +11060,8 @@ mod tests {
                 }),
                 recurrence_id: Some("20261201T150000Z".to_owned()),
                 disallow_new_time_proposal: Some(true),
+                proposed_start_time: Some("2026-12-01T15:30:00Z".to_owned()),
+                proposed_end_time: Some("2026-12-01T16:30:00Z".to_owned()),
                 dtstamp: "2026-11-25T14:00:00Z".to_owned(),
                 start: Some("2026-12-01T15:00:00Z".to_owned()),
                 end: Some("2026-12-01T16:00:00Z".to_owned()),
@@ -11128,6 +11141,8 @@ mod tests {
                 calendar::UID,
                 mail::DISALLOW_NEW_TIME_PROPOSAL,
                 email2::MEETING_MESSAGE_TYPE,
+                mr::PROPOSED_START_TIME,
+                mr::PROPOSED_END_TIME,
             ]
             .map(|token| (token.code_page, token.token))
         );
@@ -11184,6 +11199,14 @@ mod tests {
         assert_eq!(
             eas::find_text_after(&document, email2::MEETING_MESSAGE_TYPE),
             Some("1")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, mr::PROPOSED_START_TIME),
+            Some("20261201T153000Z")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, mr::PROPOSED_END_TIME),
+            Some("20261201T163000Z")
         );
         assert_eq!(
             eas::find_text_after(&document, base::DISPLAY_NAME),
@@ -11345,6 +11368,20 @@ mod tests {
             eas::find_text_after(&v141, email2::MEETING_MESSAGE_TYPE),
             Some("1")
         );
+        assert!(!eas::contains_token(&v141, mr::PROPOSED_START_TIME));
+        assert!(!eas::contains_token(&v141, mr::PROPOSED_END_TIME));
+
+        let mut v160_builder = DocumentBuilder::new();
+        write_email_fields(
+            &mut v160_builder,
+            "invitation",
+            email.clone(),
+            None,
+            ProtocolVersion::V16_0,
+        );
+        let v160 = v160_builder.finish();
+        assert!(!eas::contains_token(&v160, mr::PROPOSED_START_TIME));
+        assert!(!eas::contains_token(&v160, mr::PROPOSED_END_TIME));
 
         for (version, email_supported) in [
             (ProtocolVersion::V16_0, false),
@@ -11373,13 +11410,31 @@ mod tests {
                     compose_mail::FORWARDEES.token
                 ))
             );
+            let proposal_count = if version == ProtocolVersion::V16_1 {
+                2
+            } else {
+                0
+            };
             assert_eq!(
-                order[order.len() - 2],
+                order[order.len() - 2 - proposal_count],
                 (
                     email2::MEETING_MESSAGE_TYPE.code_page,
                     email2::MEETING_MESSAGE_TYPE.token
                 )
             );
+            if version == ProtocolVersion::V16_1 {
+                assert_eq!(
+                    order[order.len() - 3],
+                    (
+                        mr::PROPOSED_START_TIME.code_page,
+                        mr::PROPOSED_START_TIME.token
+                    )
+                );
+                assert_eq!(
+                    order[order.len() - 2],
+                    (mr::PROPOSED_END_TIME.code_page, mr::PROPOSED_END_TIME.token)
+                );
+            }
             assert!(forwarded.nodes.iter().any(
                 |node| matches!(node, Node::Start(token) if token == &compose_mail::FORWARDEES)
             ));

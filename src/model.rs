@@ -99,6 +99,8 @@ pub struct EmailMeetingRequest {
     /// instance, in EAS compact UTC DateTime form.
     pub recurrence_id: Option<String>,
     pub disallow_new_time_proposal: Option<bool>,
+    pub proposed_start_time: Option<String>,
+    pub proposed_end_time: Option<String>,
     pub dtstamp: String,
     pub start: Option<String>,
     pub end: Option<String>,
