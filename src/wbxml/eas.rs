@@ -3481,10 +3481,9 @@ fn infer_recurrence_kind(
         (true, false, true, false) => Some(3),
         (false, true, false, true) => Some(5),
         (true, false, true, true) => Some(6),
-        // A yearly WeekOfMonth without DayOfWeek is schema-valid in newer
-        // EAS versions, but its omitted weekday cannot be represented
-        // faithfully by a standalone JSCalendar rule without the event's
-        // original start date. Keep rejecting this ambiguous shape.
+        // Calendar Type 6 makes DayOfWeek optional; the conversion layer uses
+        // the series start to recover the omitted weekday.
+        (false, false, true, true) => Some(6),
         _ => None,
     }
 }
@@ -3646,12 +3645,7 @@ fn parse_calendar_recurrence(
                 && day_of_week.is_none()
                 && week_of_month.is_none()
         }
-        6 => {
-            day_of_week.is_some()
-                && week_of_month.is_some()
-                && month_of_year.is_some()
-                && day_of_month.is_none()
-        }
+        6 => week_of_month.is_some() && month_of_year.is_some() && day_of_month.is_none(),
         _ => false,
     };
     if !recurrence_shape_valid {
@@ -4744,6 +4738,10 @@ mod tests {
             }),
             (6, |b| {
                 b.leaf(super::calendar::RECURRENCE_DAY_OF_WEEK, "64");
+                b.leaf(super::calendar::RECURRENCE_WEEK_OF_MONTH, "5");
+                b.leaf(super::calendar::RECURRENCE_MONTH_OF_YEAR, "8");
+            }),
+            (6, |b| {
                 b.leaf(super::calendar::RECURRENCE_WEEK_OF_MONTH, "5");
                 b.leaf(super::calendar::RECURRENCE_MONTH_OF_YEAR, "8");
             }),

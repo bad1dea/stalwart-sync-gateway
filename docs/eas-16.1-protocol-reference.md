@@ -338,11 +338,14 @@ session's fixes were, not against spec-reading alone.
   day of the month for monthly and yearly rules. Unsupported patterns fail
   closed. Calendar Sync accepts an omitted `Recurrence/Type` at 16.0/16.1 and
   infers the supported pattern from its selectors; Task recurrence still
-  requires `Type` per MS-ASTASK. Yearly Type 6 with no `DayOfWeek` remains
-  unsupported pending an unambiguous mapping to JSCalendar. Task-specific backend
-  create/get has passed the isolated E2E regression. Real-client recurrence
-  behavior remains to be checked. Sensitivity cannot be patched per occurrence
-  under RFC 8984.
+  requires `Type` per MS-ASTASK. Yearly Type 6 may omit `DayOfWeek`; the gateway
+  infers it from the event's local series start only when the start matches the
+  specified month and ordinal, and fails closed without a consistent anchor.
+  This behavior is an inference because MS-ASCAL makes the field optional but
+  does not define its omitted-value default. Mocked regressions cover the
+  inference and JMAP recurrence mapping; real-client recurrence behavior still
+  needs confirmation. Task-specific backend create/get has passed the isolated
+  E2E regression. Sensitivity cannot be patched per occurrence under RFC 8984.
 - Real-client 16.1 negotiation and behavior, including Tasks recurrence and
   enabled Oof rendering. Set `EAS_MAX_PROTOCOL_VERSION=16.1` only on the
   isolated test bridge for that pass; production remains on 14.0 until it

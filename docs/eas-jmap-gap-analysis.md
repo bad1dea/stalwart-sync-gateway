@@ -12,6 +12,18 @@ handling. Check the current Rust implementation before treating any older
 
 Current prioritized work:
 
+Calendar Type 6 yearly-nth recurrence now accepts optional `DayOfWeek`. When
+omitted, the converter infers the weekday from the event's local series start,
+but only when `MonthOfYear` and `WeekOfMonth` agree with that start; otherwise
+it fails without writing. For `WeekOfMonth=5`, the start must be the last
+occurrence of its weekday in the specified month. Regressions cover Calendar
+Sync's omitted-Type inference, yearly conversion, and JMAP creation with a
+matching start. MS-ASCAL makes `DayOfWeek` optional for Type 6 without defining
+the omission default, so interpreting it as the start weekday is an inference
+pending real-client confirmation. Full suite: 448 passed, 77 ignored; strict
+Clippy, formatting, and diff checks pass. Isolated deployment follows;
+production remains unchanged.
+
 GAL Find's EAS 16.1 `Picture` option now joins matching Principal results to
 saved ContactCards by exact email address. Matching inline or bounded blob
 photos are returned as base64 `gal:Data`; `MaxSize` and `MaxPictures` produce
@@ -43,8 +55,9 @@ passes 443 tests (77 ignored); strict Clippy, formatting, and diff checks
 pass. Microsoft specifies Calendar `Type` as optional in 16.0/16.1 requests
 in [MS-ASCAL Recurrence](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascal/dabc38cf-7f14-4f98-9eaf-05e1ff723f4a),
 while [MS-ASTASK Appendix A](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-astask/c16a3dcb-de5b-4de9-9026-232654d0628d)
-requires Task `Type`. A yearly Type 6 pattern that omits `DayOfWeek` remains
-unsupported until its meaning can be represented without guessing.
+requires Task `Type`. A yearly Type 6 pattern that omits `DayOfWeek` is now
+accepted only when its series start supplies a consistent weekday anchor; the
+protocol-derived meaning of that omission still needs real-client confirmation.
 Deployed to the isolated Amy bridge as `localhost/eas16-isolated:c9f393a`
 (image `sha256:cd38586173ed94720a68d9d7dc9145825f1a54751a2f98004ff9f487f12bbedc`),
 started `2026-11-25T09:23:12.193589051Z`, restart count zero, `/healthz` `ok`,

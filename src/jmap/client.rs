@@ -4135,6 +4135,7 @@ impl JmapClient {
         );
         let mut update_state = None;
         let mut recurrence_time_zone = None;
+        let mut recurrence_start = None;
         if let Some(id) = id.filter(|_| {
             fields.reminder.is_some()
                 || fields.location.is_some()
@@ -4154,7 +4155,7 @@ impl JmapClient {
                     ],
                     vec![MethodCall::new(
                         "CalendarEvent/get",
-                        serde_json::json!({"accountId":account_id,"ids":[id],"properties":["id","timeZone","iCalendar"]}),
+                        serde_json::json!({"accountId":account_id,"ids":[id],"properties":["id","start","timeZone","iCalendar"]}),
                         "state",
                     )],
                 )
@@ -4174,6 +4175,11 @@ impl JmapClient {
                 .as_array()
                 .and_then(|items| items.iter().find(|item| item["id"] == id))
                 .and_then(|item| item["timeZone"].as_str())
+                .map(str::to_owned);
+            recurrence_start = result.1["list"]
+                .as_array()
+                .and_then(|items| items.iter().find(|item| item["id"] == id))
+                .and_then(|item| item["start"].as_str())
                 .map(str::to_owned);
             if let Some(disallow) = fields.disallow_new_time_proposal {
                 let item = result.1["list"]
@@ -4199,10 +4205,36 @@ impl JmapClient {
             event.insert(
                 "recurrenceRule".to_owned(),
                 match &fields.recurrence {
-                    Some(recurrence) => crate::jmap::calendar_recurrence::to_jscalendar(
-                        recurrence,
-                        recurrence_time_zone.as_deref(),
-                    )?,
+                    Some(recurrence) => {
+                        let inferred_day_of_week = if recurrence.kind == 6
+                            && recurrence.day_of_week.is_none()
+                        {
+                            let local_start = if let Some(start) = fields.start_time.as_deref() {
+                                eas_to_calendar_local(start, recurrence_time_zone.as_deref())
+                                    .context("yearly-nth recurrence has invalid series start")?
+                            } else if let Some(start) = recurrence_start.as_deref() {
+                                chrono::NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S%.f")
+                                    .context(
+                                        "yearly-nth recurrence has invalid stored series start",
+                                    )?
+                            } else {
+                                anyhow::bail!(
+                                    "yearly-nth recurrence needs a series start to infer DayOfWeek"
+                                );
+                            };
+                            Some(crate::jmap::calendar_recurrence::infer_yearly_nth_weekday(
+                                recurrence,
+                                local_start,
+                            )?)
+                        } else {
+                            None
+                        };
+                        crate::jmap::calendar_recurrence::to_jscalendar_with_weekday_fallback(
+                            recurrence,
+                            recurrence_time_zone.as_deref(),
+                            inferred_day_of_week,
+                        )?
+                    }
                     None => serde_json::Value::Null,
                 },
             );
@@ -11732,6 +11764,68 @@ mod calendar_update_state_tests {
                 email: "guest@example.test".to_owned(),
                 ..Default::default()
             }],
+            ..Default::default()
+        };
+        assert_eq!(
+            client
+                .save_calendar_event(&auth, "calendar", None, None, &fields, false)
+                .await
+                .unwrap(),
+            "event-1"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn calendar_create_infers_optional_yearly_nth_weekday_from_start() {
+        let app = Router::new().route(
+            "/",
+            post(|Json(request): Json<serde_json::Value>| async move {
+                let call = &request["methodCalls"][0];
+                assert_eq!(call[0], "CalendarEvent/set");
+                assert_eq!(call[1]["create"]["e1"]["start"], "2026-11-30T14:00:00");
+                assert_eq!(
+                    call[1]["create"]["e1"]["recurrenceRule"],
+                    serde_json::json!({
+                        "frequency":"yearly", "byMonth":["11"],
+                        "byDay":[{"day":"mo"}], "bySetPosition":[-1]
+                    })
+                );
+                Json(serde_json::json!({"methodResponses":[[
+                    "CalendarEvent/set", {"created":{"e1":{"id":"event-1"}}}, "0"
+                ]]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CALENDARS:"a"},
+            "apiUrl":url, "downloadUrl":url, "uploadUrl":url, "username":"user", "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let fields = crate::wbxml::eas::CalendarFields {
+            start_time: Some("20261130T140000Z".to_owned()),
+            recurrence_present: true,
+            recurrence: Some(crate::wbxml::eas::CalendarRecurrence {
+                kind: 6,
+                week_of_month: Some(5),
+                month_of_year: Some(11),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         assert_eq!(

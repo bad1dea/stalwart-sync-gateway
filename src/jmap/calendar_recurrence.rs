@@ -24,6 +24,14 @@ struct NDay {
 }
 
 pub fn to_jscalendar(value: &CalendarRecurrence, time_zone: Option<&str>) -> anyhow::Result<Value> {
+    to_jscalendar_with_weekday_fallback(value, time_zone, None)
+}
+
+pub fn to_jscalendar_with_weekday_fallback(
+    value: &CalendarRecurrence,
+    time_zone: Option<&str>,
+    inferred_day_of_week: Option<u8>,
+) -> anyhow::Result<Value> {
     let interval = value.interval.unwrap_or(1);
     anyhow::ensure!((1..=999).contains(&interval), "invalid recurrence interval");
     let frequency = match value.kind {
@@ -147,7 +155,8 @@ pub fn to_jscalendar(value: &CalendarRecurrence, time_zone: Option<&str>) -> any
                 .context("nth yearly recurrence needs WeekOfMonth")?;
             let days = value
                 .day_of_week
-                .context("nth yearly recurrence needs DayOfWeek")?;
+                .or(inferred_day_of_week)
+                .context("nth yearly recurrence needs DayOfWeek or a matching series start")?;
             anyhow::ensure!(
                 (1..=12).contains(&month) && value.day_of_month.is_none(),
                 "invalid nth yearly recurrence fields"
@@ -167,6 +176,53 @@ pub fn to_jscalendar(value: &CalendarRecurrence, time_zone: Option<&str>) -> any
         _ => unreachable!(),
     }
     Ok(Value::Object(rule))
+}
+
+/// Infer the omitted EAS yearly-nth weekday from the series' first start.
+/// The start must itself match the EAS month and ordinal selectors, so this
+/// cannot silently turn an inconsistent recurrence into a different rule.
+pub fn infer_yearly_nth_weekday(
+    recurrence: &CalendarRecurrence,
+    start: chrono::NaiveDateTime,
+) -> anyhow::Result<u8> {
+    use chrono::Datelike;
+
+    anyhow::ensure!(
+        recurrence.kind == 6 && recurrence.day_of_week.is_none(),
+        "weekday inference only applies to yearly-nth patterns with no DayOfWeek"
+    );
+    let month = recurrence
+        .month_of_year
+        .context("yearly-nth recurrence needs MonthOfYear")?;
+    let week = recurrence
+        .week_of_month
+        .context("yearly-nth recurrence needs WeekOfMonth")?;
+    anyhow::ensure!(
+        start.month() == u32::from(month),
+        "yearly-nth series start month does not match MonthOfYear"
+    );
+    let ordinal = (start.day() - 1) / 7 + 1;
+    if week == 5 {
+        let first = chrono::NaiveDate::from_ymd_opt(start.year(), start.month(), 1)
+            .context("invalid yearly-nth start date")?;
+        let next_month = if start.month() == 12 {
+            chrono::NaiveDate::from_ymd_opt(start.year() + 1, 1, 1)
+        } else {
+            chrono::NaiveDate::from_ymd_opt(start.year(), start.month() + 1, 1)
+        }
+        .context("invalid yearly-nth month boundary")?;
+        let days_in_month = next_month.signed_duration_since(first).num_days() as u32;
+        anyhow::ensure!(
+            start.day() + 7 > days_in_month,
+            "yearly-nth series start is not the last matching weekday"
+        );
+    } else {
+        anyhow::ensure!(
+            ordinal == u32::from(week),
+            "yearly-nth series start week does not match WeekOfMonth"
+        );
+    }
+    Ok(1 << start.weekday().num_days_from_sunday())
 }
 
 pub fn from_jscalendar(
@@ -530,6 +586,39 @@ mod tests {
             assert!(jscalendar["@type"].is_null());
             assert_eq!(from_jscalendar(&jscalendar, None).unwrap(), recurrence);
         }
+    }
+
+    #[test]
+    fn yearly_nth_without_day_of_week_uses_only_a_matching_series_start() {
+        let recurrence = CalendarRecurrence {
+            kind: 6,
+            week_of_month: Some(5),
+            month_of_year: Some(11),
+            ..Default::default()
+        };
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 11, 30)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap();
+        let weekday = infer_yearly_nth_weekday(&recurrence, start).unwrap();
+        assert_eq!(weekday, 2); // Monday
+        let rule = to_jscalendar_with_weekday_fallback(&recurrence, None, Some(weekday)).unwrap();
+        assert_eq!(rule["frequency"], "yearly");
+        assert_eq!(rule["byMonth"], json!(["11"]));
+        assert_eq!(rule["byDay"], json!([{"day":"mo"}]));
+        assert_eq!(rule["bySetPosition"], json!([-1]));
+        assert!(to_jscalendar(&recurrence, None).is_err());
+
+        let wrong_month = chrono::NaiveDate::from_ymd_opt(2026, 10, 26)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap();
+        assert!(infer_yearly_nth_weekday(&recurrence, wrong_month).is_err());
+        let not_last = chrono::NaiveDate::from_ymd_opt(2026, 11, 23)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap();
+        assert!(infer_yearly_nth_weekday(&recurrence, not_last).is_err());
     }
 
     #[test]
