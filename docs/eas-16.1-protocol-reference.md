@@ -19,8 +19,8 @@ The spec's own overview lays out the intended command sequence:
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
    `100.64.0.50:18090`, backed by isolated Stalwart. Its current gateway image
-   is `41379d4` (`sha256:ef0d4e1d43d85328038b1293480926a50c308e2ab355de5f0553ba54d61e7e2d`),
-   started `2026-11-25T12:04:02.600937012Z` with zero restarts. `/healthz`
+   is `a85c183` (`sha256:728537048ab1bd6a2fd6f0d11f8d3c8aefbd4e03b8388520c60be9dec4d325f6`),
+   started `2026-11-25T12:13:45.790153159Z` with zero restarts. `/healthz`
    and `/readyz` returned HTTP 200; the Compose environment leaves
    `EAS_MAX_PROTOCOL_VERSION` unset, so it still defaults to EAS 14.0.
    Set the variable to 16.1 during the planned client test window.
@@ -183,9 +183,10 @@ recurrence, reminder, sensitivity, busy status, and
 `DisallowNewTimeProposal` are mapped from the JMAP calendar data; proposed-time
 fields in EAS 16.1 remain unsupported. JSCalendar delegation also maps to
 `Forwardees` in 16.0/16.1, with recipient email emitted only for 16.1. Mocked
-JMAP mailbox-query/CalendarEvent-parse and WBXML writer regressions pass. Commit
-`41379d4` is deployed to Amy's isolated bridge as
-`localhost/eas16-isolated:41379d4`; `/healthz` and `/readyz`
+JMAP mailbox-query/CalendarEvent-parse and WBXML writer regressions pass.
+JSCalendar location descriptions and valid `geo:` coordinates also map into
+the AirSyncBase location structure for 16.x. Commit `a85c183` is deployed to
+Amy's isolated bridge as `localhost/eas16-isolated:a85c183`; `/healthz` and `/readyz`
 both returned HTTP 200, and the bridge still defaults to EAS 14.0.
 `Organizer` maps from the JMAP `owner` participant's display name (email
 fallback) to Email:Organizer. `ResponseRequested` maps the current attendee's
