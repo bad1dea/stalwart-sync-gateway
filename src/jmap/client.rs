@@ -8475,25 +8475,34 @@ fn email_meeting_request_from_event(
     };
     let forwardees = attendee["delegatedTo"]
         .as_object()
-        .into_iter()
-        .flat_map(|delegations| delegations.iter())
-        .filter(|(_, delegated)| *delegated == true)
-        .filter_map(|(id, _)| {
-            let participant = participants.get(id)?;
-            let email = participant["email"].as_str()?.trim();
-            if email.is_empty() {
-                return None;
-            }
-            let name = participant["name"]
-                .as_str()
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or(email);
-            Some(EmailMeetingForwardee {
-                name: name.to_owned(),
-                email: email.to_owned(),
-            })
+        .map(|delegations| {
+            let mut ids: Vec<_> = delegations
+                .iter()
+                .filter(|(_, delegated)| *delegated == true)
+                .map(|(id, _)| id)
+                .collect();
+            ids.sort();
+            let forwardees: Option<Vec<_>> = ids
+                .into_iter()
+                .map(|id| {
+                    let participant = participants.get(id)?;
+                    let email = participant["email"].as_str()?.trim();
+                    if email.is_empty() {
+                        return None;
+                    }
+                    let name = participant["name"]
+                        .as_str()
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or(email);
+                    Some(EmailMeetingForwardee {
+                        name: name.to_owned(),
+                        email: email.to_owned(),
+                    })
+                })
+                .collect();
+            forwardees.unwrap_or_default()
         })
-        .collect();
+        .unwrap_or_default();
     let response_requested = attendee["expectReply"].as_bool();
     let organizer = participants.values().find_map(|participant| {
         (participant["roles"]["owner"] == true)
@@ -8711,6 +8720,15 @@ mod meeting_request_conversion_tests {
             .forwardees[0];
         assert_eq!(forwardee.name, "Calendar Delegate");
         assert_eq!(forwardee.email, "delegate@example.test");
+
+        delegator_copy["participants"]["attendee"]["delegatedTo"] =
+            serde_json::json!({"delegate":true,"unknown":true});
+        assert!(
+            email_meeting_request_from_event(&delegator_copy, "attendee@example.test")
+                .unwrap()
+                .forwardees
+                .is_empty()
+        );
 
         // False-valued ids do not mark a delegation; an ordinary update keeps
         // its sequence-derived type.
