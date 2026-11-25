@@ -111,7 +111,7 @@ fn same_search(session: &SearchState, filter: &Value, search_text: &str) -> bool
 const SEARCHES: &str = "__find__";
 const MAX_FIND_ATTACHMENT_TEXT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_FIND_PDF_OCR_PAGES: u32 = 10;
+const MAX_FIND_PDF_OCR_PAGES: u32 = 20;
 const MAX_FIND_PDF_OCR_RUNTIME: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_FIND_PDF_OCR_EDGE: u32 = 1600;
 const MAX_FIND_ARCHIVE_ENTRIES: usize = 4096;
@@ -1018,7 +1018,7 @@ fn extract_bounded_pdf_text_with_tools(
     if !missing_text_pages.is_empty() && allow_ocr {
         if missing_text_pages.len() > MAX_FIND_PDF_OCR_PAGES as usize {
             // A textless page may contain an image. Refuse to return partial
-            // text when more than ten pages need OCR.
+            // text when more than twenty pages need OCR.
             return None;
         }
         let recognized =
@@ -3437,7 +3437,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn scanned_pdf_ocr_allows_ten_pages_with_a_total_runtime_budget() {
+    fn scanned_pdf_ocr_allows_twenty_pages_with_a_total_runtime_budget() {
         use super::{extract_pdf_pages_ocr_with_tools, FindOcrTempDir};
         use std::{fs, os::unix::fs::PermissionsExt};
 
@@ -3481,7 +3481,9 @@ mod tests {
 
         let pages = extract_pdf_pages_ocr_with_tools(
             b"bounded test PDF",
-            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            &[
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            ],
             &renderer,
             &ocr,
         )
@@ -3493,7 +3495,10 @@ mod tests {
             .join(" ");
         assert_eq!(
             super::normalize_find_attachment_text(&text),
-            Some(format!("scan alpha beta {}", ["ignored page"; 8].join(" ")))
+            Some(format!(
+                "scan alpha beta {}",
+                ["ignored page"; 18].join(" ")
+            ))
         );
         let args = fs::read_to_string(render_args).unwrap();
         let args: Vec<_> = args.lines().collect();
@@ -3503,8 +3508,8 @@ mod tests {
         assert_eq!(args[scale_limit + 1], "1600");
 
         assert!(extract_pdf_pages_ocr_with_tools(
-            b"eleven-page PDF",
-            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            b"twenty-one-page PDF",
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,],
             &renderer,
             &ocr,
         )
