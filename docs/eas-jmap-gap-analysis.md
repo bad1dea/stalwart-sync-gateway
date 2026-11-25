@@ -1854,8 +1854,12 @@ Recurring-series counters now include an RRULE translated from supported
 JSCalendar rules. They fail closed for named local time zones and series with
 recurrence exceptions, because this MIME path does not yet emit a matching
 VTIMEZONE or exception set. An occurrence counter uses the request's UTC
-`InstanceId` as `RECURRENCE-ID`. This source change is not deployed or live
-validated yet.
+`InstanceId` as `RECURRENCE-ID`. Deployed to the isolated Amy bridge as
+`localhost/eas16-isolated:c4f1045` (image
+`sha256:d2734f7209b24056a9ad0aec6d492d894f0232adc42503b3c651009668a3f4aa`),
+started `2026-11-25T07:28:29Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. The test stack has no protocol override and therefore
+retains the 14.0 default; real-client 16.1 behavior remains unverified.
 JSCalendar's
 `participationComment` is a note explaining RSVP status, not the custom email
 body carried by EAS `SendResponse`; mapping the two directly would lose the
@@ -1869,7 +1873,8 @@ Regression coverage asserts `sendSchedulingMessages` at the JMAP boundary,
 RRULE mapping, and the series-counter timezone/exception guard, and updates the
 deferred live MeetingResponse scenario. Current full suite: 433 passed, 77
 ignored; strict Clippy, formatting, and diff checks pass. The custom
-reply and counter paths are on `main` but are not deployed yet. Earlier empty
+reply and counter paths are on `main` and deployed to the isolated bridge with
+the 14.0 default; real-client 16.1 testing remains open. Earlier empty
 `SendResponse` behavior was deployed as
 `deploy-2026-11-22-eas-16-meeting-send-response-1109860`; Hermes
 Compose built image
