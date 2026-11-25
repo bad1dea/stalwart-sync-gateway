@@ -217,7 +217,8 @@ source and deployed to the isolated Amy bridge using the 14.0 default; live
 client validation remains open. Counters include named event locations and
 supported JSCalendar recurrence rules. Stable IANA zones emit VTIMEZONE and
 use local wall time; recurrence exceptions and irregular or unknown zones fail
-closed. This VTIMEZONE update is in source and awaits deployment. JSCalendar's
+closed. The VTIMEZONE path is deployed to the isolated bridge at the 14.0
+default. JSCalendar's
 `participationComment` is an RSVP note, not the
 outgoing email body, so the two are not treated as equivalent
 ([RFC 8984 §4.4.6](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6)).

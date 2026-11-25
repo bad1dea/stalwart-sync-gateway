@@ -1866,7 +1866,11 @@ as `localhost/eas16-isolated:23f4cbc` (image
 started `2026-11-25T07:35:41Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. The test stack has no protocol override and therefore
 retains the 14.0 default; real-client 16.1 behavior remains unverified. The
-new VTIMEZONE and local-wall-time source changes are awaiting deployment.
+new VTIMEZONE/local-time implementation is deployed as
+`localhost/eas16-isolated:0f05ab8` (image
+`sha256:c4bb48640bcaffcba53791486e299b8f55b919dc1ff3495c1efbcdb4b4addfc6`),
+started `2026-11-25T07:50:44Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`.
 JSCalendar's
 `participationComment` is a note explaining RSVP status, not the custom email
 body carried by EAS `SendResponse`; mapping the two directly would lose the
