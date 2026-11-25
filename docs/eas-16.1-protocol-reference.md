@@ -19,8 +19,8 @@ The spec's own overview lays out the intended command sequence:
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
    `100.64.0.50:18090`, backed by isolated Stalwart. Its current gateway image
-   is `f24b959` (`sha256:f58b3f84fba8902d5df806ec4309e7405328565939f5648c7064e462b5e2a270`),
-   started `2026-11-25T12:34:51.477864965Z` with zero restarts. `/healthz`
+   is `ae1a0a9` (`sha256:03d914f779e77fd37781884e6d60281f457077d5102cb01d7b7ff9f05b0e2f93`),
+   started `2026-11-25T12:53:21.254236014Z` with zero restarts. `/healthz`
    and `/readyz` returned HTTP 200; the Compose environment leaves
    `EAS_MAX_PROTOCOL_VERSION` unset, so it still defaults to EAS 14.0.
    Set the variable to 16.1 during the planned client test window.
@@ -184,11 +184,16 @@ recurrence, reminder, sensitivity, busy status, and
 fields in EAS 16.1 remain unsupported. JSCalendar delegation also maps to
 `Forwardees` in 16.0/16.1, with recipient email emitted only for 16.1. Mocked
 JMAP mailbox-query/CalendarEvent-parse and WBXML writer regressions pass.
+The writer order follows the schema: the version-appropriate `GlobalObjId` or
+`Calendar:UID` immediately follows `TimeZone`, then
+`DisallowNewTimeProposal`, `MeetingMessageType`, optional proposal times, and
+`Forwardees` last. A regression checks the direct-child order for 14.0 and
+16.1, including forwarded 16.x requests.
 JSCalendar location descriptions and valid `geo:` coordinates also map into
 the AirSyncBase location structure for 16.x. Legacy Email `Location` is omitted
 above the 32,768-character schema limit; this restriction does not apply to
-the 16.x AirSyncBase location encoding. Commit `f24b959` is deployed to
-Amy's isolated bridge as `localhost/eas16-isolated:f24b959`; `/healthz` and
+the 16.x AirSyncBase location encoding. Commit `ae1a0a9` is deployed to
+Amy's isolated bridge as `localhost/eas16-isolated:ae1a0a9`; `/healthz` and
 `/readyz` both returned HTTP 200, and the bridge still defaults to EAS 14.0.
 `Organizer` maps from the JMAP `owner` participant's display name (email
 fallback) to Email:Organizer. `ResponseRequested` maps the current attendee's

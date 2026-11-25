@@ -46,15 +46,16 @@ series time zone to compact UTC. Series invitations omit it. Regression tests
 cover local-time conversion and 14.x/16.x WBXML output. Microsoft defines this
 field as the identifier for a specific recurring instance in
 [MS-ASEMAIL MeetingRequest](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/0bc0a4c7-2391-428d-b2c1-471c6695d1df).
-The writer now follows the MS-ASEMAIL `MeetingRequest` child order. A regression
-checks direct-child order for EAS 14.0 and 16.1 and verifies that 16.1
-`Forwardees` follows the calendar UID. The full suite passes 468 tests (77
-ignored), including legacy GlobalObjId compatibility, versioned writer order,
-and JMAP conversion regressions; strict Clippy, formatting, and diff checks
-pass. Commit `7501714` is deployed to Amy's isolated bridge as
-`localhost/eas16-isolated:7501714` (image
-`sha256:510677f20f9fe9c3fc51a120b3253158dbe5a905f0feacb1a0c052328da60eee`),
-started `2026-11-25T12:43:52.911556732Z`, with zero restarts. At verification,
+The writer now follows the full MS-ASEMAIL `MeetingRequest` child order. A
+regression checks direct-child order for EAS 14.0 and 16.1, including the
+version-specific ID immediately after `TimeZone` and 16.1 `Forwardees` last.
+The full suite passes 468 tests (77 ignored), including legacy GlobalObjId
+compatibility, versioned writer order, and JMAP conversion regressions; strict
+Clippy, formatting, and diff checks pass. Commit `ae1a0a9` is deployed to Amy's
+isolated bridge as
+`localhost/eas16-isolated:ae1a0a9` (image
+`sha256:03d914f779e77fd37781884e6d60281f457077d5102cb01d7b7ff9f05b0e2f93`),
+started `2026-11-25T12:53:21.254236014Z`, with zero restarts. At verification,
 `/healthz` and `/readyz` returned HTTP 200 (`ok` and `ready`);
 `EAS_MAX_PROTOCOL_VERSION` remains unset, preserving the 14.0 default, and
 production is untouched. The optional `Organizer` maps the
