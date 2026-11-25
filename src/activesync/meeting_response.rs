@@ -24,6 +24,45 @@ fn invalid_instance_id_status(value: Option<&str>) -> Option<&'static str> {
         .map(|_| "104")
 }
 
+fn custom_response_body(
+    request: &Document,
+) -> Result<Option<crate::jmap::client::MeetingResponseBody>, ()> {
+    use crate::wbxml::eas::airsync_base as ab;
+    let send_response = eas::child_elements(request)
+        .into_iter()
+        .find(|child| is(child, mr::SEND_RESPONSE));
+    let Some(send_response) = send_response else {
+        return Ok(None);
+    };
+    let body = eas::child_elements(&send_response)
+        .into_iter()
+        .find(|child| is(child, ab::BODY));
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    let fields = eas::child_elements(&body);
+    let types: Vec<_> = fields.iter().filter(|field| is(field, ab::TYPE)).collect();
+    let data: Vec<_> = fields.iter().filter(|field| is(field, ab::DATA)).collect();
+    if types.len() != 1 || data.len() > 1 || fields.len() != 1 + data.len() {
+        return Err(());
+    }
+    let kind = eas::find_text_after(types[0], ab::TYPE)
+        .and_then(|value| value.parse::<u8>().ok())
+        .filter(|kind| matches!(kind, 1 | 2))
+        .ok_or(())?;
+    let data = data
+        .first()
+        .and_then(|field| eas::find_text_after(field, ab::DATA))
+        .unwrap_or("");
+    if data.len() > 256 * 1024 {
+        return Err(());
+    }
+    Ok(Some(crate::jmap::client::MeetingResponseBody {
+        kind,
+        data: data.to_owned(),
+    }))
+}
+
 pub(super) async fn handle(
     state: &AppState,
     auth: &AuthenticatedSession,
@@ -66,11 +105,11 @@ pub(super) async fn handle(
             let response = eas::find_text_after(&request, mr::USER_RESPONSE).unwrap_or("");
             let send_response = eas::contains_token(&request, mr::SEND_RESPONSE);
             let instance_id = eas::find_text_after(&request, mr::INSTANCE_ID);
+            let custom_body = custom_response_body(&request);
             let unsupported = [mr::PROPOSED_START_TIME, mr::PROPOSED_END_TIME]
                 .iter()
                 .any(|t| eas::contains_token(&request, *t))
-                || (send_response
-                    && eas::contains_token(&request, crate::wbxml::eas::airsync_base::BODY));
+                || custom_body.is_err();
             let fields = eas::child_elements(&request);
             let required = [mr::REQUEST_ID, mr::COLLECTION_ID, mr::USER_RESPONSE];
             let count = |token| fields.iter().filter(|field| is(field, token)).count();
@@ -172,6 +211,7 @@ pub(super) async fn handle(
                                     crate::jmap::client::MeetingResponseOptions {
                                         expected_organizer: organizer.as_deref(),
                                         send_response,
+                                        custom_body: custom_body.ok().flatten(),
                                         instance_id,
                                     },
                                 )
@@ -223,7 +263,18 @@ pub(super) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::invalid_instance_id_status;
+    use super::{custom_response_body, invalid_instance_id_status};
+    use crate::wbxml::{
+        eas::{airsync_base as ab, meeting_response as mr},
+        Document, Node,
+    };
+
+    fn start(token: crate::wbxml::token::Token) -> Node {
+        Node::Start(crate::wbxml::token::Token {
+            has_content: true,
+            ..token
+        })
+    }
 
     #[test]
     fn meeting_instance_id_uses_eas_invalid_format_status() {
@@ -234,5 +285,69 @@ mod tests {
             None
         );
         assert_eq!(invalid_instance_id_status(None), None);
+    }
+
+    #[test]
+    fn custom_meeting_response_body_parses_plain_text_and_html_types() {
+        for (kind, expected) in [("1", 1), ("2", 2)] {
+            let doc = Document {
+                nodes: vec![
+                    start(mr::REQUEST),
+                    start(mr::SEND_RESPONSE),
+                    start(ab::BODY),
+                    start(ab::TYPE),
+                    Node::Text(kind.into()),
+                    Node::End,
+                    start(ab::DATA),
+                    Node::Text("<b>I'll attend</b>".into()),
+                    Node::End,
+                    Node::End,
+                    Node::End,
+                    Node::End,
+                ],
+            };
+            let body = custom_response_body(&doc).unwrap().unwrap();
+            assert_eq!(body.kind, expected);
+            assert_eq!(body.data, "<b>I'll attend</b>");
+        }
+    }
+
+    #[test]
+    fn custom_meeting_response_body_rejects_unsupported_and_oversized_payloads() {
+        let invalid = Document {
+            nodes: vec![
+                start(mr::REQUEST),
+                start(mr::SEND_RESPONSE),
+                start(ab::BODY),
+                start(ab::TYPE),
+                Node::Text("4".into()),
+                Node::End,
+                start(ab::DATA),
+                Node::Text("body".into()),
+                Node::End,
+                Node::End,
+                Node::End,
+                Node::End,
+            ],
+        };
+        assert!(custom_response_body(&invalid).is_err());
+
+        let oversized = Document {
+            nodes: vec![
+                start(mr::REQUEST),
+                start(mr::SEND_RESPONSE),
+                start(ab::BODY),
+                start(ab::TYPE),
+                Node::Text("1".into()),
+                Node::End,
+                start(ab::DATA),
+                Node::Text("x".repeat(256 * 1024 + 1)),
+                Node::End,
+                Node::End,
+                Node::End,
+                Node::End,
+            ],
+        };
+        assert!(custom_response_body(&oversized).is_err());
     }
 }

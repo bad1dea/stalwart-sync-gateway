@@ -3270,6 +3270,7 @@ impl JmapClient {
             expected_organizer,
             send_response,
             instance_id,
+            custom_body,
         } = options;
         let account = auth
             .session
@@ -3281,7 +3282,7 @@ impl JmapClient {
         ];
         let response: JmapResponse<serde_json::Value> = self.api_call(auth, &using,
             vec![MethodCall::new("CalendarEvent/get", serde_json::json!({"accountId":account,
-                "ids":[event_id],"properties":["id","@type","calendarIds","participants","replyTo","timeZone","recurrenceRule","recurrenceOverrides"]}), "get")]).await?;
+                "ids":[event_id],"properties":["id","uid","@type","calendarIds","participants","replyTo","timeZone","recurrenceRule","recurrenceOverrides"]}), "get")]).await?;
         let result = response
             .method_responses
             .iter()
@@ -3351,6 +3352,42 @@ impl JmapClient {
         let state = result.1["state"]
             .as_str()
             .context("calendar state missing")?;
+        let custom_mime = if let Some(body) = custom_body {
+            if !send_response
+                || !auth.capabilities.submission
+                || auth
+                    .session
+                    .primary_account_for(capabilities::MAIL)
+                    .is_none()
+            {
+                return Ok("4");
+            }
+            let (identity_id, _) = self.fetch_primary_identity(auth).await?;
+            if identity_id.is_empty() || self.find_mailbox_by_role(auth, "sent").await?.is_none() {
+                return Ok("4");
+            }
+            let Some(uid) = event["uid"].as_str() else {
+                return Ok("4");
+            };
+            let Some(organizer) = owners[0]["email"].as_str() else {
+                return Ok("4");
+            };
+            let Some(attendee) = participant["email"].as_str() else {
+                return Ok("4");
+            };
+            Some(custom_meeting_reply_mime(
+                &body,
+                uid,
+                organizer,
+                attendee,
+                participation,
+                instance_key.as_deref(),
+                event["timeZone"].as_str(),
+            )?)
+        } else {
+            None
+        };
+        let send_scheduling_messages = send_response && custom_mime.is_none();
         if participation == "declined" && instance_key.is_none() {
             if auth.capabilities.submission {
                 let identities = self.mail_identities(auth).await?;
@@ -3367,13 +3404,13 @@ impl JmapClient {
                 .context("meeting calendar membership missing")?;
             let count = calendars.values().filter(|value| **value == true).count();
             let arguments = if count == 1 {
-                serde_json::json!({"accountId":account,"ifInState":state,"sendSchedulingMessages":send_response,"destroy":[event_id]})
+                serde_json::json!({"accountId":account,"ifInState":state,"sendSchedulingMessages":send_scheduling_messages,"destroy":[event_id]})
             } else {
                 let path = format!(
                     "calendarIds/{}",
                     calendar_id.replace('~', "~0").replace('/', "~1")
                 );
-                serde_json::json!({"accountId":account,"ifInState":state,"sendSchedulingMessages":send_response,"update":{event_id:{path:null}}})
+                serde_json::json!({"accountId":account,"ifInState":state,"sendSchedulingMessages":send_scheduling_messages,"update":{event_id:{path:null}}})
             };
             let response: JmapResponse<serde_json::Value> = self
                 .api_call(
@@ -3440,6 +3477,9 @@ impl JmapClient {
                     }
                 }
             }
+            if let Some(mime) = custom_mime {
+                self.send_email(auth, mime, true).await?;
+            }
             return Ok("1");
         }
         let participant_id = (*key).clone();
@@ -3500,7 +3540,7 @@ impl JmapClient {
                 vec![MethodCall::new(
                     "CalendarEvent/set",
                     serde_json::json!({"accountId":account,
-                "ifInState":state,"sendSchedulingMessages":send_response,
+                "ifInState":state,"sendSchedulingMessages":send_scheduling_messages,
                 "update":{event_id:update}}),
                     "set",
                 )],
@@ -3567,6 +3607,9 @@ impl JmapClient {
             owners.len() == 1 && owners[0]["email"] == owner_email,
             "meeting organizer was not retained"
         );
+        if let Some(mime) = custom_mime {
+            self.send_email(auth, mime, true).await?;
+        }
         Ok("1")
     }
 
@@ -7241,17 +7284,148 @@ impl JmapClient {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct MeetingResponseOptions<'a> {
     pub expected_organizer: Option<&'a str>,
     pub send_response: bool,
     pub instance_id: Option<&'a str>,
+    pub custom_body: Option<MeetingResponseBody>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeetingResponseBody {
+    pub kind: u8,
+    pub data: String,
 }
 
 impl AuthenticatedSession {
     pub fn username(&self) -> &str {
         &self.authorization.username
     }
+}
+
+fn calendar_text_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace(';', "\\;")
+        .replace(',', "\\,")
+        .replace("\r\n", "\\n")
+        .replace(['\r', '\n'], "\\n")
+}
+
+fn fold_ical_lines(value: &str) -> String {
+    let mut folded = String::with_capacity(value.len() + 32);
+    for line in value.split("\r\n").filter(|line| !line.is_empty()) {
+        let mut width = 0;
+        for character in line.chars() {
+            let bytes = character.len_utf8();
+            if width + bytes > 75 {
+                folded.push_str("\r\n ");
+                width = 1;
+            }
+            folded.push(character);
+            width += bytes;
+        }
+        folded.push_str("\r\n");
+    }
+    folded
+}
+
+fn wrap_mime_base64(data: &[u8]) -> String {
+    data.chunks(57)
+        .map(|line| STANDARD.encode(line))
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
+fn is_safe_mailbox(value: &str) -> bool {
+    let Some((local, domain)) = value.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && !domain.is_empty()
+        && !domain.contains('@')
+        && local
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b".!#$%&'*+-/=?^_`{|}~".contains(&byte))
+        && domain
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+}
+
+fn custom_meeting_reply_mime(
+    body: &MeetingResponseBody,
+    uid: &str,
+    organizer: &str,
+    attendee: &str,
+    participation: &str,
+    recurrence_key: Option<&str>,
+    time_zone: Option<&str>,
+) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        matches!(body.kind, 1 | 2),
+        "unsupported MeetingResponse body type"
+    );
+    anyhow::ensure!(!uid.is_empty(), "invalid meeting reply UID");
+    anyhow::ensure!(
+        is_safe_mailbox(organizer) && is_safe_mailbox(attendee),
+        "invalid meeting reply address"
+    );
+    let partstat = match participation {
+        "accepted" => "ACCEPTED",
+        "tentative" => "TENTATIVE",
+        "declined" => "DECLINED",
+        _ => anyhow::bail!("invalid meeting participation status"),
+    };
+    let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let mut calendar = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//EAS JMAP Gateway//Meeting Reply//EN\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:{}\r\nDTSTAMP:{now}\r\nORGANIZER:mailto:{}\r\nATTENDEE;PARTSTAT={partstat}:mailto:{}\r\n",
+        calendar_text_escape(uid),
+        calendar_text_escape(organizer),
+        calendar_text_escape(attendee)
+    );
+    if let Some(recurrence_key) = recurrence_key {
+        anyhow::ensure!(
+            !recurrence_key
+                .bytes()
+                .any(|byte| matches!(byte, b'\r' | b'\n' | b';')),
+            "invalid meeting recurrence key"
+        );
+        let compact =
+            if let Ok(date) = chrono::NaiveDate::parse_from_str(recurrence_key, "%Y-%m-%d") {
+                date.format("%Y%m%d").to_string()
+            } else {
+                chrono::NaiveDateTime::parse_from_str(recurrence_key, "%Y-%m-%dT%H:%M:%S")?
+                    .format("%Y%m%dT%H%M%S")
+                    .to_string()
+            };
+        if let Some(time_zone) = time_zone.filter(|zone| !zone.is_empty()) {
+            anyhow::ensure!(
+                time_zone.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-' | b'+')
+                }),
+                "invalid meeting time zone"
+            );
+            calendar.push_str(&format!("RECURRENCE-ID;TZID={time_zone}:{compact}\r\n"));
+        } else {
+            calendar.push_str(&format!("RECURRENCE-ID:{compact}\r\n"));
+        }
+    }
+    calendar.push_str("END:VEVENT\r\nEND:VCALENDAR\r\n");
+
+    calendar = fold_ical_lines(&calendar);
+    let boundary = format!("eas-meeting-{}", uuid::Uuid::new_v4().simple());
+    let content_type = if body.kind == 2 {
+        "text/html"
+    } else {
+        "text/plain"
+    };
+    let encoded_body = wrap_mime_base64(body.data.as_bytes());
+    let mime = format!(
+        "To: <{}>\r\nFrom: <{}>\r\nSubject: Meeting response\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"{boundary}\"\r\n\r\n--{boundary}\r\nContent-Type: {content_type}; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n{encoded_body}\r\n--{boundary}\r\nContent-Type: text/calendar; method=REPLY; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{calendar}--{boundary}--\r\n",
+        organizer, attendee
+    );
+    Ok(mime.into_bytes())
 }
 
 pub fn basic_credentials(headers: &HeaderMap) -> anyhow::Result<(String, String)> {
@@ -12465,6 +12639,30 @@ mod meeting_response_send_tests {
     use super::*;
     use axum::{routing::post, Json, Router};
     use std::sync::Arc;
+
+    #[test]
+    fn custom_meeting_reply_includes_body_and_targets_organizer() {
+        let mime = custom_meeting_reply_mime(
+            &MeetingResponseBody {
+                kind: 1,
+                data: "I will attend".into(),
+            },
+            "event-uid@example.test",
+            "organizer@example.test",
+            "attendee@example.test",
+            "accepted",
+            Some("2026-11-25T10:00:00"),
+            Some("America/Toronto"),
+        )
+        .unwrap();
+        let mime = String::from_utf8(mime).unwrap();
+        assert!(mime.starts_with("To: <organizer@example.test>\r\nFrom: <attendee@example.test>"));
+        assert!(mime.contains("Content-Type: text/plain; charset=utf-8"));
+        assert!(mime.contains("METHOD:REPLY\r\n"));
+        assert!(mime.contains("ATTENDEE;PARTSTAT=ACCEPTED:mailto:attendee@example.test"));
+        assert!(mime.contains("RECURRENCE-ID;TZID=America/Toronto:20261125T100000"));
+        assert!(mime.contains(&STANDARD.encode("I will attend")));
+    }
 
     #[tokio::test]
     async fn instance_response_on_non_recurring_event_returns_eas_status_146() {

@@ -1833,19 +1833,30 @@ Also completed: **EAS 16.x MeetingResponse SendResponse**. For protocol
 16.0/16.1, an empty `SendResponse` now requests JMAP scheduling messages;
 omitting it continues to suppress them. Recurring-series responses and
 `InstanceId` occurrence responses are now implemented; `InstanceId` is
-accepted for 14.1 and newer. A `SendResponse` with an embedded custom body and
-proposed meeting start/end times remain unsupported. JSCalendar's
+accepted for 14.1 and newer. `SendResponse/Body` now accepts AirSyncBase text
+and HTML bodies, validates the Body shape and a 256 KiB bound, updates the RSVP
+without triggering a second automatic scheduling message, then submits a
+multipart reply containing the requested body and an iTIP `METHOD:REPLY`
+calendar component addressed to the organizer. Recurrence replies include a
+local `RECURRENCE-ID`. MIME body encoding, iCalendar line folding, organizer
+recipient selection, plain/HTML parsing, invalid types, and oversized bodies
+have regression coverage. JMAP calendar mutation and mail submission are
+separate calls; if submission fails after the RSVP has persisted, the command
+returns a server error and a client retry may submit another reply. A live
+Stalwart and client verification remains to be done. Proposed meeting start
+and end times remain unsupported. JSCalendar's
 `participationComment` is a note explaining RSVP status, not the custom email
 body carried by EAS `SendResponse`; mapping the two directly would lose the
-requested message semantics. Supporting that body needs a verified path that
-includes it in the actual reply message. No JMAP mapping for the proposed
-start/end fields is established yet. The behavior follows the
+requested message semantics, so the custom text is carried in the reply MIME
+instead. No JMAP mapping for the proposed start/end fields is established yet.
+The behavior follows the
 [MS-ASCMD MeetingResponse rules](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/42ececcd-37df-4340-aa50-783ba714facb)
 and [SendResponse definition](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/128fff4c-1b97-42d8-a30f-f023327add0b),
 and the distinction follows [RFC 8984 section 4.4.6](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6).
 Regression coverage asserts `sendSchedulingMessages` at the JMAP boundary and
-updates the deferred live MeetingResponse scenario. Full suite: 267 passed,
-73 ignored; clippy with warnings denied, formatting and diff checks pass.
+updates the deferred live MeetingResponse scenario. Current full suite: 428
+passed, 77 ignored; strict Clippy, formatting, and diff checks pass. The custom
+body path is not deployed yet.
 Deployed as `deploy-2026-11-22-eas-16-meeting-send-response-1109860`; Hermes
 Compose built image
 `sha256:3e60bf151cf5b386a50cb564f9f899e8f327f8bf3b84070c2dee11908045e9d8`.
