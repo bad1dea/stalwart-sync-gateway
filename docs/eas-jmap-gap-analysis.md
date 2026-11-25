@@ -10,12 +10,12 @@ MIME policy, partial Sync/options persistence, and Sync long-poll/window
 handling. Check the current Rust implementation before treating any older
 “Missing” or “Not implemented” statement below as actionable.
 
-Current source `main` is `7e6769d`. The full suite passes 477 tests (77
+Current source `main` is `67577f2`. The full suite passes 478 tests (77
 ignored); strict Clippy, formatting, and diff checks pass. This build is
 deployed to Amy's isolated bridge as
-`localhost/eas16-isolated:7e6769d` (image
-`sha256:6fc022f20edb23d19a69f84efebdf51449c3d4fca12955e9e3ee43faf4338023`),
-started `2026-11-25T14:05:35.18567853Z` with zero restarts. `/healthz` and
+`localhost/eas16-isolated:67577f2` (image
+`sha256:a4cb64d003842669d7f1596f2b961cbfaa664b5783e6b945ab5d0f2105f688f2`),
+started `2026-11-25T14:21:00.669931031Z` with zero restarts. `/healthz` and
 `/readyz` returned `ok` and `ready`. `EAS_MAX_PROTOCOL_VERSION` remains
 omitted, so the isolated bridge still defaults to 14.0; production is
 untouched. Real-client 16.1 certification remains open.
@@ -42,11 +42,13 @@ schema limit; this does not restrict the 16.x AirSyncBase location fields.
 EAS 16.1 Calendar `Attendee` ProposedStartTime/ProposedEndTime now round-trip
 counter proposals. The gateway stores each pair in JSCalendar's iCalendar
 extension properties, keyed by attendee address and (for recurring events)
-recurrence key, then emits the pair only in 16.1 Calendar Sync. This is a
-gateway-owned extension because JSCalendar participants have no standard
-proposal properties. The separate fields in an email `MeetingRequest` remain
-unmapped: do not infer attendee proposals from the event's own start/end,
-because different attendees may propose different times. Sources:
+recurrence key, then emits the pair only in 16.1 Calendar Sync. Matching mail
+`MeetingRequest` objects also receive the pair from that attendee's unique
+stored CalendarEvent, queried by UID; ambiguous events, attendees, or absent
+proposal pairs are omitted. This is a gateway-owned extension because
+JSCalendar participants have no standard proposal properties. The event's own
+start/end are never used as proposal values, because different attendees may
+propose different times. Sources:
 Microsoft [ProposedStartTime](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/85189499-d911-40ae-885d-a55f2cd70c9d)
 and JSCalendar [Participant properties](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6).
 Meeting invitations for one occurrence of a recurring series now preserve the
@@ -119,6 +121,14 @@ Microsoft [Recurrences](https://learn.microsoft.com/en-us/openspecs/exchange_ser
 and [Recurrence](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/a033deda-0745-428d-b9ca-d08f3e6febcd).
 Microsoft [InstanceType](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/a4d48239-6936-4b22-9267-623ecdb49b5e)
 defines 0 as a single appointment and 1 as a recurring master.
+Commit `67577f2` adds that MeetingRequest mapping. The full suite passes 478
+tests (77 ignored), with strict Clippy, formatting, and diff checks passing.
+The commit is deployed to Amy's isolated bridge as
+`localhost/eas16-isolated:67577f2` (image
+`sha256:a4cb64d003842669d7f1596f2b961cbfaa664b5783e6b945ab5d0f2105f688f2`),
+started `2026-11-25T14:21:00.669931031Z` with zero restarts; `/healthz` and
+`/readyz` returned `ok` and `ready`. `EAS_MAX_PROTOCOL_VERSION` remains
+omitted; production is untouched. Real-client validation remains pending.
 `DisallowNewTimeProposal` is now read from the bounded (256 KiB) source
 iCalendar blob's `X-MICROSOFT-DISALLOW-COUNTER` property and emitted as 0/1;
 missing, duplicate, malformed, or oversized source data leaves it omitted.
@@ -2361,7 +2371,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Settings: RightsManagementInformation (IRM) | **Missing, out of scope** | N/A | Enterprise feature, not relevant to this account. |
 | Provision | **Done** | N/A (gateway-local, accept-everything policy) | PolicyStatus bug fixed this session. |
 | MeetingResponse | **Implemented, with protocol-version-specific target handling** | JMAP invitation lookup and `CalendarEvent/set` participation updates | Inbox invitation path and calendar target handling are in `src/activesync/meeting_response.rs`; end-to-end tests cover acceptance, tentative, decline, and invalid targets. The 14.0 restriction on modifying calendar-folder requests is enforced. |
-| MeetingResponse counter proposal persistence | **Implemented for Calendar Sync, EAS 16.1 only** (`7e6769d`) | Gateway-owned iCalendar extension properties on the CalendarEvent | Counter proposal pairs are scoped to the responding attendee and series/occurrence, included in the same state-guarded `CalendarEvent/set` as the RSVP, and read back before the reply is submitted. Calendar Sync emits both fields only in protocol 16.1. Email `MeetingRequest` proposal fields remain unimplemented. Regression tests cover extension preservation, attendee/occurrence scoping, malformed duplicates, read conversion, and 16.0 suppression. |
+| MeetingResponse counter proposal persistence | **Implemented for Calendar Sync and Email MeetingRequest, EAS 16.1 only** (`7e6769d`, `67577f2`) | Gateway-owned iCalendar extension properties on the CalendarEvent | Counter proposal pairs are scoped to the responding attendee and series/occurrence, included in the same state-guarded `CalendarEvent/set` as the RSVP, and read back before the reply is submitted. Calendar Sync emits both fields only in protocol 16.1. Matching email MeetingRequests query a unique stored event by UID and current attendee; missing or ambiguous data is omitted. Regression tests cover extension preservation, attendee/occurrence scoping, malformed duplicates, read conversion, MeetingRequest enrichment, and version suppression. |
 | Sync: Calendar (attendees, read+write) | **Done, two-way (`deploy-2026-08-26l`)** | JSCalendar `participants` + top-level `replyTo`, each participant needs `calendarAddress` too | **Overturns the "blocked, same root cause as MeetingResponse" verdict above.** Write path: `extract_calendar_fields` accumulates repeated `calendar:Attendee` blocks into `CalendarFields.attendees`; `save_calendar_event` builds a `participants` map (organizer `role:owner` + one entry per invitee `role:attendee`[+`optional`]) plus the required `replyTo`, only when attendees is non-empty. Read path: `CalendarEventObject` requests `participants`, splits it into `organizer_email`/`organizer_name` (the `role:owner` entry -- confirmed against the live [MS-ASCAL] spec's own worked example that the organizer is NEVER listed as an Attendee) and `CalendarEvent.attendees` (everyone else); `is_organizer` is set by comparing `organizer_email` to the authenticated user. `write_calendar_command` emits OrganizerName/OrganizerEmail (PR #187 field order) and, when attendees is non-empty, MeetingStatus (1 organizer's copy / 3 received as attendee) plus Attendees (AttendeeStatus 0/2/3/4/5, AttendeeType 1/2/3 -- both confirmed against the live spec pages). Full round trip live-verified over the real WBXML wire protocol: a throwaway event with 2 attendees, AND the user's own real "Invite Calendar" event (organizer khuong@khuo.ng, khuong@khuong.info Accepted, khuong.hoang@outlook.com Tentative) both read back correctly with the right per-person AttendeeStatus codes. |
 | Conversation threading (Email2:ConversationId) | **Done, device-confirmed (2026-08-26)** | JMAP `Email.threadId` -> deterministic fixed-16-byte value (UUID v5) | The `d199d37` revert's own root-cause hypothesis checked out on BOTH counts: (1) the original used WBXML token `0x0a` for `CONVERSATION_ID`, confirmed wrong against the primary MS-ASWBXML spec (fresh token-scaffolding pass, `e953835`) -- `0x0a` is actually `CONVERSATION_INDEX`, a different field; correct value is `0x09`. (2) the original sent the raw (often single-byte) JMAP `threadId` string directly; real Exchange servers send a fixed 16-byte GUID-shaped value, which iOS likely validates more strictly than the spec text implies. `eas_conversation_id()` now derives a deterministic fixed-16-byte value via UUID v5 (namespace + threadId). Field position corrected against z-push's own `syncmail.php` mapping too: the `>=14.0` block (which `ConversationId` belongs to) is appended strictly after the `>=12.0` block once version gates apply -- placed right after `NativeBodyType`. Verified: 52/52 unit tests pass; live against zoidberg, an 8-message sync produced 8 correctly-shaped 16-byte `ConversationId` values with zero WBXML corruption, and a second independent device sync of the same mailbox produced byte-for-byte identical values, confirming determinism live. **Device-confirmed 2026-08-26**: the user checked a real conversation on a real iPad against `eas-test.khuo.ng` -- grouped correctly, no sync errors. Still only deployed to the isolated zoidberg/eas-test instance; porting to production (hermes, currently still running the PHP z-push gateway) is a separate, much bigger cutover decision this confirmation doesn't itself authorize -- would need its own explicit go-ahead. |
 | Attachment on send (composing/replying with a client-attached file) | **Done, confirmed live** | `upload_blob()` + `Email/import`, whole client MIME passed through opaque | Live-tested this session: a self-addressed `SmartForward` with a real `multipart/mixed` attachment part survived byte-identical (confirmed by downloading the blob and diffing content, not just checking metadata) on both the Sent Items and delivered Inbox copies. Root cause of why this "just works" with zero special handling: both EAS transports (raw-MIME 14.0+ and the WBXML-wrapped `ComposeMail` form) always require the CLIENT to submit the complete, already-composed MIME — attachments included — there is no "reference an existing attachment without re-uploading it" mechanism in the real protocol for this gateway to have missed. `rewrite_from_header()` only touches bytes before the header/body separator, so the entire multipart structure after it (including all attachment parts) was never at risk of mutation to begin with. |

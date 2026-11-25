@@ -186,8 +186,10 @@ available in 14.1 and 16.x, where a nonzero JMAP sequence maps to message type
 2, JSCalendar `delegatedTo` maps to type 5, and `delegatedFrom` maps to type 6;
 ordinary requests map to type 1. It is omitted for 14.0. Optional
 recurrence, reminder, sensitivity, busy status, and
-`DisallowNewTimeProposal` are mapped from the JMAP calendar data; proposed-time
-fields in EAS 16.1 remain unsupported. JSCalendar delegation also maps to
+`DisallowNewTimeProposal` are mapped from the JMAP calendar data. In EAS 16.1,
+`ProposedStartTime` and `ProposedEndTime` come from a saved counter proposal
+for the authenticated attendee on a unique CalendarEvent with the same UID;
+the gateway omits them when that source is missing or ambiguous. JSCalendar delegation also maps to
 `Forwardees` in 16.0/16.1, with recipient email emitted only for 16.1. Mocked
 JMAP mailbox-query/CalendarEvent-parse and WBXML writer regressions pass.
 The writer order follows the schema: the version-appropriate `GlobalObjId` or
@@ -298,9 +300,9 @@ Counter proposals submitted through `MeetingResponse` are now retained as
 gateway-owned iCalendar extension properties on the corresponding
 CalendarEvent. Each pair is keyed by attendee and series/occurrence, read back
 before the reply is sent, and emitted as Calendar `Attendee` proposal fields
-only for EAS 16.1. The incoming mail `MeetingRequest` proposal fields still
-have no source mapping; event start/end are not substituted for attendee
-proposals.
+only for EAS 16.1. Matching incoming mail `MeetingRequest` values use the
+proposal saved for the authenticated attendee; the event's own start/end are
+never substituted for proposal times.
 
 ResolveRecipients Availability (introduced in EAS 14.0) now uses JMAP
 `Principal/getAvailability` for exact recipients and returns the required
