@@ -27,7 +27,11 @@ body, and text or already-supported document attachments. Recursion stops at
 four levels; decoded parts are capped at 16 MiB and each nested message at 256
 parts. A mocked MIME regression covers an attached message and a text attachment
 inside it. The full suite passes 406 tests (76 ignored); strict Clippy,
-formatting, and diff checks pass. Deployment verification will follow rollout.
+formatting, and diff checks pass. Deployed as
+`deploy-2026-11-24-eas-find-nested-eml-4a92862`; Homelab commit `f78994f`,
+image `sha256:3253e1c40c4e71bd92f09491caf5feb0fb6841e725286acbb6887c3fd8b3def6`,
+started `2026-11-25T03:54:53Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. Production remains at the 14.0 protocol default.
 
 Find raster attachment OCR is implemented for PNG, JPEG, GIF, TIFF, BMP, and
 WebP. Image dimensions are checked before decoding (12,000 pixels per edge,
