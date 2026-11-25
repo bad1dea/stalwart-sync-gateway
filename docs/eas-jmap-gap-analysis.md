@@ -22,6 +22,13 @@ pass. Deployed as `deploy-2026-11-24-eas-find-xlsb-c11b2cd`; Homelab commit
 started `2026-11-25T03:17:44Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. Production remains at the 14.0 protocol default.
 
+Find now searches nested `message/rfc822` attachments, including their subject,
+body, and text or already-supported document attachments. Recursion stops at
+four levels; decoded parts are capped at 16 MiB and each nested message at 256
+parts. A mocked MIME regression covers an attached message and a text attachment
+inside it. The full suite passes 406 tests (76 ignored); strict Clippy,
+formatting, and diff checks pass. Deployment verification will follow rollout.
+
 Find raster attachment OCR is implemented for PNG, JPEG, GIF, TIFF, BMP, and
 WebP. Image dimensions are checked before decoding (12,000 pixels per edge,
 40 million pixels total), decoding allocations are capped, images are reduced
@@ -151,7 +158,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
 2. **Find content coverage.** Current bounded extraction supports legacy `.xls`,
    binary Excel `.xlsb`,
    `.ppt`, and `.doc`, EPUB, macro-enabled OOXML, RFC 822 messages, Outlook `.msg`
-   attachments including compressed-RTF fallback, ordinary ZIP archives with allowlisted text/config/source
+   attachments including compressed-RTF fallback and nested attached messages,
+   ordinary ZIP archives with allowlisted text/config/source
    files, and
    Word, Excel, and PowerPoint package comment text, plus
    MIME-declared charsets for text attachments and XML declaration encodings.

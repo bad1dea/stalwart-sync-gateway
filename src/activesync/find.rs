@@ -119,6 +119,8 @@ const MAX_FIND_IMAGE_OCR_PIXELS: u64 = 40_000_000;
 const MAX_FIND_IMAGE_OCR_RUNTIME: std::time::Duration = std::time::Duration::from_secs(5);
 const MAX_FIND_ARCHIVE_ENTRIES: usize = 4096;
 const MAX_FIND_ARCHIVE_EXPANDED_BYTES: usize = 16 * 1024 * 1024;
+const MAX_FIND_EML_NESTING: usize = 4;
+const MAX_FIND_EML_PARTS: usize = 256;
 static FIND_PDF_OCR_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 pub(super) async fn handle(
@@ -720,20 +722,70 @@ fn decode_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Strin
 fn extract_rfc822_text(bytes: &[u8]) -> Option<String> {
     let message = mail_parser::MessageParser::default().parse(bytes)?;
     let mut output = String::new();
+    let mut part_count = 0;
     for part in message.messages() {
-        if let Some(subject) = part.subject() {
-            append_find_text(&mut output, subject)?;
-        }
-        for body in part.text_bodies() {
-            append_find_text(&mut output, &body)?;
-        }
-        for body in part.html_body() {
-            if let Some(html) = body.text() {
-                append_find_text(&mut output, &mail_parser::html_to_text(&html))?;
-            }
-        }
+        extract_rfc822_message_text(&mut output, &part, 0, &mut part_count)?;
     }
     Some(output)
+}
+
+fn extract_rfc822_message_text(
+    output: &mut String,
+    message: &mail_parser::MessageRef<'_>,
+    depth: usize,
+    part_count: &mut usize,
+) -> Option<()> {
+    use mail_parser::PartKind;
+
+    if depth > MAX_FIND_EML_NESTING {
+        return None;
+    }
+    if let Some(subject) = message.subject() {
+        append_find_text(output, subject)?;
+    }
+    for body in message.text_bodies() {
+        append_find_text(output, &body)?;
+    }
+    for body in message.html_body() {
+        if let Some(html) = body.text() {
+            append_find_text(output, &mail_parser::html_to_text(&html))?;
+        }
+    }
+    for part in message.attachments() {
+        *part_count = part_count.saturating_add(1);
+        if *part_count > MAX_FIND_EML_PARTS
+            || part.decoded_len() > MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES as usize
+        {
+            return None;
+        }
+        if let PartKind::Message(nested) = part.kind() {
+            extract_rfc822_message_text(output, &nested, depth + 1, part_count)?;
+            continue;
+        }
+        let content_type = part.content_type();
+        let media_type = content_type
+            .as_ref()
+            .and_then(|value| Some(format!("{}/{}", value.ctype(), value.subtype()?)))
+            .unwrap_or_else(|| "application/octet-stream".to_owned())
+            .to_ascii_lowercase();
+        if media_type == "text/plain" {
+            if let Some(text) = part.text() {
+                append_find_text(output, &text)?;
+            }
+        } else if media_type == "text/html" {
+            if let Some(html) = part.text() {
+                append_find_text(output, &mail_parser::html_to_text(&html))?;
+            }
+        } else if media_type != "message/rfc822" && is_extractable_attachment_type(&media_type) {
+            let decoded = part.decoded();
+            let Some(text) = extract_find_attachment_text_inner(&media_type, &decoded, false)
+            else {
+                continue;
+            };
+            append_find_text(output, &text)?;
+        }
+    }
+    Some(())
 }
 
 fn extract_outlook_msg_text(bytes: &[u8]) -> Option<String> {
@@ -3416,6 +3468,24 @@ mod tests {
         assert!(extracted.contains("alpha subject"));
         assert!(extracted.contains("plain beta"));
         assert!(extracted.contains("html gamma"));
+        let attached_message = concat!(
+            "From: sender@example.test\r\nSubject: outer alpha\r\nMIME-Version: 1.0\r\n",
+            "Content-Type: multipart/mixed; boundary=outer\r\n\r\n",
+            "--outer\r\nContent-Type: text/plain\r\n\r\nouter body\r\n",
+            "--outer\r\nContent-Type: message/rfc822\r\n",
+            "Content-Disposition: attachment; filename=attached.eml\r\n\r\n",
+            "From: inner@example.test\r\nSubject: nested beta\r\nMIME-Version: 1.0\r\n",
+            "Content-Type: multipart/mixed; boundary=inner\r\n\r\n",
+            "--inner\r\nContent-Type: text/plain\r\n\r\ninner body\r\n",
+            "--inner\r\nContent-Type: text/plain; name=note.txt\r\n",
+            "Content-Disposition: attachment; filename=note.txt\r\n\r\n",
+            "needle in attached message\r\n--inner--\r\n--outer--\r\n"
+        );
+        let attached_text =
+            extract_find_attachment_text("message/rfc822", attached_message.as_bytes())
+                .expect("attached email text should be included in the parent extraction");
+        assert!(attached_text.contains("nested beta"));
+        assert!(attached_text.contains("needle in attached message"));
         // Upstream msg_parser 0.3.6 MIT test fixture, used to exercise an
         // actual OLE/Outlook message rather than only malformed input.
         let outlook = include_bytes!("../../tests/fixtures/outlook-ascii.msg");
