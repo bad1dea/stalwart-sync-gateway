@@ -111,7 +111,8 @@ fn same_search(session: &SearchState, filter: &Value, search_text: &str) -> bool
 const SEARCHES: &str = "__find__";
 const MAX_FIND_ATTACHMENT_TEXT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_FIND_PDF_OCR_PAGES: u32 = 5;
+const MAX_FIND_PDF_OCR_PAGES: u32 = 10;
+const MAX_FIND_PDF_OCR_RUNTIME: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_FIND_PDF_OCR_EDGE: u32 = 1600;
 const MAX_FIND_ARCHIVE_ENTRIES: usize = 4096;
 const MAX_FIND_ARCHIVE_EXPANDED_BYTES: usize = 16 * 1024 * 1024;
@@ -1017,7 +1018,7 @@ fn extract_bounded_pdf_text_with_tools(
     if !missing_text_pages.is_empty() && allow_ocr {
         if missing_text_pages.len() > MAX_FIND_PDF_OCR_PAGES as usize {
             // A textless page may contain an image. Refuse to return partial
-            // text when more than five pages need OCR.
+            // text when more than ten pages need OCR.
             return None;
         }
         let recognized =
@@ -1084,13 +1085,21 @@ fn run_find_ocr_command(command: &mut std::process::Command, timeout: std::time:
     }
 }
 
+fn bounded_find_ocr_timeout(
+    remaining: std::time::Duration,
+    command_limit: std::time::Duration,
+) -> Option<std::time::Duration> {
+    let timeout = remaining.min(command_limit);
+    (!timeout.is_zero()).then_some(timeout)
+}
+
 fn extract_pdf_pages_ocr_with_tools(
     bytes: &[u8],
     pages: &[u32],
     pdftoppm: &std::path::Path,
     tesseract: &std::path::Path,
 ) -> Option<Vec<(u32, String)>> {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     if bytes.len() as u64 > MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES
         || pages.is_empty()
@@ -1103,10 +1112,15 @@ fn extract_pdf_pages_ocr_with_tools(
     let input = temp.0.join("input.pdf");
     std::fs::write(&input, bytes).ok()?;
 
+    let deadline = Instant::now() + MAX_FIND_PDF_OCR_RUNTIME;
     let mut output = Vec::with_capacity(pages.len());
     let mut extracted_bytes = 0usize;
     for page in pages {
         let prefix = temp.0.join("page");
+        let render_timeout = bounded_find_ocr_timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            Duration::from_secs(2),
+        )?;
         if !run_find_ocr_command(
             std::process::Command::new(pdftoppm)
                 .arg("-f")
@@ -1120,7 +1134,7 @@ fn extract_pdf_pages_ocr_with_tools(
                 .arg("-q")
                 .arg(&input)
                 .arg(&prefix),
-            Duration::from_secs(2),
+            render_timeout,
         ) {
             return None;
         }
@@ -1129,6 +1143,10 @@ fn extract_pdf_pages_ocr_with_tools(
             return None;
         }
         let output_base = temp.0.join(format!("recognized-{page}"));
+        let ocr_timeout = bounded_find_ocr_timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            Duration::from_secs(4),
+        )?;
         if !run_find_ocr_command(
             std::process::Command::new(tesseract)
                 .arg(&image)
@@ -1137,7 +1155,7 @@ fn extract_pdf_pages_ocr_with_tools(
                 .arg("eng")
                 .arg("--psm")
                 .arg("3"),
-            Duration::from_secs(4),
+            ocr_timeout,
         ) {
             return None;
         }
@@ -3419,9 +3437,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn scanned_pdf_ocr_allows_five_pages_and_bounds_tool_execution() {
+    fn scanned_pdf_ocr_allows_ten_pages_with_a_total_runtime_budget() {
         use super::{extract_pdf_pages_ocr_with_tools, FindOcrTempDir};
         use std::{fs, os::unix::fs::PermissionsExt};
+
+        assert_eq!(
+            super::bounded_find_ocr_timeout(
+                std::time::Duration::from_secs(3),
+                std::time::Duration::from_secs(4),
+            ),
+            Some(std::time::Duration::from_secs(3))
+        );
+        assert_eq!(
+            super::bounded_find_ocr_timeout(
+                std::time::Duration::ZERO,
+                std::time::Duration::from_secs(4),
+            ),
+            None
+        );
 
         let tools = FindOcrTempDir::create().unwrap();
         let renderer = tools.0.join("pdftoppm");
@@ -3448,7 +3481,7 @@ mod tests {
 
         let pages = extract_pdf_pages_ocr_with_tools(
             b"bounded test PDF",
-            &[1, 2, 3, 4, 5],
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             &renderer,
             &ocr,
         )
@@ -3460,7 +3493,7 @@ mod tests {
             .join(" ");
         assert_eq!(
             super::normalize_find_attachment_text(&text),
-            Some("scan alpha beta ignored page ignored page ignored page".to_owned())
+            Some(format!("scan alpha beta {}", ["ignored page"; 8].join(" ")))
         );
         let args = fs::read_to_string(render_args).unwrap();
         let args: Vec<_> = args.lines().collect();
@@ -3470,8 +3503,8 @@ mod tests {
         assert_eq!(args[scale_limit + 1], "1600");
 
         assert!(extract_pdf_pages_ocr_with_tools(
-            b"six-page PDF",
-            &[1, 2, 3, 4, 5, 6],
+            b"eleven-page PDF",
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
             &renderer,
             &ocr,
         )
