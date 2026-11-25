@@ -61,6 +61,7 @@ struct Mock {
     groupware: Mutex<std::collections::BTreeMap<String, Vec<serde_json::Value>>>,
     snapshot_changes: AtomicBool,
     contact_query_unavailable: AtomicBool,
+    calendar_query_unavailable: AtomicBool,
     delay_mail_set: AtomicBool,
     delayed_mail_sets: AtomicUsize,
     snapshot_missing_item: AtomicBool,
@@ -447,7 +448,12 @@ async fn mock_api(
                 } else {
                     "calendar"
                 };
-                if kind == "contacts" && m.contact_query_unavailable.load(Ordering::SeqCst) {
+                let query_unavailable = if kind == "contacts" {
+                    m.contact_query_unavailable.load(Ordering::SeqCst)
+                } else {
+                    m.calendar_query_unavailable.load(Ordering::SeqCst)
+                };
+                if query_unavailable {
                     responses.push(serde_json::json!(["error", {
                         "type":"serverUnavailable",
                         "description":"contact query disabled for test"
@@ -510,6 +516,18 @@ async fn mock_api(
                     })
                     .cloned()
                     .collect();
+                if args.get("ids").is_some_and(serde_json::Value::is_null) {
+                    if let Some(properties) = args["properties"].as_array() {
+                        list.iter_mut().for_each(|item| {
+                            if let Some(item) = item.as_object_mut() {
+                                item.retain(|name, _| {
+                                    name == "id"
+                                        || properties.iter().any(|property| property == name)
+                                });
+                            }
+                        });
+                    }
+                }
                 if m.snapshot_missing_item.load(Ordering::SeqCst) {
                     list.pop();
                 }
@@ -876,6 +894,7 @@ async fn start_mock() -> Arc<Mock> {
         groupware: Mutex::new(Default::default()),
         snapshot_changes: AtomicBool::new(false),
         contact_query_unavailable: AtomicBool::new(false),
+        calendar_query_unavailable: AtomicBool::new(false),
         delay_mail_set: AtomicBool::new(false),
         delayed_mail_sets: AtomicUsize::new(0),
         snapshot_missing_item: AtomicBool::new(false),
@@ -4474,6 +4493,297 @@ mod e2e {
             .call_using(
                 serde_json::json!([["CalendarEvent/set",{
             "accountId":live.account,"destroy":[id,added_id]},"0"]]),
+                &using,
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_calendar_disallow_new_time_proposal_persists_and_syncs() {
+        use eas::calendar as cal;
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:calendars",
+        ];
+        let calendars = live
+            .call_using(
+                serde_json::json!([["Calendar/get",{"accountId":live.account},"0"]]),
+                &using,
+            )
+            .await;
+        let calendar = calendars[0][1]["list"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let folder = format!("cal_{calendar}");
+        let stale = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{
+                    "accountId":live.account,
+                    "ids":null,
+                    "properties":["id","title"]
+                },"g"]]),
+                &using,
+            )
+            .await;
+        let stale_ids: Vec<&str> = stale[0][1]["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                event["title"]
+                    .as_str()
+                    .is_some_and(|title| title.starts_with("Disallow counter "))
+            })
+            .filter_map(|event| event["id"].as_str())
+            .collect();
+        if !stale_ids.is_empty() {
+            let cleanup = live
+                .call_using(
+                    serde_json::json!([["CalendarEvent/set",{
+                        "accountId":live.account,"destroy":stale_ids
+                    },"cleanup"]]),
+                    &using,
+                )
+                .await;
+            assert!(cleanup[0][1]["notDestroyed"].is_null());
+        }
+        let title = format!("Disallow counter {}", uuid::Uuid::new_v4());
+        let created = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set",{
+                    "accountId":live.account,
+                    "create":{"e":{
+                        "@type":"Event",
+                        "calendarIds":{&calendar:true},
+                        "title":title,
+                        "start":"2026-11-26T10:00:00",
+                        "duration":"PT1H"
+                    }}
+                },"0"]]),
+                &using,
+            )
+            .await;
+        let id = created[0][1]["created"]["e"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("CalendarEvent create failed: {created}"))
+            .to_owned();
+
+        let mut devices = Vec::new();
+        for name in ["disallow-counter-a", "disallow-counter-b"] {
+            let device = dev(name);
+            let prime = live
+                .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+                .await;
+            let initial = live
+                .wbxml_version(
+                    "Sync",
+                    &device,
+                    sync_body(&sync_key(&prime), &folder),
+                    "16.1",
+                )
+                .await;
+            let mut fetch = eas::DocumentBuilder::new();
+            fetch.start(air::SYNC);
+            fetch.start(air::COLLECTIONS);
+            fetch.start(air::COLLECTION);
+            fetch.leaf(air::SYNC_KEY, sync_key(&initial));
+            fetch.leaf(air::COLLECTION_ID, &folder);
+            fetch.empty_tag(air::GET_CHANGES);
+            fetch.start(air::COMMANDS);
+            fetch.start(air::FETCH);
+            fetch.leaf(air::SERVER_ID, &id);
+            for _ in 0..5 {
+                fetch.end();
+            }
+            let fetched = live
+                .wbxml_version(
+                    "Sync",
+                    &device,
+                    wbxml::encode_document(&fetch.finish()),
+                    "16.1",
+                )
+                .await;
+            assert!(!eas::contains_token(
+                &fetched,
+                cal::DISALLOW_NEW_TIME_PROPOSAL
+            ));
+            devices.push((device, sync_key(&initial)));
+        }
+
+        let mut change = eas::DocumentBuilder::new();
+        change.start(air::SYNC);
+        change.start(air::COLLECTIONS);
+        change.start(air::COLLECTION);
+        change.leaf(air::SYNC_KEY, &devices[0].1);
+        change.leaf(air::COLLECTION_ID, &folder);
+        change.start(air::COMMANDS);
+        change.start(air::CHANGE);
+        change.leaf(air::SERVER_ID, &id);
+        change.start(air::APPLICATION_DATA);
+        change.leaf(cal::DISALLOW_NEW_TIME_PROPOSAL, "1");
+        for _ in 0..6 {
+            change.end();
+        }
+        let changed = live
+            .wbxml_version(
+                "Sync",
+                &devices[0].0,
+                wbxml::encode_document(&change.finish()),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&changed, air::STATUS)
+            .iter()
+            .all(|status| status == "1"));
+        devices[0].1 = sync_key(&changed);
+
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{
+                    "accountId":live.account,
+                    "ids":[id],
+                    "properties":["id","iCalendar"]
+                },"0"]]),
+                &using,
+            )
+            .await;
+        let property = native[0][1]["list"][0]["iCalendar"]["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|property| {
+                property[0]
+                    .as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("X-MICROSOFT-DISALLOW-COUNTER"))
+            })
+            .unwrap_or_else(|| panic!("missing retained proposal property: {native}"));
+        assert_eq!(property[3], true);
+
+        let other_device = live
+            .wbxml_version(
+                "Sync",
+                &devices[1].0,
+                sync_body(&devices[1].1, &folder),
+                "16.1",
+            )
+            .await;
+        let mut fetch = eas::DocumentBuilder::new();
+        fetch.start(air::SYNC);
+        fetch.start(air::COLLECTIONS);
+        fetch.start(air::COLLECTION);
+        fetch.leaf(air::SYNC_KEY, sync_key(&other_device));
+        fetch.leaf(air::COLLECTION_ID, &folder);
+        fetch.empty_tag(air::GET_CHANGES);
+        fetch.start(air::COMMANDS);
+        fetch.start(air::FETCH);
+        fetch.leaf(air::SERVER_ID, &id);
+        for _ in 0..5 {
+            fetch.end();
+        }
+        let fetched = live
+            .wbxml_version(
+                "Sync",
+                &devices[1].0,
+                wbxml::encode_document(&fetch.finish()),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&fetched, cal::DISALLOW_NEW_TIME_PROPOSAL),
+            Some("1"),
+            "second-device Fetch did not return the persisted value: {fetched:?}"
+        );
+
+        let mut change = eas::DocumentBuilder::new();
+        change.start(air::SYNC);
+        change.start(air::COLLECTIONS);
+        change.start(air::COLLECTION);
+        change.leaf(air::SYNC_KEY, &devices[0].1);
+        change.leaf(air::COLLECTION_ID, &folder);
+        change.start(air::COMMANDS);
+        change.start(air::CHANGE);
+        change.leaf(air::SERVER_ID, &id);
+        change.start(air::APPLICATION_DATA);
+        change.leaf(cal::DISALLOW_NEW_TIME_PROPOSAL, "0");
+        for _ in 0..6 {
+            change.end();
+        }
+        let changed = live
+            .wbxml_version(
+                "Sync",
+                &devices[0].0,
+                wbxml::encode_document(&change.finish()),
+                "16.1",
+            )
+            .await;
+        assert!(eas::find_all_text_after(&changed, air::STATUS)
+            .iter()
+            .all(|status| status == "1"));
+        devices[0].1 = sync_key(&changed);
+
+        let native = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/get",{
+                    "accountId":live.account,"ids":[id],"properties":["id","iCalendar"]
+                },"0"]]),
+                &using,
+            )
+            .await;
+        let property = native[0][1]["list"][0]["iCalendar"]["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|property| {
+                property[0]
+                    .as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("X-MICROSOFT-DISALLOW-COUNTER"))
+            })
+            .unwrap_or_else(|| panic!("missing retained proposal property: {native}"));
+        assert_eq!(property[3], false);
+
+        let other_device = live
+            .wbxml_version(
+                "Sync",
+                &devices[1].0,
+                sync_body(&devices[1].1, &folder),
+                "16.1",
+            )
+            .await;
+        let mut fetch = eas::DocumentBuilder::new();
+        fetch.start(air::SYNC);
+        fetch.start(air::COLLECTIONS);
+        fetch.start(air::COLLECTION);
+        fetch.leaf(air::SYNC_KEY, sync_key(&other_device));
+        fetch.leaf(air::COLLECTION_ID, &folder);
+        fetch.empty_tag(air::GET_CHANGES);
+        fetch.start(air::COMMANDS);
+        fetch.start(air::FETCH);
+        fetch.leaf(air::SERVER_ID, &id);
+        for _ in 0..5 {
+            fetch.end();
+        }
+        let fetched = live
+            .wbxml_version(
+                "Sync",
+                &devices[1].0,
+                wbxml::encode_document(&fetch.finish()),
+                "16.1",
+            )
+            .await;
+        assert_eq!(
+            eas::find_text_after(&fetched, cal::DISALLOW_NEW_TIME_PROPOSAL),
+            Some("0")
+        );
+
+        let cleanup = live
+            .call_using(
+                serde_json::json!([["CalendarEvent/set",{
+                    "accountId":live.account,"destroy":[id]
+                },"0"]]),
                 &using,
             )
             .await;
@@ -12897,6 +13207,22 @@ async fn contacts_sync_uses_get_all_when_contact_query_is_unavailable() {
 
     let prime = item_sync(&env, "ipad", "ab_book", "0", "100").await;
     let response = item_sync(&env, "ipad", "ab_book", &sync_key(&prime), "100").await;
+
+    assert_eq!(eas::find_text_after(&response, air::STATUS), Some("1"));
+    assert_eq!(eas::find_all_text_after(&response, air::SERVER_ID).len(), 3);
+}
+
+#[tokio::test]
+async fn calendar_sync_uses_get_all_when_calendar_query_is_unavailable() {
+    use eas::airsync as air;
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 3);
+    env.mock
+        .calendar_query_unavailable
+        .store(true, Ordering::SeqCst);
+
+    let prime = item_sync(&env, "ipad", "cal_calendar", "0", "100").await;
+    let response = item_sync(&env, "ipad", "cal_calendar", &sync_key(&prime), "100").await;
 
     assert_eq!(eas::find_text_after(&response, air::STATUS), Some("1"));
     assert_eq!(eas::find_all_text_after(&response, air::SERVER_ID).len(), 3);

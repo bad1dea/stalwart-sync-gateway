@@ -1828,6 +1828,13 @@ impl JmapClient {
             let mut page = None;
             for method in response.method_responses {
                 if method.0 == "error" {
+                    if matches!(object_type, "ContactCard" | "CalendarEvent")
+                        && method.1["type"] == "serverUnavailable"
+                    {
+                        return self
+                            .get_all_query_fallback(auth, object_type, &filter, properties, limit)
+                            .await;
+                    }
                     anyhow::bail!("JMAP method error in {object_type} snapshot: {}", method.1);
                 } else if method.0 == query {
                     let result: QueryResponse = serde_json::from_value(method.1)?;
@@ -1853,6 +1860,64 @@ impl JmapClient {
                 return Ok(objects);
             }
         }
+    }
+
+    async fn get_all_query_fallback<T: serde::de::DeserializeOwned>(
+        &self,
+        auth: &AuthenticatedSession,
+        object_type: &str,
+        filter: &serde_json::Value,
+        properties: Option<&[&str]>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<T>> {
+        // RFC 8620 permits ids:null to return all objects when they fit in
+        // maxObjectsInGet. This keeps local collection sync working when a
+        // server's query backend is unavailable.
+        let capability = match object_type {
+            "ContactCard" => capabilities::CONTACTS,
+            "CalendarEvent" => capabilities::CALENDARS,
+            _ => anyhow::bail!("no get-all fallback for {object_type}"),
+        };
+        let account_id = auth
+            .session
+            .primary_account_for(capability)
+            .context("JMAP capability is unavailable for get-all fallback")?;
+        let get = format!("{object_type}/get");
+        let mut args = serde_json::json!({"accountId": account_id, "ids": null});
+        if let Some(properties) = properties {
+            args["properties"] = serde_json::json!(properties);
+        }
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capability.to_owned()],
+                vec![MethodCall::new(&get, args, "all")],
+            )
+            .await
+            .context("JMAP get-all fallback failed")?;
+        if let Some(error) = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "error")
+        {
+            anyhow::bail!("JMAP {object_type}/get all failed: {}", error.1);
+        }
+        let result = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == get)
+            .context("JMAP get-all fallback response is missing")?;
+        let get: GetResponse<serde_json::Value> = serde_json::from_value(result.1.clone())?;
+        let mut objects = Vec::new();
+        for object in get.list {
+            if jmap_snapshot_filter_matches(&object, filter)? {
+                objects.push(serde_json::from_value(object)?);
+                if limit != 0 && objects.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(objects)
     }
 
     pub async fn contact_snapshot_state(
@@ -2212,7 +2277,7 @@ impl JmapClient {
         address_book_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<Contact>> {
-        let queried: anyhow::Result<Vec<ContactCardObject>> = self
+        let items: Vec<ContactCardObject> = self
             .query_objects(
                 auth,
                 capabilities::CONTACTS,
@@ -2221,60 +2286,7 @@ impl JmapClient {
                 None,
                 limit,
             )
-            .await;
-        let items = match queried {
-            Ok(items) => items,
-            Err(query_error) => {
-                if !query_error.to_string().contains("serverUnavailable") {
-                    return Err(query_error);
-                }
-                // Some JMAP Contacts servers expose ContactCard/get but
-                // return serverUnavailable for ContactCard/query (including
-                // unfiltered queries). `ids: null` is the JMAP get form for
-                // all cards; filter the returned addressBookIds locally so
-                // ActiveSync Contacts Sync still works on those servers.
-                let account_id = auth
-                    .session
-                    .primary_account_for(capabilities::CONTACTS)
-                    .context("JMAP Contacts capability is unavailable")?;
-                let response: JmapResponse<serde_json::Value> = self
-                    .api_call(
-                        auth,
-                        &[capabilities::CORE.to_owned(), capabilities::CONTACTS.to_owned()],
-                        vec![MethodCall::new(
-                            "ContactCard/get",
-                            serde_json::json!({
-                                "accountId": account_id,
-                                "ids": null,
-                                "properties": ["id", "addressBookIds", "name", "emails", "phones",
-                                    "organizations", "titles", "nicknames", "addresses", "anniversaries",
-                                    "notes", "onlineServices", "media", "links", "keywords"]
-                            }),
-                            "all",
-                        )],
-                    )
-                    .await
-                    .with_context(|| {
-                        format!("ContactCard/query failed ({query_error}); get-all fallback failed")
-                    })?;
-                let result = response
-                    .method_responses
-                    .iter()
-                    .find(|method| method.0 == "ContactCard/get")
-                    .context("ContactCard/query failed and ContactCard/get response is missing")?;
-                anyhow::ensure!(
-                    result.1.get("type").is_none(),
-                    "ContactCard/query failed ({query_error}); ContactCard/get fallback returned {}",
-                    result.1
-                );
-                let get: GetResponse<ContactCardObject> = serde_json::from_value(result.1.clone())?;
-                get.list
-                    .into_iter()
-                    .filter(|item| item.address_book_ids.contains_key(address_book_id))
-                    .take(if limit == 0 { usize::MAX } else { limit })
-                    .collect()
-            }
-        };
+            .await?;
         let account_id = auth
             .session
             .primary_account_for(capabilities::CONTACTS)
@@ -3582,6 +3594,7 @@ impl JmapClient {
                 serde_json::json!({ "inCalendar": calendar_id }),
                 Some(&[
                     "id",
+                    "calendarIds",
                     "uid",
                     "@type",
                     "title",
@@ -9853,6 +9866,64 @@ fn extract_email_address(value: &str) -> Option<String> {
                 .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && !"@.-_+".contains(ch))
                 .to_owned()
         })
+}
+
+fn jmap_snapshot_filter_matches(
+    object: &serde_json::Value,
+    filter: &serde_json::Value,
+) -> anyhow::Result<bool> {
+    let Some(filters) = filter.as_object() else {
+        anyhow::bail!("unsupported local JMAP snapshot filter: {filter}");
+    };
+    for (name, value) in filters {
+        let matches = match name.as_str() {
+            "inAddressBook" => value
+                .as_str()
+                .is_some_and(|id| object["addressBookIds"][id] == true),
+            "inCalendar" => value
+                .as_str()
+                .is_some_and(|id| object["calendarIds"][id] == true),
+            "uid" => object.get("uid") == Some(value),
+            "operator" => {
+                let operator = value
+                    .as_str()
+                    .context("local JMAP snapshot filter operator must be a string")?;
+                let conditions = filters
+                    .get("conditions")
+                    .and_then(serde_json::Value::as_array)
+                    .context("local JMAP snapshot filter conditions must be an array")?;
+                match operator {
+                    "AND" => {
+                        for condition in conditions {
+                            if !jmap_snapshot_filter_matches(object, condition)? {
+                                return Ok(false);
+                            }
+                        }
+                        true
+                    }
+                    "OR" => {
+                        let mut any = false;
+                        for condition in conditions {
+                            any |= jmap_snapshot_filter_matches(object, condition)?;
+                        }
+                        any
+                    }
+                    "NOT" if conditions.len() == 1 => {
+                        !jmap_snapshot_filter_matches(object, &conditions[0])?
+                    }
+                    _ => {
+                        anyhow::bail!("unsupported local JMAP snapshot filter operator: {operator}")
+                    }
+                }
+            }
+            "conditions" => continue,
+            _ => anyhow::bail!("unsupported local JMAP snapshot filter property: {name}"),
+        };
+        if !matches {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// JSContact (RFC 9553) card shape, as returned by Stalwart's
