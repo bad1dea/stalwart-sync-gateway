@@ -9,6 +9,7 @@ services:
       STALWART_JMAP_URL: http://stalwart:8080/.well-known/jmap
       STALWART_TLS_VERIFY: "false"
       EAS_PUBLIC_URL: http://localhost:8080/Microsoft-Server-ActiveSync
+      EAS_MAX_PROTOCOL_VERSION: ${EAS_MAX_PROTOCOL_VERSION:-14.0}
       STATE_BACKEND: memory
       RUST_LOG: debug
     ports:

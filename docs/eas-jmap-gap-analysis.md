@@ -237,7 +237,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    Find, and enabled Oof on the isolated test bridge. The gateway now supports
    an explicit `EAS_MAX_PROTOCOL_VERSION=16.1` test configuration and includes
    Find in the 16.1 command advertisement. The default remains 14.0; production
-   continues to advertise 14.0 until the client pass succeeds. A local WBXML
+   continues to advertise 14.0 until the client pass succeeds. Both repository
+   Compose files now forward this opt-in to the container; resolved Compose
+   checks show 14.0 by default and 16.1 when explicitly set. A local WBXML
    regression now checks the enabled Oof Get response's scheduled state,
    end-time shape, and three audience-specific message blocks; it does not
    replace checking the enabled state with a real client. Ignored real-Stalwart

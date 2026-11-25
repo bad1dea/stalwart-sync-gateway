@@ -277,7 +277,9 @@ failures on the client side. Production defaults to advertising only 14.0.
 For isolated testing, `EAS_MAX_PROTOCOL_VERSION=16.1` advertises the audited
 version list through 16.1 and includes the Find command. Keep production at its
 14.0 default until the full field-shape audit and real-device certification
-below succeed.
+below succeed. Both repository Compose files pass this variable to the
+container, defaulting to 14.0; resolved-config checks verified the 14.0
+default and explicit 16.1 override.
 
 **Implication for any future version bump** (e.g. targeting real 16.1 to
 pick up native Notes support, RightsManagement, or other 16.x-only
