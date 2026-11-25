@@ -15079,6 +15079,26 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         eas::find_all_text_after(&doc, air::SERVER_ID),
         vec!["outlook-msg-attachment"]
     );
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "30000000-0000-4000-8000-000000000099",
+            r#"WORDS("alpha beta", gamma)"#,
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["text-attachment"]
+    );
+
     assert!(!env
         .mock
         .downloaded_blobs
