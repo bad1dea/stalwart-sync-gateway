@@ -270,19 +270,21 @@ session's fixes were, not against spec-reading alone.
 - Tasks — MS-ASTASK Appendix A defines `AllProps` as a repeating `xs:choice`,
   so the schema does not prescribe an element order. Sync emits the fields in
   its current writer order. Task Add requires `Complete`, which accepts only
-  the specified 0/1 values. An ignored live regression now checks recurring
-  EAS Add, JMAP persistence, and EAS Fetch against Stalwart. It still needs to
-  be run on the isolated test bridge, followed by device validation.
+  the specified 0/1 values. The isolated Stalwart E2E regression has passed
+  recurring EAS Add, JMAP persistence, and EAS Fetch. Real-client recurrence
+  behavior remains to be checked.
 - KQL proximity — direct `NEAR`/`ONEAR` and Boolean combinations with supported
   predicates exact-filter full message text and common address fields, using
-  the default distance of eight or an explicit distance. Attachment payload
-  positions are available for supported extracted formats up to 8 MiB input
-  and 4 MiB extracted text; scanned PDFs and larger files remain outside local
-  exact matching.
+  the default distance of eight or an explicit distance. Supported attachment
+  payloads are locally extracted for exact token-position matching up to 16 MiB
+  input and extracted text. PDF OCR supports up to 100 image-only pages within
+  its total runtime budget; unsupported formats and over-budget inputs remain
+  outside exact local matching.
 - Recurrence — common EAS event/task rules map to Stalwart's singular
   `recurrenceRule`; unsupported patterns fail closed. Task-specific backend
-  create/get and real-client recurrence behavior still need verification.
-  Sensitivity cannot be patched per occurrence under RFC 8984.
+  create/get has passed the isolated E2E regression. Real-client recurrence
+  behavior remains to be checked. Sensitivity cannot be patched per occurrence
+  under RFC 8984.
 - Real-client 16.1 negotiation and behavior, including Tasks recurrence and
   enabled Oof rendering. Set `EAS_MAX_PROTOCOL_VERSION=16.1` only on the
   isolated test bridge for that pass; production remains on 14.0 until it
