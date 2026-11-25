@@ -1167,15 +1167,16 @@ impl JmapClient {
                             "id": principal_id,
                             "utcStart": utc_start,
                             "utcEnd": utc_end,
-                            // Stalwart accepts the full event representation but rejects
-                            // a restricted eventProperties list such as `freeBusyStatus`.
-                            "showDetails": true
+                            // Stalwart supports only the event id projection here. Fetch
+                            // freeBusyStatus separately with CalendarEvent/get below.
+                            "showDetails": true,
+                            "eventProperties": ["id"]
                         }),
                         &format!("availability-{index}"),
                     )
                 })
                 .collect();
-            let response: JmapResponse<serde_json::Value> = self
+            let mut response: JmapResponse<serde_json::Value> = self
                 .api_call(
                     auth,
                     &[
@@ -1186,6 +1187,97 @@ impl JmapClient {
                     calls,
                 )
                 .await?;
+            let mut event_ids =
+                std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+            for method in &response.method_responses {
+                if method.0 != "Principal/getAvailability" {
+                    continue;
+                }
+                let Some(periods) = method.1["list"].as_array() else {
+                    continue;
+                };
+                for period in periods {
+                    if let (Some(account_id), Some(event_id)) =
+                        (period["accountId"].as_str(), period["event"]["id"].as_str())
+                    {
+                        event_ids
+                            .entry(account_id.to_owned())
+                            .or_default()
+                            .insert(event_id.to_owned());
+                    }
+                }
+            }
+            let max_objects = auth
+                .session
+                .capabilities
+                .get(capabilities::CALENDARS)
+                .and_then(|calendars| calendars["maxObjectsInGet"].as_u64())
+                .unwrap_or(500)
+                .clamp(1, 5000) as usize;
+            let mut free_busy_statuses = std::collections::HashMap::new();
+            for (account_id, ids) in event_ids {
+                let ids: Vec<_> = ids.into_iter().collect();
+                for (chunk_index, id_chunk) in ids.chunks(max_objects).enumerate() {
+                    let call = MethodCall::new(
+                        "CalendarEvent/get",
+                        serde_json::json!({
+                            "accountId": account_id,
+                            "ids": id_chunk,
+                            "properties": ["freeBusyStatus"]
+                        }),
+                        &format!("availability-events-{chunk_index}"),
+                    );
+                    // Availability is still useful when an event's details are not
+                    // readable. Keep the server-provided busyStatus as the fallback.
+                    if let Ok(event_response) = self
+                        .api_call::<serde_json::Value>(
+                            auth,
+                            &[
+                                capabilities::CORE.to_owned(),
+                                capabilities::CALENDARS.to_owned(),
+                            ],
+                            vec![call],
+                        )
+                        .await
+                    {
+                        for method in event_response.method_responses {
+                            if method.0 == "CalendarEvent/get" {
+                                if let Some(events) = method.1["list"].as_array() {
+                                    for event in events {
+                                        if let (Some(id), Some(status)) =
+                                            (event["id"].as_str(), event["freeBusyStatus"].as_str())
+                                        {
+                                            free_busy_statuses.insert(
+                                                (account_id.clone(), id.to_owned()),
+                                                status.to_owned(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for method in &mut response.method_responses {
+                if method.0 != "Principal/getAvailability" {
+                    continue;
+                }
+                if let Some(periods) = method.1["list"].as_array_mut() {
+                    for period in periods {
+                        if let (Some(account_id), Some(event_id)) =
+                            (period["accountId"].as_str(), period["event"]["id"].as_str())
+                        {
+                            if let Some(status) = free_busy_statuses
+                                .get(&(account_id.to_owned(), event_id.to_owned()))
+                            {
+                                period["event"]["freeBusyStatus"] =
+                                    serde_json::Value::String(status.clone());
+                            }
+                        }
+                    }
+                }
+            }
             for method in response.method_responses {
                 if let Some(index) = method.2.strip_prefix("availability-") {
                     let Ok(index) = index.parse::<usize>() else {
@@ -15308,22 +15400,30 @@ mod meeting_response_send_tests {
                 async move {
                 let calls = request["methodCalls"].as_array().unwrap();
                 assert_eq!(calls.len(), 1);
-                assert!(request["using"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|cap| cap == capabilities::PRINCIPALS_AVAILABILITY));
-                assert_eq!(calls[0][0], "Principal/getAvailability");
-                assert_eq!(calls[0][1]["showDetails"], true);
-                assert!(calls[0][1].get("eventProperties").is_none());
+                if calls[0][0] == "Principal/getAvailability" {
+                    assert!(request["using"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|cap| cap == capabilities::PRINCIPALS_AVAILABILITY));
+                    assert_eq!(calls[0][1]["showDetails"], true);
+                    assert_eq!(calls[0][1]["eventProperties"], serde_json::json!(["id"]));
+                }
                     let response = match call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
                         0 => {
                             assert_eq!(calls[0][1]["id"], "p1");
                             serde_json::json!(["Principal/getAvailability", {"list":[{
-                                "utcStart":"2042-05-05T10:00:00Z","utcEnd":"2042-05-05T11:00:00Z","busyStatus":"confirmed","event":null
+                                "utcStart":"2042-05-05T10:00:00Z","utcEnd":"2042-05-05T11:00:00Z","busyStatus":"confirmed","accountId":"calendar-account","event":{"id":"event1","baseEventId":"event1"}
                             }]}, "availability-0"])
                         }
                         1 => {
+                            assert_eq!(calls[0][0], "CalendarEvent/get");
+                            assert_eq!(calls[0][1]["accountId"], "calendar-account");
+                            assert_eq!(calls[0][1]["ids"], serde_json::json!(["event1"]));
+                            assert_eq!(calls[0][1]["properties"], serde_json::json!(["freeBusyStatus"]));
+                            serde_json::json!(["CalendarEvent/get", {"list":[{"id":"event1","freeBusyStatus":"x-eas-tentative"}]}, "availability-events-0"])
+                        }
+                        2 => {
                             assert_eq!(calls[0][1]["id"], "p2");
                             serde_json::json!(["error", {"type":"forbidden"}, "availability-0"])
                         }
@@ -15367,8 +15467,12 @@ mod meeting_response_send_tests {
             results["p1"].as_ref().unwrap()[0]["busyStatus"],
             "confirmed"
         );
+        assert_eq!(
+            results["p1"].as_ref().unwrap()[0]["event"]["freeBusyStatus"],
+            "x-eas-tentative"
+        );
         assert_eq!(results["p2"].as_ref().unwrap_err(), &"163");
-        assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 3);
         server.abort();
     }
 }
