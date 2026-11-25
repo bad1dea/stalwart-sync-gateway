@@ -5037,6 +5037,7 @@ impl JmapClient {
                     "progress",
                     "progressUpdated",
                     "start",
+                    "recurrenceRule",
                     "priority",
                     "privacy",
                     "keywords",
@@ -5310,8 +5311,6 @@ impl JmapClient {
                 "progressUpdated".to_owned(),
                 serde_json::Value::String(timestamp),
             );
-        } else if fields.complete == Some(false) {
-            task.insert("progressUpdated".to_owned(), serde_json::Value::Null);
         }
         crate::jmap::task_reminder::write_reminder(
             &mut task,
@@ -10903,6 +10902,68 @@ mod calendar_update_state_tests {
             .await
             .unwrap();
         assert_eq!(requests.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tasks_in_calendar_requests_and_parses_recurrence_rule() {
+        let app = Router::new().route(
+            "/",
+            post(|Json(request): Json<serde_json::Value>| async move {
+                let calls = request["methodCalls"].as_array().unwrap();
+                assert_eq!(calls[0][0], "CalendarEvent/query");
+                assert_eq!(calls[1][0], "CalendarEvent/get");
+                assert!(calls[1][1]["properties"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|property| property == "recurrenceRule"));
+                Json(serde_json::json!({"methodResponses":[
+                    ["CalendarEvent/query", {"queryState":"q1","ids":["task-1"]}, "q"],
+                    ["CalendarEvent/get", {"list":[{
+                        "id":"task-1","@type":"Task","title":"Recurring task",
+                        "progress":"needs-action","start":"2026-11-24T09:00:00",
+                        "recurrenceRule":{"frequency":"daily","interval":2,"count":3}
+                    }]}, "g"]
+                ]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CALENDARS:"a"},
+            "apiUrl":url, "downloadUrl":url, "uploadUrl":url, "username":"user", "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let tasks = client
+            .tasks_in_calendar(&auth, "calendar", 1)
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Recurring task");
+        assert_eq!(
+            tasks[0].recurrence,
+            Some(crate::wbxml::eas::CalendarRecurrence {
+                kind: 0,
+                interval: Some(2),
+                occurrences: Some(3),
+                ..Default::default()
+            })
+        );
         server.abort();
     }
 

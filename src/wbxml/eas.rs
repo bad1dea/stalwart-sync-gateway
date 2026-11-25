@@ -4261,6 +4261,75 @@ mod tests {
             })
         );
 
+        let mut daily = DocumentBuilder::new();
+        daily.start(airsync::APPLICATION_DATA);
+        daily.leaf(tasks::START_DATE, "2026-11-24T09:00:00.000Z");
+        daily.leaf(tasks::UTC_START_DATE, "2026-11-24T09:00:00.000Z");
+        daily.start(tasks::RECURRENCE);
+        daily.leaf(tasks::START, "2026-11-24T09:00:00.000Z");
+        daily.leaf(tasks::TYPE, "0");
+        daily.leaf(tasks::INTERVAL, "2");
+        daily.leaf(tasks::OCCURRENCES, "3");
+        daily.end();
+        daily.end();
+        let fields = extract_task_fields(&daily.finish().nodes);
+        assert!(fields.recurrence_present);
+        assert!(!fields.unsupported_recurrence, "{fields:?}");
+        assert_eq!(
+            fields.recurrence,
+            Some(CalendarRecurrence {
+                kind: 0,
+                interval: Some(2),
+                occurrences: Some(3),
+                ..Default::default()
+            })
+        );
+
+        // Exercise the same encoded Sync/Add command path used by live
+        // devices, including collection dispatch and ApplicationData slicing.
+        let mut sync = DocumentBuilder::new();
+        sync.start(airsync::SYNC);
+        sync.start(airsync::COLLECTIONS);
+        sync.start(airsync::COLLECTION);
+        sync.leaf(airsync::SYNC_KEY, "1");
+        sync.leaf(airsync::COLLECTION_ID, "task_calendar");
+        sync.start(airsync::COMMANDS);
+        sync.start(airsync::ADD);
+        sync.leaf(airsync::CLIENT_ID, "task-1");
+        sync.start(airsync::APPLICATION_DATA);
+        sync.leaf(tasks::SUBJECT, "Recurring task");
+        sync.leaf(tasks::COMPLETE, "0");
+        sync.leaf(tasks::START_DATE, "2026-11-24T09:00:00.000Z");
+        sync.leaf(tasks::UTC_START_DATE, "2026-11-24T09:00:00.000Z");
+        sync.start(tasks::RECURRENCE);
+        sync.leaf(tasks::START, "2026-11-24T09:00:00.000Z");
+        sync.leaf(tasks::TYPE, "0");
+        sync.leaf(tasks::INTERVAL, "2");
+        sync.leaf(tasks::OCCURRENCES, "3");
+        sync.end();
+        for _ in 0..6 {
+            sync.end();
+        }
+        let wire = crate::wbxml::encode_document(&sync.finish());
+        let decoded = crate::wbxml::decode_document(&wire).unwrap();
+        let collections = sync_collections(&decoded);
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].commands.len(), 1);
+        let command = &collections[0].commands[0];
+        assert_eq!(command.kind, SyncClientCommandKind::Add);
+        assert_eq!(command.task.subject.as_deref(), Some("Recurring task"));
+        assert!(command.task.recurrence_present);
+        assert!(!command.task.unsupported_recurrence, "{:?}", command.task);
+        assert_eq!(
+            command.task.recurrence,
+            Some(CalendarRecurrence {
+                kind: 0,
+                interval: Some(2),
+                occurrences: Some(3),
+                ..Default::default()
+            })
+        );
+
         for (calendar_type, accepted) in [("1", true), ("3", false)] {
             let mut calendar = DocumentBuilder::new();
             calendar.start(airsync::APPLICATION_DATA);

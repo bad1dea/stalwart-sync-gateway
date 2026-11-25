@@ -12,28 +12,20 @@ handling. Check the current Rust implementation before treating any older
 
 Current prioritized work:
 
+Completed since reconciliation: **Task recurrence Add/Fetch**, including
+the encoded Sync command parser path, is now live-verified against the
+isolated Stalwart bridge. EAS Add creates a Task with the expected daily
+`recurrenceRule`; an explicit Sync Fetch reads that recurrence back as Task
+WBXML. The test exposed two issues: incomplete Tasks must omit the non-nullable
+`progressUpdated` property, and Task Sync queries must request
+`recurrenceRule`. Both fixes have focused regression coverage. The live E2E
+test passes; the full suite passes 404 tests (75 ignored), strict Clippy and
+formatting pass. Real-client iOS/Outlook behavior remains part of the separate
+certification gate below.
+
 Remaining 16.1 readiness backlog (ordered by runtime impact):
 
-1. **Task recurrence verification.** The MS-ASTASK schema audit confirms
-   task properties use a repeating `xs:choice`, so the schema imposes no
-   field order. A valid recurring Task carrying `StartDate`, `UtcStartDate`,
-   and `Recurrence/Start` was rejected when those starts agreed; the parser
-   now accepts matching values and rejects conflicts. `Complete` now accepts
-   only 0 or 1, duplicate values fail, and Task Add requires `Complete`.
-   Task `Occurrences` is limited to its MS-ASTASK `unsignedByte` range, with
-   255 accepted and 256 rejected before a JMAP write; unsupported backend
-   recurrence counts above 255 fail before an invalid Task response is emitted.
-   Recurrence replies include `CalendarType=1` for monthly/yearly patterns;
-   Gregorian calendar variants are accepted on input, while non-Gregorian
-   systems and leap-month recurrences remain rejected. Weekly Task responses
-   include the required `FirstDayOfWeek`, with Sunday as the fallback when the
-   JMAP recurrence has no explicit preference.
-   Mocked Sync regressions cover recurring Add/Fetch and invalid or missing
-   Complete without a JMAP write. An ignored live-test harness now performs EAS
-   recurring Task Add, checks the saved JMAP recurrenceRule, and Fetches the
-   task back over Sync; run it on the isolated test bridge, then verify client
-   behavior.
-2. **Real-client 16.1 validation.** Exercise negotiation, Tasks, BodyPart,
+1. **Real-client 16.1 validation.** Exercise negotiation, Tasks, BodyPart,
    Find, and enabled Oof on the isolated test bridge. The gateway now supports
    an explicit `EAS_MAX_PROTOCOL_VERSION=16.1` test configuration and includes
    Find in the 16.1 command advertisement. The default remains 14.0; production
@@ -49,7 +41,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    started `2026-11-24T23:30:09Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. The container has no protocol override, so the live
    production endpoint continues to use the tested 14.0 default.
-3. **Find content coverage.** Current bounded extraction supports legacy `.xls`,
+2. **Find content coverage.** Current bounded extraction supports legacy `.xls`,
    `.ppt`, and `.doc`, EPUB, macro-enabled OOXML, RFC 822 messages, Outlook `.msg`
    attachments, ordinary ZIP archives with allowlisted text/config files, and
    Word, Excel, and PowerPoint package comment text, plus

@@ -4574,7 +4574,7 @@ mod e2e {
             .as_str()
             .unwrap()
             .to_owned();
-        let folder = format!("cal_{calendar}");
+        let folder = format!("task_{calendar}");
         let device = dev("task-recurrence-live");
         let prime = live
             .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
@@ -4638,30 +4638,38 @@ mod e2e {
             )
             .await;
         let task = &stored[0][1]["list"][0];
-        assert_eq!(task["@type"], "Task");
-        assert_eq!(task["title"], "Live recurring task fixture");
-        assert_eq!(task["recurrenceRule"]["frequency"], "daily");
-        assert_eq!(task["recurrenceRule"]["interval"], 2);
-        assert_eq!(task["recurrenceRule"]["count"], 3);
+        let stored_type = task["@type"].clone();
+        let stored_title = task["title"].clone();
+        let stored_frequency = task["recurrenceRule"]["frequency"].clone();
+        let stored_interval = task["recurrenceRule"]["interval"].clone();
+        let stored_count = task["recurrenceRule"]["count"].clone();
 
+        let mut fetch = eas::DocumentBuilder::new();
+        fetch.start(air::SYNC);
+        fetch.start(air::COLLECTIONS);
+        fetch.start(air::COLLECTION);
+        fetch.leaf(air::SYNC_KEY, sync_key(&added));
+        fetch.leaf(air::COLLECTION_ID, &folder);
+        fetch.empty_tag(air::GET_CHANGES);
+        fetch.start(air::COMMANDS);
+        fetch.start(air::FETCH);
+        fetch.leaf(air::SERVER_ID, &id);
+        for _ in 0..5 {
+            fetch.end();
+        }
         let fetched = live
             .wbxml_version(
                 "Sync",
                 &device,
-                sync_body(&sync_key(&added), &folder),
+                wbxml::encode_document(&fetch.finish()),
                 "16.1",
             )
             .await;
-        assert_eq!(
-            eas::find_text_after(&fetched, air::SERVER_ID),
-            Some(id.as_str())
-        );
-        assert_eq!(eas::find_text_after(&fetched, tasks::TYPE), Some("0"));
-        assert_eq!(eas::find_text_after(&fetched, tasks::INTERVAL), Some("2"));
-        assert_eq!(
-            eas::find_text_after(&fetched, tasks::OCCURRENCES),
-            Some("3")
-        );
+        let fetched_id = eas::find_text_after(&fetched, air::SERVER_ID).map(str::to_owned);
+        let fetched_type = eas::find_text_after(&fetched, tasks::TYPE).map(str::to_owned);
+        let fetched_interval = eas::find_text_after(&fetched, tasks::INTERVAL).map(str::to_owned);
+        let fetched_occurrences =
+            eas::find_text_after(&fetched, tasks::OCCURRENCES).map(str::to_owned);
 
         let cleanup = live
             .call_using(
@@ -4672,6 +4680,20 @@ mod e2e {
             )
             .await;
         assert!(cleanup[0][1]["notDestroyed"].is_null());
+
+        assert_eq!(stored_type, "Task");
+        assert_eq!(stored_title, "Live recurring task fixture");
+        assert_eq!(stored_frequency, "daily");
+        assert_eq!(stored_interval, 2);
+        assert_eq!(stored_count, 3);
+        assert_eq!(
+            fetched_id.as_deref(),
+            Some(id.as_str()),
+            "Task Fetch response: {fetched:?}"
+        );
+        assert_eq!(fetched_type.as_deref(), Some("0"));
+        assert_eq!(fetched_interval.as_deref(), Some("2"));
+        assert_eq!(fetched_occurrences.as_deref(), Some("3"));
     }
 
     #[tokio::test]
@@ -16434,6 +16456,7 @@ async fn task_add_recurrence_round_trips_through_sync_and_jmap() {
         assert_eq!(stored["title"], "Recurring task fixture");
         assert_eq!(stored["start"], "2026-11-24T09:00:00");
         assert_eq!(stored["due"], "2026-11-25T09:00:00");
+        assert!(stored.get("progressUpdated").is_none());
         assert_eq!(
             stored["recurrenceRule"],
             serde_json::json!({
