@@ -12,6 +12,14 @@ handling. Check the current Rust implementation before treating any older
 
 Current prioritized work:
 
+Find now extracts Excel Binary Workbook (`.xlsb`) cell values through the
+existing vendored Calamine parser, including its registered macro-enabled
+content type. A real Calamine XLSB fixture verifies extraction of worksheet
+cells; malformed or unsupported workbooks fail closed. Regression and full
+suite: 405 passed, 75 ignored; strict Clippy, formatting, and diff checks
+pass. This change is not deployed yet. The runtime image remains unchanged
+until deployment verification is recorded below.
+
 Completed since reconciliation: **Task recurrence Add/Fetch**, including
 the encoded Sync command parser path, is now live-verified against the
 isolated Stalwart bridge. EAS Add creates a Task with the expected daily
@@ -113,6 +121,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `/readyz` `ready`. The container has no protocol override, so the live
    production endpoint continues to use the tested 14.0 default.
 2. **Find content coverage.** Current bounded extraction supports legacy `.xls`,
+   binary Excel `.xlsb`,
    `.ppt`, and `.doc`, EPUB, macro-enabled OOXML, RFC 822 messages, Outlook `.msg`
    attachments, ordinary ZIP archives with allowlisted text/config/source
    files, and

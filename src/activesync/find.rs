@@ -521,6 +521,7 @@ fn is_extractable_attachment_type(content_type: &str) -> bool {
                 | "application/pdf"
                 | "application/vnd.ms-outlook"
                 | "application/vnd.ms-excel"
+                | "application/vnd.ms-excel.sheet.binary.macroenabled.12"
                 | "application/vnd.ms-powerpoint"
                 | "application/msword"
                 | "message/rfc822"
@@ -553,6 +554,7 @@ fn is_extractable_archive_type(media_type: &str) -> bool {
             | "application/vnd.openxmlformats-officedocument.spreadsheetml.template"
             | "application/vnd.ms-excel.sheet.macroenabled.12"
             | "application/vnd.ms-excel.template.macroenabled.12"
+            | "application/vnd.ms-excel.sheet.binary.macroenabled.12"
             | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
             | "application/vnd.openxmlformats-officedocument.presentationml.slideshow"
             | "application/vnd.openxmlformats-officedocument.presentationml.template"
@@ -604,6 +606,10 @@ fn extract_find_attachment_text_inner(
                 extract_legacy_xls_text(bytes)
             }))
             .ok()??
+        }
+        "application/vnd.ms-excel.sheet.binary.macroenabled.12" => {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| extract_xlsb_text(bytes)))
+                .ok()??
         }
         "application/vnd.ms-powerpoint" => {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -757,6 +763,10 @@ fn extract_archive_text(bytes: &[u8], media_type: &str) -> Option<String> {
                 || (name.starts_with("xl/worksheets/") && name.ends_with(".xml"))
                 || (name.starts_with("xl/comments") && name.ends_with(".xml"))
                 || (name.starts_with("xl/threadedComments/") && name.ends_with(".xml"))
+        }
+        "application/vnd.ms-excel.sheet.binary.macroenabled.12" => {
+            name == "xl/sharedStrings.bin"
+                || name.starts_with("xl/worksheets/sheet") && name.ends_with(".bin")
         }
         "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         | "application/vnd.openxmlformats-officedocument.presentationml.slideshow"
@@ -1175,6 +1185,34 @@ fn extract_legacy_xls_text(bytes: &[u8]) -> Option<String> {
     use calamine::{Data, Reader, Xls};
 
     let mut workbook = Xls::new(std::io::Cursor::new(bytes)).ok()?;
+    let sheet_names = workbook.sheet_names();
+    if sheet_names.len() > 256 {
+        return None;
+    }
+    let mut output = String::new();
+    for sheet in sheet_names {
+        let range = workbook.worksheet_range(&sheet).ok()?;
+        for (_, _, cell) in range.used_cells() {
+            let value = match cell {
+                Data::String(value) | Data::DateTimeIso(value) | Data::DurationIso(value) => {
+                    value.clone()
+                }
+                Data::Int(value) => value.to_string(),
+                Data::Float(value) => value.to_string(),
+                Data::Bool(value) => value.to_string(),
+                Data::DateTime(value) => value.to_string(),
+                Data::Error(_) | Data::Empty => continue,
+            };
+            append_find_text(&mut output, &value)?;
+        }
+    }
+    Some(output)
+}
+
+fn extract_xlsb_text(bytes: &[u8]) -> Option<String> {
+    use calamine::{Data, Reader, Xlsb};
+
+    let mut workbook = Xlsb::new(std::io::Cursor::new(bytes)).ok()?;
     let sheet_names = workbook.sheet_names();
     if sheet_names.len() > 256 {
         return None;
@@ -3404,6 +3442,18 @@ mod tests {
             ],
         )
         .unwrap());
+    }
+
+    #[test]
+    fn xlsb_find_extracts_workbook_cells() {
+        // Calamine's MIT-licensed date_1904.xlsb parser fixture.
+        let bytes = include_bytes!("../../tests/fixtures/legacy-xlsb.xlsb");
+        let extracted = extract_find_attachment_text(
+            "application/vnd.ms-excel.sheet.binary.macroEnabled.12",
+            bytes,
+        )
+        .expect("binary Excel workbook text should be extractable");
+        assert!(extracted.split_whitespace().any(|cell| cell == "42735"));
     }
 
     #[test]
