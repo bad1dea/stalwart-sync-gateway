@@ -2100,6 +2100,42 @@ fn validate_oof_set(
     "1"
 }
 
+fn oof_set_has_valid_field_cardinality(document: &wbxml::Document) -> bool {
+    fn root_matches(document: &wbxml::Document, token: wbxml::token::Token) -> bool {
+        matches!(document.nodes.first(), Some(wbxml::Node::Start(start))
+            if start.code_page == token.code_page && start.token == token.token)
+    }
+
+    let oof_requests: Vec<_> = wbxml::eas::child_elements(document)
+        .into_iter()
+        .filter(|child| root_matches(child, wbxml::eas::settings::OOF))
+        .collect();
+    if oof_requests.len() != 1 {
+        return false;
+    }
+    let sets: Vec<_> = wbxml::eas::child_elements(&oof_requests[0])
+        .into_iter()
+        .filter(|child| root_matches(child, wbxml::eas::settings::SET))
+        .collect();
+    if sets.len() != 1 {
+        return false;
+    }
+
+    [
+        wbxml::eas::settings::OOF_STATE,
+        wbxml::eas::settings::START_TIME,
+        wbxml::eas::settings::END_TIME,
+    ]
+    .into_iter()
+    .all(|token| {
+        wbxml::eas::child_elements(&sets[0])
+            .iter()
+            .filter(|child| root_matches(child, token))
+            .count()
+            <= 1
+    })
+}
+
 async fn settings(
     state: &AppState,
     auth: &crate::jmap::client::AuthenticatedSession,
@@ -2213,7 +2249,11 @@ async fn settings(
             let from_date =
                 wbxml::eas::find_text_after(document, set::START_TIME).map(str::to_owned);
             let to_date = wbxml::eas::find_text_after(document, set::END_TIME).map(str::to_owned);
-            let mut status = validate_oof_set(oof_state, from_date.as_deref(), to_date.as_deref());
+            let mut status = if oof_set_has_valid_field_cardinality(document) {
+                validate_oof_set(oof_state, from_date.as_deref(), to_date.as_deref())
+            } else {
+                "5"
+            };
             let mut vacation = None;
             if status == "1" {
                 let is_enabled = oof_state.map(|state| state != "0");

@@ -12934,6 +12934,47 @@ async fn settings_oof_set_requires_jmap_persistence_and_omits_non_time_based_dat
     assert_eq!(saved["fromDate"], "2042-06-01T00:00:00Z");
     assert_eq!(saved["toDate"], "2042-06-02T00:00:00Z");
 
+    let saved_before_duplicate = saved;
+    for duplicate in [
+        vec![(set::OOF_STATE, "0"), (set::OOF_STATE, "1")],
+        vec![
+            (set::OOF_STATE, "2"),
+            (set::START_TIME, "2042-07-01T00:00:00Z"),
+            (set::START_TIME, "2042-07-02T00:00:00Z"),
+            (set::END_TIME, "2042-07-03T00:00:00Z"),
+        ],
+        vec![
+            (set::OOF_STATE, "2"),
+            (set::START_TIME, "2042-07-01T00:00:00Z"),
+            (set::END_TIME, "2042-07-02T00:00:00Z"),
+            (set::END_TIME, "2042-07-03T00:00:00Z"),
+        ],
+    ] {
+        let mut duplicate_request = eas::DocumentBuilder::new();
+        duplicate_request.start(set::SETTINGS);
+        duplicate_request.start(set::OOF);
+        duplicate_request.start(set::SET);
+        for (token, value) in duplicate {
+            duplicate_request.leaf(token, value);
+        }
+        duplicate_request.end();
+        duplicate_request.end();
+        duplicate_request.end();
+        let response = env
+            .req("Settings", "oof-duplicate-set-field")
+            .header("MS-ASProtocolVersion", "16.1")
+            .body(wbxml::encode_document(&duplicate_request.finish()))
+            .send()
+            .await
+            .unwrap();
+        let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(eas::find_all_text_after(&doc, set::STATUS), vec!["1", "5"]);
+        assert_eq!(
+            *env.mock.vacation_response.lock().unwrap(),
+            saved_before_duplicate
+        );
+    }
+
     env.mock.vacation_set_error.store(true, Ordering::SeqCst);
     let response = env
         .req("Settings", "oof-set")

@@ -25,6 +25,14 @@ Deployed to the isolated Amy bridge as
 started `2026-11-25T08:40:13.764048503Z`, restart count zero, `/healthz` `ok`,
 and `/readyz` `ready`. The protocol override remains unset, preserving 14.0.
 
+Settings OOF Set now rejects duplicate direct `OofState`, `StartTime`, or
+`EndTime` elements with OOF status 5 before any `VacationResponse/set` call.
+Regressions cover each duplicate and verify stored state is unchanged. Full
+suite: 439 passed, 77 ignored; strict Clippy, formatting, and diff checks pass.
+This enforces the schema's single-value limits in Microsoft's
+[OofState](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/6703328d-6828-457f-ba98-2b6df712775c)
+and [EndTime](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/6ee7533d-303d-4967-b0d8-82a3b51ce242) definitions.
+
 Calendar recurrence mapping now treats EAS `WeekOfMonth=5` with
 `DayOfWeek=127` as the last day of the month for both monthly and yearly
 patterns. It maps to JSCalendar `byMonthDay: [-1]` and round-trips back to the
