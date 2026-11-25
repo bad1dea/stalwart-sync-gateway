@@ -2767,7 +2767,7 @@ fn task_categories(command: &Document) -> Result<Option<Vec<String>>, ()> {
 fn valid_mail_categories(categories: &[String]) -> bool {
     let mut normalized = std::collections::BTreeSet::new();
     categories.iter().all(|category| {
-        !category.starts_with('$')
+        crate::model::is_user_email_category(category)
             && crate::model::valid_jmap_keyword(category)
             && normalized.insert(category.to_ascii_lowercase())
     })

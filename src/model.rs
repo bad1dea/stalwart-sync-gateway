@@ -150,6 +150,10 @@ pub fn valid_jmap_keyword(keyword: &str) -> bool {
         })
 }
 
+pub fn is_user_email_category(keyword: &str) -> bool {
+    !keyword.starts_with('$') && !keyword.starts_with(FLAG_KEYWORD_PREFIX)
+}
+
 impl MailFlag {
     pub fn keywords(&self) -> anyhow::Result<Vec<String>> {
         let bytes = serde_json::to_vec(self)?;
@@ -234,9 +238,7 @@ impl EmailState {
             .filter(|flag| (flag.status == 2 && flagged) || (flag.status == 1 && !flagged));
         let mut categories: Vec<_> = keywords
             .iter()
-            .filter(|keyword| {
-                !keyword.starts_with('$') && !keyword.starts_with(FLAG_KEYWORD_PREFIX)
-            })
+            .filter(|keyword| is_user_email_category(keyword))
             .cloned()
             .collect();
         categories.sort_unstable();

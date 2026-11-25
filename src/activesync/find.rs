@@ -338,7 +338,7 @@ async fn execute(
         let mut query_state = None;
         let mut candidate_total = None;
         let matches_exactly = |email: &crate::model::Email| {
-            email_matches_phrases_with_addresses_and_attachments(
+            email_matches_phrases_with_categories(
                 &email.subject,
                 email.body.as_ref(),
                 &email.from,
@@ -353,6 +353,7 @@ async fn execute(
                 Some(email.keywords.iter().any(|keyword| keyword == "$flagged")),
                 Some(!email.attachments.is_empty()),
                 &email.attachments,
+                &email.keywords,
                 phrase_match,
                 &phrases,
             )
@@ -521,7 +522,7 @@ async fn execute(
         let categories: Vec<_> = email
             .keywords
             .iter()
-            .filter(|keyword| !keyword.starts_with('$'))
+            .filter(|keyword| crate::model::is_user_email_category(keyword))
             .collect();
         if !categories.is_empty() {
             b.start(mail::CATEGORIES);
@@ -2010,6 +2011,47 @@ fn email_matches_phrases_with_addresses_and_attachments(
     phrase_match: query::PhraseMatch,
     phrases: &[(String, String)],
 ) -> anyhow::Result<bool> {
+    email_matches_phrases_with_categories(
+        subject,
+        body,
+        from,
+        to,
+        cc,
+        bcc,
+        received_at,
+        sent_at,
+        size,
+        importance,
+        is_read,
+        is_flagged,
+        has_attachment,
+        attachments,
+        &[],
+        phrase_match,
+        phrases,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn email_matches_phrases_with_categories(
+    subject: &str,
+    body: Option<&crate::model::EmailBody>,
+    from: &str,
+    to: &str,
+    cc: &str,
+    bcc: &str,
+    received_at: Option<&str>,
+    sent_at: Option<&str>,
+    size: u64,
+    importance: u8,
+    is_read: Option<bool>,
+    is_flagged: Option<bool>,
+    has_attachment: Option<bool>,
+    attachments: &[crate::model::EmailAttachment],
+    categories: &[String],
+    phrase_match: query::PhraseMatch,
+    phrases: &[(String, String)],
+) -> anyhow::Result<bool> {
     match phrase_match {
         query::PhraseMatch::All => {
             for (property, phrase) in phrases {
@@ -2042,7 +2084,7 @@ fn email_matches_phrases_with_addresses_and_attachments(
                 } else if boolean_property.is_some() {
                     boolean_match.is_some_and(|value| value == (phrase == "true"))
                 } else {
-                    email_matches_phrase_with_attachments(
+                    email_matches_find_property(
                         subject,
                         body,
                         from,
@@ -2050,6 +2092,7 @@ fn email_matches_phrases_with_addresses_and_attachments(
                         cc,
                         bcc,
                         attachments,
+                        categories,
                         property,
                         phrase,
                     )?
@@ -2133,7 +2176,7 @@ fn email_matches_phrases_with_addresses_and_attachments(
                 let matched = if property.starts_with('$') {
                     boolean_match.is_some_and(|value| value == (phrase == "true"))
                 } else {
-                    email_matches_phrase_with_attachments(
+                    email_matches_find_property(
                         subject,
                         body,
                         from,
@@ -2141,6 +2184,7 @@ fn email_matches_phrases_with_addresses_and_attachments(
                         cc,
                         bcc,
                         attachments,
+                        categories,
                         property,
                         phrase,
                     )?
@@ -2153,7 +2197,7 @@ fn email_matches_phrases_with_addresses_and_attachments(
         }
         query::PhraseMatch::None => {
             for (property, phrase) in phrases {
-                if email_matches_phrase_with_attachments(
+                if email_matches_find_property(
                     subject,
                     body,
                     from,
@@ -2161,6 +2205,7 @@ fn email_matches_phrases_with_addresses_and_attachments(
                     cc,
                     bcc,
                     attachments,
+                    categories,
                     property,
                     phrase,
                 )? {
@@ -2335,7 +2380,7 @@ fn email_matches_phrases_with_addresses_and_attachments(
                             };
                             value.is_some_and(|value| value == (phrase == "true"))
                         } else {
-                            email_matches_phrase_with_attachments(
+                            email_matches_find_property(
                                 subject,
                                 body,
                                 from,
@@ -2343,6 +2388,7 @@ fn email_matches_phrases_with_addresses_and_attachments(
                                 cc,
                                 bcc,
                                 attachments,
+                                categories,
                                 property,
                                 phrase,
                             )?
@@ -2744,6 +2790,39 @@ fn email_matches_phrase_with_addresses(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn email_matches_find_property(
+    subject: &str,
+    body: Option<&crate::model::EmailBody>,
+    from: &str,
+    to: &str,
+    cc: &str,
+    bcc: &str,
+    attachments: &[crate::model::EmailAttachment],
+    categories: &[String],
+    property: &str,
+    phrase: &str,
+) -> anyhow::Result<bool> {
+    if property == "category" {
+        let needle = phrase.to_ascii_lowercase();
+        return Ok(categories
+            .iter()
+            .filter(|category| crate::model::is_user_email_category(category))
+            .any(|category| category.to_ascii_lowercase().contains(&needle)));
+    }
+    email_matches_phrase_with_attachments(
+        subject,
+        body,
+        from,
+        to,
+        cc,
+        bcc,
+        attachments,
+        property,
+        phrase,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn email_matches_phrase_with_attachments(
     subject: &str,
     body: Option<&crate::model::EmailBody>,
@@ -2971,6 +3050,92 @@ fn respond(state: &AppState, document: wbxml::Document) -> Response {
 mod tests {
     use super::*;
     use crate::model::{EmailBody, EmailBodyType};
+
+    #[test]
+    fn category_kql_matches_case_insensitive_substrings() {
+        let categories = vec!["ProjectX".to_owned(), "Work[1}".to_owned()];
+        assert!(email_matches_find_property(
+            "",
+            None,
+            "",
+            "",
+            "",
+            "",
+            &[],
+            &categories,
+            "category",
+            "project"
+        )
+        .unwrap());
+        let (kind, terms) =
+            query::phrases_for_postfilter("category:project AND isread:true").unwrap();
+        assert!(email_matches_phrases_with_categories(
+            "",
+            None,
+            "",
+            "",
+            "",
+            "",
+            None,
+            None,
+            0,
+            1,
+            Some(true),
+            Some(false),
+            Some(false),
+            &[],
+            &categories,
+            kind,
+            &terms,
+        )
+        .unwrap());
+        assert!(!email_matches_phrases_with_categories(
+            "",
+            None,
+            "",
+            "",
+            "",
+            "",
+            None,
+            None,
+            0,
+            1,
+            Some(false),
+            Some(false),
+            Some(false),
+            &[],
+            &categories,
+            kind,
+            &terms,
+        )
+        .unwrap());
+        assert!(email_matches_find_property(
+            "",
+            None,
+            "",
+            "",
+            "",
+            "",
+            &[],
+            &categories,
+            "category",
+            "WORK["
+        )
+        .unwrap());
+        assert!(!email_matches_find_property(
+            "",
+            None,
+            "",
+            "",
+            "",
+            "",
+            &[],
+            &categories,
+            "category",
+            "missing"
+        )
+        .unwrap());
+    }
 
     #[test]
     fn gal_anr_matches_prefixes_across_name_and_email_tokens() {

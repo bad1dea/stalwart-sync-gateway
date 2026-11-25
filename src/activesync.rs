@@ -5012,7 +5012,7 @@ fn write_email_fields(
     let categories: Vec<_> = email
         .keywords
         .iter()
-        .filter(|keyword| !keyword.starts_with('$'))
+        .filter(|keyword| crate::model::is_user_email_category(keyword))
         .cloned()
         .collect();
     if !categories.is_empty() {

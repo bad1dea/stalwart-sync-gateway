@@ -33,6 +33,14 @@ pub(super) fn to_filter(input: &str) -> Result<Value, &'static str> {
         return Ok(json!({}));
     }
     let tokens = tokenize(input)?;
+    if tokens
+        .iter()
+        .any(|token| matches!(token, Token::Word(word) if category_search_term(word.strip_prefix('-').or_else(|| word.strip_prefix('+')).unwrap_or(word)).is_some()))
+    {
+        return phrases_for_postfilter(input)
+            .map(|_| json!({}))
+            .ok_or("category substring query requires local filtering");
+    }
     if let Some(expanded) = expand_boolean_text_operators(&tokens) {
         let has_exact_term = has_exact_term_outside_boolean_operators(&tokens);
         if has_exact_term && flat_phrase_boolean_expression(&expanded).is_some() {
@@ -156,6 +164,25 @@ pub(super) fn phrases_for_postfilter(input: &str) -> Option<(PhraseMatch, Vec<(S
         if let Some(term) = prefix_search_term(word) {
             return Some((PhraseMatch::Any, vec![term]));
         }
+        if let Some(term) = category_search_term(word) {
+            return Some((PhraseMatch::Any, vec![term]));
+        }
+        if let Some((property, value)) = word.strip_prefix('-').and_then(category_search_term) {
+            return Some((PhraseMatch::None, vec![(property, value)]));
+        }
+    }
+    if let [Token::Not, Token::Word(word)] = tokens.as_slice() {
+        if let Some((property, value)) = category_search_term(word) {
+            return Some((PhraseMatch::None, vec![(property, value)]));
+        }
+    }
+    if tokens.iter().any(
+        |token| matches!(token, Token::Word(word) if category_search_term(word.strip_prefix('-').or_else(|| word.strip_prefix('+')).unwrap_or(word)).is_some()),
+    ) {
+        return Some((
+            PhraseMatch::Expression,
+            flat_phrase_boolean_expression(&tokens)?,
+        ));
     }
     if matches!(tokens.first(), Some(Token::Words)) {
         let mut position = 1;
@@ -798,7 +825,14 @@ fn has_exact_term_outside_boolean_operators(tokens: &[Token]) -> bool {
             continue;
         }
         if let Token::Word(word) = &tokens[position] {
-            if search_phrase_word(word).is_some() || prefix_search_term(word).is_some() {
+            let word = word
+                .strip_prefix('+')
+                .or_else(|| word.strip_prefix('-'))
+                .unwrap_or(word);
+            if search_phrase_word(word).is_some()
+                || prefix_search_term(word).is_some()
+                || category_search_term(word).is_some()
+            {
                 return true;
             }
         }
@@ -1150,6 +1184,7 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                     return None;
                 }
                 if let Some((property, value)) = search_phrase_word(word)
+                    .or_else(|| category_search_term(word))
                     .or_else(|| simple_search_property_word(word))
                     .or_else(|| qualified_prefix_search_term(word))
                 {
@@ -1177,6 +1212,7 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
                 }
             } else if let Some(negative) = word.strip_prefix('-') {
                 if let Some((property, value)) = search_phrase_word(negative)
+                    .or_else(|| category_search_term(negative))
                     .or_else(|| simple_search_property_word(negative))
                     .or_else(|| qualified_prefix_search_term(negative))
                 {
@@ -1205,6 +1241,7 @@ fn flat_phrase_boolean_expression(tokens: &[Token]) -> Option<Vec<(String, Strin
             } else {
                 let positive = word.strip_prefix('+').unwrap_or(word);
                 if let Some(phrase) = search_phrase_word(positive)
+                    .or_else(|| category_search_term(positive))
                     .or_else(|| simple_search_property_word(positive))
                     .or_else(|| qualified_prefix_search_term(positive))
                 {
@@ -1491,6 +1528,24 @@ fn simple_search_property_word(word: &str) -> Option<(String, String)> {
         return None;
     }
     Some((property, value.to_owned()))
+}
+
+fn category_search_term(word: &str) -> Option<(String, String)> {
+    let (property, value) = word.split_once(':')?;
+    if !property.eq_ignore_ascii_case("category") {
+        return None;
+    }
+    let value = if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+        &value[1..value.len() - 1]
+    } else if !value.contains('"') {
+        value
+    } else {
+        return None;
+    };
+    if value.trim().is_empty() || value.contains(['*', '?', '\\']) {
+        return None;
+    }
+    Some(("category".to_owned(), value.to_ascii_lowercase()))
 }
 
 fn prefix_search_term(word: &str) -> Option<(String, String)> {
@@ -2003,6 +2058,17 @@ fn word_condition(word: &str) -> Result<Value, &'static str> {
                 filter
             });
         }
+        if property.eq_ignore_ascii_case("category") {
+            if !matches!(operator, "=" | "<>") {
+                return Err("invalid category comparison");
+            }
+            let exact = condition("category", value)?;
+            return Ok(if operator == "<>" {
+                json!({"operator":"NOT", "conditions":[exact]})
+            } else {
+                exact
+            });
+        }
         if known_property(property) {
             return Err("unsupported search comparison");
         }
@@ -2302,7 +2368,9 @@ fn condition(property: &str, value: &str) -> Result<Value, &'static str> {
                 .strip_prefix('"')
                 .and_then(|v| v.strip_suffix('"'))
                 .unwrap_or(value);
-            if value.starts_with('$') || !crate::model::valid_jmap_keyword(value) {
+            if !crate::model::is_user_email_category(value)
+                || !crate::model::valid_jmap_keyword(value)
+            {
                 return Err("invalid category search value");
             }
             Ok(json!({"hasKeyword": value.to_ascii_lowercase()}))
@@ -3104,21 +3172,43 @@ mod tests {
     }
 
     #[test]
-    fn category_property_maps_to_a_jmap_keyword() {
-        assert_eq!(
-            to_filter("category:ProjectX").unwrap(),
-            json!({"hasKeyword":"projectx"})
-        );
-        assert_eq!(
-            to_filter("Category:\"ProjectX\"").unwrap(),
-            json!({"hasKeyword":"projectx"})
-        );
-        assert!(to_filter("category:\"two words\"").is_err());
+    fn category_colon_uses_local_contains_and_equals_uses_exact_keyword() {
+        assert_eq!(to_filter("category:ProjectX").unwrap(), json!({}));
+        assert_eq!(to_filter("Category:\"ProjectX\"").unwrap(), json!({}));
+        assert_eq!(to_filter("category:\"two words\"").unwrap(), json!({}));
         assert_eq!(
             condition("category", "tag[1}").unwrap(),
             json!({"hasKeyword":"tag[1}"})
         );
         assert!(condition("category", "tag]1").is_err());
+        assert_eq!(
+            to_filter("category=ProjectX").unwrap(),
+            json!({"hasKeyword":"projectx"})
+        );
+        assert_eq!(
+            to_filter("category<>ProjectX").unwrap(),
+            json!({"operator":"NOT", "conditions":[{"hasKeyword":"projectx"}]})
+        );
+        assert_eq!(
+            phrases_for_postfilter("category:project").unwrap(),
+            (
+                PhraseMatch::Any,
+                vec![("category".to_owned(), "project".to_owned())]
+            )
+        );
+        assert_eq!(
+            to_filter("category:project AND isread:true").unwrap(),
+            json!({})
+        );
+        assert!(phrases_for_postfilter("category:project AND isread:true").is_some());
+        assert_eq!(to_filter("-category:project").unwrap(), json!({}));
+        assert_eq!(
+            phrases_for_postfilter("-category:project").unwrap(),
+            (
+                PhraseMatch::None,
+                vec![("category".to_owned(), "project".to_owned())]
+            )
+        );
     }
 
     #[test]

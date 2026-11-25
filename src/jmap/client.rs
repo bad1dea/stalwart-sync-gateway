@@ -6388,7 +6388,8 @@ impl JmapClient {
         }
         if let Some(categories) = categories {
             let valid_keyword = |category: &str| {
-                !category.starts_with('$') && crate::model::valid_jmap_keyword(category)
+                crate::model::is_user_email_category(category)
+                    && crate::model::valid_jmap_keyword(category)
             };
             anyhow::ensure!(
                 categories.iter().all(|category| valid_keyword(category)),
@@ -6396,7 +6397,7 @@ impl JmapClient {
             );
             for key in keywords
                 .keys()
-                .filter(|key| !key.starts_with('$'))
+                .filter(|key| crate::model::is_user_email_category(key))
                 .cloned()
                 .collect::<Vec<_>>()
             {
@@ -6522,7 +6523,7 @@ impl JmapClient {
                 .collect();
             let observed: BTreeSet<_> = observed
                 .iter()
-                .filter(|(key, value)| **value && !key.starts_with('$'))
+                .filter(|(key, value)| **value && crate::model::is_user_email_category(key))
                 .map(|(key, _)| key.clone())
                 .collect();
             anyhow::ensure!(
@@ -13922,14 +13923,15 @@ mod email_state_retry_tests {
             async move {
                 let call = &request["methodCalls"][0];
                 let response = match calls.fetch_add(1, Ordering::SeqCst) {
-                    0 => serde_json::json!(["Email/get", {"state":"s1", "list":[{"id":"m", "keywords":{"$seen":true,"$flagged":true,"oldcategory":true}}]}, "get"]),
+                    0 => serde_json::json!(["Email/get", {"state":"s1", "list":[{"id":"m", "keywords":{"$seen":true,"$flagged":true,"oldcategory":true,"easflag-internal":true}}]}, "get"]),
                     1 => {
                         assert_eq!(call[1]["ifInState"], "s1");
                         assert_eq!(call[1]["update"]["m"]["keywords/oldcategory"], serde_json::Value::Null);
+                        assert!(call[1]["update"]["m"].as_object().unwrap().get("keywords/easflag-internal").is_none());
                         assert_eq!(call[1]["update"]["m"]["keywords/projectx"], true);
                         serde_json::json!(["Email/set", {"updated":{"m":null}}, "set"])
                     }
-                    2 => serde_json::json!(["Email/get", {"list":[{"id":"m", "keywords":{"$seen":true,"$flagged":true,"projectx":true}}]}, "verify"]),
+                    2 => serde_json::json!(["Email/get", {"list":[{"id":"m", "keywords":{"$seen":true,"$flagged":true,"projectx":true,"easflag-internal":true}}]}, "verify"]),
                     _ => panic!("unexpected JMAP request"),
                 };
                 Json(serde_json::json!({"methodResponses":[response]}))
