@@ -91,6 +91,17 @@ started `2026-11-25T05:59:12Z`, restart count zero, mesh `/healthz` and
 [MaxSize](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/b4f7c3f6-aea7-4267-ac87-fa7d565a18ae),
 and [Picture](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/58e18516-d6b0-4d56-b6e0-efe2c54b0f0e).
 
+Enabled scheduled OOF Get responses now preserve both JMAP schedule bounds as
+EAS `StartTime` and `EndTime`; indefinite enabled responses omit both. The
+WBXML regression checks `OofState`, exact bounds, bound ordering, and the
+three audience message blocks, plus the indefinite case. Full suite: 437
+passed, 77 ignored; strict Clippy and formatting pass. Deployed to the
+isolated Amy bridge as `localhost/eas16-isolated:8688c10` (image
+`sha256:b35e2ee48d619b68557c16aad3af5d1e04d2b7def6ae1bdd93f2b213164328a3`),
+started `2026-11-25T08:25:16Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. No protocol override is set; it remains at 14.0. Real-client
+enabled OOF behavior remains unverified.
+
 Find now extracts Excel Binary Workbook (`.xlsb`) cell values through the
 existing vendored Calamine parser, including its registered macro-enabled
 content type. A real Calamine XLSB fixture verifies extraction of worksheet
@@ -2086,7 +2097,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | SmartReply / SmartForward | **Done, threading fidelity confirmed** | Same `EmailSubmission/set` path as SendMail | Live-tested this session with a self-addressed message carrying a real Message-ID/In-Reply-To/References triplet: byte-identical values confirmed on both the Sent Items copy and the delivered Inbox copy. See roadmap item 4 for the full test. |
 | ResolveRecipients / ValidateCert | **Implemented, end-to-end covered** | Principal/contact directory matching; local X.509 chain validation | `src/activesync/resolve_recipients.rs` and `src/activesync/validate_cert.rs`; regression coverage in `src/push_tests.rs`. S/MIME compose/signing remains separate and is not implied by these commands. |
 | Settings: DeviceInformation / UserInformation | **Done (Get)** | Static/echo — no real JMAP-backed device-info storage | `PrimarySmtpAddress` bug (unrecognized field, cascading parse failure) fixed this session by removing it; `EmailAddresses>SMTPAddress` carries the same info in a valid shape. |
-| Settings: Oof (Get) | **Done** *(disabled path live-verified; enabled path spec-derived, not device-verified)* | `VacationResponse/get` (`src/jmap/vacation.rs`) | Real account state now read on every Get. Disabled (`OofState=0`) shape confirmed live, unchanged from the earlier z-push comparison fix. Enabled shape's `OofMessage` block is built from MS-ASSETTINGS' own schema, not live-toggled -- see `src/jmap/vacation.rs` module doc for why (toggling `isEnabled=true` on the real account risks a genuine auto-reply going out unsupervised). Verify with a real device present before fully trusting the enabled path. |
+| Settings: Oof (Get) | **Done** *(disabled path live-verified; enabled path spec-derived, not device-verified)* | `VacationResponse/get` (`src/jmap/vacation.rs`) | Real account state now read on every Get. Disabled (`OofState=0`) shape confirmed live, unchanged from the earlier z-push comparison fix. Enabled scheduled responses include both StartTime and EndTime, and indefinite responses omit both; WBXML regression covers these shapes. Enabled behavior has not been tested with a real device. |
 | Settings: Oof (Set) | **Done, persists and validates** | `VacationResponse/set` (`src/jmap/vacation.rs`) | Live-verified end to end with `isEnabled=false` (safe -- confirmed via direct JMAP query that `subject`/`textBody` actually persisted to the real `VacationResponse.singleton` object, then cleaned back up). `isEnabled=true` was deliberately never live-toggled for the same reason as the Get path above. Set now accepts only OofState 0/1/2, requires StartTime and EndTime together (Status 2 otherwise), and drops schedule times for non-time-based states per MS-ASCMD. Omitted Set fields preserve their JMAP values; a ReplyMessage-only update no longer disables Oof or erases a schedule. It returns failure status 100 if JMAP write or readback fails instead of acknowledging a change that was not persisted; the Settings status specification reserves 100–255 for property-specific errors. Partial-update behavior is deployed in `deploy-2026-11-24-eas-oof-partial-b067da4` (homelab `b8be778`, image `sha256:53b9c323df006c8191a44362f91343882af38fb15f7508a4a59c51456cbdd589`, `/healthz` and `/readyz` healthy). |
 | Settings: RightsManagementInformation (IRM) | **Missing, out of scope** | N/A | Enterprise feature, not relevant to this account. |
 | Provision | **Done** | N/A (gateway-local, accept-everything policy) | PolicyStatus bug fixed this session. |
