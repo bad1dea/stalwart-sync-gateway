@@ -12,6 +12,16 @@ handling. Check the current Rust implementation before treating any older
 
 Current prioritized work:
 
+Calendar `DisallowNewTimeProposal` client writes now parse the EAS boolean,
+merge `X-MICROSOFT-DISALLOW-COUNTER` into Stalwart's retained iCalendar
+extension without dropping existing properties, and verify the value through
+`CalendarEvent/get` after create/update. The write uses the existing
+`ifInState` guard for updates and fails the operation if readback does not
+match. Parser, merge, and mocked JMAP create/update/readback regressions pass.
+Full suite: 410 passed, 76 ignored; strict Clippy, formatting, and diff checks
+pass. This source change is not yet committed or deployed; live Stalwart
+storage behavior remains to be confirmed during rollout.
+
 Find now extracts Excel Binary Workbook (`.xlsb`) cell values through the
 existing vendored Calamine parser, including its registered macro-enabled
 content type. A real Calamine XLSB fixture verifies extraction of worksheet
@@ -1031,9 +1041,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    iCalendar properties in the `iCalendar.properties` extension. When the
    `X-MICROSOFT-DISALLOW-COUNTER` boolean is present, EAS now emits its value
    for protocol 14.0 and newer. Ambiguous duplicates and malformed values are
-   omitted. Client changes fail closed because JSCalendar has no equivalent
-   standard property and writing the Microsoft extension has not been
-   verified through Stalwart's storage conversion. Regression tests cover
+   omitted. Client writes now merge the Microsoft boolean into the retained
+   iCalendar extension and verify persistence by reading the event back after
+   create/update; a mismatch fails the operation. Regression tests cover
    read conversion, versioned response serialization, hash changes, and
    request rejection. Full suite: 327 passed, 73 ignored; strict Clippy,
    formatting, and diff checks pass. Deployed as

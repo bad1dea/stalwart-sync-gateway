@@ -1317,7 +1317,7 @@ pub struct CalendarFields {
     pub unsupported_online_meeting: bool,
     /// AppointmentReplyTime is response-only per MS-ASCAL.
     pub unsupported_appointment_reply_time: bool,
-    /// DisallowNewTimeProposal is currently read-only in this gateway.
+    pub disallow_new_time_proposal: Option<bool>,
     pub unsupported_disallow_new_time_proposal: bool,
     pub attendees: Vec<AttendeeField>,
     pub attendees_present: bool,
@@ -2778,6 +2778,8 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
     let mut uid_count = 0;
     let mut response_requested_count = 0;
     let mut response_requested_text = String::new();
+    let mut disallow_new_time_proposal_count = 0;
+    let mut disallow_new_time_proposal_text = String::new();
     let mut latitude: Option<String> = None;
     let mut longitude: Option<String> = None;
 
@@ -2819,10 +2821,14 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                 }
                 if same_token(*token, calendar::DISALLOW_NEW_TIME_PROPOSAL)
                     && path
-                        .iter()
-                        .any(|parent| same_token(*parent, airsync::APPLICATION_DATA))
+                        .last()
+                        .is_some_and(|parent| same_token(*parent, airsync::APPLICATION_DATA))
                 {
-                    fields.unsupported_disallow_new_time_proposal = true;
+                    disallow_new_time_proposal_count += 1;
+                    disallow_new_time_proposal_text.clear();
+                    if !token.has_content {
+                        fields.unsupported_disallow_new_time_proposal = true;
+                    }
                 }
                 if same_token(*token, calendar::RESPONSE_REQUESTED)
                     && path
@@ -3058,6 +3064,11 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                     && same_token(path[path.len() - 2], airsync::APPLICATION_DATA)
                 {
                     response_requested_text.push_str(text);
+                } else if same_token(top, calendar::DISALLOW_NEW_TIME_PROPOSAL)
+                    && path.len() >= 2
+                    && same_token(path[path.len() - 2], airsync::APPLICATION_DATA)
+                {
+                    disallow_new_time_proposal_text.push_str(text);
                 }
             }
             Node::End => {
@@ -3087,6 +3098,16 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
                         "0" => fields.response_requested = Some(false),
                         "1" => fields.response_requested = Some(true),
                         _ => fields.unsupported_response_requested = true,
+                    }
+                }
+                if path.len() >= 2
+                    && same_token(path[path.len() - 1], calendar::DISALLOW_NEW_TIME_PROPOSAL)
+                    && same_token(path[path.len() - 2], airsync::APPLICATION_DATA)
+                {
+                    match disallow_new_time_proposal_text.as_str() {
+                        "0" => fields.disallow_new_time_proposal = Some(false),
+                        "1" => fields.disallow_new_time_proposal = Some(true),
+                        _ => fields.unsupported_disallow_new_time_proposal = true,
                     }
                 }
                 if path.len() >= 2
@@ -3151,6 +3172,8 @@ fn extract_calendar_fields(nodes: &[Node]) -> CalendarFields {
         sensitivity_count > 1 || (sensitivity_count == 1 && fields.sensitivity.is_none());
     fields.unsupported_response_requested |= response_requested_count > 1
         || (response_requested_count == 1 && fields.response_requested.is_none());
+    fields.unsupported_disallow_new_time_proposal |= disallow_new_time_proposal_count > 1
+        || (disallow_new_time_proposal_count == 1 && fields.disallow_new_time_proposal.is_none());
     fields.uid_present = uid_count > 0;
     fields.unsupported_client_uid = client_uid_count > 1
         || (client_uid_count == 1
@@ -4540,15 +4563,28 @@ mod tests {
     }
 
     #[test]
-    fn disallow_new_time_proposal_is_rejected_in_client_changes() {
-        let mut builder = super::DocumentBuilder::new();
-        builder.start(super::airsync::APPLICATION_DATA);
-        builder.leaf(super::calendar::DISALLOW_NEW_TIME_PROPOSAL, "1");
-        builder.end();
-        assert!(
-            super::extract_calendar_fields(&builder.finish().nodes)
-                .unsupported_disallow_new_time_proposal
-        );
+    fn disallow_new_time_proposal_is_parsed_and_validated() {
+        for (value, expected) in [("0", false), ("1", true)] {
+            let mut builder = super::DocumentBuilder::new();
+            builder.start(super::airsync::APPLICATION_DATA);
+            builder.leaf(super::calendar::DISALLOW_NEW_TIME_PROPOSAL, value);
+            builder.end();
+            let fields = super::extract_calendar_fields(&builder.finish().nodes);
+            assert_eq!(fields.disallow_new_time_proposal, Some(expected));
+            assert!(!fields.unsupported_disallow_new_time_proposal);
+        }
+        for values in [&["2"][..], &["1", "0"][..], &[""][..]] {
+            let mut builder = super::DocumentBuilder::new();
+            builder.start(super::airsync::APPLICATION_DATA);
+            for value in values {
+                builder.leaf(super::calendar::DISALLOW_NEW_TIME_PROPOSAL, *value);
+            }
+            builder.end();
+            assert!(
+                super::extract_calendar_fields(&builder.finish().nodes)
+                    .unsupported_disallow_new_time_proposal
+            );
+        }
     }
 
     #[test]

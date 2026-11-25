@@ -3579,6 +3579,41 @@ impl JmapClient {
         Ok(())
     }
 
+    async fn verify_calendar_disallow_new_time_proposal(
+        &self,
+        auth: &AuthenticatedSession,
+        id: &str,
+        expected: bool,
+    ) -> anyhow::Result<()> {
+        let account = auth
+            .session
+            .primary_account_for(capabilities::CALENDARS)
+            .context("JMAP Calendars capability is unavailable")?;
+        let response: JmapResponse<serde_json::Value> = self
+            .api_call(
+                auth,
+                &[capabilities::CORE.to_owned(), capabilities::CALENDARS.to_owned()],
+                vec![MethodCall::new(
+                    "CalendarEvent/get",
+                    serde_json::json!({"accountId":account,"ids":[id],"properties":["id","iCalendar"]}),
+                    "verify-disallow-counter",
+                )],
+            )
+            .await?;
+        let item = response
+            .method_responses
+            .iter()
+            .find(|method| method.0 == "CalendarEvent/get")
+            .and_then(|method| method.1["list"].as_array())
+            .and_then(|items| items.iter().find(|item| item["id"] == id))
+            .context("calendar proposal verification failed")?;
+        anyhow::ensure!(
+            calendar_disallow_new_time_proposal(item.get("iCalendar")) == Some(expected),
+            "JMAP did not retain DisallowNewTimeProposal"
+        );
+        Ok(())
+    }
+
     pub async fn verify_calendar_reminder(
         &self,
         auth: &AuthenticatedSession,
@@ -3793,6 +3828,7 @@ impl JmapClient {
                 || fields.end_time.is_some()
                 || fields.attendees_present
                 || fields.response_requested.is_some()
+                || fields.disallow_new_time_proposal.is_some()
                 || fields.recurrence_present
         }) {
             let response: JmapResponse<serde_json::Value> = self
@@ -3804,7 +3840,7 @@ impl JmapClient {
                     ],
                     vec![MethodCall::new(
                         "CalendarEvent/get",
-                        serde_json::json!({"accountId":account_id,"ids":[id],"properties":["id","timeZone"]}),
+                        serde_json::json!({"accountId":account_id,"ids":[id],"properties":["id","timeZone","iCalendar"]}),
                         "state",
                     )],
                 )
@@ -3825,6 +3861,19 @@ impl JmapClient {
                 .and_then(|items| items.iter().find(|item| item["id"] == id))
                 .and_then(|item| item["timeZone"].as_str())
                 .map(str::to_owned);
+            if let Some(disallow) = fields.disallow_new_time_proposal {
+                let item = result.1["list"]
+                    .as_array()
+                    .and_then(|items| items.iter().find(|item| item["id"] == id))
+                    .context("calendar event disappeared before custom-property update")?;
+                event.insert(
+                    "iCalendar".to_owned(),
+                    calendar_icalendar_with_disallow_new_time_proposal(
+                        item.get("iCalendar"),
+                        disallow,
+                    )?,
+                );
+            }
             update_state = Some(
                 result.1["state"]
                     .as_str()
@@ -3843,6 +3892,14 @@ impl JmapClient {
                     None => serde_json::Value::Null,
                 },
             );
+        }
+        if id.is_none() {
+            if let Some(disallow) = fields.disallow_new_time_proposal {
+                event.insert(
+                    "iCalendar".to_owned(),
+                    calendar_icalendar_with_disallow_new_time_proposal(None, disallow)?,
+                );
+            }
         }
         if clear_recurrence_exceptions
             && (fields.recurrence_present
@@ -4455,6 +4512,14 @@ impl JmapClient {
                         .get("updated")
                         .and_then(|value| value.get(existing_id));
                     if updated.is_some() {
+                        if let Some(disallow) = fields.disallow_new_time_proposal {
+                            self.verify_calendar_disallow_new_time_proposal(
+                                auth,
+                                existing_id,
+                                disallow,
+                            )
+                            .await?;
+                        }
                         if let Some(reminder) = fields.reminder.filter(|_| reminder_changed) {
                             let verify: JmapResponse<serde_json::Value> = self
                                 .api_call(
@@ -4519,6 +4584,10 @@ impl JmapClient {
                     .and_then(|event| event.get("id"))
                     .and_then(|value| value.as_str())
                 {
+                    if let Some(disallow) = fields.disallow_new_time_proposal {
+                        self.verify_calendar_disallow_new_time_proposal(auth, new_id, disallow)
+                            .await?;
+                    }
                     if let Some(reminder) = fields.reminder {
                         self.verify_calendar_reminder(auth, new_id, reminder)
                             .await?;
@@ -8051,6 +8120,54 @@ fn calendar_disallow_new_time_proposal(icalendar: Option<&serde_json::Value>) ->
         })
 }
 
+fn calendar_icalendar_with_disallow_new_time_proposal(
+    existing: Option<&serde_json::Value>,
+    value: bool,
+) -> anyhow::Result<serde_json::Value> {
+    let mut icalendar = match existing {
+        Some(value) if value.is_object() => value.clone(),
+        Some(serde_json::Value::Null) | None => serde_json::json!({}),
+        Some(_) => anyhow::bail!("invalid JMAP iCalendar extension"),
+    };
+    let properties = icalendar
+        .as_object_mut()
+        .context("invalid JMAP iCalendar extension")?
+        .entry("properties")
+        .or_insert_with(|| serde_json::json!([]));
+    let properties = properties
+        .as_array_mut()
+        .context("invalid JMAP iCalendar properties")?;
+    let mut matches = properties.iter_mut().filter(|property| {
+        property
+            .as_array()
+            .and_then(|property| property.first())
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case("X-MICROSOFT-DISALLOW-COUNTER"))
+    });
+    if let Some(property) = matches.next() {
+        anyhow::ensure!(
+            matches.next().is_none(),
+            "ambiguous duplicate DisallowNewTimeProposal properties"
+        );
+        let property = property
+            .as_array_mut()
+            .context("invalid DisallowNewTimeProposal property")?;
+        anyhow::ensure!(
+            property.len() >= 4,
+            "incomplete DisallowNewTimeProposal property"
+        );
+        property[3] = serde_json::Value::Bool(value);
+    } else {
+        properties.push(serde_json::json!([
+            "X-MICROSOFT-DISALLOW-COUNTER",
+            {},
+            "boolean",
+            value
+        ]));
+    }
+    Ok(icalendar)
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct CalendarEventLocation {
     name: Option<String>,
@@ -9514,6 +9631,43 @@ mod tests {
     }
 
     #[test]
+    fn microsoft_disallow_counter_write_preserves_other_icalendar_properties() {
+        let existing = serde_json::json!({
+            "properties": [
+                ["X-OTHER-PROPERTY", {"X-PARAM":"kept"}, "text", "value"],
+                ["X-MICROSOFT-DISALLOW-COUNTER", {}, "boolean", false]
+            ],
+            "components": [["VALARM", [], []]]
+        });
+        let updated =
+            super::calendar_icalendar_with_disallow_new_time_proposal(Some(&existing), true)
+                .unwrap();
+        assert_eq!(updated["properties"].as_array().unwrap().len(), 2);
+        assert_eq!(updated["properties"][0], existing["properties"][0]);
+        assert_eq!(updated["properties"][1][3], true);
+        assert_eq!(updated["components"], existing["components"]);
+        assert_eq!(
+            super::calendar_disallow_new_time_proposal(Some(&updated)),
+            Some(true)
+        );
+
+        let created =
+            super::calendar_icalendar_with_disallow_new_time_proposal(None, false).unwrap();
+        assert_eq!(
+            super::calendar_disallow_new_time_proposal(Some(&created)),
+            Some(false)
+        );
+        let duplicate = serde_json::json!({"properties":[
+            ["X-MICROSOFT-DISALLOW-COUNTER",{},"boolean",true],
+            ["X-MICROSOFT-DISALLOW-COUNTER",{},"boolean",false]
+        ]});
+        assert!(
+            super::calendar_icalendar_with_disallow_new_time_proposal(Some(&duplicate), true)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn appointment_reply_time_uses_only_the_unique_authenticated_attendee() {
         let participants: std::collections::BTreeMap<String, super::ParticipantObject> =
             serde_json::from_value(serde_json::json!({
@@ -10454,6 +10608,181 @@ mod calendar_update_state_tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[tokio::test]
+    async fn calendar_update_persists_and_verifies_disallow_new_time_proposal() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = requests.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(request): Json<serde_json::Value>| {
+                let request_count = request_count.clone();
+                async move {
+                    let call = &request["methodCalls"][0];
+                    match request_count.fetch_add(1, Ordering::SeqCst) {
+                        0 => {
+                            assert_eq!(call[0], "CalendarEvent/get");
+                            assert!(call[1]["properties"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .any(|property| property == "iCalendar"));
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/get", {"state":"state-1", "list":[{
+                                    "id":"event-1", "timeZone":"Etc/UTC",
+                                    "iCalendar":{"properties":[[
+                                        "X-OTHER-PROPERTY", {}, "text", "preserve me"
+                                    ]]}
+                                }]}, "state"
+                            ]]}))
+                        }
+                        1 => {
+                            assert_eq!(call[0], "CalendarEvent/set");
+                            assert_eq!(call[1]["ifInState"], "state-1");
+                            let update = &call[1]["update"]["event-1"];
+                            assert_eq!(update["title"], "Changed title");
+                            assert_eq!(
+                                update["iCalendar"]["properties"].as_array().unwrap().len(),
+                                2
+                            );
+                            assert_eq!(update["iCalendar"]["properties"][0][0], "X-OTHER-PROPERTY");
+                            assert_eq!(
+                                update["iCalendar"]["properties"][1][0],
+                                "X-MICROSOFT-DISALLOW-COUNTER"
+                            );
+                            assert_eq!(update["iCalendar"]["properties"][1][3], true);
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/set", {"updated":{"event-1":null}}, "0"
+                            ]]}))
+                        }
+                        2 => {
+                            assert_eq!(call[0], "CalendarEvent/get");
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/get", {"list":[{
+                                    "id":"event-1", "iCalendar":{"properties":[
+                                        ["X-OTHER-PROPERTY", {}, "text", "preserve me"],
+                                        ["X-MICROSOFT-DISALLOW-COUNTER", {}, "boolean", true]
+                                    ]}
+                                }]}, "verify-disallow-counter"
+                            ]]}))
+                        }
+                        _ => panic!("unexpected JMAP call"),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CALENDARS:"a"},
+            "apiUrl":url, "downloadUrl":url, "uploadUrl":url, "username":"user", "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let fields = crate::wbxml::eas::CalendarFields {
+            subject: Some("Changed title".into()),
+            disallow_new_time_proposal: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            client
+                .save_calendar_event(&auth, "calendar", Some("event-1"), None, &fields, false)
+                .await
+                .unwrap(),
+            "event-1"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn calendar_create_persists_and_verifies_disallow_new_time_proposal() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = requests.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(request): Json<serde_json::Value>| {
+                let request_count = request_count.clone();
+                async move {
+                    let call = &request["methodCalls"][0];
+                    match request_count.fetch_add(1, Ordering::SeqCst) {
+                        0 => {
+                            assert_eq!(call[0], "CalendarEvent/set");
+                            assert_eq!(
+                                call[1]["create"]["e1"]["iCalendar"]["properties"][0][0],
+                                "X-MICROSOFT-DISALLOW-COUNTER"
+                            );
+                            assert_eq!(
+                                call[1]["create"]["e1"]["iCalendar"]["properties"][0][3],
+                                true
+                            );
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/set", {"created":{"e1":{"id":"event-1"}}}, "0"
+                            ]]}))
+                        }
+                        1 => {
+                            assert_eq!(call[0], "CalendarEvent/get");
+                            Json(serde_json::json!({"methodResponses":[[
+                                "CalendarEvent/get", {"list":[{
+                                    "id":"event-1", "iCalendar":{"properties":[
+                                        ["X-MICROSOFT-DISALLOW-COUNTER", {}, "boolean", true]
+                                    ]}
+                                }]}, "verify-disallow-counter"
+                            ]]}))
+                        }
+                        _ => panic!("unexpected JMAP call"),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CALENDARS:"a"},
+            "apiUrl":url, "downloadUrl":url, "uploadUrl":url, "username":"user", "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        let fields = crate::wbxml::eas::CalendarFields {
+            disallow_new_time_proposal: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            client
+                .save_calendar_event(&auth, "calendar", None, None, &fields, false)
+                .await
+                .unwrap(),
+            "event-1"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
 
     #[tokio::test]
     async fn calendar_create_maps_recurrence_and_response_requested() {
