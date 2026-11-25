@@ -131,24 +131,27 @@ fields, including Boolean expressions with supported predicates. Trailing `*`
 prefixes on proximity terms are matched against token starts. `attachment:`
 name searches are matched locally against attachment metadata. String-property
 `*` tests and negated property-presence restrictions are evaluated locally.
-Text, JSON, XML,
-text-bearing PDF, EPUB XHTML, OOXML Word/Excel/PowerPoint (including
-macro-enabled variants), OpenDocument Text/Spreadsheet/Presentation, and
-allowlisted text/config files inside generic ZIP archives are extracted for
-exact text/proximity matching up to
-8 MiB input and 4 MiB extracted text, with bounded archive expansion. CSV,
-NDJSON, YAML, and TOML application media types use charset-aware text decoding.
-Legacy `.xls` workbooks are also parsed
-with a 250,000-cell dense-range limit to prevent oversized worksheet coordinates
-from causing large allocations. Legacy binary Word and PowerPoint formats,
-Word/Excel/PowerPoint package comments are included within the XML budget.
-Scanned-only PDFs with up to three image-only pages use bounded Poppler
-rendering and English Tesseract OCR. Mixed PDFs retain native text and OCR
-only pages without extractable text, including when the document has more
-than three total pages. PDFs with more than three image-only pages remain
-unsupported to avoid partial-content false matches. Attachments
-larger than 8 MiB also remain outside exact matching. These extraction changes
-are source-tested; real-client validation remains open. Find is
+Text, JSON, XML, text-bearing PDF, EPUB XHTML, OOXML Word/Excel/PowerPoint
+(including macro-enabled variants), OpenDocument Text/Spreadsheet/Presentation,
+legacy `.doc`/`.xls`/`.ppt`/`.xlsb`, Outlook `.msg`, RFC 822 messages (including
+nested attached messages), and allowlisted text/config/source files inside
+generic ZIP archives are extracted for exact text/proximity matching. Word,
+Excel, and PowerPoint package comments are included. Text attachments honor
+declared charsets and XML declarations. Raster attachments in PNG, JPEG, GIF,
+TIFF, BMP, and WebP use bounded English Tesseract OCR. PDFs use bounded
+Poppler/Tesseract OCR for image-only pages: up to 100 such pages per attachment,
+with a 30-second total runtime budget. Mixed PDFs retain native text and OCR
+only pages without extractable text, regardless of total page count. Downloaded
+attachments and extracted text are each capped at 16 MiB; generic ZIP expansion
+is also capped at 16 MiB. Larger attachments and PDFs exceeding the OCR page or
+time budget remain outside exact local matching.
+
+GAL results currently map Stalwart `Principal` identity fields (display name,
+alias, and email). When the request asks for photos, each result includes
+`gal:Picture/Status=173` (`NoPicture`), since Principal records expose no photo
+data; `MaxSize` and `MaxPictures` are validated against the protocol limits.
+The optional `Options/Range` may be omitted. These paths have source-level
+regression coverage; real-client 16.1 validation remains open. Find is
 protocol-version gated to 16.1 and is not advertised while production negotiates
 only 14.0. Mailbox results include the EAS `Importance` response property in
 low/normal/high wire values.

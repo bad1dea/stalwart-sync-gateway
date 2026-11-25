@@ -164,7 +164,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    regression now checks the enabled Oof Get response's scheduled state,
    end-time shape, and three audience-specific message blocks; it does not
    replace checking the enabled state with a real client. The full current
-   suite passes 404 tests (75 ignored); strict Clippy, formatting, and diff
+   suite passes 407 tests (76 ignored); strict Clippy, formatting, and diff
    checks pass.
    Deployed with that production default as
    `deploy-2026-11-24-eas-16.1-opt-in-13bea13`; homelab commit `fcb698e`, image
@@ -172,7 +172,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    started `2026-11-24T23:30:09Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. The container has no protocol override, so the live
    production endpoint continues to use the tested 14.0 default.
-2. **Find content coverage.** Current bounded extraction supports legacy `.xls`,
+2. **Find content coverage — code paths complete within explicit resource
+   budgets.** Bounded extraction supports legacy `.xls`,
    binary Excel `.xlsb`,
    `.ppt`, and `.doc`, EPUB, macro-enabled OOXML, RFC 822 messages, Outlook `.msg`
    attachments including compressed-RTF fallback and nested attached messages,
@@ -181,11 +182,13 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    Word, Excel, and PowerPoint package comment text, plus
    MIME-declared charsets for text attachments and XML declaration encodings.
    Scanned-only PDFs with up to one hundred image-only pages and supported
-   raster image attachments use resource-bounded OCR. Attachments above 16 MiB and PDFs with more than one hundred image-only
-   remain outside exact local matching. Mixed
-   PDFs retain native text and OCR only pages without extractable text, even
-   when the PDF has more than three total pages. A four-page real fixture
-   covers native text plus an OCR-only page.
+   raster image attachments use resource-bounded OCR. Mixed PDFs retain native
+   text and OCR only pages without extractable text, regardless of total page
+   count. Attachments above 16 MiB and PDFs with more than one hundred
+   image-only pages remain outside exact local matching due to explicit input,
+   output, page, and runtime limits; these ceilings are not currently tracked
+   as implementation gaps. A four-page real fixture covers native text plus an
+   OCR-only page.
    The attachment input cap was raised from 4 MiB to 8 MiB
    with a regression that searches inside a 6 MiB OOXML payload; the focused
    test and full suite passed. Deployed as
