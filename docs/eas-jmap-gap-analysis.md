@@ -56,7 +56,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    MIME-declared charsets for text attachments and XML declaration encodings.
    Scanned-only PDFs with up to three image-only pages use resource-bounded
    OCR. Attachments above 8 MiB, PDFs with more than three image-only pages,
-   and extracted text above 2 MiB remain outside exact local matching. Mixed
+   and extracted text above 4 MiB remain outside exact local matching. Mixed
    PDFs retain native text and OCR only pages without extractable text, even
    when the PDF has more than three total pages. A four-page real fixture
    covers native text plus an OCR-only page.
@@ -433,7 +433,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    EPUB XHTML, OOXML Word/Excel/PowerPoint (including
    macro-enabled variants), and OpenDocument Text, Spreadsheet, and Presentation
    attachment containers up to 8 MiB for exact text/NEAR checks, with extracted
-   text still capped at 2 MiB. Explicit textual MIME aliases for CSV, NDJSON,
+   text still capped at 4 MiB. Explicit textual MIME aliases for CSV, NDJSON,
    YAML, and TOML use the same charset-aware bounded extraction path. Legacy
    `.xls` worksheets,
    `.ppt` streams, and Word `.doc` piece tables are also parsed within explicit
@@ -463,7 +463,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    Tesseract OCR. Rendering probes at most four pages to detect overflow and
    only accepts PDFs with three or fewer pages, scales each page to at most
    1600 pixels per edge, applies subprocess time limits, and keeps OCR output
-   under the 2 MiB text budget. The runtime image includes `poppler-utils` and
+   under the 4 MiB text budget. The runtime image includes `poppler-utils` and
    Tesseract's English data. A generated image-only PDF fixture passes the
    real OCR path on this host; a fake-tool regression verifies page and render
    bounds without requiring system OCR packages. Multi-page mixed PDFs remain
@@ -475,9 +475,9 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `/readyz` `ready`. Runtime checks confirmed `/usr/bin/pdftoppm`,
    `/usr/bin/tesseract`, and the `eng` trained data. The protocol default
    remains 14.0.
-   Extracted and normalized text output is capped at 2 MiB, including bounded
+   Extracted and normalized text output is capped at 4 MiB, including bounded
    streaming output from the PDF parser and XML entity/CDATA decoding. RFC 822 and
-   Outlook message decoding are capped at the same 2 MiB extracted-text limit;
+   Outlook message decoding are capped at the same 4 MiB extracted-text limit;
    compressed Outlook RTF is not expanded. OOXML extraction includes Word
    comments and glossary text, Excel comments, and PowerPoint comments within
    the same bounded XML budget. Mocked 16.1

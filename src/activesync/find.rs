@@ -109,11 +109,12 @@ fn same_search(session: &SearchState, filter: &Value, search_text: &str) -> bool
     session.filter == *filter && session.search_text == search_text
 }
 const SEARCHES: &str = "__find__";
-const MAX_FIND_ATTACHMENT_TEXT_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_FIND_ATTACHMENT_TEXT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_FIND_PDF_OCR_PAGES: u32 = 3;
 const MAX_FIND_PDF_OCR_EDGE: u32 = 1600;
 const MAX_FIND_ARCHIVE_ENTRIES: usize = 4096;
+const MAX_FIND_ARCHIVE_EXPANDED_BYTES: usize = 2 * 1024 * 1024;
 static FIND_PDF_OCR_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 pub(super) async fn handle(
@@ -798,7 +799,7 @@ fn extract_archive_text(bytes: &[u8], media_type: &str) -> Option<String> {
         }
         _ => false,
     };
-    let mut remaining = MAX_FIND_ATTACHMENT_TEXT_BYTES as usize;
+    let mut remaining = MAX_FIND_ARCHIVE_EXPANDED_BYTES;
     let mut output = String::new();
     let mut found = false;
     for index in 0..archive.len() {
@@ -1071,6 +1072,7 @@ fn extract_pdf_pages_ocr_with_tools(
     std::fs::write(&input, bytes).ok()?;
 
     let mut output = Vec::with_capacity(pages.len());
+    let mut extracted_bytes = 0usize;
     for page in pages {
         let prefix = temp.0.join("page");
         if !run_find_ocr_command(
@@ -1109,7 +1111,8 @@ fn extract_pdf_pages_ocr_with_tools(
         }
         let text_path = output_base.with_extension("txt");
         let size = std::fs::metadata(&text_path).ok()?.len();
-        if size > MAX_FIND_ATTACHMENT_TEXT_BYTES {
+        extracted_bytes = extracted_bytes.saturating_add(size as usize);
+        if extracted_bytes > MAX_FIND_ATTACHMENT_TEXT_BYTES as usize {
             return None;
         }
         let text = std::fs::read_to_string(text_path).ok()?;
@@ -3348,6 +3351,20 @@ mod tests {
             ],
         )
         .unwrap());
+    }
+
+    #[test]
+    fn generic_zip_expansion_limit_is_independent_of_text_output_limit() {
+        use std::io::Write;
+
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("large.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(&vec![b'x'; MAX_FIND_ARCHIVE_EXPANDED_BYTES + 1])
+            .unwrap();
+        let zip = zip.finish().unwrap().into_inner();
+
+        assert!(extract_archive_text(&zip, "application/zip").is_none());
     }
 
     #[cfg(unix)]

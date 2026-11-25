@@ -136,7 +136,7 @@ text-bearing PDF, EPUB XHTML, OOXML Word/Excel/PowerPoint (including
 macro-enabled variants), OpenDocument Text/Spreadsheet/Presentation, and
 allowlisted text/config files inside generic ZIP archives are extracted for
 exact text/proximity matching up to
-8 MiB input and 2 MiB extracted text, with bounded archive expansion. CSV,
+8 MiB input and 4 MiB extracted text, with bounded archive expansion. CSV,
 NDJSON, YAML, and TOML application media types use charset-aware text decoding.
 Legacy `.xls` workbooks are also parsed
 with a 250,000-cell dense-range limit to prevent oversized worksheet coordinates
@@ -274,7 +274,7 @@ session's fixes were, not against spec-reading alone.
   predicates exact-filter full message text and common address fields, using
   the default distance of eight or an explicit distance. Attachment payload
   positions are available for supported extracted formats up to 8 MiB input
-  and 2 MiB extracted text; scanned PDFs and larger files remain outside local
+  and 4 MiB extracted text; scanned PDFs and larger files remain outside local
   exact matching.
 - Recurrence — common EAS event/task rules map to Stalwart's singular
   `recurrenceRule`; unsupported patterns fail closed. Task-specific backend
