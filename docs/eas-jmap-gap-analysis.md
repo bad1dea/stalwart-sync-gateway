@@ -64,7 +64,11 @@ tool regression proves five pages are extracted, six are refused, and each
 render/OCR subprocess remains individually time-bounded; existing real scanned
 and mixed-PDF fixtures cover the installed Poppler/Tesseract path. The full
 suite passes 404 tests (75 ignored), strict Clippy passes, and formatting and
-diff checks pass.
+diff checks pass. Deployed as
+`deploy-2026-11-25-eas-find-ocr-5pages-f3102c4`; Homelab commit `57b2ae6`,
+image `sha256:76ecbdf2069b4204e1e32f6c429497ab33b360a40e604b76b8f709bb1f31ac3a`,
+started `2026-11-25T02:18:04Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. Production retains the 14.0 protocol default.
 
 Remaining 16.1 readiness backlog (ordered by runtime impact):
 
