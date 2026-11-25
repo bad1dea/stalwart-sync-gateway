@@ -22,6 +22,35 @@ struct AvailabilityRequest {
     end: DateTime<Utc>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PictureRequest {
+    max_size: usize,
+    max_pictures: usize,
+}
+
+type ParsedRequest = (
+    Vec<String>,
+    usize,
+    Option<AvailabilityRequest>,
+    Option<PictureRequest>,
+);
+
+fn picture_value<'a>(
+    picture: Option<&'a [u8]>,
+    options: PictureRequest,
+    pictures_sent: &mut usize,
+) -> (&'static str, Option<&'a [u8]>) {
+    match picture {
+        None => ("173", None),
+        Some(bytes) if bytes.len() > options.max_size => ("174", None),
+        Some(_) if *pictures_sent >= options.max_pictures => ("175", None),
+        Some(bytes) => {
+            *pictures_sent += 1;
+            ("1", Some(bytes))
+        }
+    }
+}
+
 const FREE_BUSY_SLOT_NANOS: i64 = 30 * 60 * 1_000_000_000;
 
 impl AvailabilityRequest {
@@ -146,12 +175,21 @@ struct Recipient {
     alias: String,
     kind: &'static str,
     principal_id: Option<String>,
+    picture: Option<Vec<u8>>,
 }
 
 fn insert_recipient(candidates: &mut BTreeMap<String, Recipient>, recipient: Recipient) {
-    candidates
-        .entry(recipient.email.to_lowercase())
-        .or_insert(recipient);
+    use std::collections::btree_map::Entry;
+    match candidates.entry(recipient.email.to_lowercase()) {
+        Entry::Vacant(entry) => {
+            entry.insert(recipient);
+        }
+        Entry::Occupied(mut entry) => {
+            if entry.get().picture.is_none() {
+                entry.get_mut().picture = recipient.picture;
+            }
+        }
+    }
 }
 
 fn matching<'a>(query: &str, candidates: &'a [Recipient]) -> Vec<&'a Recipient> {
@@ -177,9 +215,7 @@ fn matching<'a>(query: &str, candidates: &'a [Recipient]) -> Vec<&'a Recipient> 
         .collect()
 }
 
-fn request(
-    doc: &Document,
-) -> Result<(Vec<String>, usize, Option<AvailabilityRequest>), &'static str> {
+fn request(doc: &Document) -> Result<ParsedRequest, &'static str> {
     if !is(doc, rr::RESOLVE_RECIPIENTS) {
         return Err("5");
     }
@@ -187,6 +223,7 @@ fn request(
     let mut max = 100usize;
     let mut options_seen = false;
     let mut availability = None;
+    let mut picture = None;
     for child in eas::child_elements(doc) {
         if is(&child, rr::TO) {
             let value = eas::find_text_after(&child, rr::TO)
@@ -226,7 +263,35 @@ fn request(
                     }
                     availability = Some(AvailabilityRequest::parse(&option)?);
                 } else if is(&option, rr::PICTURE) {
-                    return Err("6");
+                    let mut max_size = 102400usize;
+                    let mut max_pictures = 100usize;
+                    let mut picture_fields = std::collections::BTreeSet::new();
+                    for field in eas::child_elements(&option) {
+                        let Some(Node::Start(token)) = field.nodes.first() else {
+                            return Err("5");
+                        };
+                        if !picture_fields.insert((token.code_page, token.token)) {
+                            return Err("5");
+                        }
+                        let value: usize = eas::find_text_after(&field, *token)
+                            .ok_or("5")?
+                            .parse()
+                            .map_err(|_| "5")?;
+                        if is(&field, rr::MAX_SIZE) {
+                            if value > 102400 {
+                                return Err("5");
+                            }
+                            max_size = value;
+                        } else if is(&field, rr::MAX_PICTURES) {
+                            max_pictures = value;
+                        } else {
+                            return Err("5");
+                        }
+                    }
+                    picture = Some(PictureRequest {
+                        max_size,
+                        max_pictures,
+                    });
                 } else {
                     return Err("5");
                 }
@@ -238,18 +303,25 @@ fn request(
     if queries.is_empty() || queries.len() > 100 {
         return Err("5");
     }
-    Ok((queries, max, availability))
+    Ok((queries, max, availability, picture))
 }
 
 pub(super) async fn handle(
     state: &AppState,
     auth: &AuthenticatedSession,
     document: &Document,
+    version: super::ProtocolVersion,
 ) -> Response {
-    let parsed = request(document);
+    let parsed = request(document).and_then(|(queries, max, availability, picture)| {
+        if picture.is_some() && version == super::ProtocolVersion::V14_0 {
+            Err("6")
+        } else {
+            Ok((queries, max, availability, picture))
+        }
+    });
     let mut b = DocumentBuilder::new();
     b.start(rr::RESOLVE_RECIPIENTS);
-    let (queries, max, availability) = match parsed {
+    let (queries, max, availability, picture) = match parsed {
         Ok(v) => v,
         Err(status) => {
             b.leaf(rr::STATUS, status);
@@ -274,6 +346,7 @@ pub(super) async fn handle(
                             alias: p.alias,
                             kind: "1",
                             principal_id: Some(p.id),
+                            picture: None,
                         },
                     );
                 }
@@ -286,7 +359,7 @@ pub(super) async fn handle(
         {
             let (contacts, count) = state
                 .jmap
-                .search_contacts(auth, None, &[], None, 0, 10000)
+                .search_contacts_for_recipients(auth, &queries)
                 .await?;
             anyhow::ensure!(
                 count as usize == contacts.len(),
@@ -315,6 +388,7 @@ pub(super) async fn handle(
                             alias: String::new(),
                             kind: "2",
                             principal_id: None,
+                            picture: c.picture.clone(),
                         },
                     );
                 }
@@ -371,6 +445,7 @@ pub(super) async fn handle(
     } else {
         HashMap::new()
     };
+    let mut pictures_sent = 0usize;
     b.leaf(rr::STATUS, "1");
     for (query, items) in queries.into_iter().zip(matches) {
         let count = items.len();
@@ -392,6 +467,20 @@ pub(super) async fn handle(
             b.leaf(rr::TYPE, item.kind);
             b.leaf(rr::DISPLAY_NAME, &item.name);
             b.leaf(rr::EMAIL_ADDRESS, &item.email);
+            if let Some(options) = picture {
+                b.start(rr::PICTURE);
+                let (status, data) =
+                    picture_value(item.picture.as_deref(), options, &mut pictures_sent);
+                b.leaf(rr::STATUS, status);
+                if let Some(bytes) = data {
+                    use base64::Engine;
+                    b.leaf(
+                        rr::DATA,
+                        base64::engine::general_purpose::STANDARD.encode(bytes),
+                    );
+                }
+                b.end();
+            }
             if let Some(request) = availability.filter(|_| count == 1) {
                 b.start(rr::AVAILABILITY);
                 let result = item
@@ -443,6 +532,7 @@ mod tests {
                 alias: "alice".into(),
                 kind: "1",
                 principal_id: Some("principal-1".into()),
+                picture: None,
             },
             Recipient {
                 name: "Alice Smith".into(),
@@ -450,6 +540,7 @@ mod tests {
                 alias: String::new(),
                 kind: "2",
                 principal_id: None,
+                picture: None,
             },
         ];
         assert_eq!(matching("ALICE", &recipients).len(), 1);
@@ -468,6 +559,7 @@ mod tests {
                 alias: "person".into(),
                 kind: "1",
                 principal_id: Some("principal-1".into()),
+                picture: None,
             },
         );
         insert_recipient(
@@ -478,6 +570,7 @@ mod tests {
                 alias: String::new(),
                 kind: "2",
                 principal_id: None,
+                picture: Some(vec![1, 2, 3]),
             },
         );
         let candidates: Vec<_> = candidates.into_values().collect();
@@ -485,6 +578,7 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].kind, "1");
         assert_eq!(matches[0].principal_id.as_deref(), Some("principal-1"));
+        assert_eq!(matches[0].picture.as_deref(), Some(&[1, 2, 3][..]));
     }
 
     fn availability_document(start: &str, end: Option<&str>) -> Document {
@@ -511,7 +605,7 @@ mod tests {
         builder.end();
         builder.end();
         let document = wbxml::decode_document(&wbxml::encode_document(&builder.finish())).unwrap();
-        let (_, _, availability) = request(&document).unwrap();
+        let (_, _, availability, _) = request(&document).unwrap();
         let availability = availability.unwrap();
         assert_eq!(availability.end - availability.start, Duration::days(7));
 
@@ -525,6 +619,56 @@ mod tests {
         builder.end();
         let document = wbxml::decode_document(&wbxml::encode_document(&builder.finish())).unwrap();
         assert_eq!(request(&document).unwrap_err(), "5");
+    }
+
+    #[test]
+    fn picture_options_validate_size_and_picture_limit() {
+        let mut builder = DocumentBuilder::new();
+        builder.start(rr::RESOLVE_RECIPIENTS);
+        builder.leaf(rr::TO, "person@example.test");
+        builder.start(rr::OPTIONS);
+        builder.start(rr::PICTURE);
+        builder.leaf(rr::MAX_SIZE, "102400");
+        builder.leaf(rr::MAX_PICTURES, "2");
+        builder.end();
+        builder.end();
+        builder.end();
+        let document = wbxml::decode_document(&wbxml::encode_document(&builder.finish())).unwrap();
+        let (_, _, _, picture) = request(&document).unwrap();
+        assert_eq!(picture.unwrap().max_size, 102400);
+        assert_eq!(picture.unwrap().max_pictures, 2);
+
+        let mut builder = DocumentBuilder::new();
+        builder.start(rr::RESOLVE_RECIPIENTS);
+        builder.leaf(rr::TO, "person@example.test");
+        builder.start(rr::OPTIONS);
+        builder.start(rr::PICTURE);
+        builder.leaf(rr::MAX_SIZE, "102401");
+        builder.end();
+        builder.end();
+        builder.end();
+        let document = wbxml::decode_document(&wbxml::encode_document(&builder.finish())).unwrap();
+        assert_eq!(request(&document).unwrap_err(), "5");
+    }
+
+    #[test]
+    fn pictures_report_missing_oversized_and_count_limited_statuses() {
+        let options = PictureRequest {
+            max_size: 2,
+            max_pictures: 1,
+        };
+        let mut sent = 0;
+        assert_eq!(picture_value(None, options, &mut sent), ("173", None));
+        assert_eq!(
+            picture_value(Some(&[1, 2, 3]), options, &mut sent),
+            ("174", None)
+        );
+        assert_eq!(
+            picture_value(Some(&[1, 2]), options, &mut sent),
+            ("1", Some(&[1, 2][..]))
+        );
+        assert_eq!(picture_value(Some(&[9]), options, &mut sent), ("175", None));
+        assert_eq!(sent, 1);
     }
 
     #[test]

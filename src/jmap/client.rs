@@ -1650,6 +1650,38 @@ impl JmapClient {
         position: usize,
         limit: usize,
     ) -> anyhow::Result<(Vec<Contact>, u64)> {
+        self.search_contacts_inner(
+            auth,
+            address_book,
+            terms,
+            alternatives,
+            position,
+            limit,
+            false,
+        )
+        .await
+    }
+
+    pub async fn search_contacts_for_recipients(
+        &self,
+        auth: &AuthenticatedSession,
+        queries: &[String],
+    ) -> anyhow::Result<(Vec<Contact>, u64)> {
+        self.search_contacts_inner(auth, None, &[], Some(queries), 0, 10000, true)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn search_contacts_inner(
+        &self,
+        auth: &AuthenticatedSession,
+        address_book: Option<&str>,
+        terms: &[String],
+        alternatives: Option<&[String]>,
+        position: usize,
+        limit: usize,
+        fetch_picture_blobs: bool,
+    ) -> anyhow::Result<(Vec<Contact>, u64)> {
         let account = auth
             .session
             .primary_account_for(capabilities::CONTACTS)
@@ -1782,9 +1814,37 @@ impl JmapClient {
                         .is_none_or(|values| values.iter().any(|term| has(term)))
                 {
                     if total >= position as u64 && contacts.len() < limit {
-                        contacts.push(Contact::from(serde_json::from_value::<ContactCardObject>(
-                            item,
-                        )?));
+                        let card: ContactCardObject = serde_json::from_value(item)?;
+                        let picture_blob = card
+                            .media
+                            .get("eas_picture")
+                            .or_else(|| {
+                                card.media
+                                    .values()
+                                    .find(|media| media.kind.as_deref() == Some("photo"))
+                            })
+                            .and_then(|media| media.blob_id.clone());
+                        let mut contact = Contact::from(card);
+                        if fetch_picture_blobs && contact.picture.is_none() {
+                            if let Some(blob_id) = picture_blob {
+                                if let Some((bytes, _)) = self
+                                    .download_contact_blob_limited(
+                                        auth,
+                                        &blob_id,
+                                        "contact-picture",
+                                        102401,
+                                    )
+                                    .await?
+                                {
+                                    contact.picture = Some(bytes);
+                                } else {
+                                    // Preserve the over-limit condition so EAS can return
+                                    // NoPictureTooBig without downloading an unbounded blob.
+                                    contact.picture = Some(vec![0; 102401]);
+                                }
+                            }
+                        }
+                        contacts.push(contact);
                     }
                     total += 1;
                 }
@@ -6716,6 +6776,21 @@ impl JmapClient {
             .await
     }
 
+    async fn download_contact_blob_limited(
+        &self,
+        auth: &AuthenticatedSession,
+        blob_id: &str,
+        name: &str,
+        max_bytes: usize,
+    ) -> anyhow::Result<Option<(Vec<u8>, String)>> {
+        let account_id = auth
+            .session
+            .primary_account_for(capabilities::CONTACTS)
+            .context("JMAP Contacts capability is not available")?;
+        self.download_blob_from_account_limited(auth, account_id, blob_id, name, Some(max_bytes))
+            .await
+    }
+
     async fn download_blob_from_account(
         &self,
         auth: &AuthenticatedSession,
@@ -7845,6 +7920,8 @@ struct ContactCardNickname {
 struct ContactCardMedia {
     kind: Option<String>,
     uri: Option<String>,
+    #[serde(rename = "blobId")]
+    blob_id: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -9780,6 +9857,17 @@ impl From<CalendarObject> for Collection {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn jscontact_media_parses_blob_id_for_recipient_photo_downloads() {
+        let media: super::ContactCardMedia = serde_json::from_value(serde_json::json!({
+            "kind": "photo",
+            "blobId": "photo-blob-1"
+        }))
+        .unwrap();
+        assert_eq!(media.kind.as_deref(), Some("photo"));
+        assert_eq!(media.blob_id.as_deref(), Some("photo-blob-1"));
+    }
+
     #[test]
     fn microsoft_disallow_counter_property_maps_to_eas_flag() {
         let icalendar = serde_json::json!({

@@ -66,6 +66,18 @@ started `2026-11-25T05:34:02Z`, restart count zero, mesh `/healthz` and
 `/readyz` healthy, and public `/healthz` healthy. A live Stalwart free/busy
 round-trip remains to be verified.
 
+ResolveRecipients `Picture` is implemented in source for protocol 14.1, 16.0,
+and 16.1. It validates `MaxSize` (0–102400 bytes) and `MaxPictures`, returns
+the specified per-picture statuses for missing, oversized, and over-limit
+photos, and includes photos from inline JSContact media URIs or bounded JMAP
+contact-photo blob downloads. Duplicate principal/contact addresses retain
+the directory result and merge in the saved contact photo. Focused parser,
+photo-limit, deduplication, and blob-ID mapping regressions pass; full suite:
+423 passed, 76 ignored; strict Clippy, formatting, and diff checks pass. This
+source change has not yet been deployed. The current environment does not
+contain the Homelab compose checkout or deployment secrets. Production remains
+at EAS 14.0; isolated 16.1 client certification remains open.
+
 Find now extracts Excel Binary Workbook (`.xlsb`) cell values through the
 existing vendored Calamine parser, including its registered macro-enabled
 content type. A real Calamine XLSB fixture verifies extraction of worksheet

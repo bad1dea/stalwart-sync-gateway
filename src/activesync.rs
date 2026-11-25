@@ -351,7 +351,7 @@ pub async fn post_handler(
                         .await;
                 }
                 if command.eq_ignore_ascii_case("ResolveRecipients") {
-                    return resolve_recipients::handle(&state, &auth, &document).await;
+                    return resolve_recipients::handle(&state, &auth, &document, version).await;
                 }
                 if command.eq_ignore_ascii_case("Find") {
                     return find::handle(&state, &auth, &query, &document, version).await;
