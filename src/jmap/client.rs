@@ -888,18 +888,15 @@ impl JmapClient {
         anyhow::bail!("missing Email/get response for search")
     }
 
-    /// Backs EAS `Search` for `Store>Name == "GAL"` -- confirmed live
-    /// 2026-08-26 against Stalwart's `Principal/query`: `filter:
-    /// {"text": ...}` does real (if strict -- whole-token, not
-    /// substring/prefix like real Exchange GAL's ANR) matching against
-    /// name/email, checked by searching a real principal's first name
-    /// and getting exactly that principal back. There are 7 real
-    /// principals on this instance (not a placeholder/empty directory),
-    /// so this has something real to search. Stalwart's `Principal`
-    /// object has no separate first/last name fields -- `description` is
-    /// the closest thing to a human display name (e.g. "khuong", "System
-    /// administrator") and is used for `gal:DisplayName` when present,
-    /// falling back to the account name (its email) otherwise.
+    /// Supplies the complete paginated directory for EAS Search and Find
+    /// GAL matching. Do not apply `Principal/query`'s text filter here:
+    /// Stalwart matches whole tokens, while Exchange ANR accepts prefixes.
+    /// The caller applies the shared local prefix matcher to display name,
+    /// alias, and email. Stalwart's `Principal` object has no separate
+    /// first/last name fields -- `description` is the closest thing to a
+    /// human display name (e.g. "khuong", "System administrator") and is
+    /// used for `gal:DisplayName` when present, falling back to the account
+    /// name (its email) otherwise.
     pub async fn all_principals(
         &self,
         auth: &AuthenticatedSession,

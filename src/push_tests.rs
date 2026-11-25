@@ -16645,6 +16645,48 @@ async fn search_processes_multiple_store_queries_independently() {
 }
 
 #[tokio::test]
+async fn gal_search_matches_multi_token_anr_prefixes() {
+    use eas::{gal, search as srch};
+    let env = start_env(Opts::default()).await;
+    env.mock.identities.lock().unwrap().push(serde_json::json!({
+        "id":"i3", "name":"michael.alexander",
+        "email":"michael.alexander@example.test",
+        "description":"Michael Alexander"
+    }));
+    let mut request = eas::DocumentBuilder::new();
+    request.start(srch::SEARCH);
+    request.start(srch::STORE);
+    request.leaf(srch::NAME, "GAL");
+    request.leaf(srch::QUERY, "Michael A.");
+    request.start(srch::OPTIONS);
+    request.leaf(srch::RANGE, "0-9");
+    request.end();
+    request.end();
+    request.end();
+
+    let response = env
+        .req("Search", "gal-prefix")
+        .body(wbxml::encode_document(&request.finish()))
+        .send()
+        .await
+        .unwrap();
+    let document = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        eas::find_all_text_after(&document, srch::STATUS),
+        vec!["1", "1"]
+    );
+    assert_eq!(eas::find_text_after(&document, srch::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_text_after(&document, gal::DISPLAY_NAME),
+        Some("Michael Alexander")
+    );
+    assert_eq!(
+        eas::find_text_after(&document, gal::EMAIL_ADDRESS),
+        Some("michael.alexander@example.test")
+    );
+}
+
+#[tokio::test]
 async fn mixed_search_does_not_return_partial_results_when_a_class_changes() {
     use eas::{airsync as air, search as srch};
     let env = start_env(Opts::default()).await;
