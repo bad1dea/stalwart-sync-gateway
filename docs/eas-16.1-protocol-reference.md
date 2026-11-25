@@ -19,9 +19,9 @@ The spec's own overview lays out the intended command sequence:
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
    `100.64.0.50:18090`, backed by isolated Stalwart. Its current gateway image
-   is `d276441` (`sha256:15040486345e09a65f0ce140ab84f5960472c3b4e26869c445d7aa08790d187c`),
-   started `2026-11-25T11:27:14.813042683Z` with zero restarts. `/healthz`
-   and `/readyz` returned HTTP 200 at `11:27:19Z`; the Compose environment
+   is `9ceb978` (`sha256:527c632cfade1a8aaba28ca5f26da1c7fccf1641a33a41b7ebfe930144f3d09d`),
+   started `2026-11-25T11:34:50.524479504Z` with zero restarts. `/healthz`
+   and `/readyz` returned HTTP 200 at `11:34:55Z`; the Compose environment
    leaves `EAS_MAX_PROTOCOL_VERSION` unset, so it still defaults to EAS 14.0.
    Set the variable to 16.1 during the planned client test window.
 2. **Provision** — device sends its info, gets + acks security policy.
@@ -193,9 +193,9 @@ required recurrence interval emitted even when the source uses its default.
 `DisallowNewTimeProposal` reads `X-MICROSOFT-DISALLOW-COUNTER` from the source
 iCalendar blob, bounded to 256 KiB, and maps its boolean value to EAS 0/1.
 Unsupported recurrence rules suppress structured meeting-request metadata.
-Parser and WBXML regressions cover these mappings. The new counter-policy
-mapping is not yet deployed; the bridge currently runs `d276441` and defaults
-to EAS 14.0. Real-client validation remains pending.
+Parser and WBXML regressions cover these mappings, deployed on the isolated
+bridge as `9ceb978`. The bridge defaults to EAS 14.0. Real-client validation
+remains pending.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
 SendMail posts a full new outgoing message; SmartReply/SmartForward use

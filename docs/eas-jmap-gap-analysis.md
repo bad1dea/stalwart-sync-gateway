@@ -38,11 +38,11 @@ recurrence converter to Email:Recurrences; the required EAS interval defaults
 to 1, and unsupported recurrence rules fail closed by omitting structured
 meeting-request metadata. `InstanceType` now reports 0 for a single event and
 1 for a recurring master based on the parsed recurrence rule. Commit
-`d276441` is deployed to Amy's isolated bridge as
-`localhost/eas16-isolated:d276441` (image
-`sha256:15040486345e09a65f0ce140ab84f5960472c3b4e26869c445d7aa08790d187c`),
-started `2026-11-25T11:27:14.813042683Z`, with zero restarts. At
-`2026-11-25T11:27:19Z`, `/healthz` and `/readyz` returned HTTP 200 (`ok` and
+`9ceb978` is deployed to Amy's isolated bridge as
+`localhost/eas16-isolated:9ceb978` (image
+`sha256:527c632cfade1a8aaba28ca5f26da1c7fccf1641a33a41b7ebfe930144f3d09d`),
+started `2026-11-25T11:34:50.524479504Z`, with zero restarts. At
+`2026-11-25T11:34:55Z`, `/healthz` and `/readyz` returned HTTP 200 (`ok` and
 `ready`). `EAS_MAX_PROTOCOL_VERSION` remains unset, preserving the 14.0
 default; production is untouched. Real-client validation remains pending.
 Sources: Microsoft
@@ -64,7 +64,8 @@ defines 0 as a single appointment and 1 as a recurring master.
 `DisallowNewTimeProposal` is now read from the bounded (256 KiB) source
 iCalendar blob's `X-MICROSOFT-DISALLOW-COUNTER` property and emitted as 0/1;
 missing, duplicate, malformed, or oversized source data leaves it omitted.
-This code and its MIME-to-WBXML regression are awaiting deployment. Source:
+This code downloads at most 256 KiB from the Calendar account and its
+MIME-to-WBXML regression passes. Source:
 Microsoft [DisallowNewTimeProposal](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/bac187fa-43cb-4183-8c3d-e0a594efad7c).
 
 MeetingResponse now gates `ProposedStartTime` and `ProposedEndTime` to EAS
