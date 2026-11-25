@@ -15,8 +15,10 @@ session]** rather than stated as fact — see the note at the bottom.
 The spec's own overview lays out the intended command sequence:
 
 1. **Autodiscover** — client resolves account config. The gateway implements
-   Autodiscover and advertises the configured `EAS_PUBLIC_URL`; clients can
-   also be pointed directly at the isolated test endpoint for protocol tests.
+   Autodiscover and advertises the configured `EAS_PUBLIC_URL`. Real-client
+   16.1 certification requires an isolated test endpoint; the previous
+   `eas-test.khuo.ng` compose service is no longer present in the Homelab
+   checkout (decommissioned in commit `6051729`).
 2. **Provision** — device sends its info, gets + acks security policy.
 3. **FolderSync** — retrieves the folder hierarchy.
 4. **GetItemEstimate** — count of pending changes, then **Sync** to

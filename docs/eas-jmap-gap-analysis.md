@@ -244,10 +244,13 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    E2E tests now cover ResolveRecipients free/busy values through the EAS
    response and a contact-photo response through a real ContactCard. They
    compile here but have not been run in this environment because no `E2E_*`
-   credentials are configured. `https://eas-test.khuo.ng/healthz` currently
-   returns `ok`; this health check does not prove 16.1 negotiation or client
-   behavior. The full local suite passes 424 tests (77 ignored); strict
-   Clippy, formatting, and diff checks pass.
+   credentials are configured. Homelab history shows the former
+   `eas-test.khuo.ng` compose service was decommissioned in commit `6051729`;
+   its DNS still resolves and `/healthz` returns `ok`, but the current
+   Homelab checkout has no test-gateway compose configuration, so that health
+   response does not prove an isolated 16.1 bridge is active. The full local
+   suite passes 424 tests (77 ignored); strict Clippy, formatting, and diff
+   checks pass.
    Deployed with that production default as
    `deploy-2026-11-24-eas-16.1-opt-in-13bea13`; homelab commit `fcb698e`, image
    `sha256:902bfe01a2ec516b68b7517f9a38ba730bfafdeb66eb5cd5ec85822ef4e44b0d`,
