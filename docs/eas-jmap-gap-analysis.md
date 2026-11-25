@@ -19,6 +19,11 @@ JMAP recurrence metadata from being silently emitted to clients as though the
 field were absent. Regressions cover invalid types, negative and overflow
 values, the 999 interval boundary, and the largest valid count. Full suite:
 438 passed, 77 ignored; strict Clippy, formatting, and diff checks pass.
+Deployed to the isolated Amy bridge as
+`localhost/eas16-isolated:7e502b2` (image
+`sha256:c9a59b507fe5570d4e0085c1af336441a7e178f08216f7f8d8240bb2c3383938`),
+started `2026-11-25T08:40:13.764048503Z`, restart count zero, `/healthz` `ok`,
+and `/readyz` `ready`. The protocol override remains unset, preserving 14.0.
 
 MeetingResponse now accepts `InstanceId` for recurring invitations on 14.1,
 16.0, and 16.1, maps the original UTC occurrence start to the parent event's
