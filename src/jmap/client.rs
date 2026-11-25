@@ -3283,7 +3283,7 @@ impl JmapClient {
         ];
         let response: JmapResponse<serde_json::Value> = self.api_call(auth, &using,
             vec![MethodCall::new("CalendarEvent/get", serde_json::json!({"accountId":account,
-                "ids":[event_id],"properties":["id","uid","title","description","sequence","@type","calendarIds","participants","replyTo","timeZone","recurrenceRule","recurrenceOverrides"]}), "get")]).await?;
+                "ids":[event_id],"properties":["id","uid","title","description","locations","sequence","@type","calendarIds","participants","replyTo","timeZone","recurrenceRule","recurrenceOverrides"]}), "get")]).await?;
         let result = response
             .method_responses
             .iter()
@@ -3383,6 +3383,7 @@ impl JmapClient {
             let Some(attendee) = participant["email"].as_str() else {
                 return Ok("4");
             };
+            let location = counter_event_location(&event["locations"]);
             Some(meeting_response_mime(
                 custom_body.as_ref(),
                 proposed_times.as_ref(),
@@ -3396,6 +3397,7 @@ impl JmapClient {
                     time_zone: event["timeZone"].as_str(),
                     title: event["title"].as_str().unwrap_or(""),
                     description: event["description"].as_str(),
+                    location: location.as_deref(),
                     sequence: event["sequence"].as_u64().unwrap_or(0),
                     recurrence_rule: event["recurrenceRule"]
                         .as_object()
@@ -7333,8 +7335,26 @@ struct MeetingResponseMimeContext<'a> {
     time_zone: Option<&'a str>,
     title: &'a str,
     description: Option<&'a str>,
+    location: Option<&'a str>,
     sequence: u64,
     recurrence_rule: Option<&'a serde_json::Value>,
+}
+
+fn counter_event_location(locations: &serde_json::Value) -> Option<String> {
+    let names: Vec<_> = locations
+        .as_object()?
+        .values()
+        .filter_map(|location| location["name"].as_str())
+        .filter(|name| !name.trim().is_empty())
+        .collect();
+    match names.as_slice() {
+        [] => None,
+        [name] => Some((*name).to_owned()),
+        // JSCalendar allows multiple locations while iCalendar LOCATION is a
+        // single text property. Preserve each named option in deterministic
+        // map order rather than silently dropping all but one.
+        _ => Some(names.join(" / ")),
+    }
 }
 
 fn series_counter_supported(event: &serde_json::Value) -> bool {
@@ -7501,6 +7521,7 @@ fn meeting_response_mime(
         time_zone,
         title,
         description,
+        location,
         sequence,
         recurrence_rule,
     } = context;
@@ -7547,6 +7568,9 @@ fn meeting_response_mime(
                 "DESCRIPTION:{}\r\n",
                 calendar_text_escape(description)
             ));
+        }
+        if let Some(location) = location {
+            calendar.push_str(&format!("LOCATION:{}\r\n", calendar_text_escape(location)));
         }
         if instance_id.is_none() {
             if let Some(recurrence_rule) = recurrence_rule {
@@ -12845,6 +12869,7 @@ mod meeting_response_send_tests {
                 time_zone: Some("America/Toronto"),
                 title: "Planning",
                 description: Some("Details"),
+                location: None,
                 sequence: 0,
                 recurrence_rule: None,
             },
@@ -12874,6 +12899,7 @@ mod meeting_response_send_tests {
                 time_zone: None,
                 title: "Planning",
                 description: None,
+                location: None,
                 sequence: 0,
                 recurrence_rule: None,
             },
@@ -12902,6 +12928,7 @@ mod meeting_response_send_tests {
                 time_zone: None,
                 title: "Planning",
                 description: Some("Discuss budget"),
+                location: Some("Room; Floor 2"),
                 sequence: 3,
                 recurrence_rule: None,
             },
@@ -12914,6 +12941,7 @@ mod meeting_response_send_tests {
         assert!(mime.contains("DTSTART:20261125T150000Z\r\nDTEND:20261125T160000Z"));
         assert!(mime.contains("SEQUENCE:3\r\nSUMMARY:Planning"));
         assert!(mime.contains("DESCRIPTION:Discuss budget"));
+        assert!(mime.contains("LOCATION:Room\\; Floor 2\r\n"));
         assert!(mime.contains("RECURRENCE-ID:20261125T150000Z\r\n"));
         assert!(!mime.contains("RECURRENCE-ID;TZID="));
     }
@@ -12945,6 +12973,7 @@ mod meeting_response_send_tests {
                 time_zone: Some("UTC"),
                 title: "Weekly review",
                 description: None,
+                location: None,
                 sequence: 1,
                 recurrence_rule: Some(&rule),
             },

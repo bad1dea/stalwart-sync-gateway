@@ -1845,6 +1845,8 @@ have regression coverage. MIME Body type 4 and body-part payloads remain
 unsupported. Proposed start/end values are now parsed as one
 ordered UTC pair and sent as an iTIP `METHOD:COUNTER` with the event UID,
 organizer, attendee, title, description, sequence, and proposed DTSTART/DTEND.
+When the event has named JMAP locations, counters also include them as an
+escaped iCalendar `LOCATION` value.
 The RSVP update follows `UserResponse`; automatic scheduling messages are
 suppressed so the counter is not duplicated. JMAP calendar mutation and mail
 submission are separate calls; if submission fails after the RSVP has
@@ -1859,7 +1861,8 @@ VTIMEZONE or exception set. An occurrence counter uses the request's UTC
 `sha256:d2734f7209b24056a9ad0aec6d492d894f0232adc42503b3c651009668a3f4aa`),
 started `2026-11-25T07:28:29Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. The test stack has no protocol override and therefore
-retains the 14.0 default; real-client 16.1 behavior remains unverified.
+retains the 14.0 default; real-client 16.1 behavior remains unverified. The
+later source change to include event locations is awaiting deployment.
 JSCalendar's
 `participationComment` is a note explaining RSVP status, not the custom email
 body carried by EAS `SendResponse`; mapping the two directly would lose the
