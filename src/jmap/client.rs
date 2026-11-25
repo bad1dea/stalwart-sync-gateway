@@ -3271,6 +3271,7 @@ impl JmapClient {
             send_response,
             instance_id,
             custom_body,
+            proposed_times,
         } = options;
         let account = auth
             .session
@@ -3282,7 +3283,7 @@ impl JmapClient {
         ];
         let response: JmapResponse<serde_json::Value> = self.api_call(auth, &using,
             vec![MethodCall::new("CalendarEvent/get", serde_json::json!({"accountId":account,
-                "ids":[event_id],"properties":["id","uid","@type","calendarIds","participants","replyTo","timeZone","recurrenceRule","recurrenceOverrides"]}), "get")]).await?;
+                "ids":[event_id],"properties":["id","uid","title","description","sequence","@type","calendarIds","participants","replyTo","timeZone","recurrenceRule","recurrenceOverrides"]}), "get")]).await?;
         let result = response
             .method_responses
             .iter()
@@ -3296,6 +3297,12 @@ impl JmapClient {
         };
         if event["@type"] != "Event" || event["calendarIds"][calendar_id] != true {
             return Ok("2");
+        }
+        if proposed_times.is_some() && !event["recurrenceRule"].is_null() && instance_id.is_none() {
+            // An RFC 5546 COUNTER for an entire series must include its
+            // recurrence description. Until the JSCalendar→iCalendar RRULE
+            // mapping is available here, don't send a misleading one-off.
+            return Ok("4");
         }
         let instance_key = if let Some(instance_id) = instance_id {
             if event["recurrenceRule"].is_null() {
@@ -3352,7 +3359,7 @@ impl JmapClient {
         let state = result.1["state"]
             .as_str()
             .context("calendar state missing")?;
-        let custom_mime = if let Some(body) = custom_body {
+        let custom_mime = if custom_body.is_some() || proposed_times.is_some() {
             if !send_response
                 || !auth.capabilities.submission
                 || auth
@@ -3375,14 +3382,21 @@ impl JmapClient {
             let Some(attendee) = participant["email"].as_str() else {
                 return Ok("4");
             };
-            Some(custom_meeting_reply_mime(
-                &body,
-                uid,
-                organizer,
-                attendee,
-                participation,
-                instance_key.as_deref(),
-                event["timeZone"].as_str(),
+            Some(meeting_response_mime(
+                custom_body.as_ref(),
+                proposed_times.as_ref(),
+                MeetingResponseMimeContext {
+                    uid,
+                    organizer,
+                    attendee,
+                    participation,
+                    recurrence_key: instance_key.as_deref(),
+                    instance_id,
+                    time_zone: event["timeZone"].as_str(),
+                    title: event["title"].as_str().unwrap_or(""),
+                    description: event["description"].as_str(),
+                    sequence: event["sequence"].as_u64().unwrap_or(0),
+                },
             )?)
         } else {
             None
@@ -7290,12 +7304,32 @@ pub struct MeetingResponseOptions<'a> {
     pub send_response: bool,
     pub instance_id: Option<&'a str>,
     pub custom_body: Option<MeetingResponseBody>,
+    pub proposed_times: Option<MeetingResponseProposal>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MeetingResponseBody {
     pub kind: u8,
     pub data: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeetingResponseProposal {
+    pub start: chrono::DateTime<chrono::Utc>,
+    pub end: chrono::DateTime<chrono::Utc>,
+}
+
+struct MeetingResponseMimeContext<'a> {
+    uid: &'a str,
+    organizer: &'a str,
+    attendee: &'a str,
+    participation: &'a str,
+    recurrence_key: Option<&'a str>,
+    instance_id: Option<&'a str>,
+    time_zone: Option<&'a str>,
+    title: &'a str,
+    description: Option<&'a str>,
+    sequence: u64,
 }
 
 impl AuthenticatedSession {
@@ -7353,17 +7387,29 @@ fn is_safe_mailbox(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
 }
 
-fn custom_meeting_reply_mime(
-    body: &MeetingResponseBody,
-    uid: &str,
-    organizer: &str,
-    attendee: &str,
-    participation: &str,
-    recurrence_key: Option<&str>,
-    time_zone: Option<&str>,
+fn meeting_response_mime(
+    body: Option<&MeetingResponseBody>,
+    proposal: Option<&MeetingResponseProposal>,
+    context: MeetingResponseMimeContext<'_>,
 ) -> anyhow::Result<Vec<u8>> {
+    let MeetingResponseMimeContext {
+        uid,
+        organizer,
+        attendee,
+        participation,
+        recurrence_key,
+        instance_id,
+        time_zone,
+        title,
+        description,
+        sequence,
+    } = context;
     anyhow::ensure!(
-        matches!(body.kind, 1 | 2),
+        body.is_some() || proposal.is_some(),
+        "empty custom meeting reply"
+    );
+    anyhow::ensure!(
+        body.is_none_or(|body| matches!(body.kind, 1..=3)),
         "unsupported MeetingResponse body type"
     );
     anyhow::ensure!(!uid.is_empty(), "invalid meeting reply UID");
@@ -7378,13 +7424,39 @@ fn custom_meeting_reply_mime(
         _ => anyhow::bail!("invalid meeting participation status"),
     };
     let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let method = if proposal.is_some() {
+        "COUNTER"
+    } else {
+        "REPLY"
+    };
     let mut calendar = format!(
-        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//EAS JMAP Gateway//Meeting Reply//EN\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:{}\r\nDTSTAMP:{now}\r\nORGANIZER:mailto:{}\r\nATTENDEE;PARTSTAT={partstat}:mailto:{}\r\n",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//EAS JMAP Gateway//Meeting Response//EN\r\nMETHOD:{method}\r\nBEGIN:VEVENT\r\nUID:{}\r\nDTSTAMP:{now}\r\nORGANIZER:mailto:{}\r\nATTENDEE;PARTSTAT={partstat}:mailto:{}\r\n",
         calendar_text_escape(uid),
         calendar_text_escape(organizer),
         calendar_text_escape(attendee)
     );
-    if let Some(recurrence_key) = recurrence_key {
+    if let Some(proposal) = proposal {
+        calendar.push_str(&format!(
+            "DTSTART:{}\r\nDTEND:{}\r\nSEQUENCE:{sequence}\r\nSUMMARY:{}\r\n",
+            proposal.start.format("%Y%m%dT%H%M%SZ"),
+            proposal.end.format("%Y%m%dT%H%M%SZ"),
+            calendar_text_escape(title),
+        ));
+        if let Some(description) = description {
+            calendar.push_str(&format!(
+                "DESCRIPTION:{}\r\n",
+                calendar_text_escape(description)
+            ));
+        }
+    }
+    if proposal.is_some() {
+        if let Some(instance_id) = instance_id {
+            let occurrence = chrono::DateTime::parse_from_rfc3339(instance_id)?
+                .with_timezone(&chrono::Utc)
+                .format("%Y%m%dT%H%M%SZ");
+            calendar.push_str(&format!("RECURRENCE-ID:{occurrence}\r\n"));
+        }
+    } else if let Some(recurrence_key) = recurrence_key {
         anyhow::ensure!(
             !recurrence_key
                 .bytes()
@@ -7415,16 +7487,23 @@ fn custom_meeting_reply_mime(
 
     calendar = fold_ical_lines(&calendar);
     let boundary = format!("eas-meeting-{}", uuid::Uuid::new_v4().simple());
-    let content_type = if body.kind == 2 {
-        "text/html"
+    let mime = if let Some(body) = body {
+        let content_type = match body.kind {
+            2 => "text/html",
+            3 => "text/rtf",
+            _ => "text/plain",
+        };
+        let encoded_body = wrap_mime_base64(body.data.as_bytes());
+        format!(
+            "To: <{}>\r\nFrom: <{}>\r\nSubject: Meeting response\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"{boundary}\"\r\n\r\n--{boundary}\r\nContent-Type: {content_type}; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n{encoded_body}\r\n--{boundary}\r\nContent-Type: text/calendar; method={method}; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{calendar}--{boundary}--\r\n",
+            organizer, attendee
+        )
     } else {
-        "text/plain"
+        format!(
+            "To: <{}>\r\nFrom: <{}>\r\nSubject: Meeting time proposal\r\nMIME-Version: 1.0\r\nContent-Type: text/calendar; method={method}; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{calendar}",
+            organizer, attendee
+        )
     };
-    let encoded_body = wrap_mime_base64(body.data.as_bytes());
-    let mime = format!(
-        "To: <{}>\r\nFrom: <{}>\r\nSubject: Meeting response\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"{boundary}\"\r\n\r\n--{boundary}\r\nContent-Type: {content_type}; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n{encoded_body}\r\n--{boundary}\r\nContent-Type: text/calendar; method=REPLY; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{calendar}--{boundary}--\r\n",
-        organizer, attendee
-    );
     Ok(mime.into_bytes())
 }
 
@@ -12642,17 +12721,24 @@ mod meeting_response_send_tests {
 
     #[test]
     fn custom_meeting_reply_includes_body_and_targets_organizer() {
-        let mime = custom_meeting_reply_mime(
-            &MeetingResponseBody {
+        let mime = meeting_response_mime(
+            Some(&MeetingResponseBody {
                 kind: 1,
                 data: "I will attend".into(),
+            }),
+            None,
+            MeetingResponseMimeContext {
+                uid: "event-uid@example.test",
+                organizer: "organizer@example.test",
+                attendee: "attendee@example.test",
+                participation: "accepted",
+                recurrence_key: Some("2026-11-25T10:00:00"),
+                instance_id: Some("2026-11-25T15:00:00Z"),
+                time_zone: Some("America/Toronto"),
+                title: "Planning",
+                description: Some("Details"),
+                sequence: 0,
             },
-            "event-uid@example.test",
-            "organizer@example.test",
-            "attendee@example.test",
-            "accepted",
-            Some("2026-11-25T10:00:00"),
-            Some("America/Toronto"),
         )
         .unwrap();
         let mime = String::from_utf8(mime).unwrap();
@@ -12662,6 +12748,63 @@ mod meeting_response_send_tests {
         assert!(mime.contains("ATTENDEE;PARTSTAT=ACCEPTED:mailto:attendee@example.test"));
         assert!(mime.contains("RECURRENCE-ID;TZID=America/Toronto:20261125T100000"));
         assert!(mime.contains(&STANDARD.encode("I will attend")));
+
+        let rtf = meeting_response_mime(
+            Some(&MeetingResponseBody {
+                kind: 3,
+                data: r"{\rtf1 Hello}".into(),
+            }),
+            None,
+            MeetingResponseMimeContext {
+                uid: "event-uid@example.test",
+                organizer: "organizer@example.test",
+                attendee: "attendee@example.test",
+                participation: "accepted",
+                recurrence_key: None,
+                instance_id: None,
+                time_zone: None,
+                title: "Planning",
+                description: None,
+                sequence: 0,
+            },
+        )
+        .unwrap();
+        assert!(String::from_utf8(rtf)
+            .unwrap()
+            .contains("Content-Type: text/rtf; charset=utf-8"));
+    }
+
+    #[test]
+    fn proposed_time_email_uses_counter_method_and_event_sequence() {
+        let mime = meeting_response_mime(
+            None,
+            Some(&MeetingResponseProposal {
+                start: "2026-11-25T15:00:00Z".parse().unwrap(),
+                end: "2026-11-25T16:00:00Z".parse().unwrap(),
+            }),
+            MeetingResponseMimeContext {
+                uid: "event-uid@example.test",
+                organizer: "organizer@example.test",
+                attendee: "attendee@example.test",
+                participation: "declined",
+                recurrence_key: Some("2026-11-25T10:00:00"),
+                instance_id: Some("2026-11-25T15:00:00Z"),
+                time_zone: None,
+                title: "Planning",
+                description: Some("Discuss budget"),
+                sequence: 3,
+            },
+        )
+        .unwrap();
+        let mime = String::from_utf8(mime).unwrap();
+        assert!(mime.starts_with("To: <organizer@example.test>\r\nFrom: <attendee@example.test>"));
+        assert!(mime.contains("Content-Type: text/calendar; method=COUNTER; charset=utf-8"));
+        assert!(mime.contains("METHOD:COUNTER\r\n"));
+        assert!(mime.contains("DTSTART:20261125T150000Z\r\nDTEND:20261125T160000Z"));
+        assert!(mime.contains("SEQUENCE:3\r\nSUMMARY:Planning"));
+        assert!(mime.contains("DESCRIPTION:Discuss budget"));
+        assert!(mime.contains("RECURRENCE-ID:20261125T150000Z\r\n"));
+        assert!(!mime.contains("RECURRENCE-ID;TZID="));
     }
 
     #[tokio::test]
@@ -12715,6 +12858,74 @@ mod meeting_response_send_tests {
                 .unwrap(),
             "146"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn series_counter_without_instance_id_fails_closed_before_writing() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let captured = calls.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(_request): Json<serde_json::Value>| {
+                let calls = captured.clone();
+                async move {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Json(serde_json::json!({"methodResponses":[[
+                        "CalendarEvent/get", {"state":"s1","list":[{
+                            "id":"e","uid":"event@example.test","@type":"Event",
+                            "calendarIds":{"cal":true},"recurrenceRule":{"frequency":"weekly"},
+                            "participants":{
+                                "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                                "self":{"email":"user@example.test","roles":{"attendee":true}}
+                            }
+                        }]}, "get"
+                    ]]}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CALENDARS:"a"}, "apiUrl":url,
+            "downloadUrl":url,"uploadUrl":url,"username":"user@example.test","state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user@example.test".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        assert_eq!(
+            client
+                .respond_calendar_event(
+                    &auth,
+                    "cal",
+                    "e",
+                    "declined",
+                    MeetingResponseOptions {
+                        send_response: true,
+                        proposed_times: Some(MeetingResponseProposal {
+                            start: "2026-12-01T15:00:00Z".parse().unwrap(),
+                            end: "2026-12-01T16:00:00Z".parse().unwrap(),
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap(),
+            "4"
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         server.abort();
     }
 

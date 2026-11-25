@@ -24,43 +24,124 @@ fn invalid_instance_id_status(value: Option<&str>) -> Option<&'static str> {
         .map(|_| "104")
 }
 
-fn custom_response_body(
+fn response_payload(
     request: &Document,
-) -> Result<Option<crate::jmap::client::MeetingResponseBody>, ()> {
+) -> Result<
+    (
+        Option<crate::jmap::client::MeetingResponseBody>,
+        Option<crate::jmap::client::MeetingResponseProposal>,
+    ),
+    (),
+> {
     use crate::wbxml::eas::airsync_base as ab;
     let send_response = eas::child_elements(request)
         .into_iter()
         .find(|child| is(child, mr::SEND_RESPONSE));
     let Some(send_response) = send_response else {
-        return Ok(None);
+        return Ok((None, None));
     };
-    let body = eas::child_elements(&send_response)
-        .into_iter()
-        .find(|child| is(child, ab::BODY));
-    let Some(body) = body else {
-        return Ok(None);
-    };
-    let fields = eas::child_elements(&body);
-    let types: Vec<_> = fields.iter().filter(|field| is(field, ab::TYPE)).collect();
-    let data: Vec<_> = fields.iter().filter(|field| is(field, ab::DATA)).collect();
-    if types.len() != 1 || data.len() > 1 || fields.len() != 1 + data.len() {
+    let fields = eas::child_elements(&send_response);
+    if fields.iter().any(|field| {
+        !is(field, ab::BODY)
+            && !is(field, mr::PROPOSED_START_TIME)
+            && !is(field, mr::PROPOSED_END_TIME)
+    }) {
         return Err(());
     }
-    let kind = eas::find_text_after(types[0], ab::TYPE)
-        .and_then(|value| value.parse::<u8>().ok())
-        .filter(|kind| matches!(kind, 1 | 2))
-        .ok_or(())?;
-    let data = data
-        .first()
-        .and_then(|field| eas::find_text_after(field, ab::DATA))
-        .unwrap_or("");
-    if data.len() > 256 * 1024 {
+    let bodies: Vec<_> = fields.iter().filter(|field| is(field, ab::BODY)).collect();
+    if bodies.len() > 1 {
         return Err(());
     }
-    Ok(Some(crate::jmap::client::MeetingResponseBody {
-        kind,
-        data: data.to_owned(),
-    }))
+    let body = if let Some(body) = bodies.first() {
+        let body_fields = eas::child_elements(body);
+        let types: Vec<_> = body_fields
+            .iter()
+            .filter(|field| is(field, ab::TYPE))
+            .collect();
+        let data: Vec<_> = body_fields
+            .iter()
+            .filter(|field| is(field, ab::DATA))
+            .collect();
+        let sizes: Vec<_> = body_fields
+            .iter()
+            .filter(|field| is(field, ab::ESTIMATED_DATA_SIZE))
+            .collect();
+        let truncations: Vec<_> = body_fields
+            .iter()
+            .filter(|field| is(field, ab::TRUNCATED))
+            .collect();
+        let previews: Vec<_> = body_fields
+            .iter()
+            .filter(|field| is(field, ab::PREVIEW))
+            .collect();
+        let allowed_fields =
+            types.len() + data.len() + sizes.len() + truncations.len() + previews.len();
+        if types.len() != 1
+            || data.len() > 1
+            || sizes.len() > 1
+            || truncations.len() > 1
+            || previews.len() > 1
+            || body_fields.len() != allowed_fields
+        {
+            return Err(());
+        }
+        if let Some(size) = sizes.first() {
+            eas::find_text_after(size, ab::ESTIMATED_DATA_SIZE)
+                .and_then(|value| value.parse::<u32>().ok())
+                .ok_or(())?;
+        }
+        if let Some(truncated) = truncations.first() {
+            if !matches!(
+                eas::find_text_after(truncated, ab::TRUNCATED),
+                Some("0" | "1")
+            ) {
+                return Err(());
+            }
+        }
+        let kind = eas::find_text_after(types[0], ab::TYPE)
+            .and_then(|value| value.parse::<u8>().ok())
+            .filter(|kind| matches!(kind, 1..=3))
+            .ok_or(())?;
+        let data = data
+            .first()
+            .and_then(|field| eas::find_text_after(field, ab::DATA))
+            .unwrap_or("");
+        if data.len() > 256 * 1024 {
+            return Err(());
+        }
+        Some(crate::jmap::client::MeetingResponseBody {
+            kind,
+            data: data.to_owned(),
+        })
+    } else {
+        None
+    };
+    let starts: Vec<_> = fields
+        .iter()
+        .filter(|field| is(field, mr::PROPOSED_START_TIME))
+        .collect();
+    let ends: Vec<_> = fields
+        .iter()
+        .filter(|field| is(field, mr::PROPOSED_END_TIME))
+        .collect();
+    if starts.len() > 1 || ends.len() > 1 || starts.is_empty() != ends.is_empty() {
+        return Err(());
+    }
+    let proposal = if let (Some(start), Some(end)) = (starts.first(), ends.first()) {
+        let start = eas::find_text_after(start, mr::PROPOSED_START_TIME)
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&chrono::Utc))
+            .ok_or(())?;
+        let end = eas::find_text_after(end, mr::PROPOSED_END_TIME)
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&chrono::Utc))
+            .filter(|end| *end > start)
+            .ok_or(())?;
+        Some(crate::jmap::client::MeetingResponseProposal { start, end })
+    } else {
+        None
+    };
+    Ok((body, proposal))
 }
 
 pub(super) async fn handle(
@@ -105,11 +186,8 @@ pub(super) async fn handle(
             let response = eas::find_text_after(&request, mr::USER_RESPONSE).unwrap_or("");
             let send_response = eas::contains_token(&request, mr::SEND_RESPONSE);
             let instance_id = eas::find_text_after(&request, mr::INSTANCE_ID);
-            let custom_body = custom_response_body(&request);
-            let unsupported = [mr::PROPOSED_START_TIME, mr::PROPOSED_END_TIME]
-                .iter()
-                .any(|t| eas::contains_token(&request, *t))
-                || custom_body.is_err();
+            let payload = response_payload(&request);
+            let unsupported = payload.is_err();
             let fields = eas::child_elements(&request);
             let required = [mr::REQUEST_ID, mr::COLLECTION_ID, mr::USER_RESPONSE];
             let count = |token| fields.iter().filter(|field| is(field, token)).count();
@@ -125,6 +203,7 @@ pub(super) async fn handle(
             let valid_fields = valid_target
                 && count(mr::USER_RESPONSE) == 1
                 && count(mr::INSTANCE_ID) <= 1
+                && count(mr::SEND_RESPONSE) <= 1
                 && (instance_id.is_none() || !matches!(version, ProtocolVersion::V14_0))
                 && (!send_response
                     || matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1))
@@ -132,15 +211,7 @@ pub(super) async fn handle(
                     required
                         .iter()
                         .chain([eas::search::LONG_ID].iter())
-                        .chain(
-                            [
-                                mr::INSTANCE_ID,
-                                mr::SEND_RESPONSE,
-                                mr::PROPOSED_START_TIME,
-                                mr::PROPOSED_END_TIME,
-                            ]
-                            .iter(),
-                        )
+                        .chain([mr::INSTANCE_ID, mr::SEND_RESPONSE].iter())
                         .any(|token| is(field, *token))
                 });
             let mut calendar_id = None;
@@ -211,7 +282,14 @@ pub(super) async fn handle(
                                     crate::jmap::client::MeetingResponseOptions {
                                         expected_organizer: organizer.as_deref(),
                                         send_response,
-                                        custom_body: custom_body.ok().flatten(),
+                                        custom_body: payload
+                                            .as_ref()
+                                            .ok()
+                                            .and_then(|(body, _)| body.clone()),
+                                        proposed_times: payload
+                                            .as_ref()
+                                            .ok()
+                                            .and_then(|(_, proposal)| proposal.clone()),
                                         instance_id,
                                     },
                                 )
@@ -263,7 +341,7 @@ pub(super) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::{custom_response_body, invalid_instance_id_status};
+    use super::{invalid_instance_id_status, response_payload};
     use crate::wbxml::{
         eas::{airsync_base as ab, meeting_response as mr},
         Document, Node,
@@ -289,7 +367,7 @@ mod tests {
 
     #[test]
     fn custom_meeting_response_body_parses_plain_text_and_html_types() {
-        for (kind, expected) in [("1", 1), ("2", 2)] {
+        for (kind, expected) in [("1", 1), ("2", 2), ("3", 3)] {
             let doc = Document {
                 nodes: vec![
                     start(mr::REQUEST),
@@ -306,7 +384,9 @@ mod tests {
                     Node::End,
                 ],
             };
-            let body = custom_response_body(&doc).unwrap().unwrap();
+            let (body, proposal) = response_payload(&doc).unwrap();
+            let body = body.unwrap();
+            assert!(proposal.is_none());
             assert_eq!(body.kind, expected);
             assert_eq!(body.data, "<b>I'll attend</b>");
         }
@@ -330,7 +410,7 @@ mod tests {
                 Node::End,
             ],
         };
-        assert!(custom_response_body(&invalid).is_err());
+        assert!(response_payload(&invalid).is_err());
 
         let oversized = Document {
             nodes: vec![
@@ -348,6 +428,45 @@ mod tests {
                 Node::End,
             ],
         };
-        assert!(custom_response_body(&oversized).is_err());
+        assert!(response_payload(&oversized).is_err());
+    }
+
+    #[test]
+    fn proposed_times_require_a_valid_ordered_pair() {
+        let doc = Document {
+            nodes: vec![
+                start(mr::REQUEST),
+                start(mr::SEND_RESPONSE),
+                start(mr::PROPOSED_START_TIME),
+                Node::Text("2026-11-25T15:00:00Z".into()),
+                Node::End,
+                start(mr::PROPOSED_END_TIME),
+                Node::Text("2026-11-25T16:00:00Z".into()),
+                Node::End,
+                Node::End,
+                Node::End,
+            ],
+        };
+        let (body, proposal) = response_payload(&doc).unwrap();
+        assert!(body.is_none());
+        let proposal = proposal.unwrap();
+        assert_eq!(proposal.start.to_rfc3339(), "2026-11-25T15:00:00+00:00");
+        assert_eq!(proposal.end.to_rfc3339(), "2026-11-25T16:00:00+00:00");
+
+        let reversed = Document {
+            nodes: vec![
+                start(mr::REQUEST),
+                start(mr::SEND_RESPONSE),
+                start(mr::PROPOSED_START_TIME),
+                Node::Text("2026-11-25T16:00:00Z".into()),
+                Node::End,
+                start(mr::PROPOSED_END_TIME),
+                Node::Text("2026-11-25T15:00:00Z".into()),
+                Node::End,
+                Node::End,
+                Node::End,
+            ],
+        };
+        assert!(response_payload(&reversed).is_err());
     }
 }
