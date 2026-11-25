@@ -21,7 +21,12 @@ WBXML. The test exposed two issues: incomplete Tasks must omit the non-nullable
 `recurrenceRule`. Both fixes have focused regression coverage. The live E2E
 test passes; the full suite passes 404 tests (75 ignored), strict Clippy and
 formatting pass. Real-client iOS/Outlook behavior remains part of the separate
-certification gate below.
+certification gate below. Code commit `bdd323e` is deployed as
+`deploy-2026-11-25-eas-task-recurrence-bdd323e`; Homelab commit `4b59842`,
+image `sha256:9c0b5083e9a20c41b39847f2eafb775889e17a3fda16350023693939f4483798`,
+started `2026-11-25T01:44:23Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. Production has no protocol-version override and retains the
+14.0 default.
 
 Remaining 16.1 readiness backlog (ordered by runtime impact):
 
