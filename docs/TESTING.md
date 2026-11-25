@@ -78,6 +78,7 @@ returns once `/healthz` answers.
 | `e2e_gateway_restart_keeps_device_state` | no re-download, no false Status 2, push resumes |
 | `e2e_long_ping_is_held_for_the_heartbeat` | quiet Ping answered Status 1 at the heartbeat, not before |
 | `e2e_calendar_busy_status_round_trips_between_devices` | EAS 16.1 calendar busy status writes plus direct `Principal/getAvailability` and ResolveRecipients `MergedFreeBusy` responses for free, tentative, busy, and out-of-office states |
+| `e2e_resolve_recipients_returns_contact_picture` | EAS 16.1 ResolveRecipients photo request backed by a real JMAP ContactCard media URI |
 | `e2e_random_changes_every_status2_is_delivered_and_none_missed` | random new mail, read flips, moves, destroys (server side) and read flips, deletes, MoveItems (device side) on two devices, messages of any age: every Status 2 is deliverable, every change is announced, the acting device is not echoed, both devices end up identical (`E2E_STEPS`, `E2E_SEED`) |
 
 Last full run (2026-11-12, 1:30 am ET): all 9 pass, random test at 100 steps; at `E2E_N=5000` (5000 messages in 50

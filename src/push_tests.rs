@@ -5284,6 +5284,73 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_resolve_recipients_returns_contact_picture() {
+        use eas::resolve_recipients as rr;
+        let live = Live::new("E2E_USER2").await;
+        let using = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:contacts"];
+        let books = live
+            .call_using(
+                serde_json::json!([["AddressBook/get", {"accountId":live.account}, "0"]]),
+                &using,
+            )
+            .await;
+        let book = books[0][1]["list"][0]["id"].as_str().unwrap();
+        let marker = format!("recipient-photo-{}", std::process::id());
+        let email = format!("{marker}@example.test");
+        let created = live
+            .call_using(
+                serde_json::json!([["ContactCard/set", {
+                    "accountId":live.account,
+                    "create":{"photo":{"@type":"Card","version":"1.0",
+                        "addressBookIds":{book:true},
+                        "name":{"full":marker},
+                        "emails":{"e":{"address":email}},
+                        "media":{"photo":{"@type":"Media","kind":"photo",
+                            "uri":"data:image/png;base64,AQID"}}}}
+                }, "0"]]),
+                &using,
+            )
+            .await;
+        let id = created[0][1]["created"]["photo"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let mut request = eas::DocumentBuilder::new();
+        request.start(rr::RESOLVE_RECIPIENTS);
+        request.leaf(rr::TO, &email);
+        request.start(rr::OPTIONS);
+        request.start(rr::PICTURE);
+        request.leaf(rr::MAX_SIZE, "102400");
+        request.leaf(rr::MAX_PICTURES, "1");
+        request.end();
+        request.end();
+        request.end();
+        let result = live
+            .wbxml_version(
+                "ResolveRecipients",
+                &dev("resolve-photo"),
+                wbxml::encode_document(&request.finish()),
+                "16.1",
+            )
+            .await;
+        let statuses = eas::find_all_text_after(&result, rr::STATUS);
+        let photos = eas::find_all_text_after(&result, rr::DATA);
+        let cleanup = live
+            .call_using(
+                serde_json::json!([["ContactCard/set", {
+                    "accountId":live.account,"destroy":[id]
+                }, "0"]]),
+                &using,
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert_eq!(statuses, vec!["1", "1", "1"]);
+        assert_eq!(photos, vec!["AQID"]);
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_search_contacts_paginates_and_fetches_results() {
         use eas::{contacts, item_operations as ops, search as srch};
         let live = Live::new("E2E_USER2").await;
