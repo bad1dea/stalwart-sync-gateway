@@ -20,8 +20,13 @@ existing attendee overrides as well. Both paths use `ifInState` and verify
 persisted participant state; declining one occurrence leaves the series
 intact. Mocked JMAP regressions cover occurrence decline and whole-series
 acceptance while preserving organizer and attendee data. Full suite: 413
-passed, 76 ignored; strict Clippy, formatting, and diff checks pass. This
-source change is validated but not yet deployed.
+passed, 76 ignored; strict Clippy, formatting, and diff checks pass. Deployed
+as `deploy-2026-11-24-eas-meeting-response-recurrence-d963275`; Homelab commit
+`5c003f3`, image
+`sha256:30faa72b4c3b3777f419d8a1369705e00c59c9f437bdb312cb8291f6861806ac`,
+started `2026-11-25T05:00:14Z`, restart count zero, `/healthz` and `/readyz`
+both healthy through the mesh and public endpoint. Production continues to
+advertise EAS 14.0; real-client 16.1 certification remains open.
 
 Calendar `DisallowNewTimeProposal` client writes now parse the EAS boolean,
 merge `X-MICROSOFT-DISALLOW-COUNTER` into Stalwart's retained iCalendar

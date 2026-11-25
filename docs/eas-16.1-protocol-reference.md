@@ -195,9 +195,13 @@ PolicyStatus bug (SUCCESS vs NOPOLICY) was fixed this session
 ### MeetingResponse (§2.2.1.11)
 Accept/decline/tentatively-accept a meeting invite. The handler resolves an
 Inbox invitation to its CalendarEvent and writes the participation response;
-calendar-folder target behavior is protocol-version gated. The path is
-end-to-end covered in `src/push_tests.rs`. Real-client 16.1 certification
-remains separate from handler coverage.
+calendar-folder target behavior is protocol-version gated. Recurring series
+responses update the master participant plus existing attendee overrides;
+`InstanceId` on 14.1/16.0/16.1 changes only the selected occurrence. The updates
+preserve other participant data and verify readback. Mocked regressions cover
+series acceptance and occurrence decline. Deployed as
+`deploy-2026-11-24-eas-meeting-response-recurrence-d963275`; real-client 16.1
+certification remains separate from handler coverage.
 
 ## WBXML codepages (MS-ASWBXML)
 
