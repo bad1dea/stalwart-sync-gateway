@@ -129,6 +129,7 @@ fn merged_free_busy(
         }
         let status = match period["event"]["freeBusyStatus"].as_str() {
             Some("x-eas-out-of-office") => b'3',
+            Some("x-eas-tentative") => b'1',
             _ => match period["busyStatus"].as_str() {
                 Some("tentative") => b'1',
                 Some("confirmed" | "unavailable") => b'2',
@@ -739,7 +740,7 @@ mod tests {
         .unwrap();
         let periods = vec![
             serde_json::json!({"utcStart":"2042-05-05T10:10:00Z","utcEnd":"2042-05-05T10:20:00Z","busyStatus":"confirmed"}),
-            serde_json::json!({"utcStart":"2042-05-05T10:30:00Z","utcEnd":"2042-05-05T10:40:00Z","busyStatus":"tentative"}),
+            serde_json::json!({"utcStart":"2042-05-05T10:30:00Z","utcEnd":"2042-05-05T10:40:00Z","busyStatus":"confirmed","event":{"freeBusyStatus":"x-eas-tentative"}}),
             serde_json::json!({"utcStart":"2042-05-05T11:00:00Z","utcEnd":"2042-05-05T11:10:00Z","busyStatus":"confirmed","event":{"freeBusyStatus":"x-eas-out-of-office"}}),
             serde_json::json!({"utcStart":"2042-05-05T11:30:00Z","utcEnd":"2042-05-05T11:30:00.500Z","busyStatus":"tentative"}),
             serde_json::json!({"utcStart":"2042-05-05T12:00:00Z","utcEnd":"2042-05-05T12:30:00Z","busyStatus":"confirmed"}),
