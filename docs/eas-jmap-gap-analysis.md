@@ -59,6 +59,13 @@ Homelab commit `f89d6f0`, image
 started `2026-11-25T02:10:46Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. Production retains the 14.0 protocol default.
 
+PDF Find OCR now permits five image-only pages per attachment. The synthetic
+tool regression proves five pages are extracted, six are refused, and each
+render/OCR subprocess remains individually time-bounded; existing real scanned
+and mixed-PDF fixtures cover the installed Poppler/Tesseract path. The full
+suite passes 404 tests (75 ignored), strict Clippy passes, and formatting and
+diff checks pass.
+
 Remaining 16.1 readiness backlog (ordered by runtime impact):
 
 1. **Real-client 16.1 validation.** Exercise negotiation, Tasks, BodyPart,
@@ -82,8 +89,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    attachments, ordinary ZIP archives with allowlisted text/config files, and
    Word, Excel, and PowerPoint package comment text, plus
    MIME-declared charsets for text attachments and XML declaration encodings.
-   Scanned-only PDFs with up to three image-only pages use resource-bounded
-   OCR. Attachments above 16 MiB, PDFs with more than three image-only pages,
+   Scanned-only PDFs with up to five image-only pages use resource-bounded
+   OCR. Attachments above 16 MiB, PDFs with more than five image-only pages,
    and extracted text above 8 MiB remain outside exact local matching. Mixed
    PDFs retain native text and OCR only pages without extractable text, even
    when the PDF has more than three total pages. A four-page real fixture
