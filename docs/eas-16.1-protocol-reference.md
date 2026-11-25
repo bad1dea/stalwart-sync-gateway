@@ -208,7 +208,9 @@ certification remains separate from handler coverage.
 ResolveRecipients Availability (introduced in EAS 14.0) now uses JMAP
 `Principal/getAvailability` for exact recipients and returns the required
 30-minute MergedFreeBusy string. Input bounds and per-recipient errors are
-covered by regressions; live Stalwart verification is still pending.
+covered by regressions. The implementation is deployed in
+`deploy-2026-11-25-eas-resolve-recipient-availability-220f007`; live Stalwart
+free/busy round-trip verification remains pending.
 
 ## WBXML codepages (MS-ASWBXML)
 

@@ -58,8 +58,13 @@ and free map to `1`, `2`, `3`, and `0`. JMAP errors map to per-recipient EAS
 availability statuses 162/163. Regressions cover input validation, default
 range, slot boundaries/status conversion, and batched success/per-principal
 failure. Full suite: 420 passed, 76 ignored; strict Clippy, formatting, and
-diff checks pass. This change is not yet committed or deployed, and live
-Stalwart free/busy round-trip remains to be verified.
+diff checks pass. Deployed as
+`deploy-2026-11-25-eas-resolve-recipient-availability-220f007`; Homelab commit
+`c25e58b`, image
+`sha256:519e1b2d3ff2af57a24a16d47c710468c5dbfb4c9f6ca1839bd568a335cc2d2c`,
+started `2026-11-25T05:34:02Z`, restart count zero, mesh `/healthz` and
+`/readyz` healthy, and public `/healthz` healthy. A live Stalwart free/busy
+round-trip remains to be verified.
 
 Find now extracts Excel Binary Workbook (`.xlsb`) cell values through the
 existing vendored Calamine parser, including its registered macro-enabled
