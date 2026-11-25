@@ -10,11 +10,11 @@ MIME policy, partial Sync/options persistence, and Sync long-poll/window
 handling. Check the current Rust implementation before treating any older
 “Missing” or “Not implemented” statement below as actionable.
 
-The functional source at `58893ad` is deployed to Amy's isolated bridge. The
-full suite passes 484 tests (80 ignored); strict Clippy and formatting pass.
-The image is `localhost/eas16-isolated:58893ad` (image
-`sha256:44a7a9e15c4112748299a9b653f759115dbc1e50aeaf164f3fc332a0bc2781dd`),
-started `2026-11-25T17:58:38.837215286Z` with zero restarts. `/healthz` and
+The functional source at `0fa8c57` is deployed to Amy's isolated bridge. The
+full suite passes 485 tests (80 ignored); strict Clippy and formatting pass.
+The image is `localhost/eas16-isolated:0fa8c57` (image
+`sha256:10594e58f1870de11d6ec1340c0e3fc8d74ce7cf2e4e434a5702147af0960982`),
+started `2026-11-25T18:06:59.393087579Z` with zero restarts. `/healthz` and
 `/readyz` returned `ok` and `ready`; authenticated EAS OPTIONS advertises only
 14.0. `EAS_MAX_PROTOCOL_VERSION` remains unset, and production is untouched.
 Real-client 16.1 certification remains open.
@@ -50,12 +50,13 @@ Stalwart, including JMAP confirmation that Delete removed the card.
 
 That EAS Sync test exposed a Stalwart 0.16.27 limitation: `ContactCard/query`
 returns `serverUnavailable`, even without a filter, while `ContactCard/get`
-with `ids: null` succeeds. Contacts Sync now falls back to Get-all and filters
-by `addressBookIds` only for that explicit method error; snapshot changes and
-incomplete reads continue to fail without advancing state or deleting held
-contacts. A mocked regression covers the fallback, and the ignored live WBXML
-test passed. The earlier rejected vendor-property experiment created no
-contact and changed no user data.
+with `ids: null` succeeds. Contacts Sync and Contacts Search now fall back to
+Get-all only for that explicit method error. Sync filters by `addressBookIds`;
+Search applies its existing local terms and range after guarding the Get
+snapshot with before/after state reads. Changed or incomplete reads still fail
+closed. Mocked regressions cover Sync and Search, and the ignored live WBXML
+Sync and Contact Search E2E tests passed. The earlier rejected vendor-property
+experiment created no contact and changed no user data.
 
 The same Stalwart limitation affects `CalendarEvent/query`. Calendar Sync now
 uses `CalendarEvent/get` with `ids: null` only for an explicit
@@ -2424,10 +2425,11 @@ read/reply/send, plus calendar/contacts/notes sync.
 | GetAttachment (legacy) | **Done** | `download_blob()` | `AttachmentName` reference is a synthetic `blobId||name` string this gateway itself issues. |
 | GetItemEstimate | **Done** | Counts from the same `Email/query`/`ContactCard/query`/`CalendarEvent/query` paths used for Sync | FolderType field bug fixed this session. |
 | MoveItems | **Done (mail only), non-mail behavior confirmed safe** | `Email/set` (`mailboxIds`) | Mail only. Confirmed by direct code read (no longer unverified): a Notes/Contacts/Calendar item would fail cleanly with Status 5 (`Email/set` rejects the non-Email id as `notFound`), not silent corruption. Currently moot anyway — every non-mail collection has exactly one folder, so no real client has anywhere to offer moving an item to. See command-matrix doc for the full reasoning. |
+| Search: Contacts | **Done; isolated Stalwart Search verified** (`0fa8c57`) | `ContactCard/query`, with `ContactCard/get` `ids:null` fallback on `serverUnavailable` | Search preserves local term, range, and picture handling. The fallback guards its single Get-all snapshot with Contacts state reads and fails closed if the state changes. Mocked range/search regression and ignored live Search + ItemOperations E2E pass. |
 | Search (mailbox + GAL) | **Done, both halves (`deploy-2026-08-26n`)** | `Email/query` for mail; paginated `Principal/query` + local ANR matching for GAL | Mailbox `Email/query` full-text matching was live-tested against subject/body. GAL Search deliberately loads the complete paginated principal directory and locally applies the same multi-token prefix matcher used by Find, because Stalwart's `Principal/query` text filter only matches whole tokens and would drop valid Exchange ANR prefixes. Regression coverage checks `Michael A.` matching `Michael Alexander`. `search()` (`activesync.rs`) dispatches `Store>Name` to the right one; a Mailbox search restricted to any `airsync:Class` other than "Email" returns a clean empty result rather than erroring. `EAS Range`'s zero-based-inclusive "m-n" converts directly to JMAP `position`/`limit`. Real bug caught during live verification, not left in: the first pass reused `write_email_fields`'s `body_pref=None` (its own doc comment: "always full body -- correct for ItemOperations Fetch"), so a 4-result search came back as a 132KB response with every match's full HTML body and attachment metadata inlined -- fixed by parsing Search's own `airsyncbase:BodyPreference` (the identical element Sync's Options carries) and defaulting to a 500-char plain-text preview when absent, confirmed live to shrink the same 4-result response to 2.9KB. `ItemOperations`'s Fetch parser also accepts a bare `search:LongId` so a device can open a Search result's full body. The separate ActiveSync `Find` command is implemented in `src/activesync/find.rs`, gated to 16.1, and included in the advertised command list only when the configured protocol ceiling is 16.1. Forced-version regressions exercise Find; real-client certification remains open. |
 | SendMail | **Done** | `EmailSubmission/set` (blob-upload then submit) | Confirmed live and working. |
 | SmartReply / SmartForward | **Done, threading fidelity confirmed** | Same `EmailSubmission/set` path as SendMail | Live-tested this session with a self-addressed message carrying a real Message-ID/In-Reply-To/References triplet: byte-identical values confirmed on both the Sent Items copy and the delivered Inbox copy. See roadmap item 4 for the full test. |
-| ResolveRecipients / ValidateCert | **Implemented, end-to-end covered** | Principal/contact directory matching; local X.509 chain validation | `src/activesync/resolve_recipients.rs` and `src/activesync/validate_cert.rs`; regression coverage in `src/push_tests.rs`. S/MIME compose/signing remains separate and is not implied by these commands. |
+| ResolveRecipients / ValidateCert | **Implemented, end-to-end covered** | Principal/contact directory matching; local X.509 chain validation | Contacts Search used by ResolveRecipients also falls back to `ContactCard/get ids:null` on Stalwart's explicit `serverUnavailable`; this behavior is covered by the Search fallback regression. `src/activesync/resolve_recipients.rs` and `src/activesync/validate_cert.rs`; regression coverage in `src/push_tests.rs`. S/MIME compose/signing remains separate and is not implied by these commands. |
 | Settings: DeviceInformation / UserInformation | **Done (Get)** | Static/echo — no real JMAP-backed device-info storage | `PrimarySmtpAddress` bug (unrecognized field, cascading parse failure) fixed this session by removing it; `EmailAddresses>SMTPAddress` carries the same info in a valid shape. |
 | Settings: Oof (Get) | **Done** *(disabled path live-verified; enabled path spec-derived, not device-verified)* | `VacationResponse/get` (`src/jmap/vacation.rs`) | Real account state now read on every Get. Disabled (`OofState=0`) shape confirmed live, unchanged from the earlier z-push comparison fix. Enabled scheduled responses include both StartTime and EndTime, and indefinite responses omit both; WBXML regression covers these shapes. Enabled behavior has not been tested with a real device. |
 | Settings: Oof (Set) | **Done, persists and validates** | `VacationResponse/set` (`src/jmap/vacation.rs`) | Live-verified end to end with `isEnabled=false` (safe -- confirmed via direct JMAP query that `subject`/`textBody` actually persisted to the real `VacationResponse.singleton` object, then cleaned back up). `isEnabled=true` was deliberately never live-toggled for the same reason as the Get path above. Set now accepts only OofState 0/1/2, requires StartTime and EndTime together (Status 2 otherwise), and drops schedule times for non-time-based states per MS-ASCMD. Omitted Set fields preserve their JMAP values; a ReplyMessage-only update no longer disables Oof or erases a schedule. It returns failure status 100 if JMAP write or readback fails instead of acknowledging a change that was not persisted; the Settings status specification reserves 100–255 for property-specific errors. Partial-update behavior is deployed in `deploy-2026-11-24-eas-oof-partial-b067da4` (homelab `b8be778`, image `sha256:53b9c323df006c8191a44362f91343882af38fb15f7508a4a59c51456cbdd589`, `/healthz` and `/readyz` healthy). |
