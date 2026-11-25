@@ -19,8 +19,8 @@ The spec's own overview lays out the intended command sequence:
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
    `100.64.0.50:18090`, backed by isolated Stalwart. Its current gateway image
-   is `e635df0` (`sha256:5be67cc5fce150fa423997f19ea7ee0c6d924d1e574c415785140168713a8a03`),
-   started `2026-11-25T13:25:44.883343706Z` with zero restarts. `/healthz`
+   is `8d8bca8` (`sha256:477801269dc721271bfa1c18a56ef8544f70a0b41b890a80bea32f10652df0c0`),
+   started `2026-11-25T13:30:20.678674545Z` with zero restarts. `/healthz`
    and `/readyz` returned HTTP 200; the Compose environment leaves
    `EAS_MAX_PROTOCOL_VERSION` unset, so it still defaults to EAS 14.0.
    Set the variable to 16.1 during the planned client test window.
@@ -196,8 +196,8 @@ The writer order follows the schema: the version-appropriate `GlobalObjId` or
 JSCalendar location descriptions and valid `geo:` coordinates also map into
 the AirSyncBase location structure for 16.x. Legacy Email `Location` is omitted
 above the 32,768-character schema limit; this restriction does not apply to
-the 16.x AirSyncBase location encoding. Commit `e635df0` is deployed to
-Amy's isolated bridge as `localhost/eas16-isolated:e635df0`; `/healthz` and
+the 16.x AirSyncBase location encoding. Commit `8d8bca8` is deployed to
+Amy's isolated bridge as `localhost/eas16-isolated:8d8bca8`; `/healthz` and
 `/readyz` both return HTTP 200, and the bridge still defaults to EAS 14.0.
 `Organizer` maps from the JMAP `owner` participant's display name (email
 fallback) to Email:Organizer. `ResponseRequested` maps the current attendee's
