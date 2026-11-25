@@ -804,7 +804,31 @@ impl JmapClient {
                 continue;
             };
             if let [event] = events.as_slice() {
-                if let Some(request) = email_meeting_request_from_event(event, auth.username()) {
+                if let Some(mut request) = email_meeting_request_from_event(event, auth.username())
+                {
+                    match self
+                        .download_calendar_blob_with_type_limited(
+                            auth,
+                            blob,
+                            "invitation.ics",
+                            256 * 1024,
+                        )
+                        .await
+                    {
+                        Ok(Some((bytes, _))) => {
+                            request.disallow_new_time_proposal =
+                                calendar_disallow_new_time_proposal_from_blob(&bytes);
+                        }
+                        Ok(None) => tracing::debug!(
+                            blob_id = blob,
+                            "calendar invitation source exceeds parsing limit"
+                        ),
+                        Err(error) => tracing::warn!(
+                            %error,
+                            blob_id = blob,
+                            "could not read calendar invitation source"
+                        ),
+                    }
                     requests.insert(blob.to_owned(), request);
                 }
             }
@@ -6971,6 +6995,20 @@ impl JmapClient {
             .await
     }
 
+    pub async fn download_calendar_blob_with_type_limited(
+        &self,
+        auth: &AuthenticatedSession,
+        blob_id: &str,
+        name: &str,
+        max_bytes: usize,
+    ) -> anyhow::Result<Option<(Vec<u8>, String)>> {
+        let Some(account_id) = auth.session.primary_account_for(capabilities::CALENDARS) else {
+            anyhow::bail!("JMAP Calendars capability is not available");
+        };
+        self.download_blob_from_account_limited(auth, account_id, blob_id, name, Some(max_bytes))
+            .await
+    }
+
     async fn download_contact_blob_limited(
         &self,
         auth: &AuthenticatedSession,
@@ -8489,6 +8527,7 @@ fn email_meeting_request_from_event(
         busy_status,
         reminder_seconds,
         recurrence,
+        disallow_new_time_proposal: None,
         dtstamp,
         start,
         end,
@@ -8501,6 +8540,37 @@ fn email_meeting_request_from_event(
             1
         },
     })
+}
+
+fn calendar_disallow_new_time_proposal_from_blob(bytes: &[u8]) -> Option<bool> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut logical_lines: Vec<String> = Vec::new();
+    for line in text.split(['\r', '\n']).filter(|line| !line.is_empty()) {
+        if (line.starts_with(' ') || line.starts_with('\t')) && !logical_lines.is_empty() {
+            logical_lines.last_mut()?.push_str(&line[1..]);
+        } else {
+            logical_lines.push(line.to_owned());
+        }
+    }
+    let mut result = None;
+    for line in logical_lines {
+        let Some((property, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = property.split(';').next()?.trim();
+        if !name.eq_ignore_ascii_case("X-MICROSOFT-DISALLOW-COUNTER") {
+            continue;
+        }
+        if result.is_some() {
+            return None;
+        }
+        result = Some(match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => true,
+            "false" | "0" => false,
+            _ => return None,
+        });
+    }
+    result
 }
 
 #[cfg(test)]
@@ -8659,6 +8729,32 @@ mod meeting_request_conversion_tests {
     }
 
     #[test]
+    fn reads_disallow_counter_from_unfolded_icalendar_property() {
+        assert_eq!(
+            calendar_disallow_new_time_proposal_from_blob(
+                b"BEGIN:VCALENDAR\r\nX-MICROSOFT-DISALLOW-COUNTER;VALUE=BOOLEAN:\r\n TRUE\r\nEND:VCALENDAR\r\n"
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            calendar_disallow_new_time_proposal_from_blob(b"X-MICROSOFT-DISALLOW-COUNTER:0\r\n"),
+            Some(false)
+        );
+        assert_eq!(
+            calendar_disallow_new_time_proposal_from_blob(
+                b"X-MICROSOFT-DISALLOW-COUNTER:TRUE\r\nX-MICROSOFT-DISALLOW-COUNTER:FALSE\r\n"
+            ),
+            None
+        );
+        assert_eq!(
+            calendar_disallow_new_time_proposal_from_blob(
+                b"X-MICROSOFT-DISALLOW-COUNTER:MAYBE\r\n"
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn does_not_invent_timezone_or_accept_non_request_calendar_messages() {
         let missing_zone = serde_json::json!({
             "@type":"Event", "method":"request", "uid":"u",
@@ -8693,7 +8789,10 @@ mod meeting_request_conversion_tests {
 #[cfg(test)]
 mod email_meeting_request_fetch_tests {
     use super::*;
-    use axum::{routing::post, Json, Router};
+    use axum::{
+        routing::{get, post},
+        Json, Router,
+    };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -8747,6 +8846,14 @@ mod email_meeting_request_fetch_tests {
                     }
                 }
             }),
+        ).route(
+            "/download/:account_id/:blob_id/:name",
+            get(|axum::extract::Path((account_id, blob_id, _name)): axum::extract::Path<(String, String, String)>| async move {
+                assert_eq!(account_id, "calendar-account");
+                assert_eq!(blob_id, "invite-blob");
+                ([ ("content-type", "text/calendar; charset=utf-8") ],
+                    b"BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nX-MICROSOFT-DISALLOW-COUNTER:TRUE\r\nEND:VCALENDAR\r\n".to_vec())
+            }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
@@ -8757,7 +8864,9 @@ mod email_meeting_request_fetch_tests {
                 "urn:ietf:params:jmap:mail":"mail-account",
                 "urn:ietf:params:jmap:calendars":"calendar-account"
             },
-            "apiUrl":url, "downloadUrl":url, "uploadUrl":url,
+            "apiUrl":url,
+            "downloadUrl":format!("{url}download/{{accountId}}/{{blobId}}/{{name}}?type={{type}}"),
+            "uploadUrl":url,
             "username":"attendee@example.test", "state":"s"
         }))
         .unwrap();
@@ -8781,6 +8890,7 @@ mod email_meeting_request_fetch_tests {
         assert_eq!(request.start.as_deref(), Some("20261201T150000Z"));
         assert_eq!(request.end.as_deref(), Some("20261201T160000Z"));
         assert_eq!(request.location.as_deref(), Some("Room 42"));
+        assert_eq!(request.disallow_new_time_proposal, Some(true));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         server.abort();
     }

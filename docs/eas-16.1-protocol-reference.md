@@ -190,10 +190,12 @@ relative-to-start display alert; unsupported alert kinds are skipped.
 Supported JSCalendar recurrence rules map into Email:Recurrences, with a
 required recurrence interval emitted even when the source uses its default.
 `InstanceType` is 0 for a single event and 1 for a recurring master.
+`DisallowNewTimeProposal` reads `X-MICROSOFT-DISALLOW-COUNTER` from the source
+iCalendar blob, bounded to 256 KiB, and maps its boolean value to EAS 0/1.
 Unsupported recurrence rules suppress structured meeting-request metadata.
-Parser and WBXML regressions cover these mappings, now deployed on the isolated
-bridge as `d276441`. It still defaults to EAS 14.0. Real-client validation
-remains pending.
+Parser and WBXML regressions cover these mappings. The new counter-policy
+mapping is not yet deployed; the bridge currently runs `d276441` and defaults
+to EAS 14.0. Real-client validation remains pending.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
 SendMail posts a full new outgoing message; SmartReply/SmartForward use

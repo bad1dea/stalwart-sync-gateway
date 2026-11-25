@@ -5250,6 +5250,12 @@ fn write_email_meeting_request(
     if let Some(reminder_seconds) = meeting.reminder_seconds {
         builder.leaf(mail::REMINDER, reminder_seconds.to_string());
     }
+    if let Some(disallow) = meeting.disallow_new_time_proposal {
+        builder.leaf(
+            mail::DISALLOW_NEW_TIME_PROPOSAL,
+            if disallow { "1" } else { "0" },
+        );
+    }
     if let Some(recurrence) = &meeting.recurrence {
         builder.start(mail::RECURRENCES);
         builder.start(mail::RECURRENCE);
@@ -10821,6 +10827,7 @@ mod tests {
                     occurrences: Some(6),
                     ..Default::default()
                 }),
+                disallow_new_time_proposal: Some(true),
                 dtstamp: "2026-11-25T14:00:00Z".to_owned(),
                 start: Some("2026-12-01T15:00:00Z".to_owned()),
                 end: Some("2026-12-01T16:00:00Z".to_owned()),
@@ -10876,6 +10883,10 @@ mod tests {
         assert_eq!(eas::find_text_after(&document, mail::REMINDER), Some("900"));
         assert_eq!(
             eas::find_text_after(&document, mail::RECURRENCE_TYPE),
+            Some("1")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, mail::DISALLOW_NEW_TIME_PROPOSAL),
             Some("1")
         );
         assert_eq!(eas::find_text_after(&document, mail::INTERVAL), Some("2"));

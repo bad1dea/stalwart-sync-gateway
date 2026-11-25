@@ -20,9 +20,8 @@ all-day state, the required 172-byte `TimeZone`, `Calendar:UID`,
 `AirSyncBase:Location`, and `MeetingMessageType` (1 for a new request, 2 when
 the JMAP sequence is nonzero). Older protocol versions keep the normal email
 shape because the legacy `GlobalObjId` conversion is not implemented. The
-optional `DisallowNewTimeProposal` and 16.1
-`ProposedStartTime`/`ProposedEndTime` fields remain unmapped. The full suite
-passes 462 tests (77 ignored), including mailbox-query-to-JMAP-parse,
+optional 16.1 `ProposedStartTime`/`ProposedEndTime` fields remain unmapped. The
+full suite passes 463 tests (77 ignored), including mailbox-query-to-JMAP-parse,
 organizer and RSVP-request mapping, and WBXML writer regressions; strict
 Clippy, formatting, and diff checks pass. The optional `Organizer` maps the
 JMAP participant with the `owner` role to its display name, falling back to
@@ -62,6 +61,11 @@ Microsoft [Recurrences](https://learn.microsoft.com/en-us/openspecs/exchange_ser
 and [Recurrence](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/a033deda-0745-428d-b9ca-d08f3e6febcd).
 Microsoft [InstanceType](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/a4d48239-6936-4b22-9267-623ecdb49b5e)
 defines 0 as a single appointment and 1 as a recurring master.
+`DisallowNewTimeProposal` is now read from the bounded (256 KiB) source
+iCalendar blob's `X-MICROSOFT-DISALLOW-COUNTER` property and emitted as 0/1;
+missing, duplicate, malformed, or oversized source data leaves it omitted.
+This code and its MIME-to-WBXML regression are awaiting deployment. Source:
+Microsoft [DisallowNewTimeProposal](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/bac187fa-43cb-4183-8c3d-e0a594efad7c).
 
 MeetingResponse now gates `ProposedStartTime` and `ProposedEndTime` to EAS
 16.1. `SendResponse` remains available in 16.0 and 16.1, but a proposal on
