@@ -36,6 +36,17 @@ pub struct ItemState {
 
 #[async_trait]
 pub trait StateStore: Send + Sync {
+    async fn contact_extensions(
+        &self,
+        account_id: &str,
+        contact_id: &str,
+    ) -> anyhow::Result<Option<serde_json::Value>>;
+    async fn put_contact_extensions(
+        &self,
+        account_id: &str,
+        contact_id: &str,
+        value: Option<serde_json::Value>,
+    ) -> anyhow::Result<()>;
     async fn get(
         &self,
         user: &str,
@@ -128,10 +139,40 @@ pub struct MemoryStateStore {
     records: RwLock<BTreeMap<String, SyncRecord>>,
     item_states: RwLock<BTreeMap<String, Vec<ItemState>>>,
     draft_mappings: RwLock<BTreeMap<(String, String), String>>,
+    contact_extensions: RwLock<BTreeMap<(String, String), serde_json::Value>>,
 }
 
 #[async_trait]
 impl StateStore for MemoryStateStore {
+    async fn contact_extensions(
+        &self,
+        account_id: &str,
+        contact_id: &str,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        Ok(self
+            .contact_extensions
+            .read()
+            .await
+            .get(&(account_id.to_owned(), contact_id.to_owned()))
+            .cloned())
+    }
+
+    async fn put_contact_extensions(
+        &self,
+        account_id: &str,
+        contact_id: &str,
+        value: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        let key = (account_id.to_owned(), contact_id.to_owned());
+        let mut values = self.contact_extensions.write().await;
+        if let Some(value) = value {
+            values.insert(key, value);
+        } else {
+            values.remove(&key);
+        }
+        Ok(())
+    }
+
     async fn get(
         &self,
         user: &str,
@@ -315,6 +356,61 @@ impl SqliteStateStore {
 
 #[async_trait]
 impl StateStore for SqliteStateStore {
+    async fn contact_extensions(
+        &self,
+        account_id: &str,
+        contact_id: &str,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SQLite state lock poisoned"))?;
+        let encoded: Option<String> = connection
+            .query_row(
+                "SELECT fields_json FROM contact_extensions WHERE account_id = ?1 AND contact_id = ?2",
+                params![account_id, contact_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to read contact extension fields")?;
+        encoded
+            .map(|value| {
+                serde_json::from_str(&value).context("invalid stored contact extension fields")
+            })
+            .transpose()
+    }
+
+    async fn put_contact_extensions(
+        &self,
+        account_id: &str,
+        contact_id: &str,
+        value: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SQLite state lock poisoned"))?;
+        if let Some(value) = value {
+            let encoded = serde_json::to_string(&value)
+                .context("failed to encode contact extension fields")?;
+            connection.execute(
+                "INSERT INTO contact_extensions (account_id, contact_id, fields_json, updated_at)
+                 VALUES (?1, ?2, ?3, unixepoch())
+                 ON CONFLICT(account_id, contact_id) DO UPDATE SET
+                    fields_json = excluded.fields_json, updated_at = excluded.updated_at",
+                params![account_id, contact_id, encoded],
+            ).context("failed to store contact extension fields")?;
+        } else {
+            connection
+                .execute(
+                    "DELETE FROM contact_extensions WHERE account_id = ?1 AND contact_id = ?2",
+                    params![account_id, contact_id],
+                )
+                .context("failed to delete contact extension fields")?;
+        }
+        Ok(())
+    }
+
     async fn get(
         &self,
         user: &str,
@@ -656,6 +752,17 @@ fn migrate(connection: &Connection) -> anyhow::Result<()> {
 
         INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (3, unixepoch());
+
+        CREATE TABLE IF NOT EXISTS contact_extensions (
+            account_id TEXT NOT NULL,
+            contact_id TEXT NOT NULL,
+            fields_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (account_id, contact_id)
+        );
+
+        INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (4, unixepoch());
         ",
     )?;
     Ok(())
@@ -713,6 +820,72 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_contact_extensions_survive_reopen_and_clear() {
+        let path = std::env::temp_dir().join(format!(
+            "stalwart-sync-gateway-contact-state-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let store = std::sync::Arc::new(SqliteStateStore::open(path.to_str().unwrap()).unwrap());
+        let fields = serde_json::json!({"assistantName":"Grace Hopper"});
+        store
+            .put_contact_extensions("account-a", "contact-1", Some(fields.clone()))
+            .await
+            .unwrap();
+        drop(store);
+        let reopened = std::sync::Arc::new(SqliteStateStore::open(path.to_str().unwrap()).unwrap());
+        assert_eq!(
+            reopened
+                .contact_extensions("account-a", "contact-1")
+                .await
+                .unwrap(),
+            Some(fields)
+        );
+        exercise_contact_extensions(reopened).await;
+        let _ = std::fs::remove_file(&path);
+    }
+
+    async fn exercise_contact_extensions(store: std::sync::Arc<dyn StateStore>) {
+        let fields = serde_json::json!({
+            "assistantName":"Grace Hopper",
+            "spouse":"Alex Lovelace",
+            "children":["Byron Ada", "Byron Ralph"],
+            "customerId":"customer-314",
+            "governmentId":"id-2718",
+            "managerName":"CN=Grace Hopper,OU=People"
+        });
+        store
+            .put_contact_extensions("account-a", "contact-1", Some(fields.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .contact_extensions("account-a", "contact-1")
+                .await
+                .unwrap(),
+            Some(fields)
+        );
+        assert!(store
+            .contact_extensions("account-b", "contact-1")
+            .await
+            .unwrap()
+            .is_none());
+        store
+            .put_contact_extensions("account-a", "contact-1", None)
+            .await
+            .unwrap();
+        assert!(store
+            .contact_extensions("account-a", "contact-1")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn memory_contact_extensions_are_scoped_and_clearable() {
+        exercise_contact_extensions(std::sync::Arc::new(MemoryStateStore::default())).await;
     }
 
     async fn exercise_operation_reservation(store: std::sync::Arc<dyn StateStore>) {

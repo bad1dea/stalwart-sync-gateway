@@ -32,31 +32,18 @@ account was removed after the run. The server's rejected `freeBusyStatus`
 event projection and omitted availability `accountId` are both covered by the
 request path and regression tests.
 
-EAS Contacts `AssistantName`, `Spouse`, and multi-valued `Children` now
-round-trip through JSContact vendor properties `khuo.ng:easAssistantName`,
-`khuo.ng:easSpouse`, and `khuo.ng:easChildren`. These are name fields, so the
-bridge preserves their values without fabricating related ContactCard IDs.
-Partial updates are state-guarded, empty scalar values clear the corresponding
-property, and an empty Children container clears the list. WBXML parsing,
-writing, Sync fingerprinting, JMAP readback, update, and clear behavior have
-regression coverage. The current full suite passes 480 tests (78 ignored).
-The deployment runs on the isolated test bridge only; no real contact was
-modified.
-
-The same JSContact vendor-property approach now covers EAS Contacts2
-`CustomerId`, `GovernmentId`, and `ManagerName` as
-`khuo.ng:easCustomerId`, `khuo.ng:easGovernmentId`, and
-`khuo.ng:easManagerName`. These preserve the literal identifier or manager
-distinguished-name string; empty Change fields clear them. Parser, writer,
-fingerprint, readback, update, and clear regressions pass. Strict Clippy,
-formatting, and diff checks pass. The change is deployed to the isolated
-bridge as `localhost/eas16-isolated:412c9c6`; `/healthz` and `/readyz` returned
-HTTP 200, with zero container restarts. The environment continues to omit
-`EAS_MAX_PROTOCOL_VERSION`, so it defaults to 14.0. Production was not changed.
-An ignored live-Stalwart regression now covers vendor-property creation,
-readback, partial update, clear, and cleanup. Its first run received HTTP 401
-from the JMAP session endpoint using the stored remote test credentials, before
-creating or changing any contact. Re-run it with valid disposable credentials.
+The earlier Contact field implementation claimed JSContact vendor-property
+round trips. That claim was disproven against the configured Stalwart 0.16.27:
+`ContactCard/set` rejects `khuo.ng:easAssistantName` as `invalidProperties`.
+The server session also does not advertise JMAP Object Metadata, so that
+capability is not available as a server-side alternative in this environment.
+The implementation is being changed to store EAS-only values in the gateway's
+persistent SQLite state, keyed by the Stalwart account and ContactCard ID. The
+values remain available to EAS Sync, Find/Search and ItemOperations through
+this gateway, but are not visible to JMAP or CardDAV clients and require the
+gateway state database to be retained. Live verification against Stalwart is
+required before this replacement is counted complete. The rejected vendor
+property experiment created no contact and changed no user data.
 
 Current prioritized work:
 

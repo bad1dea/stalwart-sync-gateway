@@ -19,13 +19,6 @@ use crate::{
     },
 };
 
-const EAS_ASSISTANT_NAME_PROPERTY: &str = "khuo.ng:easAssistantName";
-const EAS_SPOUSE_PROPERTY: &str = "khuo.ng:easSpouse";
-const EAS_CHILDREN_PROPERTY: &str = "khuo.ng:easChildren";
-const EAS_CUSTOMER_ID_PROPERTY: &str = "khuo.ng:easCustomerId";
-const EAS_GOVERNMENT_ID_PROPERTY: &str = "khuo.ng:easGovernmentId";
-const EAS_MANAGER_NAME_PROPERTY: &str = "khuo.ng:easManagerName";
-
 #[derive(Debug, thiserror::Error)]
 #[error("JMAP email state changed")]
 struct EmailStateMismatch;
@@ -2014,7 +2007,7 @@ impl JmapClient {
                 MethodCall::new("ContactCard/get", serde_json::json!({
                     "accountId":account, "#ids":{"resultOf":"q","name":"ContactCard/query","path":"/ids"},
                     "properties":["id","addressBookIds","name","emails","phones","organizations",
-                        "titles","nicknames","addresses","anniversaries","notes","onlineServices","media","links","keywords","khuo.ng:easAssistantName","khuo.ng:easSpouse","khuo.ng:easChildren","khuo.ng:easCustomerId","khuo.ng:easGovernmentId","khuo.ng:easManagerName"]
+                        "titles","nicknames","addresses","anniversaries","notes","onlineServices","media","links","keywords"]
                 }), "g"),
             ]).await?;
             let query = response
@@ -2077,6 +2070,7 @@ impl JmapClient {
                             })
                             .and_then(|media| media.blob_id.clone());
                         let mut contact = Contact::from(card);
+                        self.apply_contact_extensions(account, &mut contact).await?;
                         if fetch_picture_blobs && contact.picture.is_none() {
                             if let Some(blob_id) = picture_blob {
                                 if let Some((bytes, _)) = self
@@ -2146,7 +2140,7 @@ impl JmapClient {
                     "ContactCard/get",
                     serde_json::json!({
                         "accountId":account, "ids":[id],
-                        "properties":["id","addressBookIds","name","emails","phones","organizations","titles","keywords","anniversaries","links","notes","khuo.ng:easAssistantName","khuo.ng:easSpouse","khuo.ng:easChildren","khuo.ng:easCustomerId","khuo.ng:easGovernmentId","khuo.ng:easManagerName"]
+                        "properties":["id","addressBookIds","name","emails","phones","organizations","titles","keywords","anniversaries","links","notes"]
                     }),
                     "g",
                 )],
@@ -2162,7 +2156,54 @@ impl JmapClient {
             get.list.len() <= 1 && get.list.iter().all(|item| item.id == id),
             "contact lookup returned unexpected items"
         );
-        Ok(get.list.into_iter().next().map(Contact::from))
+        let mut contact = get.list.into_iter().next().map(Contact::from);
+        if let Some(contact) = &mut contact {
+            self.apply_contact_extensions(account, contact).await?;
+        }
+        Ok(contact)
+    }
+
+    async fn apply_contact_extensions(
+        &self,
+        account_id: &str,
+        contact: &mut Contact,
+    ) -> anyhow::Result<()> {
+        let Some(fields) = self
+            .state
+            .contact_extensions(account_id, &contact.id)
+            .await?
+        else {
+            return Ok(());
+        };
+        contact.assistant_name = fields
+            .get("assistantName")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        contact.spouse = fields
+            .get("spouse")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        contact.children = fields
+            .get("children")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        contact.customer_id = fields
+            .get("customerId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        contact.government_id = fields
+            .get("governmentId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        contact.manager_name = fields
+            .get("managerName")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        Ok(())
     }
 
     pub async fn contacts_in_address_book(
@@ -2181,7 +2222,18 @@ impl JmapClient {
                 limit,
             )
             .await?;
-        Ok(items.into_iter().map(Contact::from).collect())
+        let account_id = auth
+            .session
+            .primary_account_for(capabilities::CONTACTS)
+            .context("JMAP Contacts capability is unavailable")?;
+        let mut contacts = Vec::with_capacity(items.len());
+        for item in items {
+            let mut contact = Contact::from(item);
+            self.apply_contact_extensions(account_id, &mut contact)
+                .await?;
+            contacts.push(contact);
+        }
+        Ok(contacts)
     }
 
     /// Creates (`id: None`) or updates (`id: Some`) a contact from
@@ -2207,30 +2259,37 @@ impl JmapClient {
             anyhow::bail!("JMAP Contacts capability is not available");
         };
 
-        let mut card = serde_json::Map::new();
+        let mut extensions = match id {
+            Some(contact_id) => self
+                .state
+                .contact_extensions(account_id, contact_id)
+                .await?
+                .unwrap_or_else(|| serde_json::json!({})),
+            None => serde_json::json!({}),
+        };
+        let extension_fields = extensions
+            .as_object_mut()
+            .context("stored EAS contact extension is not an object")?;
         for (property, requested) in [
-            (EAS_ASSISTANT_NAME_PROPERTY, &fields.assistant_name),
-            (EAS_SPOUSE_PROPERTY, &fields.spouse),
-            (EAS_CUSTOMER_ID_PROPERTY, &fields.customer_id),
-            (EAS_GOVERNMENT_ID_PROPERTY, &fields.government_id),
-            (EAS_MANAGER_NAME_PROPERTY, &fields.manager_name),
+            ("assistantName", &fields.assistant_name),
+            ("spouse", &fields.spouse),
+            ("customerId", &fields.customer_id),
+            ("governmentId", &fields.government_id),
+            ("managerName", &fields.manager_name),
         ] {
             if let Some(value) = requested {
                 if value.is_empty() {
-                    if id.is_some() {
-                        card.insert(property.to_owned(), serde_json::Value::Null);
-                    }
+                    extension_fields.remove(property);
                 } else {
-                    card.insert(property.to_owned(), serde_json::json!(value));
+                    extension_fields.insert(property.to_owned(), serde_json::json!(value));
                 }
             }
         }
         if let Some(children) = &fields.children {
-            card.insert(
-                EAS_CHILDREN_PROPERTY.to_owned(),
-                serde_json::json!(children),
-            );
+            extension_fields.insert("children".to_owned(), serde_json::json!(children));
         }
+
+        let mut card = serde_json::Map::new();
 
         let mut components = Vec::new();
         let yomi_first = fields
@@ -2589,25 +2648,26 @@ impl JmapClient {
             }
         }
         let mut contact_state = None;
-        if let Some(existing_id) = id.filter(|_| {
-            has_name_update
-                || has_nickname_update
-                || has_im_update
-                || has_picture_update
-                || has_notes_update
-                || has_anniversary_update
-                || has_organizations_update
-                || has_phones_update
-                || has_links_update
-                || !addresses.is_empty()
-                || has_office_location_update
-                || fields.assistant_name.is_some()
-                || fields.spouse.is_some()
-                || fields.children.is_some()
-                || fields.customer_id.is_some()
-                || fields.government_id.is_some()
-                || fields.manager_name.is_some()
-        }) {
+        let has_jmap_contact_update = has_name_update
+            || has_nickname_update
+            || has_im_update
+            || has_picture_update
+            || has_notes_update
+            || has_anniversary_update
+            || has_organizations_update
+            || has_phones_update
+            || has_links_update
+            || !addresses.is_empty()
+            || has_office_location_update;
+        let has_eas_extension_update = fields.assistant_name.is_some()
+            || fields.spouse.is_some()
+            || fields.children.is_some()
+            || fields.customer_id.is_some()
+            || fields.government_id.is_some()
+            || fields.manager_name.is_some();
+        if let Some(existing_id) =
+            id.filter(|_| has_jmap_contact_update || has_eas_extension_update)
+        {
             let mut properties = vec!["id"];
             if has_name_update {
                 properties.push("name");
@@ -2655,12 +2715,13 @@ impl JmapClient {
                 .iter()
                 .find(|method| method.0 == "ContactCard/get")
                 .context("contact address lookup failed")?;
-            contact_state = Some(
-                result.1["state"]
-                    .as_str()
-                    .context("contact address state missing")?
-                    .to_owned(),
-            );
+            let fetched_state = result.1["state"]
+                .as_str()
+                .context("contact address state missing")?
+                .to_owned();
+            if has_jmap_contact_update {
+                contact_state = Some(fetched_state);
+            }
             let existing = result.1["list"]
                 .as_array()
                 .and_then(|list| list.iter().find(|item| item["id"] == existing_id))
@@ -3272,6 +3333,22 @@ impl JmapClient {
             }
         };
 
+        if let Some(existing_id) = id {
+            let has_jmap_update = card
+                .keys()
+                .any(|property| property != "@type" && property != "version");
+            if !has_jmap_update {
+                self.state
+                    .put_contact_extensions(
+                        account_id,
+                        existing_id,
+                        (!extension_fields.is_empty()).then(|| extensions.clone()),
+                    )
+                    .await?;
+                return Ok(existing_id.to_owned());
+            }
+        }
+
         let response: JmapResponse<serde_json::Value> = self
             .api_call(
                 auth,
@@ -3283,40 +3360,48 @@ impl JmapClient {
             )
             .await?;
 
-        for method in response.method_responses {
-            if method.0 == "error" {
-                anyhow::bail!("JMAP method error in ContactCard/set");
-            }
-            if method.0 == "ContactCard/set" {
-                if let Some(existing_id) = id {
-                    let updated = method
-                        .1
-                        .get("updated")
-                        .and_then(|value| value.get(existing_id));
-                    if updated.is_some() {
-                        return Ok(existing_id.to_owned());
-                    }
-                    anyhow::bail!(
-                        "ContactCard/set did not confirm update for {existing_id}: {:?}",
-                        method.1.get("notUpdated")
-                    );
-                }
-                if let Some(new_id) = method
-                    .1
-                    .get("created")
-                    .and_then(|c| c.get("c1"))
-                    .and_then(|card| card.get("id"))
-                    .and_then(|value| value.as_str())
-                {
-                    return Ok(new_id.to_owned());
-                }
+        let method = response
+            .method_responses
+            .into_iter()
+            .find(|method| method.0 == "ContactCard/set")
+            .context("ContactCard/set response was missing")?;
+        let saved_id = if method.0 == "error" {
+            anyhow::bail!("JMAP method error in ContactCard/set")
+        } else if let Some(existing_id) = id {
+            let updated = method
+                .1
+                .get("updated")
+                .and_then(|value| value.get(existing_id));
+            if updated.is_some() {
+                existing_id.to_owned()
+            } else {
                 anyhow::bail!(
-                    "ContactCard/set did not return a created id: {:?}",
-                    method.1.get("notCreated")
+                    "ContactCard/set did not confirm update for {existing_id}: {:?}",
+                    method.1.get("notUpdated")
                 );
             }
-        }
-        anyhow::bail!("ContactCard/set response was missing")
+        } else if let Some(new_id) = method
+            .1
+            .get("created")
+            .and_then(|c| c.get("c1"))
+            .and_then(|card| card.get("id"))
+            .and_then(|value| value.as_str())
+        {
+            new_id.to_owned()
+        } else {
+            anyhow::bail!(
+                "ContactCard/set did not return a created id: {:?}",
+                method.1.get("notCreated")
+            )
+        };
+        self.state
+            .put_contact_extensions(
+                account_id,
+                &saved_id,
+                (!extension_fields.is_empty()).then(|| extensions.clone()),
+            )
+            .await?;
+        Ok(saved_id)
     }
 
     /// Idempotent, matching `destroy_note`/`destroy_email_by_id`'s own
@@ -3352,6 +3437,9 @@ impl JmapClient {
                     .and_then(|value| value.as_array())
                     .is_some_and(|list| list.iter().any(|v| v.as_str() == Some(id)));
                 if destroyed {
+                    self.state
+                        .put_contact_extensions(account_id, id, None)
+                        .await?;
                     return Ok(());
                 }
                 let not_found = method
@@ -3362,6 +3450,9 @@ impl JmapClient {
                     .and_then(|t| t.as_str())
                     == Some("notFound");
                 if not_found {
+                    self.state
+                        .put_contact_extensions(account_id, id, None)
+                        .await?;
                     return Ok(());
                 }
                 anyhow::bail!("ContactCard/set destroy did not report success for {id}");
@@ -9748,18 +9839,6 @@ struct ContactCardObject {
     links: BTreeMap<String, ContactCardLink>,
     #[serde(default)]
     notes: BTreeMap<String, ContactCardNote>,
-    #[serde(default, rename = "khuo.ng:easAssistantName")]
-    eas_assistant_name: Option<String>,
-    #[serde(default, rename = "khuo.ng:easSpouse")]
-    eas_spouse: Option<String>,
-    #[serde(default, rename = "khuo.ng:easChildren")]
-    eas_children: Vec<String>,
-    #[serde(default, rename = "khuo.ng:easCustomerId")]
-    eas_customer_id: Option<String>,
-    #[serde(default, rename = "khuo.ng:easGovernmentId")]
-    eas_government_id: Option<String>,
-    #[serde(default, rename = "khuo.ng:easManagerName")]
-    eas_manager_name: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -10152,12 +10231,12 @@ impl From<ContactCardObject> for Contact {
             car_phone,
             radio_phone,
             assistant_phone,
-            assistant_name: value.eas_assistant_name,
-            spouse: value.eas_spouse,
-            children: value.eas_children,
-            customer_id: value.eas_customer_id,
-            government_id: value.eas_government_id,
-            manager_name: value.eas_manager_name,
+            assistant_name: None,
+            spouse: None,
+            children: Vec::new(),
+            customer_id: None,
+            government_id: None,
+            manager_name: None,
             company_main_phone,
             mms,
             account_name,
@@ -14094,26 +14173,41 @@ mod calendar_update_state_tests {
 #[cfg(test)]
 mod contact_address_tests {
     use super::*;
+    use crate::state::StateStore;
 
-    #[test]
-    fn eas_contact_relationship_extension_reads_names_without_fabricating_related_cards() {
-        let card: ContactCardObject = serde_json::from_value(serde_json::json!({
-            "id":"c",
-            "khuo.ng:easAssistantName":"Grace Hopper",
-            "khuo.ng:easSpouse":"Alex Lovelace",
-            "khuo.ng:easChildren":["Byron Ada","Byron Ralph"],
-            "khuo.ng:easCustomerId":"customer-314",
-            "khuo.ng:easGovernmentId":"id-2718",
-            "khuo.ng:easManagerName":"CN=Grace Hopper,OU=People"
-        }))
-        .unwrap();
-        let contact = Contact::from(card);
+    use axum::{routing::post, Json, Router};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn eas_contact_extension_values_overlay_jmap_contact_from_gateway_state() {
+        let store = Arc::new(crate::state::MemoryStateStore::default());
+        store
+            .put_contact_extensions(
+                "account",
+                "c",
+                Some(serde_json::json!({
+                    "assistantName":"Grace Hopper",
+                    "spouse":"Alex Lovelace",
+                    "children":["Byron Ada", "Byron Ralph"],
+                    "customerId":"customer-314",
+                    "governmentId":"id-2718",
+                    "managerName":"CN=Grace Hopper,OU=People"
+                })),
+            )
+            .await
+            .unwrap();
+        let client = JmapClient::new(Config::from_env().unwrap(), store).unwrap();
+        let mut contact = Contact {
+            id: "c".to_owned(),
+            ..Default::default()
+        };
+        client
+            .apply_contact_extensions("account", &mut contact)
+            .await
+            .unwrap();
         assert_eq!(contact.assistant_name.as_deref(), Some("Grace Hopper"));
         assert_eq!(contact.spouse.as_deref(), Some("Alex Lovelace"));
-        assert_eq!(
-            contact.children,
-            vec!["Byron Ada".to_owned(), "Byron Ralph".to_owned()]
-        );
+        assert_eq!(contact.children, ["Byron Ada", "Byron Ralph"]);
         assert_eq!(contact.customer_id.as_deref(), Some("customer-314"));
         assert_eq!(contact.government_id.as_deref(), Some("id-2718"));
         assert_eq!(
@@ -14121,8 +14215,6 @@ mod contact_address_tests {
             Some("CN=Grace Hopper,OU=People")
         );
     }
-    use axum::{routing::post, Json, Router};
-    use std::sync::Arc;
 
     #[tokio::test]
     async fn contact_address_sync_maps_eas_contexts_to_jscontact() {
@@ -14318,41 +14410,25 @@ mod contact_address_tests {
                                 "other_note":{"@type":"Note","note":"Keep this text"},
                                 "eas_notes":{"@type":"Note","note":"Updated contact note"}
                             }));
-                            assert_eq!(call[1]["update"]["contact-1"][EAS_ASSISTANT_NAME_PROPERTY], "Grace Hopper");
-                            assert_eq!(call[1]["update"]["contact-1"][EAS_SPOUSE_PROPERTY], "Alex Lovelace");
-                            assert_eq!(call[1]["update"]["contact-1"][EAS_CHILDREN_PROPERTY], serde_json::json!(["Byron Ada", "Byron Ralph"]));
-                            assert_eq!(call[1]["update"]["contact-1"][EAS_CUSTOMER_ID_PROPERTY], "customer-314");
-                            assert_eq!(call[1]["update"]["contact-1"][EAS_GOVERNMENT_ID_PROPERTY], "id-2718");
-                            assert_eq!(call[1]["update"]["contact-1"][EAS_MANAGER_NAME_PROPERTY], "CN=Grace Hopper,OU=People");
+                            for property in [
+                                "khuo.ng:easAssistantName", "khuo.ng:easSpouse",
+                                "khuo.ng:easChildren", "khuo.ng:easCustomerId",
+                                "khuo.ng:easGovernmentId", "khuo.ng:easManagerName"
+                            ] {
+                                assert!(call[1]["update"]["contact-1"].get(property).is_none());
+                            }
                             assert!(call[1]["update"]["contact-1"].get("relatedTo").is_none());
                             serde_json::json!(["ContactCard/set", {"updated":{"contact-1":null}}, "0"])
                         }
                         2 => {
                             assert_eq!(call[0], "ContactCard/get");
+                            assert_eq!(call[1]["ids"], serde_json::json!(["contact-1"]));
                             serde_json::json!(["ContactCard/get", {
                                 "state":"after",
-                                "list":[{"id":"contact-1",
-                                    "khuo.ng:easAssistantName":"Grace Hopper",
-                                    "khuo.ng:easSpouse":"Alex Lovelace",
-                                    "khuo.ng:easChildren":["Byron Ada","Byron Ralph"],
-                                    "khuo.ng:easCustomerId":"customer-314",
-                                    "khuo.ng:easGovernmentId":"id-2718",
-                                    "khuo.ng:easManagerName":"CN=Grace Hopper,OU=People"
-                                }]
+                                "list":[{"id":"contact-1"}]
                             }, "address-state"])
                         }
-                        3 => {
-                            assert_eq!(call[0], "ContactCard/set");
-                            assert_eq!(call[1]["ifInState"], "after");
-                            assert!(call[1]["update"]["contact-1"][EAS_ASSISTANT_NAME_PROPERTY].is_null());
-                            assert!(call[1]["update"]["contact-1"][EAS_SPOUSE_PROPERTY].is_null());
-                            assert!(call[1]["update"]["contact-1"][EAS_CUSTOMER_ID_PROPERTY].is_null());
-                            assert!(call[1]["update"]["contact-1"][EAS_GOVERNMENT_ID_PROPERTY].is_null());
-                            assert!(call[1]["update"]["contact-1"][EAS_MANAGER_NAME_PROPERTY].is_null());
-                            assert_eq!(call[1]["update"]["contact-1"][EAS_CHILDREN_PROPERTY], serde_json::json!([]));
-                            serde_json::json!(["ContactCard/set", {"updated":{"contact-1":null}}, "0"])
-                        }
-                        _ => panic!("unexpected JMAP request"),
+                        _ => panic!("unexpected JMAP request: {call}"),
                     };
                     Json(serde_json::json!({"methodResponses":[response]}))
                 }
@@ -14396,6 +14472,23 @@ mod contact_address_tests {
                 .unwrap(),
             "contact-1"
         );
+        let mut mapped = Contact {
+            id: "contact-1".to_owned(),
+            ..Default::default()
+        };
+        client
+            .apply_contact_extensions("a", &mut mapped)
+            .await
+            .unwrap();
+        assert_eq!(mapped.assistant_name.as_deref(), Some("Grace Hopper"));
+        assert_eq!(mapped.spouse.as_deref(), Some("Alex Lovelace"));
+        assert_eq!(mapped.children, ["Byron Ada", "Byron Ralph"]);
+        assert_eq!(mapped.customer_id.as_deref(), Some("customer-314"));
+        assert_eq!(mapped.government_id.as_deref(), Some("id-2718"));
+        assert_eq!(
+            mapped.manager_name.as_deref(),
+            Some("CN=Grace Hopper,OU=People")
+        );
         let clear_fields = crate::wbxml::eas::ContactFields {
             assistant_name: Some(String::new()),
             spouse: Some(String::new()),
@@ -14412,7 +14505,21 @@ mod contact_address_tests {
                 .unwrap(),
             "contact-1"
         );
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        let mut cleared = Contact {
+            id: "contact-1".to_owned(),
+            ..Default::default()
+        };
+        client
+            .apply_contact_extensions("a", &mut cleared)
+            .await
+            .unwrap();
+        assert!(cleared.assistant_name.is_none());
+        assert!(cleared.spouse.is_none());
+        assert!(cleared.children.is_empty());
+        assert!(cleared.customer_id.is_none());
+        assert!(cleared.government_id.is_none());
+        assert!(cleared.manager_name.is_none());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
         server.abort();
     }
 

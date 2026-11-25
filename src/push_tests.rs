@@ -5514,7 +5514,7 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
-    async fn e2e_contact_vendor_properties_round_trip_and_clear_on_stalwart() {
+    async fn e2e_contact_eas_fields_survive_restart_and_clear_on_stalwart() {
         let live = Live::new("E2E_USER2").await;
         let using = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:contacts"];
         let books = live
@@ -5524,98 +5524,84 @@ mod e2e {
             )
             .await;
         let book = books[0][1]["list"][0]["id"].as_str().unwrap().to_owned();
-        let created = live
-            .call_using(
-                serde_json::json!([["ContactCard/set", {
-                    "accountId":live.account,
-                    "create":{"contact":{
-                        "@type":"Card", "version":"1.0",
-                        "addressBookIds":{&book:true},
-                        "name":{"full":"EAS vendor-property fixture"},
-                        "khuo.ng:easAssistantName":"Assistant Name",
-                        "khuo.ng:easSpouse":"Spouse Name",
-                        "khuo.ng:easChildren":["Child One","Child Two"],
-                        "khuo.ng:easCustomerId":"customer-314",
-                        "khuo.ng:easGovernmentId":"government-2718",
-                        "khuo.ng:easManagerName":"CN=Manager,OU=People"
-                    }}
-                }, "0"]]),
-                &using,
-            )
-            .await;
-        let id = created[0][1]["created"]["contact"]["id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("contact create failed: {created}"))
-            .to_owned();
-
-        let fetched = live
-            .call_using(
-                serde_json::json!([["ContactCard/get", {
-                    "accountId":live.account, "ids":[id], "properties":[
-                        "id", "khuo.ng:easAssistantName", "khuo.ng:easSpouse",
-                        "khuo.ng:easChildren", "khuo.ng:easCustomerId",
-                        "khuo.ng:easGovernmentId", "khuo.ng:easManagerName"
-                    ]
-                }, "0"]]),
-                &using,
-            )
-            .await;
-        let card = &fetched[0][1]["list"][0];
-        assert_eq!(card["khuo.ng:easAssistantName"], "Assistant Name");
-        assert_eq!(card["khuo.ng:easSpouse"], "Spouse Name");
+        let state_path = std::env::temp_dir().join(format!(
+            "stalwart-sync-gateway-eas-contact-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let mut config = crate::config::Config::from_env().unwrap();
+        config.stalwart_jmap_url = format!("{}/jmap/session", live.jmap.trim_end_matches('/'))
+            .parse()
+            .unwrap();
+        let store = Arc::new(state::SqliteStateStore::open(state_path.to_str().unwrap()).unwrap());
+        let client = crate::jmap::client::JmapClient::new(config.clone(), store.clone()).unwrap();
+        let auth = client
+            .session_with_basic(&live.user, &live.pass)
+            .await
+            .unwrap();
+        let fields = crate::wbxml::eas::ContactFields {
+            first_name: Some("EAS".into()),
+            last_name: Some(format!("contact-{}", std::process::id())),
+            assistant_name: Some("Assistant Name".into()),
+            spouse: Some("Spouse Name".into()),
+            children: Some(vec!["Child One".into(), "Child Two".into()]),
+            customer_id: Some("customer-314".into()),
+            government_id: Some("government-2718".into()),
+            manager_name: Some("CN=Manager,OU=People".into()),
+            ..Default::default()
+        };
+        let id = client
+            .save_contact(&auth, &book, None, &fields)
+            .await
+            .unwrap();
+        let created = client.get_contact_by_id(&auth, &id).await.unwrap().unwrap();
+        assert_eq!(created.assistant_name.as_deref(), Some("Assistant Name"));
+        assert_eq!(created.spouse.as_deref(), Some("Spouse Name"));
+        assert_eq!(created.children, ["Child One", "Child Two"]);
+        assert_eq!(created.customer_id.as_deref(), Some("customer-314"));
+        assert_eq!(created.government_id.as_deref(), Some("government-2718"));
         assert_eq!(
-            card["khuo.ng:easChildren"],
-            serde_json::json!(["Child One", "Child Two"])
+            created.manager_name.as_deref(),
+            Some("CN=Manager,OU=People")
         );
-        assert_eq!(card["khuo.ng:easCustomerId"], "customer-314");
-        assert_eq!(card["khuo.ng:easGovernmentId"], "government-2718");
-        assert_eq!(card["khuo.ng:easManagerName"], "CN=Manager,OU=People");
 
-        let updated = live
-            .call_using(
-                serde_json::json!([["ContactCard/set", {
-                    "accountId":live.account,
-                    "update":{&id:{
-                        "khuo.ng:easAssistantName":null,
-                        "khuo.ng:easSpouse":"Updated Spouse",
-                        "khuo.ng:easChildren":[],
-                        "khuo.ng:easCustomerId":null,
-                        "khuo.ng:easGovernmentId":"government-161",
-                        "khuo.ng:easManagerName":null
-                    }}
-                }, "0"]]),
-                &using,
-            )
-            .await;
-        assert!(updated[0][1]["notUpdated"].is_null(), "{updated}");
+        drop(client);
+        drop(store);
+        let reopened =
+            Arc::new(state::SqliteStateStore::open(state_path.to_str().unwrap()).unwrap());
+        let client = crate::jmap::client::JmapClient::new(config, reopened).unwrap();
+        let auth = client
+            .session_with_basic(&live.user, &live.pass)
+            .await
+            .unwrap();
+        let update = crate::wbxml::eas::ContactFields {
+            assistant_name: Some(String::new()),
+            spouse: Some("Updated Spouse".into()),
+            children: Some(Vec::new()),
+            customer_id: Some(String::new()),
+            government_id: Some("government-161".into()),
+            manager_name: Some(String::new()),
+            ..Default::default()
+        };
+        client
+            .save_contact(&auth, &book, Some(&id), &update)
+            .await
+            .unwrap();
+        let updated = client.get_contact_by_id(&auth, &id).await.unwrap().unwrap();
+        assert!(updated.assistant_name.is_none());
+        assert_eq!(updated.spouse.as_deref(), Some("Updated Spouse"));
+        assert!(updated.children.is_empty());
+        assert!(updated.customer_id.is_none());
+        assert_eq!(updated.government_id.as_deref(), Some("government-161"));
+        assert!(updated.manager_name.is_none());
 
-        let fetched = live
-            .call_using(
-                serde_json::json!([["ContactCard/get", {
-                    "accountId":live.account, "ids":[id], "properties":[
-                        "id", "khuo.ng:easAssistantName", "khuo.ng:easSpouse",
-                        "khuo.ng:easChildren", "khuo.ng:easCustomerId",
-                        "khuo.ng:easGovernmentId", "khuo.ng:easManagerName"
-                    ]
-                }, "0"]]),
-                &using,
-            )
-            .await;
-        let card = &fetched[0][1]["list"][0];
-        assert!(card["khuo.ng:easAssistantName"].is_null());
-        assert_eq!(card["khuo.ng:easSpouse"], "Updated Spouse");
-        assert_eq!(card["khuo.ng:easChildren"], serde_json::json!([]));
-        assert!(card["khuo.ng:easCustomerId"].is_null());
-        assert_eq!(card["khuo.ng:easGovernmentId"], "government-161");
-        assert!(card["khuo.ng:easManagerName"].is_null());
-
-        let cleanup = live
-            .call_using(
-                serde_json::json!([["ContactCard/set", {"accountId":live.account,"destroy":[id]}, "0"]]),
-                &using,
-            )
-            .await;
-        assert!(cleanup[0][1]["notDestroyed"].is_null(), "{cleanup}");
+        client.destroy_contact(&auth, &id).await.unwrap();
+        assert!(client
+            .get_contact_by_id(&auth, &id)
+            .await
+            .unwrap()
+            .is_none());
+        drop(client);
+        let _ = std::fs::remove_file(&state_path);
     }
 
     #[tokio::test]
