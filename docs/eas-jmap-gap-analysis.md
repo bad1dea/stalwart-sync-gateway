@@ -10,16 +10,14 @@ MIME policy, partial Sync/options persistence, and Sync long-poll/window
 handling. Check the current Rust implementation before treating any older
 “Missing” or “Not implemented” statement below as actionable.
 
-The functional source at `412c9c6` is deployed to Amy's isolated bridge; a
-subsequent test-only commit adds the live vendor-property regression. The full
-suite passes 480 tests (78 ignored); strict Clippy, formatting, and diff checks
-pass. The image is
-`localhost/eas16-isolated:412c9c6` (image
-`sha256:a5d4f838b19ea1dd3dc0b19e74a25a40d9151a70275f0ee5afb892b982ba8766`),
-started `2026-11-25T16:02:33.647341854Z` with zero restarts. `/healthz` and
-`/readyz` returned HTTP 200 with `ok` and `ready`. The isolated bridge still
-defaults to EAS 14.0; production is untouched. Real-client 16.1 certification
-remains open.
+The functional source at `f11e05a` is deployed to Amy's isolated bridge. The
+full suite passes 482 tests (78 ignored); strict Clippy, formatting, and diff
+checks pass. The image is `localhost/eas16-isolated:f11e05a` (image
+`sha256:3491deef140a66da1b447c9f8741d4f0e9acf172994344af87c6655a09a4f3e6`),
+started `2026-11-25T16:45:21.854591658Z` with zero restarts. `/healthz` and
+`/readyz` returned `ok` and `ready`; authenticated EAS OPTIONS advertises only
+14.0. `EAS_MAX_PROTOCOL_VERSION` remains unset, and production is untouched.
+Real-client 16.1 certification remains open.
 
 EAS `ResolveRecipients` Availability now preserves the saved EAS free, tentative,
 busy, and out-of-office values when Stalwart exposes event details. The bridge
@@ -37,13 +35,17 @@ round trips. That claim was disproven against the configured Stalwart 0.16.27:
 `ContactCard/set` rejects `khuo.ng:easAssistantName` as `invalidProperties`.
 The server session also does not advertise JMAP Object Metadata, so that
 capability is not available as a server-side alternative in this environment.
-The implementation is being changed to store EAS-only values in the gateway's
-persistent SQLite state, keyed by the Stalwart account and ContactCard ID. The
-values remain available to EAS Sync, Find/Search and ItemOperations through
-this gateway, but are not visible to JMAP or CardDAV clients and require the
-gateway state database to be retained. Live verification against Stalwart is
-required before this replacement is counted complete. The rejected vendor
-property experiment created no contact and changed no user data.
+The replacement stores EAS-only values in the gateway's persistent SQLite
+state, keyed by the Stalwart account and ContactCard ID. The ignored
+`e2e_contact_eas_fields_survive_restart_and_clear_on_stalwart` regression passed
+against Stalwart 0.16.27: ContactCard create/read, SQLite close/reopen, partial
+update, scalar/list clearing, JMAP readback, delete, and sidecar cleanup. The
+server receives only standard JSContact fields. These EAS-only values remain
+available through this gateway, but are not visible to JMAP/CardDAV clients and
+require the gateway state database to be retained. The code is deployed to the
+isolated 14.0-default bridge; it has not yet been tested with a real EAS client.
+The earlier rejected vendor-property experiment created no contact and changed
+no user data.
 
 Current prioritized work:
 
@@ -2381,6 +2383,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Sync: Mail (client Add) | **Done (`16.0`/`16.1`)** | `Email/set` / `Email/import` + blob | The mail Sync path creates drafts in Drafts and non-draft items in the requested Mailbox with stable replay markers, attachment handling, MIME import, response mapping, and recovery after a server write. Regression coverage includes draft replay/content changes/attachments/Bcc/retries plus non-draft property generation (`src/activesync/draft.rs`, `src/push_tests.rs`). |
 | Sync: Mail (server-side delete surfaced to client) | **Done** (`deploy-2026-08-25v`) | Targeted `Email/get` (id + mailboxIds) per previously-seen-but-absent-from-window candidate | `emails_still_in_mailbox()` in `src/jmap/client.rs` — deliberately NOT a naive "absent from this fetch = deleted" diff, since `emails_in_mailbox`'s query is sorted newest-first and capped at the window size, so an old message pushed out of the window by newer mail looks identical to a real deletion under a plain diff. Live-verified both directions: a real destroyed message correctly surfaced as a Delete on the next Sync, and a real non-deleted message correctly confirmed present (not flagged) via the same JMAP call shape. |
 | Sync: Contacts (read) | **Done** | `ContactCard/query`+`/get` (JSContact, RFC 9553) | Confirmed live against a real card. |
+| Sync: Contacts EAS-only relationship/identifier fields | **Implemented, isolated live JMAP path verified (`f11e05a`)** | Gateway SQLite state keyed by JMAP account + ContactCard ID | AssistantName, Spouse, Children, CustomerId, GovernmentId, and ManagerName survive gateway state-store reopen and partial update/clear. Stalwart 0.16.27 rejects JSContact vendor properties and does not advertise JMAP Metadata. The fields are EAS-gateway-local; JMAP/CardDAV clients do not see them. |
 | Sync: Contacts (write: add/edit/delete) | **Done** (`deploy-2026-08-25s`, addresses `deploy-2026-11-22-eas-contact-addresses-0e8a071`, categories `deploy-2026-11-22-eas-contact-categories-79585fc`, names `deploy-2026-11-22-eas-contact-name-parts-c3f4378` and `deploy-2026-11-22-eas-contact-name-prefix-c48ee61c`, dates `deploy-2026-11-22-eas-contact-dates-5f03d66`, department `deploy-2026-11-22-eas-contact-department-6708d25`, secondary phones `deploy-2026-11-22-eas-contact-secondary-phones-6c3d00d`, fax/pager `deploy-2026-11-22-eas-contact-fax-pager-9e7ab32`, car/radio `deploy-2026-11-22-eas-contact-car-radio-60e5eca`, assistant phone `deploy-2026-11-22-eas-contact-assistant-phone-0a89e0a`, phonetic names `deploy-2026-11-22-eas-contact-yomi-name-1a55270` and `deploy-2026-11-22-eas-contact-yomi-company-4860c47`, office location `deploy-2026-11-22-eas-contact-office-location-64d7a8e`, webpage `deploy-2026-11-22-eas-contact-web-page-d97a2d2`, business fax `deploy-2026-11-22-eas-contact-business-fax-78425f9`) | `ContactCard/set` | `sync_contacts_collection` handles Add/Change/Delete and hash diff. Contact names and phonetic names, birthdays/anniversaries, emails, home/business primary and secondary lines, fax/pager/car/radio/assistant numbers, web pages, organization/title/department, office location, business/home/other postal address components, and categories map to JSContact. Partial address, name, organization, phone, link, and anniversary edits preserve untouched components under a JMAP state guard; empty fields clear components. |
 | Sync: Calendar (read) | **Done** | `CalendarEvent/query`+`/get` (JSCalendar, draft-ietf-calext-jscalendarbis superseding RFC 8984) | Confirmed live against a real event; recurrence is now mapped where supported. |
 | Sync: Calendar (write: add/edit/delete) | **Done** (`deploy-2026-08-25t`; recurrence `deploy-2026-11-24-eas-calendar-recurrence-bea1387`; instance fields `deploy-2026-11-24-eas-calendar-instance-fields-d99b3a3`; HTML exception body `deploy-2026-11-24-eas-calendar-exception-html-gate-8cf107d`) | `CalendarEvent/set` | `save_calendar_event`/`destroy_calendar_event` handle lifecycle and supported recurrence rules. EAS 16.0/16.1 occurrence deletes and mapped per-instance fields use `recurrenceOverrides`; sensitivity remains unsupported because JSCalendar disallows `privacy` in recurrence patches. |
