@@ -49,16 +49,21 @@ field as the identifier for a specific recurring instance in
 The writer now follows the full MS-ASEMAIL `MeetingRequest` child order. A
 regression checks direct-child order for EAS 14.0 and 16.1, including the
 version-specific ID immediately after `TimeZone` and 16.1 `Forwardees` last.
-The full suite passes 468 tests (77 ignored), including legacy GlobalObjId
-compatibility, versioned writer order, and JMAP conversion regressions; strict
-Clippy, formatting, and diff checks pass. Commit `ae1a0a9` is deployed to Amy's
-isolated bridge as
-`localhost/eas16-isolated:ae1a0a9` (image
-`sha256:03d914f779e77fd37781884e6d60281f457077d5102cb01d7b7ff9f05b0e2f93`),
-started `2026-11-25T12:53:21.254236014Z`, with zero restarts. At verification,
-`/healthz` and `/readyz` returned HTTP 200 (`ok` and `ready`);
-`EAS_MAX_PROTOCOL_VERSION` remains unset, preserving the 14.0 default, and
-production is untouched. The optional `Organizer` maps the
+Mail Categories now round-trip through EAS `Email:Categories` and JMAP custom
+Email keywords, including client updates that preserve system flags, Find
+results, and KQL `Category:` search. Labels that violate JMAP keyword rules
+are rejected on write. Category-only changes now participate in Sync
+fingerprints and return in state-only Change responses, with an empty category
+container when clearing. Regression coverage includes parsing, WBXML output,
+JMAP keyword replacement, fingerprinting, propagation, and query translation.
+The full suite passes 472 tests (77 ignored); strict Clippy, formatting, and
+diff checks pass. Commit `1794397` is deployed to Amy's isolated bridge as
+`localhost/eas16-isolated:1794397` (image
+`sha256:30eb2ec1c862c7d397b197501a314da2eccbd53f4bddd02db4b216451efb816d`),
+started `2026-11-25T13:19:42.937150482Z`, with zero restarts. `/healthz` and
+`/readyz` return `ok` and `ready`; `EAS_MAX_PROTOCOL_VERSION` remains omitted,
+preserving the 14.0 default, and production is untouched. The optional
+`Organizer` maps the
 JMAP participant with the `owner` role to its display name, falling back to
 email, and emits Email:Organizer. `ResponseRequested` maps the current
 attendee's JSCalendar `expectReply` boolean to EAS values 1/0, preserving
@@ -592,12 +597,12 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    those categories, and KQL `Category:` searches map to `Email/query`
    `hasKeyword`. System keywords are excluded from the EAS category list.
    JMAP keyword restrictions are enforced on client category writes, and
-   regression tests cover parsing, output, JMAP keyword replacement, and KQL
-   translation. The full suite passes 470 tests (77 ignored); strict Clippy, formatting, and diff checks
-   pass. Commit `9376225` is deployed to Amy's isolated bridge as
-   `localhost/eas16-isolated:9376225`, image
-   `sha256:37a56bccbfa4bd88c0cf63c563877da9748728a358b2bc23a9c4d9d63cc781cc`,
-   started `2026-11-25T13:11:21.51806027Z`, with zero restarts. `/healthz`
+   regression tests cover parsing, output, replacement, Sync propagation, and
+   KQL translation. The full suite passes 472 tests (77 ignored); strict
+   Clippy, formatting, and diff checks pass. Commit `1794397` is deployed to
+   Amy's isolated bridge as `localhost/eas16-isolated:1794397`, image
+   `sha256:30eb2ec1c862c7d397b197501a314da2eccbd53f4bddd02db4b216451efb816d`,
+   started `2026-11-25T13:19:42.937150482Z`, with zero restarts. `/healthz`
    returns `ok` and `/readyz` returns `ready`; `EAS_MAX_PROTOCOL_VERSION` is
    omitted, preserving the 14.0 default. Real-client interoperability remains
    part of the 16.1 validation backlog above.
@@ -2311,6 +2316,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | EAS feature | Status | JMAP mechanism | Notes |
 |---|---|---|---|
 | Sync: Mail (read) | **Done** | `Email/query`+`/get` | Field order/format audited hard this session; MIME-open (Type=4) and list BodyPreference both handled. |
+| Sync: Mail categories | **Done, two-way** (`1794397`) | JMAP custom Email keywords | EAS `Email:Categories` reads and writes user categories while preserving system keywords; category-only mutations are fingerprinted and propagated as state-only Change responses, including clears. JMAP keyword character limits apply. Find results also include categories, and KQL `Category:` maps to `hasKeyword`. Regression coverage includes parser, response, replacement, state propagation, and KQL. |
 | Sync: Mail (mark read) | **Done** | `Email/set` (keywords `$seen`) | `apply_mail_client_commands`, Change command. |
 | Sync: Mail (delete) | **Done** | `Email/set` destroy / `Email/destroy`-equivalent | Delete command, `destroy_email()`. |
 | Sync: Mail (move) | **Done** | `Email/set` (`mailboxIds`) | Separate `MoveItems` command, not a Sync-embedded move. |
