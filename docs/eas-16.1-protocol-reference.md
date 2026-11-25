@@ -19,7 +19,7 @@ The spec's own overview lays out the intended command sequence:
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
    `100.64.0.50:18090`, backed by isolated Stalwart. Health and readiness pass;
-   its current gateway image is `eb9ccc5` and it still defaults to EAS 14.0.
+   its current gateway image is `e89bd36` and it still defaults to EAS 14.0.
    Set `EAS_MAX_PROTOCOL_VERSION` to 16.1 during the planned client test window.
 2. **Provision** — device sends its info, gets + acks security policy.
 3. **FolderSync** — retrieves the folder hierarchy.
@@ -328,7 +328,9 @@ session's fixes were, not against spec-reading alone.
   its total runtime budget; unsupported formats and over-budget inputs remain
   outside exact local matching.
 - Recurrence — common EAS event/task rules map to Stalwart's singular
-  `recurrenceRule`; unsupported patterns fail closed. Task-specific backend
+  `recurrenceRule`; EAS `WeekOfMonth=5` with `DayOfWeek=127` maps to the last
+  day of the month for monthly and yearly rules. Unsupported patterns fail
+  closed. Task-specific backend
   create/get has passed the isolated E2E regression. Real-client recurrence
   behavior remains to be checked. Sensitivity cannot be patched per occurrence
   under RFC 8984.

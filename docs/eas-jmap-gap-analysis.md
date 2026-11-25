@@ -292,13 +292,13 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    2026-11-25 found the isolated gateway on Amy at `100.64.0.50:18090`, backed
    by `eas16-clean-stalwart` on its separate `eas16-interop-net`; `/healthz`
    and `/readyz` returned `ok` and `ready`, with zero restarts. The running
-   image was `localhost/eas16-isolated:8688c10`, started
-   `2026-11-25T08:25:16.868499514Z`. Its Compose environment omits
+   latest image was `localhost/eas16-isolated:e89bd36`, started
+   `2026-11-25T08:47:17.399590203Z`. Its Compose environment omits
    `EAS_MAX_PROTOCOL_VERSION`, so the gateway defaults to 14.0. The former Homelab test service was
    decommissioned in commit `6051729`; the live temporary stack is outside
    that checkout. Before real-client validation, explicitly set the isolated
    bridge's protocol ceiling to 16.1 during the planned test window. Production
-   remains on 14.0. The full local suite passes 437 tests (77 ignored); strict
+   remains on 14.0. The full local suite passes 439 tests (77 ignored); strict
    Clippy, formatting, and diff checks pass.
    Deployed with that production default as
    `deploy-2026-11-24-eas-16.1-opt-in-13bea13`; homelab commit `fcb698e`, image
