@@ -247,14 +247,19 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    replace checking the enabled state with a real client. Ignored real-Stalwart
    E2E tests now cover ResolveRecipients free/busy values through the EAS
    response and a contact-photo response through a real ContactCard. They
-   compile here but have not been run in this environment because no `E2E_*`
-   credentials are configured. Homelab history shows the former
-   `eas-test.khuo.ng` compose service was decommissioned in commit `6051729`;
-   its DNS still resolves and `/healthz` returns `ok`, but the current
-   Homelab checkout has no test-gateway compose configuration, so that health
-   response does not prove an isolated 16.1 bridge is active. The full local
-   suite passes 424 tests (77 ignored); strict Clippy, formatting, and diff
-   checks pass.
+   compile here but have not been run against real Stalwart because no `E2E_*`
+   credentials are configured in this workspace. A fresh runtime check found
+   the isolated gateway on Amy at `100.64.0.50:18090`, backed by
+   `eas16-clean-stalwart` on its separate `eas16-interop-net`; `/healthz` and
+   `/readyz` return `ok` and `ready`, and the public test hostname routes to
+   it. Its image is still `localhost/eas16-isolated:task-recurrence-debug` and
+   its Compose environment omits `EAS_MAX_PROTOCOL_VERSION`, so the gateway
+   currently defaults to 14.0. The former Homelab test service was
+   decommissioned in commit `6051729`; the live temporary stack is outside
+   that checkout. Before real-client validation, refresh the isolated image
+   from this source and explicitly set its protocol ceiling to 16.1. Production
+   remains on 14.0. The full local suite passes 425 tests (77 ignored); strict
+   Clippy, formatting, and diff checks pass.
    Deployed with that production default as
    `deploy-2026-11-24-eas-16.1-opt-in-13bea13`; homelab commit `fcb698e`, image
    `sha256:902bfe01a2ec516b68b7517f9a38ba730bfafdeb66eb5cd5ec85822ef4e44b0d`,
