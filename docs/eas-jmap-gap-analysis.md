@@ -30,6 +30,11 @@ in [MS-ASCAL Recurrence](https://learn.microsoft.com/en-us/openspecs/exchange_se
 while [MS-ASTASK Appendix A](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-astask/c16a3dcb-de5b-4de9-9026-232654d0628d)
 requires Task `Type`. A yearly Type 6 pattern that omits `DayOfWeek` remains
 unsupported until its meaning can be represented without guessing.
+Deployed to the isolated Amy bridge as `localhost/eas16-isolated:c9f393a`
+(image `sha256:cd38586173ed94720a68d9d7dc9145825f1a54751a2f98004ff9f487f12bbedc`),
+started `2026-11-25T09:23:12.193589051Z`, restart count zero, `/healthz` `ok`,
+and `/readyz` `ready`. The protocol override remains unset; the bridge
+continues to default to 14.0.
 
 Calendar recurrence reads now reject present `interval` and `count` values
 that are strings, negative numbers, or outside the unsigned 32-bit range;
@@ -324,8 +329,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    2026-11-25 found the isolated gateway on Amy at `100.64.0.50:18090`, backed
    by `eas16-clean-stalwart` on its separate `eas16-interop-net`; `/healthz`
    and `/readyz` returned `ok` and `ready`, with zero restarts. The running
-   latest image is `localhost/eas16-isolated:e089eed`, started
-   `2026-11-25T08:59:18.03984349Z`, with zero restarts. Its Compose environment omits
+   latest image is `localhost/eas16-isolated:c9f393a`, started
+   `2026-11-25T09:23:12.193589051Z`, with zero restarts. Its Compose environment omits
    `EAS_MAX_PROTOCOL_VERSION`, so the gateway defaults to 14.0. The former Homelab test service was
    decommissioned in commit `6051729`; the live temporary stack is outside
    that checkout. Before real-client validation, explicitly set the isolated

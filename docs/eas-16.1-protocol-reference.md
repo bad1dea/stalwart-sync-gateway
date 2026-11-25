@@ -19,7 +19,7 @@ The spec's own overview lays out the intended command sequence:
    `eas-test.khuo.ng` Homelab Compose service was decommissioned in commit
    `6051729`, but a separate temporary test stack is now live on Amy at
    `100.64.0.50:18090`, backed by isolated Stalwart. Health and readiness pass;
-   its current gateway image is `e089eed` and it still defaults to EAS 14.0.
+   its current gateway image is `c9f393a` and it still defaults to EAS 14.0.
    Set `EAS_MAX_PROTOCOL_VERSION` to 16.1 during the planned client test window.
 2. **Provision** — device sends its info, gets + acks security policy.
 3. **FolderSync** — retrieves the folder hierarchy.
