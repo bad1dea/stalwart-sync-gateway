@@ -110,7 +110,11 @@ pub fn to_jscalendar(value: &CalendarRecurrence, time_zone: Option<&str>) -> any
                 "unexpected nth monthly recurrence fields"
             );
             if days == 127 {
-                rule.insert("byMonthDay".into(), json!([week]));
+                anyhow::ensure!((1..=5).contains(&week), "invalid monthly day");
+                rule.insert(
+                    "byMonthDay".into(),
+                    json!([if week == 5 { -1 } else { i64::from(week) }]),
+                );
             } else {
                 rule.insert("byDay".into(), json!(weekdays(days, None)?));
                 rule.insert("bySetPosition".into(), json!([week_to_position(week)]));
@@ -150,7 +154,11 @@ pub fn to_jscalendar(value: &CalendarRecurrence, time_zone: Option<&str>) -> any
             );
             rule.insert("byMonth".into(), json!([month.to_string()]));
             if days == 127 {
-                rule.insert("byMonthDay".into(), json!([week]));
+                anyhow::ensure!((1..=5).contains(&week), "invalid yearly day");
+                rule.insert(
+                    "byMonthDay".into(),
+                    json!([if week == 5 { -1 } else { i64::from(week) }]),
+                );
             } else {
                 rule.insert("byDay".into(), json!(weekdays(days, None)?));
                 rule.insert("bySetPosition".into(), json!([week_to_position(week)]));
@@ -263,6 +271,14 @@ pub fn from_jscalendar(
             (1, Some(day_mask(&by_day, false)?), None, None, None)
         }
         "monthly"
+            if by_month_day == [-1]
+                && by_day.is_empty()
+                && by_month.is_empty()
+                && set_position.is_none() =>
+        {
+            (3, Some(127), None, Some(5), None)
+        }
+        "monthly"
             if by_month_day.len() == 1
                 && by_day.is_empty()
                 && by_month.is_empty()
@@ -281,6 +297,15 @@ pub fn from_jscalendar(
                 Some(ordinal_to_week(week)?),
                 None,
             )
+        }
+        "yearly"
+            if by_month.len() == 1
+                && by_month_day == [-1]
+                && by_day.is_empty()
+                && set_position.is_none() =>
+        {
+            let month = parse_month(&by_month[0])?;
+            (6, Some(127), None, Some(5), Some(month))
         }
         "yearly"
             if by_month.len() == 1
@@ -558,5 +583,48 @@ mod tests {
             from_jscalendar(&rule, None).unwrap().occurrences,
             Some(u32::MAX)
         );
+    }
+
+    #[test]
+    fn fifth_day_of_week_127_recurrence_maps_to_last_day_of_month() {
+        for recurrence in [
+            CalendarRecurrence {
+                kind: 3,
+                week_of_month: Some(5),
+                day_of_week: Some(127),
+                ..Default::default()
+            },
+            CalendarRecurrence {
+                kind: 6,
+                week_of_month: Some(5),
+                day_of_week: Some(127),
+                month_of_year: Some(6),
+                ..Default::default()
+            },
+        ] {
+            let rule = to_jscalendar(&recurrence, None).unwrap();
+            assert_eq!(rule["byMonthDay"], json!([-1]));
+            assert_eq!(from_jscalendar(&rule, None).unwrap(), recurrence);
+        }
+
+        for (week, day) in [(1, 1), (4, 4)] {
+            let recurrence = CalendarRecurrence {
+                kind: 3,
+                week_of_month: Some(week),
+                day_of_week: Some(127),
+                ..Default::default()
+            };
+            assert_eq!(
+                to_jscalendar(&recurrence, None).unwrap()["byMonthDay"],
+                json!([day])
+            );
+        }
+
+        for rule in [
+            json!({"frequency":"monthly","byMonthDay":[-2]}),
+            json!({"frequency":"yearly","byMonth":["6"],"byMonthDay":[-2]}),
+        ] {
+            assert!(from_jscalendar(&rule, None).is_err(), "{rule}");
+        }
     }
 }

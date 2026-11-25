@@ -25,6 +25,16 @@ Deployed to the isolated Amy bridge as
 started `2026-11-25T08:40:13.764048503Z`, restart count zero, `/healthz` `ok`,
 and `/readyz` `ready`. The protocol override remains unset, preserving 14.0.
 
+Calendar recurrence mapping now treats EAS `WeekOfMonth=5` with
+`DayOfWeek=127` as the last day of the month for both monthly and yearly
+patterns. It maps to JSCalendar `byMonthDay: [-1]` and round-trips back to the
+same EAS pattern; weeks 1–4 remain days 1–4. Regressions cover both recurrence
+types and reject unsupported negative month-day values. Full suite: 439
+passed, 77 ignored; strict Clippy, formatting, and diff checks pass. Sources:
+Microsoft [MS-ASCAL Recurrence Patterns](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascal/6b32175a-e89d-4a9a-a715-a2e8bab289b0)
+and [Creating Recurring Calendar Items](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascal/7e47367e-85f4-4548-a649-e38f2e0f5d66),
+and [RFC 8984 `byMonthDay`](https://www.rfc-editor.org/rfc/rfc8984.html).
+
 MeetingResponse now accepts `InstanceId` for recurring invitations on 14.1,
 16.0, and 16.1, maps the original UTC occurrence start to the parent event's
 local JSCalendar recurrence key, and changes only that occurrence's attendee
