@@ -4452,6 +4452,11 @@ fn write_email_state_change(
     builder.start(air::APPLICATION_DATA);
     builder.leaf(mail::READ, read_hash(metadata.read));
     write_email_flag(builder, &metadata);
+    builder.start(mail::CATEGORIES);
+    for category in &metadata.categories {
+        builder.leaf(mail::CATEGORY, category.clone());
+    }
+    builder.end();
     builder.end();
     builder.end();
 }
@@ -9227,12 +9232,42 @@ mod tests {
     use super::{
         apply_body_preference, decode_entity_at, eas_conversation_id, eas_datetime,
         eas_datetime_dashes, is_non_mail_collection_id, plain_text_preview, validate_oof_set,
-        write_email_fields, write_oof_get_body, ProtocolVersion,
+        write_email_fields, write_email_state_change, write_oof_get_body, ProtocolVersion,
     };
-    use crate::model::{Email, EmailAttachment, EmailBody, EmailBodyType};
-    use crate::wbxml::eas::RequestedBodyPreference as BodyPreference;
+    use crate::model::{Email, EmailAttachment, EmailBody, EmailBodyType, EmailState};
+    use crate::wbxml::eas::{
+        self, airsync as air, email as mail, RequestedBodyPreference as BodyPreference,
+    };
     use crate::wbxml::eas::{airsync_base as base, DocumentBuilder};
     use crate::wbxml::Node;
+
+    #[test]
+    fn state_only_email_change_includes_categories_even_when_empty() {
+        let mut builder = DocumentBuilder::new();
+        write_email_state_change(
+            &mut builder,
+            "email-1",
+            EmailState {
+                read: true,
+                categories: vec!["projectx".to_owned()],
+                ..EmailState::default()
+            },
+        );
+        let doc = builder.finish();
+        assert_eq!(eas::find_text_after(&doc, mail::CATEGORY), Some("projectx"));
+        assert!(doc.nodes.iter().any(|node| matches!(node, Node::Start(token) if token.code_page == mail::CATEGORIES.code_page && token.token == mail::CATEGORIES.token)));
+        assert_eq!(eas::find_text_after(&doc, mail::READ), Some("1"));
+
+        let mut empty = DocumentBuilder::new();
+        write_email_state_change(&mut empty, "email-2", EmailState::default());
+        let empty = empty.finish();
+        assert!(empty.nodes.iter().any(|node| matches!(node, Node::Start(token) if token.code_page == mail::CATEGORIES.code_page && token.token == mail::CATEGORIES.token)));
+        assert!(eas::find_all_text_after(&empty, mail::CATEGORY).is_empty());
+        assert_eq!(
+            eas::find_text_after(&empty, air::SERVER_ID),
+            Some("email-2")
+        );
+    }
 
     #[test]
     fn oof_set_validation_rejects_invalid_states_and_unpaired_dates() {

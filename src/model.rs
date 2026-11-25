@@ -195,6 +195,7 @@ pub struct EmailState {
     pub read: bool,
     pub flagged: bool,
     pub flag: Option<MailFlag>,
+    pub categories: Vec<String>,
     pub draft_revision: Option<String>,
 }
 
@@ -217,12 +218,23 @@ impl EmailState {
         flagged: bool,
         keywords: impl Iterator<Item = &'a str>,
     ) -> Self {
-        let flag = MailFlag::from_keywords(keywords)
+        let keywords: Vec<String> = keywords.map(str::to_owned).collect();
+        let flag = MailFlag::from_keywords(keywords.iter().map(String::as_str))
             .filter(|flag| (flag.status == 2 && flagged) || (flag.status == 1 && !flagged));
+        let mut categories: Vec<_> = keywords
+            .iter()
+            .filter(|keyword| {
+                !keyword.starts_with('$') && !keyword.starts_with(FLAG_KEYWORD_PREFIX)
+            })
+            .cloned()
+            .collect();
+        categories.sort_unstable();
+        categories.dedup();
         Self {
             read,
             flagged,
             flag,
+            categories,
             draft_revision: None,
         }
     }
@@ -247,6 +259,14 @@ impl EmailState {
         if let Some(revision) = &self.draft_revision {
             value.push_str(";draft:");
             value.push_str(revision);
+        }
+        if !self.categories.is_empty() {
+            value.push_str(";categories:");
+            for category in &self.categories {
+                value.push_str(&category.len().to_string());
+                value.push(':');
+                value.push_str(category);
+            }
         }
         value
     }
@@ -529,5 +549,23 @@ mod flag_tests {
             MailFlag::from_keywords(keys.iter().skip(1).map(String::as_str)),
             None
         );
+    }
+
+    #[test]
+    fn email_state_fingerprint_tracks_custom_categories_but_not_system_keywords() {
+        let state = |keywords: &[(&str, bool)]| {
+            EmailState::from_keywords(
+                &keywords
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), *value))
+                    .collect(),
+            )
+        };
+        let before = state(&[("$seen", true), ("alpha", true), ("ignored", false)]);
+        let reordered = state(&[("alpha", true), ("$seen", true)]);
+        let changed = state(&[("$seen", true), ("beta", true)]);
+        assert_eq!(before.fingerprint(), reordered.fingerprint());
+        assert_ne!(before.fingerprint(), changed.fingerprint());
+        assert_eq!(before.categories, vec!["alpha"]);
     }
 }
