@@ -14258,7 +14258,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         )
         .unwrap();
     expanded_zip_archive
-        .write_all(&vec![b'x'; 3 * 1024 * 1024])
+        .write_all(&vec![b'x'; 12 * 1024 * 1024])
         .unwrap();
     expanded_zip_archive
         .write_all(b" victor whiskey beyond the old ZIP budget")
@@ -14315,7 +14315,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         })],
     );
     let large_text_attachment = {
-        let mut text = vec![b'x'; 6 * 1024 * 1024];
+        let mut text = vec![b'x'; 12 * 1024 * 1024];
         text.extend_from_slice(b" yankee zulu");
         text
     };

@@ -109,12 +109,12 @@ fn same_search(session: &SearchState, filter: &Value, search_text: &str) -> bool
     session.filter == *filter && session.search_text == search_text
 }
 const SEARCHES: &str = "__find__";
-const MAX_FIND_ATTACHMENT_TEXT_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_FIND_ATTACHMENT_TEXT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FIND_PDF_OCR_PAGES: u32 = 5;
 const MAX_FIND_PDF_OCR_EDGE: u32 = 1600;
 const MAX_FIND_ARCHIVE_ENTRIES: usize = 4096;
-const MAX_FIND_ARCHIVE_EXPANDED_BYTES: usize = 8 * 1024 * 1024;
+const MAX_FIND_ARCHIVE_EXPANDED_BYTES: usize = 16 * 1024 * 1024;
 static FIND_PDF_OCR_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 pub(super) async fn handle(

@@ -28,9 +28,9 @@ started `2026-11-25T01:44:23Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. Production has no protocol-version override and retains the
 14.0 default.
 
-Find permits up to 8 MiB of extracted attachment text, downloads attachments
-up to 16 MiB, and expands generic ZIP entries up to 8 MiB. Exact and over-limit
-text boundaries are covered, and a 6 MiB plain-text attachment is found by an
+Find permits up to 16 MiB of extracted attachment text, downloads attachments
+up to 16 MiB, and expands generic ZIP entries up to 16 MiB. Exact and over-limit
+text boundaries are covered, and a 12 MiB plain-text attachment is found by an
 exact NEAR query. The full suite passes 404 tests (75 ignored), strict Clippy
 passes, and the real scanned-PDF OCR test passes. The text-cap change is
 deployed as
@@ -83,6 +83,12 @@ Deployed as `deploy-2026-11-25-eas-find-zip-source-adf5a0d`; Homelab commit
 started `2026-11-25T02:25:59Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. Production retains the 14.0 protocol default.
 
+Find's extracted-text and generic ZIP expansion limits now both match the
+16 MiB attachment download ceiling. Exact 16 MiB and over-limit boundaries
+are tested; EAS Find matches exact NEAR terms in 12 MiB plain-text and expanded
+ZIP attachments. The full suite, strict Clippy, formatting, and diff checks
+pass.
+
 Remaining 16.1 readiness backlog (ordered by runtime impact):
 
 1. **Real-client 16.1 validation.** Exercise negotiation, Tasks, BodyPart,
@@ -108,8 +114,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    Word, Excel, and PowerPoint package comment text, plus
    MIME-declared charsets for text attachments and XML declaration encodings.
    Scanned-only PDFs with up to five image-only pages use resource-bounded
-   OCR. Attachments above 16 MiB, PDFs with more than five image-only pages,
-   and extracted text above 8 MiB remain outside exact local matching. Mixed
+   OCR. Attachments above 16 MiB and PDFs with more than five image-only pages
+   remain outside exact local matching. Mixed
    PDFs retain native text and OCR only pages without extractable text, even
    when the PDF has more than three total pages. A four-page real fixture
    covers native text plus an OCR-only page.
