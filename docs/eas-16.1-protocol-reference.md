@@ -101,13 +101,16 @@ around `ping()` for the standing note on why that was deliberately not
 ### ItemOperations (§2.2.1.10)
 Generalized item-fetch command — can fetch a message body, an attachment,
 or (with `Options>Schema`) a subset of fields, and supports fetching
-multiple items across different stores in one request. This gateway accepts
-multiple Fetch operations, applies each Store independently, parses body and
-MIME options, and now restricts the returned Properties fields to the
-top-level entries requested by Schema for mail, contacts, calendar events,
-tasks, and notes. The real device this session uses the Sync-embedded
-`<Fetch>` for opening messages instead (confirmed live), so this path remains
-secondary for that client even though its protocol handling is broader.
+multiple items in one request. This gateway accepts multiple Fetch operations
+for the `Mailbox` store; it does not implement `DocumentLibrary`. Within that
+store it fetches mail, contacts, calendar events, tasks, notes, and attachments
+using CollectionId plus ServerId, LongId, or FileReference. It parses body and
+MIME options, supports byte ranges and multipart responses for attachment
+references, and restricts returned Properties to top-level Schema entries for
+mail, contacts, calendar events, tasks, and notes. The real device this session
+uses the Sync-embedded `<Fetch>` for opening messages instead (confirmed live),
+so this path remains secondary for that client even though its protocol
+handling is broader.
 
 ### GetAttachment (§2.2.2.8, **legacy — pre-14.0 only**)
 A plain `GET ...?Cmd=GetAttachment&AttachmentName=...`, no WBXML request
