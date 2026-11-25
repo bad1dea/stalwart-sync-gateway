@@ -71,6 +71,7 @@ struct Mock {
     mail_structures: Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
     mail_attachments: Mutex<std::collections::BTreeMap<String, Vec<serde_json::Value>>>,
     download_blobs: Mutex<std::collections::BTreeMap<String, (String, Vec<u8>)>>,
+    downloaded_blobs: Mutex<Vec<String>>,
     mail_bodies: Mutex<std::collections::BTreeMap<String, (String, bool)>>,
     body_get_limits: Mutex<Vec<(String, usize)>>,
     body_get_error: AtomicBool,
@@ -736,6 +737,7 @@ async fn mock_download(
     State(mock): State<Arc<Mock>>,
     axum::extract::Path((_account, blob, _name)): axum::extract::Path<(String, String, String)>,
 ) -> axum::response::Response {
+    mock.downloaded_blobs.lock().unwrap().push(blob.clone());
     if mock.download_error.load(Ordering::SeqCst) || blob == "missing" {
         return (axum::http::StatusCode::NOT_FOUND, "missing").into_response();
     }
@@ -874,6 +876,7 @@ async fn start_mock() -> Arc<Mock> {
         mail_structures: Mutex::new(Default::default()),
         mail_attachments: Mutex::new(Default::default()),
         download_blobs: Mutex::new(Default::default()),
+        downloaded_blobs: Mutex::new(Vec::new()),
         mail_bodies: Mutex::new(Default::default()),
         body_get_limits: Mutex::new(Vec::new()),
         body_get_error: AtomicBool::new(false),
@@ -14224,12 +14227,12 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
                 .compression_method(zip::CompressionMethod::Stored),
         )
         .unwrap();
-    let embedded_file = (0..6 * 1024 * 1024)
+    let embedded_file = (0..12 * 1024 * 1024)
         .map(|index| (index % 251) as u8)
         .collect::<Vec<_>>();
     docx_archive.write_all(&embedded_file).unwrap();
     let docx = docx_archive.finish().unwrap().into_inner();
-    assert!(docx.len() > 4 * 1024 * 1024 && docx.len() <= 8 * 1024 * 1024);
+    assert!(docx.len() > 8 * 1024 * 1024 && docx.len() <= 16 * 1024 * 1024);
     let mut zip_archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     zip_archive
         .start_file(
@@ -14348,7 +14351,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         vec![serde_json::json!({
             "blobId":"never-downloaded-blob", "name":"too-large.docx",
             "type":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "size":8 * 1024 * 1024 + 1
+            "size":16 * 1024 * 1024 + 1
         })],
     );
     env.mock.mail_bodies.lock().unwrap().insert(
@@ -14791,6 +14794,13 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         eas::find_all_text_after(&doc, air::SERVER_ID),
         vec!["outlook-msg-attachment"]
     );
+    assert!(!env
+        .mock
+        .downloaded_blobs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|blob| blob == "never-downloaded-blob"));
 }
 
 #[tokio::test]

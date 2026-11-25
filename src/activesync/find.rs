@@ -110,7 +110,7 @@ fn same_search(session: &SearchState, filter: &Value, search_text: &str) -> bool
 }
 const SEARCHES: &str = "__find__";
 const MAX_FIND_ATTACHMENT_TEXT_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FIND_PDF_OCR_PAGES: u32 = 3;
 const MAX_FIND_PDF_OCR_EDGE: u32 = 1600;
 const MAX_FIND_ARCHIVE_ENTRIES: usize = 4096;

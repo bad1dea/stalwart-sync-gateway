@@ -28,11 +28,21 @@ started `2026-11-25T01:44:23Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. Production has no protocol-version override and retains the
 14.0 default.
 
-Find now permits up to 8 MiB of extracted attachment text, matching its
-8 MiB download ceiling; the generic ZIP expanded-data limit remains 2 MiB.
-Exact and over-limit boundaries are covered, and a 6 MiB plain-text attachment
-is found by an exact NEAR query. The full suite passes 404 tests (75 ignored),
-strict Clippy passes, and the real scanned-PDF OCR test passes.
+Find permits up to 8 MiB of extracted attachment text and downloads attachments
+up to 8 MiB; generic ZIP expansion remains 2 MiB. Exact and over-limit text
+boundaries are covered, and a 6 MiB plain-text attachment is found by an exact
+NEAR query. The full suite passes 404 tests (75 ignored), strict Clippy passes,
+and the real scanned-PDF OCR test passes. Deployed as
+`deploy-2026-11-25-eas-find-8mb-text-0f5c90c`; Homelab commit `589dbd9`, image
+`sha256:18092476150a2781c8bc06424780f7eb50bdf66c32cdd99f387ea8893248cf6a`,
+started `2026-11-25T01:53:44Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. Production remains at the 14.0 protocol default.
+
+The download ceiling is now 16 MiB while extracted text remains capped at
+8 MiB. A 12 MiB OOXML package is searchable, while a metadata-declared
+attachment above 16 MiB is verified to be skipped before download. The full
+suite passes 404 tests (75 ignored); strict Clippy, formatting, and diff checks
+pass.
 
 Remaining 16.1 readiness backlog (ordered by runtime impact):
 
@@ -58,7 +68,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    Word, Excel, and PowerPoint package comment text, plus
    MIME-declared charsets for text attachments and XML declaration encodings.
    Scanned-only PDFs with up to three image-only pages use resource-bounded
-   OCR. Attachments above 8 MiB, PDFs with more than three image-only pages,
+   OCR. Attachments above 16 MiB, PDFs with more than three image-only pages,
    and extracted text above 8 MiB remain outside exact local matching. Mixed
    PDFs retain native text and OCR only pages without extractable text, even
    when the PDF has more than three total pages. A four-page real fixture
