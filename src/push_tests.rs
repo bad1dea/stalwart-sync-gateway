@@ -8481,14 +8481,16 @@ mod e2e {
             .unwrap_or_else(|| panic!("event creation failed: {event}"))
             .to_owned();
         let folder = format!("cal_{calendar}");
-        let device = dev("response-type");
+        // Fixed only within this dedicated E2E bridge; the calendar id is
+        // unique per run, so previous runs cannot reuse its collection state.
+        let device = "response-fields-16-1";
         let prime = live
-            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .wbxml_version("Sync", device, sync_body("0", &folder), "16.1")
             .await;
         let initial = live
             .wbxml_version(
                 "Sync",
-                &device,
+                device,
                 sync_body(&sync_key(&prime), &folder),
                 "16.1",
             )
@@ -8497,13 +8499,13 @@ mod e2e {
             eas::find_text_after(&initial, cal::RESPONSE_TYPE),
             Some("2")
         );
-        assert_eq!(
-            eas::find_text_after(&initial, cal::RESPONSE_REQUESTED),
-            Some("0")
-        );
-        assert_eq!(
-            eas::find_text_after(&initial, cal::APPOINTMENT_REPLY_TIME),
-            Some("20420706T093000Z")
+        let initial_response_requested = eas::find_text_after(&initial, cal::RESPONSE_REQUESTED);
+        let initial_appointment_reply_time =
+            eas::find_text_after(&initial, cal::APPOINTMENT_REPLY_TIME);
+        assert!(
+            initial_response_requested == Some("0")
+                && initial_appointment_reply_time == Some("20420706T093000Z"),
+            "16.1 initial Sync fields: ResponseRequested={initial_response_requested:?} (expected Some(\"0\")); AppointmentReplyTime={initial_appointment_reply_time:?} (expected Some(\"20420706T093000Z\"))"
         );
         let updated = live
             .call_using(
@@ -8516,7 +8518,7 @@ mod e2e {
         let changed = live
             .wbxml_version(
                 "Sync",
-                &device,
+                device,
                 sync_body(&sync_key(&initial), &folder),
                 "16.1",
             )
@@ -8525,13 +8527,13 @@ mod e2e {
             eas::find_text_after(&changed, cal::RESPONSE_TYPE),
             Some("3")
         );
-        assert_eq!(
-            eas::find_text_after(&changed, cal::RESPONSE_REQUESTED),
-            Some("1")
-        );
-        assert_eq!(
-            eas::find_text_after(&changed, cal::APPOINTMENT_REPLY_TIME),
-            Some("20420706T100000Z")
+        let changed_response_requested = eas::find_text_after(&changed, cal::RESPONSE_REQUESTED);
+        let changed_appointment_reply_time =
+            eas::find_text_after(&changed, cal::APPOINTMENT_REPLY_TIME);
+        assert!(
+            changed_response_requested == Some("1")
+                && changed_appointment_reply_time == Some("20420706T100000Z"),
+            "16.1 changed Sync fields: ResponseRequested={changed_response_requested:?} (expected Some(\"1\")); AppointmentReplyTime={changed_appointment_reply_time:?} (expected Some(\"20420706T100000Z\"))"
         );
         let cancelled = live
             .call_using(
@@ -8544,7 +8546,7 @@ mod e2e {
         let cancelled_sync = live
             .wbxml_version(
                 "Sync",
-                &device,
+                device,
                 sync_body(&sync_key(&changed), &folder),
                 "16.1",
             )
@@ -8586,7 +8588,7 @@ mod e2e {
                 b.end();
             }
             let rejected = live
-                .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+                .wbxml_version("Sync", device, wbxml::encode_document(&b.finish()), "16.1")
                 .await;
             assert!(eas::find_all_text_after(&rejected, air::STATUS).contains(&"5".to_owned()));
             key = sync_key(&rejected);
@@ -8615,7 +8617,7 @@ mod e2e {
             b.end();
         }
         let rejected = live
-            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "16.1")
+            .wbxml_version("Sync", device, wbxml::encode_document(&b.finish()), "16.1")
             .await;
         assert!(eas::find_all_text_after(&rejected, air::STATUS).contains(&"6".to_owned()));
         let native = live
