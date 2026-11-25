@@ -2302,13 +2302,7 @@ fn condition(property: &str, value: &str) -> Result<Value, &'static str> {
                 .strip_prefix('"')
                 .and_then(|v| v.strip_suffix('"'))
                 .unwrap_or(value);
-            if value.is_empty()
-                || value.starts_with('$')
-                || !value.is_ascii()
-                || value
-                    .chars()
-                    .any(|ch| ch.is_ascii_whitespace() || "(){}[]%*\\\"".contains(ch))
-            {
+            if value.starts_with('$') || !crate::model::valid_jmap_keyword(value) {
                 return Err("invalid category search value");
             }
             Ok(json!({"hasKeyword": value.to_ascii_lowercase()}))
@@ -3120,6 +3114,11 @@ mod tests {
             json!({"hasKeyword":"projectx"})
         );
         assert!(to_filter("category:\"two words\"").is_err());
+        assert_eq!(
+            condition("category", "tag[1}").unwrap(),
+            json!({"hasKeyword":"tag[1}"})
+        );
+        assert!(condition("category", "tag]1").is_err());
     }
 
     #[test]

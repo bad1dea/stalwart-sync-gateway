@@ -139,6 +139,17 @@ pub struct MailFlag {
 
 pub const FLAG_KEYWORD_PREFIX: &str = "easflag-";
 
+/// RFC 8621 §2.1.1 custom keyword syntax. JMAP keywords are ASCII, case
+/// insensitive, 1–255 printable non-space characters, excluding `(`, `)`,
+/// `{`, `]`, `%`, `*`, `"`, and `\\`.
+pub fn valid_jmap_keyword(keyword: &str) -> bool {
+    (1..=255).contains(&keyword.len())
+        && keyword.bytes().all(|byte| {
+            (0x21..=0x7e).contains(&byte)
+                && !matches!(byte, b'(' | b')' | b'{' | b']' | b'%' | b'*' | b'"' | b'\\')
+        })
+}
+
 impl MailFlag {
     pub fn keywords(&self) -> anyhow::Result<Vec<String>> {
         let bytes = serde_json::to_vec(self)?;
@@ -567,5 +578,15 @@ mod flag_tests {
         assert_eq!(before.fingerprint(), reordered.fingerprint());
         assert_ne!(before.fingerprint(), changed.fingerprint());
         assert_eq!(before.categories, vec!["alpha"]);
+    }
+
+    #[test]
+    fn jmap_keyword_validation_matches_rfc_8621_character_set() {
+        assert!(valid_jmap_keyword("tag[1}"));
+        for invalid in ["", "two words", "bad{tag", "bad]tag", "bad\\tag", "é"] {
+            assert!(!valid_jmap_keyword(invalid), "{invalid:?}");
+        }
+        assert!(valid_jmap_keyword(&"x".repeat(255)));
+        assert!(!valid_jmap_keyword(&"x".repeat(256)));
     }
 }

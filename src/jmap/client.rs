@@ -6388,13 +6388,7 @@ impl JmapClient {
         }
         if let Some(categories) = categories {
             let valid_keyword = |category: &str| {
-                !category.is_empty()
-                    && category.len() <= 255
-                    && !category.starts_with('$')
-                    && category.is_ascii()
-                    && !category
-                        .chars()
-                        .any(|ch| ch.is_ascii_whitespace() || "(){}[]%*\\\"".contains(ch))
+                !category.starts_with('$') && crate::model::valid_jmap_keyword(category)
             };
             anyhow::ensure!(
                 categories.iter().all(|category| valid_keyword(category)),
