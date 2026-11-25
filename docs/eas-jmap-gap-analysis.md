@@ -34,6 +34,11 @@ passed, 77 ignored; strict Clippy, formatting, and diff checks pass. Sources:
 Microsoft [MS-ASCAL Recurrence Patterns](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascal/6b32175a-e89d-4a9a-a715-a2e8bab289b0)
 and [Creating Recurring Calendar Items](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascal/7e47367e-85f4-4548-a649-e38f2e0f5d66),
 and [RFC 8984 `byMonthDay`](https://www.rfc-editor.org/rfc/rfc8984.html).
+Deployed to the isolated Amy bridge as
+`localhost/eas16-isolated:e89bd36` (image
+`sha256:41180958f4542824a0a3935ef8972e41b72422b53b82a9069a48307e1a400c9d`),
+started `2026-11-25T08:47:17.399590203Z`, restart count zero, `/healthz` `ok`,
+and `/readyz` `ready`. The protocol override remains unset, preserving 14.0.
 
 MeetingResponse now accepts `InstanceId` for recurring invitations on 14.1,
 16.0, and 16.1, maps the original UTC occurrence start to the parent event's
