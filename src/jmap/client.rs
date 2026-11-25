@@ -3110,7 +3110,7 @@ impl JmapClient {
         event_id: &str,
         participation: &str,
         options: MeetingResponseOptions<'_>,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<&'static str> {
         let MeetingResponseOptions {
             expected_organizer,
             send_response,
@@ -3136,14 +3136,14 @@ impl JmapClient {
             .as_array()
             .and_then(|items| items.iter().find(|event| event["id"] == event_id))
         else {
-            return Ok(false);
+            return Ok("2");
         };
         if event["@type"] != "Event" || event["calendarIds"][calendar_id] != true {
-            return Ok(false);
+            return Ok("2");
         }
         let instance_key = if let Some(instance_id) = instance_id {
             if event["recurrenceRule"].is_null() {
-                return Ok(false);
+                return Ok("146");
             }
             let key = recurrence_override_key(instance_id, event["timeZone"].as_str())?;
             anyhow::ensure!(
@@ -3159,7 +3159,7 @@ impl JmapClient {
             .and_then(|key| event["recurrenceOverrides"][key].get("participants"))
             .unwrap_or(&event["participants"]);
         let Some(participants) = effective_participants.as_object() else {
-            return Ok(false);
+            return Ok("2");
         };
         let owners: Vec<_> = participants
             .values()
@@ -3170,14 +3170,14 @@ impl JmapClient {
                 .as_str()
                 .is_none_or(|email| email.eq_ignore_ascii_case(auth.username()))
         {
-            return Ok(false);
+            return Ok("2");
         }
         if expected_organizer.is_some_and(|expected| {
             owners[0]["email"]
                 .as_str()
                 .is_none_or(|email| !email.eq_ignore_ascii_case(expected))
         }) {
-            return Ok(false);
+            return Ok("2");
         }
         let matches: Vec<_> = participants
             .iter()
@@ -3188,10 +3188,10 @@ impl JmapClient {
             })
             .collect();
         let [(key, participant)] = matches.as_slice() else {
-            return Ok(false);
+            return Ok("2");
         };
         if participant["roles"]["owner"] == true {
-            return Ok(false);
+            return Ok("2");
         }
         let state = result.1["state"]
             .as_str()
@@ -3204,7 +3204,7 @@ impl JmapClient {
                         .as_str()
                         .is_some_and(|email| email.eq_ignore_ascii_case(&identity.email))
                 }) {
-                    return Ok(false);
+                    return Ok("2");
                 }
             }
             let calendars = event["calendarIds"]
@@ -3285,7 +3285,7 @@ impl JmapClient {
                     }
                 }
             }
-            return Ok(true);
+            return Ok("1");
         }
         let participant_id = (*key).clone();
         let original_roles = participant["roles"].clone();
@@ -3412,7 +3412,7 @@ impl JmapClient {
             owners.len() == 1 && owners[0]["email"] == owner_email,
             "meeting organizer was not retained"
         );
-        Ok(true)
+        Ok("1")
     }
 
     pub async fn calendar_event_for_invitation(
@@ -12284,6 +12284,60 @@ mod meeting_response_send_tests {
     use std::sync::Arc;
 
     #[tokio::test]
+    async fn instance_response_on_non_recurring_event_returns_eas_status_146() {
+        let app = Router::new().route(
+            "/",
+            post(|Json(_request): Json<serde_json::Value>| async {
+                Json(serde_json::json!({"methodResponses":[[
+                    "CalendarEvent/get", {"state":"s1","list":[{
+                        "id":"e","@type":"Event","calendarIds":{"cal":true},
+                        "participants":{}
+                    }]}, "get"
+                ]]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::CALENDARS:"a"}, "apiUrl":url,
+            "downloadUrl":url,"uploadUrl":url,"username":"user@example.test","state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user@example.test".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            client
+                .respond_calendar_event(
+                    &auth,
+                    "cal",
+                    "e",
+                    "accepted",
+                    MeetingResponseOptions {
+                        instance_id: Some("2026-11-25T15:00:00.000Z"),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap(),
+            "146"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn meeting_response_send_flag_controls_jmap_scheduling_messages() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let captured = calls.clone();
@@ -12343,19 +12397,22 @@ mod meeting_response_send_tests {
             Arc::new(crate::state::MemoryStateStore::default()),
         )
         .unwrap();
-        assert!(client
-            .respond_calendar_event(
-                &auth,
-                "cal",
-                "e",
-                "accepted",
-                MeetingResponseOptions {
-                    send_response: true,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap());
+        assert_eq!(
+            client
+                .respond_calendar_event(
+                    &auth,
+                    "cal",
+                    "e",
+                    "accepted",
+                    MeetingResponseOptions {
+                        send_response: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap(),
+            "1"
+        );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
         server.abort();
     }
@@ -12430,20 +12487,23 @@ mod meeting_response_send_tests {
             Arc::new(crate::state::MemoryStateStore::default()),
         )
         .unwrap();
-        assert!(client
-            .respond_calendar_event(
-                &auth,
-                "cal",
-                "e",
-                "declined",
-                MeetingResponseOptions {
-                    send_response: true,
-                    instance_id: Some("2026-11-25T15:00:00.000Z"),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap());
+        assert_eq!(
+            client
+                .respond_calendar_event(
+                    &auth,
+                    "cal",
+                    "e",
+                    "declined",
+                    MeetingResponseOptions {
+                        send_response: true,
+                        instance_id: Some("2026-11-25T15:00:00.000Z"),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap(),
+            "1"
+        );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
         server.abort();
     }
@@ -12519,16 +12579,19 @@ mod meeting_response_send_tests {
             Arc::new(crate::state::MemoryStateStore::default()),
         )
         .unwrap();
-        assert!(client
-            .respond_calendar_event(
-                &auth,
-                "cal",
-                "e",
-                "accepted",
-                MeetingResponseOptions::default()
-            )
-            .await
-            .unwrap());
+        assert_eq!(
+            client
+                .respond_calendar_event(
+                    &auth,
+                    "cal",
+                    "e",
+                    "accepted",
+                    MeetingResponseOptions::default()
+                )
+                .await
+                .unwrap(),
+            "1"
+        );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
         server.abort();
     }

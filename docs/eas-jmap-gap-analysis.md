@@ -1,6 +1,6 @@
 # EAS ↔ JMAP gap analysis and roadmap
 
-## Reconciled status for source `main` (2026-11-24)
+## Reconciled status for source `main` (2026-11-25)
 
 The historical tables and roadmap below describe an August 2026 source snapshot;
 they are not a current implementation inventory. The November source contains
@@ -20,8 +20,13 @@ existing attendee overrides as well. Both paths use `ifInState` and verify
 persisted participant state; declining one occurrence leaves the series
 intact. Mocked JMAP regressions cover occurrence decline and whole-series
 acceptance while preserving organizer and attendee data. Full suite: 413
-passed, 76 ignored; strict Clippy, formatting, and diff checks pass. Deployed
-as `deploy-2026-11-24-eas-meeting-response-recurrence-d963275`; Homelab commit
+passed, 76 ignored; strict Clippy, formatting, and diff checks pass. Invalid
+RFC 3339 `InstanceId` values now return EAS status 104, and an instance reply
+against a non-recurring event returns status 146. Both outcomes have focused
+regressions. Current full suite: 415 passed, 76 ignored; strict Clippy,
+formatting, and diff checks pass. These status-code changes are implemented
+locally but not yet committed or deployed. The previously deployed baseline is
+`deploy-2026-11-24-eas-meeting-response-recurrence-d963275`; Homelab commit
 `5c003f3`, image
 `sha256:30faa72b4c3b3777f419d8a1369705e00c59c9f437bdb312cb8291f6861806ac`,
 started `2026-11-25T05:00:14Z`, restart count zero, `/healthz` and `/readyz`
@@ -823,7 +828,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `sha256:6b48329c78265129eae9ab73bb478d51b2465b0198465ffb2881a155edd8261b`,
    started `2026-11-24T19:25:30Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Runtime health is verified; real-client 16.1
-   certification remains open.
+certification remains open.
    Phrase matching is case-insensitive and requires adjacent
    words in order. Regression tests cover plain, HTML, and RTF bodies,
    subject/body conjunctions, truncation, and unsupported Boolean forms. Full

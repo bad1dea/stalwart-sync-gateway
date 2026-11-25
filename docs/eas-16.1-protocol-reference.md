@@ -199,7 +199,10 @@ calendar-folder target behavior is protocol-version gated. Recurring series
 responses update the master participant plus existing attendee overrides;
 `InstanceId` on 14.1/16.0/16.1 changes only the selected occurrence. The updates
 preserve other participant data and verify readback. Mocked regressions cover
-series acceptance and occurrence decline. Deployed as
+series acceptance and occurrence decline. Invalid `InstanceId` formats return
+status 104, and using an `InstanceId` with a non-recurring event returns status
+146; regressions cover both. These status fixes are implemented locally and
+awaiting deployment. The recurring-write baseline is deployed as
 `deploy-2026-11-24-eas-meeting-response-recurrence-d963275`; real-client 16.1
 certification remains separate from handler coverage.
 

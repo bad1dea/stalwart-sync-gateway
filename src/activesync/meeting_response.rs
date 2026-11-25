@@ -18,6 +18,12 @@ fn is(doc: &Document, expected: Token) -> bool {
     matches!(doc.nodes.first(), Some(Node::Start(token)) if token.code_page == expected.code_page && token.token == expected.token)
 }
 
+fn invalid_instance_id_status(value: Option<&str>) -> Option<&'static str> {
+    value
+        .filter(|value| chrono::DateTime::parse_from_rfc3339(value).is_err())
+        .map(|_| "104")
+}
+
 pub(super) async fn handle(
     state: &AppState,
     auth: &AuthenticatedSession,
@@ -106,6 +112,8 @@ pub(super) async fn handle(
                 || !matches!(response, "1" | "2" | "3")
             {
                 "2"
+            } else if let Some(status) = invalid_instance_id_status(instance_id) {
+                status
             } else if lookup_failed || unsupported {
                 "4"
             } else if matches!(version, ProtocolVersion::V14_0) && folder.starts_with("cal_") {
@@ -169,11 +177,11 @@ pub(super) async fn handle(
                                 )
                                 .await
                             {
-                                Ok(true) => {
+                                Ok("1") => {
                                     calendar_id = Some(event);
                                     "1"
                                 }
-                                Ok(false) => "2",
+                                Ok(status) => status,
                                 Err(error) => {
                                     tracing::warn!(%error, "meeting response failed");
                                     "4"
@@ -211,4 +219,20 @@ pub(super) async fn handle(
         wbxml::encode_document(&b.finish()),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invalid_instance_id_status;
+
+    #[test]
+    fn meeting_instance_id_uses_eas_invalid_format_status() {
+        assert_eq!(invalid_instance_id_status(Some("not-a-date")), Some("104"));
+        assert_eq!(invalid_instance_id_status(Some("")), Some("104"));
+        assert_eq!(
+            invalid_instance_id_status(Some("2026-11-25T15:00:00.000Z")),
+            None
+        );
+        assert_eq!(invalid_instance_id_status(None), None);
+    }
 }
