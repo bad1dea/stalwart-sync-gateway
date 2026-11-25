@@ -28,6 +28,12 @@ started `2026-11-25T01:44:23Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. Production has no protocol-version override and retains the
 14.0 default.
 
+Find now permits up to 8 MiB of extracted attachment text, matching its
+8 MiB download ceiling; the generic ZIP expanded-data limit remains 2 MiB.
+Exact and over-limit boundaries are covered, and a 6 MiB plain-text attachment
+is found by an exact NEAR query. The full suite passes 404 tests (75 ignored),
+strict Clippy passes, and the real scanned-PDF OCR test passes.
+
 Remaining 16.1 readiness backlog (ordered by runtime impact):
 
 1. **Real-client 16.1 validation.** Exercise negotiation, Tasks, BodyPart,
@@ -53,7 +59,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    MIME-declared charsets for text attachments and XML declaration encodings.
    Scanned-only PDFs with up to three image-only pages use resource-bounded
    OCR. Attachments above 8 MiB, PDFs with more than three image-only pages,
-   and extracted text above 4 MiB remain outside exact local matching. Mixed
+   and extracted text above 8 MiB remain outside exact local matching. Mixed
    PDFs retain native text and OCR only pages without extractable text, even
    when the PDF has more than three total pages. A four-page real fixture
    covers native text plus an OCR-only page.
@@ -77,7 +83,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `sha256:9699a05e302248912a5fc228be3b9ab53aeac297ed8e55d46c254f03ced6e763`,
    started `2026-11-25T00:53:12Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Production continues to advertise 14.0 by default.
-   The exact extracted-text cap is now 4 MiB; generic ZIP expansion remains
+   The exact extracted-text cap was raised to 4 MiB; generic ZIP expansion remains
    independently capped at 2 MiB. Regressions cover exact/over-limit text and
    the unchanged ZIP expansion bound. The full suite passes 403 tests (75
    ignored), strict Clippy and formatting pass, and real OCR passes on the

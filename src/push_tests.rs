@@ -14264,6 +14264,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         .unwrap();
     let xlsm = xlsm_archive.finish().unwrap().into_inner();
     env.mock.add_mail("inbox", "text-attachment");
+    env.mock.add_mail("inbox", "large-text-attachment");
     env.mock.add_mail("inbox", "oversized-text-attachment");
     env.mock.add_mail("inbox", "pdf-attachment");
     env.mock.add_mail("inbox", "docx-attachment");
@@ -14286,6 +14287,22 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         vec![serde_json::json!({
             "blobId":"text-blob", "name":"notes.txt",
             "type":"text/plain", "size":10
+        })],
+    );
+    let large_text_attachment = {
+        let mut text = vec![b'x'; 6 * 1024 * 1024];
+        text.extend_from_slice(b" yankee zulu");
+        text
+    };
+    env.mock.mail_bodies.lock().unwrap().insert(
+        "large-text-attachment".to_owned(),
+        ("unrelated body".to_owned(), false),
+    );
+    env.mock.mail_attachments.lock().unwrap().insert(
+        "large-text-attachment".to_owned(),
+        vec![serde_json::json!({
+            "blobId":"large-text-blob", "name":"large.txt",
+            "type":"text/plain", "size":large_text_attachment.len()
         })],
     );
     env.mock.mail_bodies.lock().unwrap().insert(
@@ -14443,6 +14460,10 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         .unwrap()
         .insert("pdf-blob".to_owned(), ("application/pdf".to_owned(), pdf));
     env.mock.download_blobs.lock().unwrap().insert(
+        "large-text-blob".to_owned(),
+        ("text/plain".to_owned(), large_text_attachment),
+    );
+    env.mock.download_blobs.lock().unwrap().insert(
         "docx-blob".to_owned(),
         (
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_owned(),
@@ -14560,6 +14581,25 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
     assert_eq!(
         eas::find_all_text_after(&doc, air::SERVER_ID),
         vec!["zip-attachment"]
+    );
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(find_body(
+            "30000000-0000-4000-8000-000000000098",
+            "yankee NEAR(0) zulu",
+            None,
+            "0-9",
+        ))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, air::SERVER_ID),
+        vec!["large-text-attachment"]
     );
 
     let response = env
