@@ -51,18 +51,19 @@ regression checks direct-child order for EAS 14.0 and 16.1, including the
 version-specific ID immediately after `TimeZone` and 16.1 `Forwardees` last.
 Mail Categories now round-trip through EAS `Email:Categories` and JMAP custom
 Email keywords, including client updates that preserve system flags, Find
-results, and KQL `Category:` search. Labels that violate JMAP keyword rules
+results, and KQL `Category:` search. A colon restriction uses case-insensitive
+substring matching locally, following [MS-KQL property restrictions](https://learn.microsoft.com/en-us/openspecs/sharepoint_protocols/ms-kql/1b4eb34a-0e20-4aca-b38e-41f531a747ff); `Category=` uses exact JMAP keyword matching. Labels that violate JMAP keyword rules
 are rejected per item on write using the exact character and length rules in
 [RFC 8621 §2.1.1](https://www.rfc-editor.org/rfc/rfc8621.html#section-2.1.1).
 Category-only changes now participate in Sync
 fingerprints and return in state-only Change responses, with an empty category
 container when clearing. Regression coverage includes parsing, WBXML output,
 JMAP keyword replacement, fingerprinting, propagation, and query translation.
-The full suite passes 474 tests (77 ignored); strict Clippy, formatting, and
-diff checks pass. Commit `8d8bca8` is deployed to Amy's isolated bridge as
-`localhost/eas16-isolated:8d8bca8` (image
-`sha256:477801269dc721271bfa1c18a56ef8544f70a0b41b890a80bea32f10652df0c0`),
-started `2026-11-25T13:30:20.678674545Z`, with zero restarts. `/healthz` and
+The full suite passes 475 tests (77 ignored); strict Clippy, formatting, and
+diff checks pass. Commit `4446b80` is deployed to Amy's isolated bridge as
+`localhost/eas16-isolated:4446b80` (image
+`sha256:5d16a76bcbc9ae089cd33bf299cd5f24d7ac528fbf9fb6b1445b831ce5e9b7e9`),
+started `2026-11-25T13:45:33.108547343Z`, with zero restarts. `/healthz` and
 `/readyz` return `ok` and `ready`; `EAS_MAX_PROTOCOL_VERSION` remains omitted,
 preserving the 14.0 default, and production is untouched. The optional
 `Organizer` maps the
@@ -596,16 +597,17 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `/readyz` `ready`.
    Mail Categories now map between EAS `Email:Categories` and JMAP custom
    Email keywords for Sync output and client changes; Find results include
-   those categories, and KQL `Category:` searches map to `Email/query`
-   `hasKeyword`. System keywords are excluded from the EAS category list.
-   JMAP keyword restrictions are enforced on client category writes, and
+   those categories. KQL `Category:` uses a case-insensitive local substring
+   match; `Category=` maps to `Email/query` `hasKeyword`. System and internal
+   flag keywords are excluded from category values. JMAP keyword restrictions
+   are enforced on client category writes, and
    regression tests cover parsing, output, replacement, Sync propagation, and
    KQL translation, and invalid categories failing only their own Change
-   command. The full suite passes 474 tests (77 ignored); strict Clippy,
-   formatting, and diff checks pass. Commit `8d8bca8` is deployed to Amy's
-   isolated bridge as `localhost/eas16-isolated:8d8bca8`, image
-   `sha256:477801269dc721271bfa1c18a56ef8544f70a0b41b890a80bea32f10652df0c0`,
-   started `2026-11-25T13:30:20.678674545Z`, with zero restarts. `/healthz`
+   command. The full suite passes 475 tests (77 ignored); strict Clippy,
+   formatting, and diff checks pass. Commit `4446b80` is deployed to Amy's
+   isolated bridge as `localhost/eas16-isolated:4446b80`, image
+   `sha256:5d16a76bcbc9ae089cd33bf299cd5f24d7ac528fbf9fb6b1445b831ce5e9b7e9`,
+   started `2026-11-25T13:45:33.108547343Z`, with zero restarts. `/healthz`
    returns `ok` and `/readyz` returns `ready`; `EAS_MAX_PROTOCOL_VERSION` is
    omitted, preserving the 14.0 default. Real-client interoperability remains
    part of the 16.1 validation backlog above.
@@ -2319,7 +2321,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | EAS feature | Status | JMAP mechanism | Notes |
 |---|---|---|---|
 | Sync: Mail (read) | **Done** | `Email/query`+`/get` | Field order/format audited hard this session; MIME-open (Type=4) and list BodyPreference both handled. |
-| Sync: Mail categories | **Done, two-way** (`8d8bca8`) | JMAP custom Email keywords | EAS `Email:Categories` reads and writes user categories while preserving system keywords; category-only mutations are fingerprinted and propagated as state-only Change responses, including clears. RFC 8621 keyword rules apply; invalid categories fail only their own Change command. Find results also include categories, and KQL `Category:` maps to `hasKeyword`. Regression coverage includes parser, response, replacement, state propagation, validation, and KQL. |
+| Sync: Mail categories | **Done, two-way** (`4446b80`) | JMAP custom Email keywords | EAS `Email:Categories` reads and writes user categories while preserving system and internal flag keywords; category-only mutations are fingerprinted and propagated as state-only Change responses, including clears. RFC 8621 keyword rules apply; invalid categories fail only their own Change command. Find results also include categories; KQL `Category:` is a local substring search and `Category=` maps to exact `hasKeyword`. Regression coverage includes parser, response, replacement, state propagation, validation, and KQL. |
 | Sync: Mail (mark read) | **Done** | `Email/set` (keywords `$seen`) | `apply_mail_client_commands`, Change command. |
 | Sync: Mail (delete) | **Done** | `Email/set` destroy / `Email/destroy`-equivalent | Delete command, `destroy_email()`. |
 | Sync: Mail (move) | **Done** | `Email/set` (`mailboxIds`) | Separate `MoveItems` command, not a Sync-embedded move. |
