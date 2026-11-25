@@ -8474,7 +8474,7 @@ mod e2e {
                 "start":"2042-07-06T10:00:00", "duration":"PT1H", "replyTo":{"imip":"mailto:owner@example.test"},
                 "participants":{
                     "owner":{"@type":"Participant", "email":"owner@example.test", "calendarAddress":"mailto:owner@example.test", "roles":{"owner":true}, "sendTo":{"imip":"mailto:owner@example.test"}, "scheduleAgent":"client"},
-                    "self":{"@type":"Participant", "email":live.user, "calendarAddress":format!("mailto:{}",live.user), "roles":{"attendee":true}, "participationStatus":"tentative", "sendTo":{"imip":format!("mailto:{}",live.user)}, "scheduleAgent":"client"}
+                    "self":{"@type":"Participant", "email":live.user, "calendarAddress":format!("mailto:{}",live.user), "roles":{"attendee":true}, "participationStatus":"tentative", "expectReply":false, "scheduleUpdated":"2042-07-06T09:30:00Z", "sendTo":{"imip":format!("mailto:{}",live.user)}, "scheduleAgent":"client"}
                 }}}}, "0"]]), &using).await;
         let id = event[0][1]["created"]["e"]["id"]
             .as_str()
@@ -8497,10 +8497,18 @@ mod e2e {
             eas::find_text_after(&initial, cal::RESPONSE_TYPE),
             Some("2")
         );
+        assert_eq!(
+            eas::find_text_after(&initial, cal::RESPONSE_REQUESTED),
+            Some("0")
+        );
+        assert_eq!(
+            eas::find_text_after(&initial, cal::APPOINTMENT_REPLY_TIME),
+            Some("20420706T093000Z")
+        );
         let updated = live
             .call_using(
-                serde_json::json!([["CalendarEvent/set", {"accountId":live.account,
-            "update":{&id:{"participants/self/participationStatus":"accepted"}}}, "0"]]),
+            serde_json::json!([["CalendarEvent/set", {"accountId":live.account,
+            "update":{&id:{"participants/self/participationStatus":"accepted", "participants/self/expectReply":true, "participants/self/scheduleUpdated":"2042-07-06T10:00:00Z"}}}, "0"]]),
                 &using,
             )
             .await;
@@ -8516,6 +8524,14 @@ mod e2e {
         assert_eq!(
             eas::find_text_after(&changed, cal::RESPONSE_TYPE),
             Some("3")
+        );
+        assert_eq!(
+            eas::find_text_after(&changed, cal::RESPONSE_REQUESTED),
+            Some("1")
+        );
+        assert_eq!(
+            eas::find_text_after(&changed, cal::APPOINTMENT_REPLY_TIME),
+            Some("20420706T100000Z")
         );
         let cancelled = live
             .call_using(

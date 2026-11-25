@@ -3660,34 +3660,13 @@ impl JmapClient {
                 capabilities::CALENDARS,
                 "CalendarEvent",
                 serde_json::json!({ "inCalendar": calendar_id }),
-                Some(&[
-                    "id",
-                    "calendarIds",
-                    "uid",
-                    "@type",
-                    "title",
-                    "updated",
-                    "description",
-                    "descriptionContentType",
-                    "start",
-                    "timeZone",
-                    "duration",
-                    "status",
-                    "locations",
-                    "showWithoutTime",
-                    "freeBusyStatus",
-                    "privacy",
-                    "keywords",
-                    "alerts",
-                    "useDefaultAlerts",
-                    "recurrenceRule",
-                    "recurrenceOverrides",
-                    "participants",
-                    "replyTo",
-                    "links",
-                    "virtualLocations",
-                    "iCalendar",
-                ]),
+                // CalendarEvent participants contain protocol-relevant
+                // extension properties (`expectReply`, `scheduleUpdated`)
+                // that some JMAP servers omit from a projected `get` even
+                // when the parent `participants` property is requested.
+                // Fetch the complete record so ResponseRequested and
+                // AppointmentReplyTime survive the JMAP → EAS conversion.
+                None,
                 limit,
             )
             .await?;
