@@ -594,8 +594,13 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    JMAP keyword restrictions are enforced on client category writes, and
    regression tests cover parsing, output, JMAP keyword replacement, and KQL
    translation. The full suite passes 470 tests (77 ignored); strict Clippy, formatting, and diff checks
-   pass. Real-client interoperability remains part of the 16.1 validation
-   backlog above.
+   pass. Commit `9376225` is deployed to Amy's isolated bridge as
+   `localhost/eas16-isolated:9376225`, image
+   `sha256:37a56bccbfa4bd88c0cf63c563877da9748728a358b2bc23a9c4d9d63cc781cc`,
+   started `2026-11-25T13:11:21.51806027Z`, with zero restarts. `/healthz`
+   returns `ok` and `/readyz` returns `ready`; `EAS_MAX_PROTOCOL_VERSION` is
+   omitted, preserving the 14.0 default. Real-client interoperability remains
+   part of the 16.1 validation backlog above.
    GAL Find uses the EAS prefix-string/ANR rule locally across principal
    display names, aliases, and email tokens; multi-token prefixes such as
    `Michael A.` now match `Michael Alexander` despite JMAP's whole-token
