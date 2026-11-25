@@ -169,17 +169,21 @@ not advertise it. Mailbox results include the EAS `Importance` response property
 low/normal/high wire values.
 
 ### MeetingRequest in Email Sync (§2.2.2.48)
-For 16.0/16.1 mail Sync, a parsed `METHOD:REQUEST` calendar part is returned as
+For mail Sync, a parsed `METHOD:REQUEST` calendar part is returned as
 `IPM.Schedule.Meeting.Request` with an `Email:MeetingRequest` container when the
-authenticated user appears as an attendee. The current writer emits the
-required `DtStamp`, 172-byte `TimeZone`, `Calendar:UID`, and
-`Email2:MeetingMessageType`, plus available start/end, all-day, and
-`AirSyncBase:Location` values. A nonzero JMAP sequence maps to message type 2;
-otherwise it maps to type 1. EAS 14.x keeps the ordinary `IPM.Note` response,
-because legacy `GlobalObjId` conversion is not implemented. Optional
-recurrence, reminder, sensitivity, busy status,
-proposal-policy, and 16.1 proposed-time fields remain unsupported. Mocked
-JMAP mailbox-query/CalendarEvent-parse and WBXML writer regressions pass.
+authenticated user appears as an attendee. The writer emits the required
+`DtStamp` and 172-byte `TimeZone`, plus available start/end and all-day values.
+For 14.0/14.1 it uses Email `GlobalObjId` (the bounded deterministic
+`vCal-Uid` representation) and Email `Location`; for 16.0/16.1 it uses
+`Calendar:UID` and `AirSyncBase:Location`. `Email2:MeetingMessageType` is
+available in 14.1 and 16.x, where a nonzero JMAP sequence maps to message type
+2 and otherwise to type 1; it is omitted for 14.0. Optional
+recurrence, reminder, sensitivity, busy status, and
+`DisallowNewTimeProposal` are mapped from the JMAP calendar data; proposed-time
+fields in EAS 16.1 remain unsupported. Mocked JMAP mailbox-query/CalendarEvent-
+parse and WBXML writer regressions pass. Commit `eccb319` is deployed to Amy's
+isolated bridge as `localhost/eas16-isolated:eccb319`; `/healthz` and `/readyz`
+both returned HTTP 200, and the bridge still defaults to EAS 14.0.
 `Organizer` maps from the JMAP `owner` participant's display name (email
 fallback) to Email:Organizer. `ResponseRequested` maps the current attendee's
 JSCalendar `expectReply` value to EAS 1/0, omitting the element if unavailable.
@@ -193,9 +197,8 @@ required recurrence interval emitted even when the source uses its default.
 `DisallowNewTimeProposal` reads `X-MICROSOFT-DISALLOW-COUNTER` from the source
 iCalendar blob, bounded to 256 KiB, and maps its boolean value to EAS 0/1.
 Unsupported recurrence rules suppress structured meeting-request metadata.
-Parser and WBXML regressions cover these mappings, deployed on the isolated
-bridge as `9ceb978`. The bridge defaults to EAS 14.0. Real-client validation
-remains pending.
+Parser and WBXML regressions cover these mappings. The isolated bridge defaults
+to EAS 14.0. Real-client validation remains pending.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
 SendMail posts a full new outgoing message; SmartReply/SmartForward use

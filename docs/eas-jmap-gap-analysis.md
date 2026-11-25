@@ -13,17 +13,25 @@ handling. Check the current Rust implementation before treating any older
 Current prioritized work:
 
 Mail Sync now parses a unique `text/calendar` MIME part through
-`CalendarEvent/parse` and emits the base `Email:MeetingRequest` response for
-protocol 16.0/16.1 only when the authenticated user is an attendee. The writer
-uses `MessageClass=IPM.Schedule.Meeting.Request`, UTC `DtStamp`, start/end,
-all-day state, the required 172-byte `TimeZone`, `Calendar:UID`,
-`AirSyncBase:Location`, and `MeetingMessageType` (1 for a new request, 2 when
-the JMAP sequence is nonzero). Older protocol versions keep the normal email
-shape because the legacy `GlobalObjId` conversion is not implemented. The
-optional 16.1 `ProposedStartTime`/`ProposedEndTime` fields remain unmapped. The
-full suite passes 463 tests (77 ignored), including mailbox-query-to-JMAP-parse,
-organizer and RSVP-request mapping, and WBXML writer regressions; strict
-Clippy, formatting, and diff checks pass. The optional `Organizer` maps the
+`CalendarEvent/parse` and emits `Email:MeetingRequest` when the authenticated
+user is an attendee. The EAS 14.0/14.1 writer uses
+`MessageClass=IPM.Schedule.Meeting.Request`, Email `GlobalObjId` and `Location`;
+the 16.0/16.1 writer uses `Calendar:UID` and `AirSyncBase:Location`. The legacy
+GlobalObjId uses the deterministic `vCal-Uid` form, has a bounded UID input,
+and matches Microsoft's published byte-vector example. The common fields
+include UTC `DtStamp`, start/end, all-day state, and the required 172-byte
+`TimeZone`; `MeetingMessageType` is emitted for 14.1 and 16.x (1 for a new
+request, 2 when the JMAP sequence is nonzero), and omitted for 14.0 where that
+field is unavailable. The optional 16.1 `ProposedStartTime`/`ProposedEndTime`
+fields remain unmapped. The full suite passes 464 tests (77 ignored), including
+legacy GlobalObjId compatibility, 16.x writer, and JMAP conversion regressions;
+strict Clippy, formatting, and diff checks pass. Commit `eccb319` is deployed to
+Amy's isolated bridge as `localhost/eas16-isolated:eccb319` (image
+`sha256:144582a56094e51a9f16ecf4ee2813f47f89cae5f7feca9478e6bc05fa2cb1c9`),
+started `2026-11-25T11:44:17.804425523Z`, with zero restarts. At verification,
+`/healthz` and `/readyz` returned HTTP 200 (`ok` and `ready`);
+`EAS_MAX_PROTOCOL_VERSION` remains unset, preserving the 14.0 default, and
+production is untouched. The optional `Organizer` maps the
 JMAP participant with the `owner` role to its display name, falling back to
 email, and emits Email:Organizer. `ResponseRequested` maps the current
 attendee's JSCalendar `expectReply` boolean to EAS values 1/0, preserving
