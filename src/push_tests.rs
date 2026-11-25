@@ -4882,7 +4882,7 @@ mod e2e {
     #[tokio::test]
     #[ignore]
     async fn e2e_calendar_busy_status_round_trips_between_devices() {
-        use eas::calendar as cal;
+        use eas::{calendar as cal, resolve_recipients as rr};
         let live = Live::new("E2E_USER2").await;
         let using = [
             "urn:ietf:params:jmap:core",
@@ -4973,6 +4973,38 @@ mod e2e {
             assert_eq!(
                 availability[0][1]["list"].as_array().unwrap().is_empty(),
                 status == "0"
+            );
+            let mut request = eas::DocumentBuilder::new();
+            request.start(rr::RESOLVE_RECIPIENTS);
+            request.leaf(rr::TO, &live.user);
+            request.start(rr::OPTIONS);
+            request.start(rr::AVAILABILITY);
+            request.leaf(rr::START_TIME, "2042-05-05T10:00:00Z");
+            request.leaf(rr::END_TIME, "2042-05-05T11:00:00Z");
+            request.end();
+            request.end();
+            request.end();
+            let resolved = live
+                .wbxml_version(
+                    "ResolveRecipients",
+                    &dev("availability"),
+                    wbxml::encode_document(&request.finish()),
+                    "16.1",
+                )
+                .await;
+            assert_eq!(
+                eas::find_all_text_after(&resolved, rr::STATUS),
+                vec!["1", "1", "1"]
+            );
+            assert_eq!(
+                eas::find_all_text_after(&resolved, rr::MERGED_FREE_BUSY),
+                vec![match status {
+                    "0" => "00",
+                    "1" => "11",
+                    "2" => "22",
+                    "3" => "33",
+                    _ => unreachable!(),
+                }]
             );
             let other = live
                 .wbxml_version(
