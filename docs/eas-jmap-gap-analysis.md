@@ -10,15 +10,15 @@ MIME policy, partial Sync/options persistence, and Sync long-poll/window
 handling. Check the current Rust implementation before treating any older
 “Missing” or “Not implemented” statement below as actionable.
 
-Current source `main` is `0fd628a`. The full suite passes 478 tests (77
+Current source `main` is `d83dccb`. The full suite passes 480 tests (77
 ignored); strict Clippy, formatting, and diff checks pass. This build is
 deployed to Amy's isolated bridge as
-`localhost/eas16-isolated:0fd628a` (image
-`sha256:16053bfda191308720423dbb20a6b5a3eee355313aafa78905866eac95293a00`),
-started `2026-11-25T15:33:07.816566936Z` with zero restarts. After the live
-test, `/healthz` and `/readyz` returned `ok` and `ready`. The isolated bridge
-still defaults to EAS 14.0; production is untouched. Real-client 16.1
-certification remains open.
+`localhost/eas16-isolated:d83dccb` (image
+`sha256:8e5b614c12fc1696c9215333670cf22e15ac362c8407756122ed44a155ea41fb`),
+started `2026-11-25T15:54:12.503077309Z` with zero restarts. `/healthz` and
+`/readyz` returned HTTP 200 with `ok` and `ready`. The isolated bridge still
+defaults to EAS 14.0; production is untouched. Real-client 16.1 certification
+remains open.
 
 EAS `ResolveRecipients` Availability now preserves the saved EAS free, tentative,
 busy, and out-of-office values when Stalwart exposes event details. The bridge
@@ -30,6 +30,17 @@ statuses through ResolveRecipients and Sync on two devices. Its temporary
 account was removed after the run. The server's rejected `freeBusyStatus`
 event projection and omitted availability `accountId` are both covered by the
 request path and regression tests.
+
+EAS Contacts `AssistantName`, `Spouse`, and multi-valued `Children` now
+round-trip through JSContact vendor properties `khuo.ng:easAssistantName`,
+`khuo.ng:easSpouse`, and `khuo.ng:easChildren`. These are name fields, so the
+bridge preserves their values without fabricating related ContactCard IDs.
+Partial updates are state-guarded, empty scalar values clear the corresponding
+property, and an empty Children container clears the list. WBXML parsing,
+writing, Sync fingerprinting, JMAP readback, update, and clear behavior have
+regression coverage. The current full suite passes 480 tests (77 ignored).
+The deployment runs on the isolated test bridge only; no real contact was
+modified.
 
 Current prioritized work:
 
@@ -532,16 +543,16 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    2026-11-25 found the isolated gateway on Amy at `100.64.0.50:18090`, backed
    by `eas16-clean-stalwart` on its separate `eas16-interop-net`; `/healthz`
    and `/readyz` returned `ok` and `ready`, with zero restarts. The running
-   latest image is `localhost/eas16-isolated:d73d09a` (image
-   `sha256:94ec1df3758572a201c5bfcfce4da503ea2f9d7886cc7d879973b28170557fb4`),
-   started `2026-11-25T14:29:39.642047439Z`, with zero restarts. Its Compose
+   latest image is `localhost/eas16-isolated:d83dccb` (image
+   `sha256:8e5b614c12fc1696c9215333670cf22e15ac362c8407756122ed44a155ea41fb`),
+   started `2026-11-25T15:54:12.503077309Z`, with zero restarts. Its Compose
    environment omits `EAS_MAX_PROTOCOL_VERSION`, so the gateway defaults to
    14.0. The former Homelab test service was
    decommissioned in commit `6051729`; the live temporary stack is outside
    that checkout. Before real-client validation, explicitly set the isolated
    bridge's protocol ceiling to 16.1 only after the user's weekly-use reserve
    reaches 1%, during the client test window. Production remains on 14.0. The
-   current local suite passes 478 tests (77 ignored); strict Clippy, formatting,
+   current local suite passes 480 tests (77 ignored); strict Clippy, formatting,
    and diff checks pass.
    Deployed with that production default as
    `deploy-2026-11-24-eas-16.1-opt-in-13bea13`; homelab commit `fcb698e`, image
