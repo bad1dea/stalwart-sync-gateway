@@ -1193,13 +1193,26 @@ impl JmapClient {
                 if method.0 != "Principal/getAvailability" {
                     continue;
                 }
+                let Some(index) = method
+                    .2
+                    .strip_prefix("availability-")
+                    .and_then(|index| index.parse::<usize>().ok())
+                else {
+                    continue;
+                };
+                let Some(principal_id) = chunk.get(index) else {
+                    continue;
+                };
                 let Some(periods) = method.1["list"].as_array() else {
                     continue;
                 };
                 for period in periods {
-                    if let (Some(account_id), Some(event_id)) =
-                        (period["accountId"].as_str(), period["event"]["id"].as_str())
-                    {
+                    if let Some(event_id) = period["event"]["id"].as_str() {
+                        // Stalwart returns an event id stub without accountId. For a
+                        // principal's own account, its Principal id is also the JMAP
+                        // account id; compliant responses that include accountId take
+                        // precedence.
+                        let account_id = period["accountId"].as_str().unwrap_or(principal_id);
                         event_ids
                             .entry(account_id.to_owned())
                             .or_default()
@@ -1264,10 +1277,19 @@ impl JmapClient {
                     continue;
                 }
                 if let Some(periods) = method.1["list"].as_array_mut() {
+                    let Some(index) = method
+                        .2
+                        .strip_prefix("availability-")
+                        .and_then(|index| index.parse::<usize>().ok())
+                    else {
+                        continue;
+                    };
+                    let Some(principal_id) = chunk.get(index) else {
+                        continue;
+                    };
                     for period in periods {
-                        if let (Some(account_id), Some(event_id)) =
-                            (period["accountId"].as_str(), period["event"]["id"].as_str())
-                        {
+                        if let Some(event_id) = period["event"]["id"].as_str() {
+                            let account_id = period["accountId"].as_str().unwrap_or(principal_id);
                             if let Some(status) = free_busy_statuses
                                 .get(&(account_id.to_owned(), event_id.to_owned()))
                             {
@@ -15413,12 +15435,12 @@ mod meeting_response_send_tests {
                         0 => {
                             assert_eq!(calls[0][1]["id"], "p1");
                             serde_json::json!(["Principal/getAvailability", {"list":[{
-                                "utcStart":"2042-05-05T10:00:00Z","utcEnd":"2042-05-05T11:00:00Z","busyStatus":"confirmed","accountId":"calendar-account","event":{"id":"event1","baseEventId":"event1"}
+                                "utcStart":"2042-05-05T10:00:00Z","utcEnd":"2042-05-05T11:00:00Z","busyStatus":"confirmed","event":{"id":"event1","baseEventId":"event1"}
                             }]}, "availability-0"])
                         }
                         1 => {
                             assert_eq!(calls[0][0], "CalendarEvent/get");
-                            assert_eq!(calls[0][1]["accountId"], "calendar-account");
+                            assert_eq!(calls[0][1]["accountId"], "p1");
                             assert_eq!(calls[0][1]["ids"], serde_json::json!(["event1"]));
                             assert_eq!(calls[0][1]["properties"], serde_json::json!(["freeBusyStatus"]));
                             serde_json::json!(["CalendarEvent/get", {"list":[{"id":"event1","freeBusyStatus":"x-eas-tentative"}]}, "availability-events-0"])
