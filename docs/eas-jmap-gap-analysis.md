@@ -19,7 +19,11 @@ and that a body-only `SendResponse` remains supported in 16.0. Full suite:
 451 passed, 77 ignored; strict Clippy, formatting, and diff checks pass. Sources:
 Microsoft [ProposedStartTime](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/85189499-d911-40ae-885d-a55f2cd70c9d)
 and [ProposedEndTime](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/12bb43fa-06b1-4b30-80e4-a5873510d7eb).
-Isolated deployment follows; production remains unchanged.
+Deployed to Amy's isolated bridge as `localhost/eas16-isolated:74f0c3f`
+(image `sha256:d3fd7aa729c2a15474ffc8fa1a4c2c16c6c22c4ef99e07ae7a409ccf188b2e64`),
+started `2026-11-25T10:18:42.211557431Z`, with zero restarts. `/healthz` and
+`/readyz` both return HTTP 200 (`ok` and `ready`). `EAS_MAX_PROTOCOL_VERSION`
+remains unset, preserving the 14.0 default; production is untouched.
 
 Task recurrence handling now validates the EAS `Regenerate` and `DeadOccur`
 children. `Regenerate=0` is accepted (the protocol default); `Regenerate=1`
