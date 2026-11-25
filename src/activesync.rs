@@ -5239,6 +5239,9 @@ fn write_email_meeting_request(
     if let Some(busy_status) = meeting.busy_status {
         builder.leaf(mail::BUSY_STATUS, busy_status.to_string());
     }
+    if let Some(reminder_seconds) = meeting.reminder_seconds {
+        builder.leaf(mail::REMINDER, reminder_seconds.to_string());
+    }
     if let Some(location) = &meeting.location {
         builder.start(base::LOCATION);
         builder.leaf(base::DISPLAY_NAME, location.clone());
@@ -10769,6 +10772,7 @@ mod tests {
                 response_requested: Some(true),
                 sensitivity: Some(2),
                 busy_status: Some(2),
+                reminder_seconds: Some(900),
                 dtstamp: "2026-11-25T14:00:00Z".to_owned(),
                 start: Some("2026-12-01T15:00:00Z".to_owned()),
                 end: Some("2026-12-01T16:00:00Z".to_owned()),
@@ -10817,6 +10821,7 @@ mod tests {
             eas::find_text_after(&document, mail::BUSY_STATUS),
             Some("2")
         );
+        assert_eq!(eas::find_text_after(&document, mail::REMINDER), Some("900"));
         assert_eq!(
             eas::find_text_after(&document, email2::MEETING_MESSAGE_TYPE),
             Some("1")

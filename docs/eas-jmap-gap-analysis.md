@@ -20,9 +20,9 @@ all-day state, the required 172-byte `TimeZone`, `Calendar:UID`,
 `AirSyncBase:Location`, and `MeetingMessageType` (1 for a new request, 2 when
 the JMAP sequence is nonzero). Older protocol versions keep the normal email
 shape because the legacy `GlobalObjId` conversion is not implemented. The
-optional `Recurrences`, `Reminder`, `DisallowNewTimeProposal`, and 16.1
+optional `Recurrences`, `DisallowNewTimeProposal`, and 16.1
 `ProposedStartTime`/`ProposedEndTime` fields remain unmapped. The full suite
-passes 460 tests (77 ignored), including mailbox-query-to-JMAP-parse,
+passes 461 tests (77 ignored), including mailbox-query-to-JMAP-parse,
 organizer and RSVP-request mapping, and WBXML writer regressions; strict
 Clippy, formatting, and diff checks pass. The optional `Organizer` maps the
 JMAP participant with the `owner` role to its display name, falling back to
@@ -31,7 +31,10 @@ attendee's JSCalendar `expectReply` boolean to EAS values 1/0, preserving
 omission if the property is missing. Sensitivity maps JSCalendar privacy
 `public`/`private`/`secret` to EAS 0/2/3; BusyStatus maps free/busy to 0/2 and
 uses JSCalendar's default `busy` when omitted. These values are included only
-when recognized. Commit `76f42fa` is deployed to Amy's isolated bridge as
+when recognized. EAS `Reminder` now uses seconds from the nearest supported
+relative-to-start display alert; email alerts and absolute triggers are
+excluded, and invitations without such a display alert omit the field. This
+addition is awaiting deployment. Commit `76f42fa` is deployed to Amy's isolated bridge as
 `localhost/eas16-isolated:76f42fa` (image
 `sha256:91ae5608d72e1b00ebaea32bf154af023c59fdabf1386ed99e8a76959c32741e`),
 started `2026-11-25T11:09:19.139520784Z`, with zero restarts. At

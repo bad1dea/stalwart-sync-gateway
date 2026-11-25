@@ -8446,6 +8446,8 @@ fn email_meeting_request_from_event(
         "busy" => Some(2),
         _ => None,
     };
+    let reminder_seconds = crate::jmap::calendar_reminder::read_reminder(&event["alerts"])
+        .map(|minutes| u64::from(minutes) * 60);
     let dtstamp = calendar_event_time_to_eas(event["updated"].as_str()?, "Etc/UTC")?;
     let start_value = event["start"].as_str();
     let time_zone = match event["timeZone"].as_str() {
@@ -8478,6 +8480,7 @@ fn email_meeting_request_from_event(
         response_requested,
         sensitivity,
         busy_status,
+        reminder_seconds,
         dtstamp,
         start,
         end,
@@ -8601,6 +8604,21 @@ mod meeting_request_conversion_tests {
         let request = email_meeting_request_from_event(&defaults, "attendee@example.test").unwrap();
         assert_eq!(request.sensitivity, Some(0));
         assert_eq!(request.busy_status, Some(2));
+    }
+
+    #[test]
+    fn maps_relative_display_alert_to_meeting_request_reminder_seconds() {
+        let event = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"u",
+            "updated":"2026-11-25T14:00:00Z", "timeZone":"Etc/UTC",
+            "alerts":{
+                "fifteen":{"@type":"Alert","action":"display","trigger":{"@type":"OffsetTrigger","offset":"-PT15M"}},
+                "email":{"@type":"Alert","action":"email","trigger":{"@type":"OffsetTrigger","offset":"-PT5M"}}
+            },
+            "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}}
+        });
+        let request = email_meeting_request_from_event(&event, "attendee@example.test").unwrap();
+        assert_eq!(request.reminder_seconds, Some(900));
     }
 
     #[test]

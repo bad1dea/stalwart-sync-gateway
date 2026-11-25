@@ -185,9 +185,11 @@ fallback) to Email:Organizer. `ResponseRequested` maps the current attendee's
 JSCalendar `expectReply` value to EAS 1/0, omitting the element if unavailable.
 `Sensitivity` maps JSCalendar `privacy` public/private/secret to EAS
 0/2/3. `BusyStatus` maps free/busy to 0/2 and applies JSCalendar's default of
-busy when omitted. These mappings are covered by parser and WBXML tests and
-are deployed on the isolated bridge as `76f42fa`. The bridge still defaults
-to EAS 14.0. Real-client validation remains pending.
+busy when omitted. EAS `Reminder` maps seconds from the nearest supported
+relative-to-start display alert; unsupported alert kinds are skipped. These
+mappings are covered by parser and WBXML tests; the reminder change is not
+yet deployed. The bridge still defaults to EAS 14.0. Real-client validation
+remains pending.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
 SendMail posts a full new outgoing message; SmartReply/SmartForward use

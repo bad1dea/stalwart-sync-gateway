@@ -93,6 +93,7 @@ pub struct EmailMeetingRequest {
     pub response_requested: Option<bool>,
     pub sensitivity: Option<u8>,
     pub busy_status: Option<u8>,
+    pub reminder_seconds: Option<u64>,
     pub dtstamp: String,
     pub start: Option<String>,
     pub end: Option<String>,
