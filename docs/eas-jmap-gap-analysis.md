@@ -12,6 +12,15 @@ handling. Check the current Rust implementation before treating any older
 
 Current prioritized work:
 
+MeetingResponse now gates `ProposedStartTime` and `ProposedEndTime` to EAS
+16.1. `SendResponse` remains available in 16.0 and 16.1, but a proposal on
+16.0 is rejected. A regression verifies the 16.0 rejection, 16.1 acceptance,
+and that a body-only `SendResponse` remains supported in 16.0. Full suite:
+451 passed, 77 ignored; strict Clippy, formatting, and diff checks pass. Sources:
+Microsoft [ProposedStartTime](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/85189499-d911-40ae-885d-a55f2cd70c9d)
+and [ProposedEndTime](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/12bb43fa-06b1-4b30-80e4-a5873510d7eb).
+Isolated deployment follows; production remains unchanged.
+
 Task recurrence handling now validates the EAS `Regenerate` and `DeadOccur`
 children. `Regenerate=0` is accepted (the protocol default); `Regenerate=1`
 fails closed because JSCalendar has no regenerate-on-completion behavior.

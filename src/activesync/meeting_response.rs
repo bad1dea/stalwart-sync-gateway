@@ -24,15 +24,22 @@ fn invalid_instance_id_status(value: Option<&str>) -> Option<&'static str> {
         .map(|_| "104")
 }
 
-fn response_payload(
-    request: &Document,
-) -> Result<
-    (
-        Option<crate::jmap::client::MeetingResponseBody>,
-        Option<crate::jmap::client::MeetingResponseProposal>,
-    ),
-    (),
-> {
+type ResponsePayload = (
+    Option<crate::jmap::client::MeetingResponseBody>,
+    Option<crate::jmap::client::MeetingResponseProposal>,
+);
+
+fn proposed_times_supported(
+    version: ProtocolVersion,
+    payload: &Result<ResponsePayload, ()>,
+) -> bool {
+    match payload {
+        Ok((_, Some(_))) => matches!(version, ProtocolVersion::V16_1),
+        _ => true,
+    }
+}
+
+fn response_payload(request: &Document) -> Result<ResponsePayload, ()> {
     use crate::wbxml::eas::airsync_base as ab;
     let send_response = eas::child_elements(request)
         .into_iter()
@@ -207,6 +214,7 @@ pub(super) async fn handle(
                 && (instance_id.is_none() || !matches!(version, ProtocolVersion::V14_0))
                 && (!send_response
                     || matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1))
+                && proposed_times_supported(version, &payload)
                 && fields.iter().all(|field| {
                     required
                         .iter()
@@ -341,7 +349,7 @@ pub(super) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::{invalid_instance_id_status, response_payload};
+    use super::{invalid_instance_id_status, proposed_times_supported, response_payload};
     use crate::wbxml::{
         eas::{airsync_base as ab, meeting_response as mr},
         Document, Node,
@@ -452,6 +460,33 @@ mod tests {
         let proposal = proposal.unwrap();
         assert_eq!(proposal.start.to_rfc3339(), "2026-11-25T15:00:00+00:00");
         assert_eq!(proposal.end.to_rfc3339(), "2026-11-25T16:00:00+00:00");
+        let payload = response_payload(&doc);
+        assert!(!proposed_times_supported(
+            super::ProtocolVersion::V16_0,
+            &payload
+        ));
+        assert!(proposed_times_supported(
+            super::ProtocolVersion::V16_1,
+            &payload
+        ));
+
+        let body_only = Document {
+            nodes: vec![
+                start(mr::REQUEST),
+                start(mr::SEND_RESPONSE),
+                start(ab::BODY),
+                start(ab::TYPE),
+                Node::Text("1".into()),
+                Node::End,
+                Node::End,
+                Node::End,
+                Node::End,
+            ],
+        };
+        assert!(proposed_times_supported(
+            super::ProtocolVersion::V16_0,
+            &response_payload(&body_only)
+        ));
 
         let reversed = Document {
             nodes: vec![
