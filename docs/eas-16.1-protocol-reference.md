@@ -136,7 +136,7 @@ text-bearing PDF, EPUB XHTML, OOXML Word/Excel/PowerPoint (including
 macro-enabled variants), OpenDocument Text/Spreadsheet/Presentation, and
 allowlisted text/config files inside generic ZIP archives are extracted for
 exact text/proximity matching up to
-4 MiB input and 2 MiB extracted text, with bounded archive expansion. CSV,
+8 MiB input and 2 MiB extracted text, with bounded archive expansion. CSV,
 NDJSON, YAML, and TOML application media types use charset-aware text decoding.
 Legacy `.xls` workbooks are also parsed
 with a 250,000-cell dense-range limit to prevent oversized worksheet coordinates
@@ -145,7 +145,7 @@ Word/Excel/PowerPoint package comments are included within the XML budget.
 Scanned-only PDFs of up to three pages now use bounded Poppler rendering and
 English Tesseract OCR. Mixed text/scanned PDFs and scanned PDFs above three
 pages remain unsupported to avoid partial-content false matches. Attachments
-larger than 4 MiB also remain outside exact matching. These extraction changes
+larger than 8 MiB also remain outside exact matching. These extraction changes
 are source-tested; real-client validation remains open. Find is
 protocol-version gated to 16.1 and is not advertised while production negotiates
 only 14.0. Mailbox results include the EAS `Importance` response property in
@@ -271,7 +271,7 @@ session's fixes were, not against spec-reading alone.
 - KQL proximity — direct `NEAR`/`ONEAR` and Boolean combinations with supported
   predicates exact-filter full message text and common address fields, using
   the default distance of eight or an explicit distance. Attachment payload
-  positions are available for supported extracted formats up to 4 MiB input
+  positions are available for supported extracted formats up to 8 MiB input
   and 2 MiB extracted text; scanned PDFs and larger files remain outside local
   exact matching.
 - Recurrence — common EAS event/task rules map to Stalwart's singular

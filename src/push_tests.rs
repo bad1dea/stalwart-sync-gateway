@@ -14202,12 +14202,12 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
                 .compression_method(zip::CompressionMethod::Stored),
         )
         .unwrap();
-    let embedded_file = (0..3 * 1024 * 1024)
+    let embedded_file = (0..6 * 1024 * 1024)
         .map(|index| (index % 251) as u8)
         .collect::<Vec<_>>();
     docx_archive.write_all(&embedded_file).unwrap();
     let docx = docx_archive.finish().unwrap().into_inner();
-    assert!(docx.len() > 2 * 1024 * 1024 && docx.len() <= 4 * 1024 * 1024);
+    assert!(docx.len() > 4 * 1024 * 1024 && docx.len() <= 8 * 1024 * 1024);
     let mut zip_archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     zip_archive
         .start_file(
@@ -14309,7 +14309,7 @@ async fn find_matches_text_and_proximity_inside_downloaded_text_attachments() {
         vec![serde_json::json!({
             "blobId":"never-downloaded-blob", "name":"too-large.docx",
             "type":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "size":4 * 1024 * 1024 + 1
+            "size":8 * 1024 * 1024 + 1
         })],
     );
     env.mock.mail_bodies.lock().unwrap().insert(

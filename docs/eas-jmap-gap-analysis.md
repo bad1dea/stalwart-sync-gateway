@@ -55,7 +55,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    Word, Excel, and PowerPoint package comment text, plus
    MIME-declared charsets for text attachments and XML declaration encodings.
    Scanned-only PDFs up to three pages now use resource-bounded OCR. Attachments
-   above 4 MiB, scanned PDFs above three pages, PDFs mixing scanned and
+   above 8 MiB, scanned PDFs above three pages, PDFs mixing scanned and
    selectable-text pages, and extracted text above 2 MiB remain outside exact
    local matching.
 
@@ -409,7 +409,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    text-bearing PDFs,
    EPUB XHTML, OOXML Word/Excel/PowerPoint (including
    macro-enabled variants), and OpenDocument Text, Spreadsheet, and Presentation
-   attachment containers up to 4 MiB for exact text/NEAR checks, with extracted
+   attachment containers up to 8 MiB for exact text/NEAR checks, with extracted
    text still capped at 2 MiB. Explicit textual MIME aliases for CSV, NDJSON,
    YAML, and TOML use the same charset-aware bounded extraction path. Legacy
    `.xls` worksheets,
