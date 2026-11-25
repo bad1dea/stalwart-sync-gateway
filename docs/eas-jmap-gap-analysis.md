@@ -587,6 +587,15 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `sha256:150ae046978987f3222b14b3ca3115f0a5cbf8f2ce9a9694e9dbf0bc830d2e17`,
    started `2026-11-24T19:33:29Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`.
+   Mail Categories now map between EAS `Email:Categories` and JMAP custom
+   Email keywords for Sync output and client changes; Find results include
+   those categories, and KQL `Category:` searches map to `Email/query`
+   `hasKeyword`. System keywords are excluded from the EAS category list.
+   JMAP keyword restrictions are enforced on client category writes, and
+   regression tests cover parsing, output, JMAP keyword replacement, and KQL
+   translation. The full suite passes 470 tests (77 ignored); strict Clippy, formatting, and diff checks
+   pass. Real-client interoperability remains part of the 16.1 validation
+   backlog above.
    GAL Find uses the EAS prefix-string/ANR rule locally across principal
    display names, aliases, and email tokens; multi-token prefixes such as
    `Michael A.` now match `Michael Alexander` despite JMAP's whole-token

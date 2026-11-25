@@ -6315,10 +6315,11 @@ impl JmapClient {
         email_id: &str,
         read: Option<bool>,
         flag: Option<&crate::model::MailFlag>,
+        categories: Option<&[String]>,
     ) -> anyhow::Result<EmailState> {
         for attempt in 0..3 {
             match self
-                .update_email_state_once(auth, email_id, read, flag)
+                .update_email_state_once(auth, email_id, read, flag, categories)
                 .await
             {
                 Err(error) if error.is::<EmailStateMismatch>() && attempt < 2 => continue,
@@ -6334,6 +6335,7 @@ impl JmapClient {
         email_id: &str,
         read: Option<bool>,
         flag: Option<&crate::model::MailFlag>,
+        categories: Option<&[String]>,
     ) -> anyhow::Result<EmailState> {
         let account_id = auth
             .session
@@ -6382,6 +6384,37 @@ impl JmapClient {
                 keywords.insert("$seen".to_owned(), true);
             } else {
                 keywords.remove("$seen");
+            }
+        }
+        if let Some(categories) = categories {
+            let valid_keyword = |category: &str| {
+                !category.is_empty()
+                    && category.len() <= 255
+                    && !category.starts_with('$')
+                    && category.is_ascii()
+                    && !category
+                        .chars()
+                        .any(|ch| ch.is_ascii_whitespace() || "(){}[]%*\\\"".contains(ch))
+            };
+            anyhow::ensure!(
+                categories.iter().all(|category| valid_keyword(category)),
+                "EAS category cannot be represented as a JMAP keyword"
+            );
+            for key in keywords
+                .keys()
+                .filter(|key| !key.starts_with('$'))
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                let escaped = key.replace('~', "~0").replace('/', "~1");
+                patch.insert(format!("keywords/{escaped}"), serde_json::Value::Null);
+                keywords.remove(&key);
+            }
+            for category in categories {
+                let normalized = category.to_ascii_lowercase();
+                let escaped = normalized.replace('~', "~0").replace('/', "~1");
+                patch.insert(format!("keywords/{escaped}"), serde_json::json!(true));
+                keywords.insert(normalized, true);
             }
         }
         if let Some(flag) = flag {
@@ -6487,6 +6520,21 @@ impl JmapClient {
                     || flags(&observed) != flags(&keywords)))
         {
             anyhow::bail!("JMAP did not retain the requested email state");
+        }
+        if let Some(categories) = categories {
+            let expected: BTreeSet<_> = categories
+                .iter()
+                .map(|category| category.to_ascii_lowercase())
+                .collect();
+            let observed: BTreeSet<_> = observed
+                .iter()
+                .filter(|(key, value)| **value && !key.starts_with('$'))
+                .map(|(key, _)| key.clone())
+                .collect();
+            anyhow::ensure!(
+                observed == expected,
+                "JMAP did not retain the requested email categories"
+            );
         }
         let keywords = observed;
         Ok(identities.state(email_id, EmailState::from_keywords(&keywords)))
@@ -13872,6 +13920,57 @@ mod email_state_retry_tests {
     };
 
     #[tokio::test]
+    async fn email_category_update_replaces_custom_keywords_and_preserves_system_keywords() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let captured = calls.clone();
+        let app = Router::new().route("/", post(move |Json(request): Json<serde_json::Value>| {
+            let calls = captured.clone();
+            async move {
+                let call = &request["methodCalls"][0];
+                let response = match calls.fetch_add(1, Ordering::SeqCst) {
+                    0 => serde_json::json!(["Email/get", {"state":"s1", "list":[{"id":"m", "keywords":{"$seen":true,"$flagged":true,"oldcategory":true}}]}, "get"]),
+                    1 => {
+                        assert_eq!(call[1]["ifInState"], "s1");
+                        assert_eq!(call[1]["update"]["m"]["keywords/oldcategory"], serde_json::Value::Null);
+                        assert_eq!(call[1]["update"]["m"]["keywords/projectx"], true);
+                        serde_json::json!(["Email/set", {"updated":{"m":null}}, "set"])
+                    }
+                    2 => serde_json::json!(["Email/get", {"list":[{"id":"m", "keywords":{"$seen":true,"$flagged":true,"projectx":true}}]}, "verify"]),
+                    _ => panic!("unexpected JMAP request"),
+                };
+                Json(serde_json::json!({"methodResponses":[response]}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let session: JmapSession = serde_json::from_value(serde_json::json!({
+            "capabilities":{}, "primaryAccounts":{capabilities::MAIL:"a"}, "apiUrl":url,
+            "downloadUrl":url, "uploadUrl":url, "username":"user", "state":"s"
+        }))
+        .unwrap();
+        let auth = AuthenticatedSession {
+            capabilities: GatewayCapabilities::from_session(&session),
+            session,
+            authorization: BasicAuthorization {
+                username: "user".into(),
+                password: "password".into(),
+            },
+        };
+        let client = JmapClient::new(
+            Config::from_env().unwrap(),
+            Arc::new(crate::state::MemoryStateStore::default()),
+        )
+        .unwrap();
+        client
+            .update_email_state(&auth, "m", None, None, Some(&["ProjectX".to_owned()]))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn retries_a_state_mismatch_with_fresh_keywords() {
         let calls = Arc::new(AtomicUsize::new(0));
         let captured = calls.clone();
@@ -13920,7 +14019,7 @@ mod email_state_retry_tests {
         )
         .unwrap();
         let state = client
-            .update_email_state(&auth, "m", Some(true), None)
+            .update_email_state(&auth, "m", Some(true), None, None)
             .await
             .unwrap();
         assert!(state.read);
@@ -14010,7 +14109,7 @@ mod email_state_retry_tests {
         )
         .unwrap();
         let state = client
-            .update_email_state(&auth, "m", None, Some(&requested))
+            .update_email_state(&auth, "m", None, Some(&requested), None)
             .await
             .unwrap();
         assert_eq!(state.flag, Some(merged));

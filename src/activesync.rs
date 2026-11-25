@@ -4364,10 +4364,16 @@ async fn apply_mail_client_commands(
                         status,
                         fields: command.flag_fields.clone(),
                     });
-                if command.read.is_some() || flag.is_some() {
+                if command.read.is_some() || flag.is_some() || command.mail_categories.is_some() {
                     let metadata = state
                         .jmap
-                        .update_email_state(auth, &command.server_id, command.read, flag.as_ref())
+                        .update_email_state(
+                            auth,
+                            &command.server_id,
+                            command.read,
+                            flag.as_ref(),
+                            command.mail_categories.as_deref(),
+                        )
                         .await?;
                     applied = true;
                     metadata_changes.push((command.server_id.clone(), metadata));
@@ -4997,6 +5003,19 @@ fn write_email_fields(
     }
     if !email.reply_to.is_empty() {
         builder.leaf(mail::REPLY_TO, email.reply_to);
+    }
+    let categories: Vec<_> = email
+        .keywords
+        .iter()
+        .filter(|keyword| !keyword.starts_with('$'))
+        .cloned()
+        .collect();
+    if !categories.is_empty() {
+        builder.start(mail::CATEGORIES);
+        for category in categories {
+            builder.leaf(mail::CATEGORY, category);
+        }
+        builder.end();
     }
     // Metadata only (no content -- see the project's logging constraint on
     // mail bodies): lets a body-not-rendering report be diagnosed without
@@ -10823,7 +10842,7 @@ mod tests {
             received_at: Some("2026-08-24T02:05:00Z".to_owned()),
             sent_at: None,
             size: 0,
-            keywords: vec![],
+            keywords: vec!["$seen".to_owned(), "projectx".to_owned()],
             from: "sender@example.com".to_owned(),
             to: "recipient@example.com".to_owned(),
             cc: "cc@example.com".to_owned(),
@@ -10858,7 +10877,7 @@ mod tests {
         write_email_fields(&mut builder, "email-1", email, None, ProtocolVersion::V14_0);
         let doc = builder.finish();
 
-        use crate::wbxml::eas::email as mail;
+        use crate::wbxml::eas::{self, email as mail};
         let expected_order = [
             (mail::TO.code_page, mail::TO.token),
             (mail::CC.code_page, mail::CC.token),
@@ -10887,6 +10906,10 @@ mod tests {
             })
             .collect();
         assert_eq!(actual_order, expected_order);
+        assert_eq!(
+            eas::find_all_text_after(&doc, mail::CATEGORY),
+            vec!["projectx"]
+        );
     }
 
     #[test]

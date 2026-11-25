@@ -518,6 +518,18 @@ async fn execute(
         }
         b.leaf(mail::READ, if email.read { "1" } else { "0" });
         b.leaf(mail::IMPORTANCE, email.importance.to_string());
+        let categories: Vec<_> = email
+            .keywords
+            .iter()
+            .filter(|keyword| !keyword.starts_with('$'))
+            .collect();
+        if !categories.is_empty() {
+            b.start(mail::CATEGORIES);
+            for category in categories {
+                b.leaf(mail::CATEGORY, category.clone());
+            }
+            b.end();
+        }
         b.leaf(
             email2::IS_DRAFT,
             if email.keywords.iter().any(|keyword| keyword == "$draft") {

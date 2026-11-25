@@ -1299,6 +1299,7 @@ pub struct SyncClientCommand {
     pub read: Option<bool>,
     pub flag_status: Option<u8>,
     pub flag_fields: Vec<(u8, u8, String)>,
+    pub mail_categories: Option<Vec<String>>,
     pub flag_valid: bool,
     pub unsupported_mail_change: bool,
     pub document: Document,
@@ -2141,6 +2142,7 @@ pub fn sync_collections_with_optional_recurrence_type(
                             read: None,
                             flag_status: None,
                             flag_fields: Vec::new(),
+                            mail_categories: None,
                             flag_valid: true,
                             unsupported_mail_change: false,
                             document: Document { nodes: Vec::new() },
@@ -2241,7 +2243,11 @@ pub fn sync_collections_with_optional_recurrence_type(
                         ) || child_elements(&command_doc).iter()
                             .filter(|child| matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, airsync::APPLICATION_DATA)))
                             .flat_map(child_elements)
-                            .any(|child| !matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, email::READ) || same_token(*t, email::FLAG)));
+                            .any(|child| !matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, email::READ) || same_token(*t, email::FLAG) || same_token(*t, email::CATEGORIES)));
+                        match extract_categories(&command_doc, email::CATEGORIES, email::CATEGORY) {
+                            Ok(categories) => command.mail_categories = categories,
+                            Err(()) => command.unsupported_mail_change = true,
+                        }
                         command.document = command_doc;
                         command.instance_id =
                             find_text_after(&command.document, airsync_base::INSTANCE_ID)
@@ -5532,6 +5538,9 @@ mod tests {
         builder.leaf(airsync::SERVER_ID, "email-a");
         builder.start(airsync::APPLICATION_DATA);
         builder.leaf(email::READ, "1");
+        builder.start(email::CATEGORIES);
+        builder.leaf(email::CATEGORY, "projectx");
+        builder.end();
         builder.end();
         builder.end();
         builder.start(airsync::DELETE);
@@ -5553,6 +5562,11 @@ mod tests {
         );
         assert_eq!(collections[0].commands[0].server_id, "email-a");
         assert_eq!(collections[0].commands[0].read, Some(true));
+        assert_eq!(
+            collections[0].commands[0].mail_categories,
+            Some(vec!["projectx".to_owned()])
+        );
+        assert!(!collections[0].commands[0].unsupported_mail_change);
         assert_eq!(
             collections[0].commands[1].kind,
             SyncClientCommandKind::Delete

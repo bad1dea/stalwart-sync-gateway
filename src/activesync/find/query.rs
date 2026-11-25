@@ -2297,6 +2297,22 @@ fn condition(property: &str, value: &str) -> Result<Value, &'static str> {
     }
     match property {
         "size" => size_condition(":", value),
+        "category" => {
+            let value = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or(value);
+            if value.is_empty()
+                || value.starts_with('$')
+                || !value.is_ascii()
+                || value
+                    .chars()
+                    .any(|ch| ch.is_ascii_whitespace() || "(){}[]%*\\\"".contains(ch))
+            {
+                return Err("invalid category search value");
+            }
+            Ok(json!({"hasKeyword": value.to_ascii_lowercase()}))
+        }
         "text" | "subject" | "body" | "from" | "to" | "cc" | "bcc" => Ok(json!({property: value})),
         "participants" => Ok(json!({"operator": "OR", "conditions": [
             {"from": value}, {"to": value}, {"cc": value}, {"bcc": value}]})),
@@ -2346,6 +2362,7 @@ fn known_property(property: &str) -> bool {
         "isflagged",
         "hasattachment",
         "hasattachments",
+        "category",
     ]
     .iter()
     .any(|known| property.eq_ignore_ascii_case(known))
@@ -3090,6 +3107,19 @@ mod tests {
                 ]
             ))
         );
+    }
+
+    #[test]
+    fn category_property_maps_to_a_jmap_keyword() {
+        assert_eq!(
+            to_filter("category:ProjectX").unwrap(),
+            json!({"hasKeyword":"projectx"})
+        );
+        assert_eq!(
+            to_filter("Category:\"ProjectX\"").unwrap(),
+            json!({"hasKeyword":"projectx"})
+        );
+        assert!(to_filter("category:\"two words\"").is_err());
     }
 
     #[test]
