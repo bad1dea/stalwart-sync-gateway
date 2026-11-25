@@ -66,6 +66,12 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `sha256:9df94985f6eb239b3f8bd17bdf397a9c8df465c97744ea09934ac423d48f2206`,
    started `2026-11-25T00:29:19Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. Protocol advertisement remains at the 14.0 default.
+   Mixed-PDF page extraction is also deployed as
+   `deploy-2026-11-24-eas-find-mixed-pdf-a0afdab`; homelab commit `1412218`,
+   image `sha256:584e54604e4d29893254533e60fe59ccc9fd00f3507aa9acb7c73bf7c813dfb4`,
+   started `2026-11-25T00:39:31Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. The expanded suite passes 402 tests (75 ignored), strict
+   Clippy and formatting pass, and the real scanned-PDF OCR test passes.
 
 1. **BodyPartPreference / BodyPart response path — implemented and deployed.**
    Request parsing and independent Sync option
