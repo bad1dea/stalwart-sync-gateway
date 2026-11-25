@@ -1027,18 +1027,10 @@ pub mod rights_management {
     }
 }
 
-/// WBXML codepage 25 (Find), [MS-ASCMD] section 2.2.1.2. Real bug-in-
-/// waiting if this is ever wired up without checking this comment first:
-/// EVERY tag in this codepage is gated to protocol version 16.1 ONLY
-/// (confirmed directly in the spec's own per-tag version column, not
-/// inferred) -- and this gateway currently advertises
-/// `SUPPORTED_PROTOCOLS = "14.0"` (12.0/12.1 until 2026-11-12) (see activesync.rs), a
-/// deliberate cap put in place this session after the whole
-/// over-advertisement root-cause saga. A real device will never invoke
-/// Find against this gateway as it stands today no matter how complete
-/// an implementation is written, unless/until 16.1 gets re-added to that
-/// advertised list -- which is its own decision with its own risk, not
-/// a prerequisite to casually bundle in with implementing Find itself.
+/// WBXML codepage 25 (Find), [MS-ASCMD] section 2.2.1.2. Every tag in this
+/// codepage is gated to protocol version 16.1. The handler is implemented and
+/// the command is advertised only when `EAS_MAX_PROTOCOL_VERSION=16.1`; the
+/// production default remains 14.0. See `config.rs` and `activesync.rs`.
 pub mod find {
     use super::Token;
 

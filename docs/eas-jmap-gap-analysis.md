@@ -48,6 +48,15 @@ started `2026-11-25T03:29:02Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. The container reports Tesseract `eng` and `osd` language
 data. Production remains at the 14.0 protocol default.
 
+GAL Find now handles the optional photo request in EAS 16.1. It validates
+`MaxSize` (0 through 102400 bytes) and nonnegative `MaxPictures`, accepts the
+optional `Options/Range` omission, and returns `gal:Picture/Status=173`
+(`NoPicture`) for each match because Stalwart `Principal` records expose no
+photo data. A mocked WBXML regression requests a photo with size/count limits
+and no Range, then verifies the GAL result and per-entry status. The full suite
+passes 407 tests (76 ignored); strict Clippy, formatting, and diff checks pass.
+Deployment details will be recorded after rollout.
+
 Outlook `.msg` Find now falls back to bounded compressed-RTF decoding when
 plain text and HTML bodies are absent. The compressed and declared output sizes
 are checked against the existing 16 MiB limits before decompression. An

@@ -29,6 +29,7 @@ struct Request {
     text: String,
     folder: Option<String>,
     deep: bool,
+    picture_requested: bool,
     start: usize,
     end: usize,
 }
@@ -72,15 +73,35 @@ fn parse(document: &wbxml::Document) -> Result<Request, &'static str> {
             .ok_or("missing FreeText")?
     };
     let options = child(&criteria, f::OPTIONS);
-    let (start, end) = if let Some(options) = &options {
-        let range = eas::find_text_after(options, f::RANGE).ok_or("missing Range")?;
-        let (start, end) = range.split_once('-').ok_or("invalid Range")?;
-        let start = start.parse::<usize>().map_err(|_| "invalid Range")?;
-        let end = end.parse::<usize>().map_err(|_| "invalid Range")?;
-        if end < start || end >= 1000 {
-            return Err("invalid Range");
+    let picture_requested = options.as_ref().and_then(|doc| child(doc, f::PICTURE));
+    if let Some(picture) = &picture_requested {
+        if let Some(max_size) = eas::find_text_after(picture, f::MAX_SIZE) {
+            let max_size = max_size.parse::<i64>().map_err(|_| "invalid MaxSize")?;
+            if !(0..=102_400).contains(&max_size) {
+                return Err("invalid MaxSize");
+            }
         }
-        (start, end)
+        if let Some(max_pictures) = eas::find_text_after(picture, f::MAX_PICTURES) {
+            let max_pictures = max_pictures
+                .parse::<i64>()
+                .map_err(|_| "invalid MaxPictures")?;
+            if max_pictures < 0 {
+                return Err("invalid MaxPictures");
+            }
+        }
+    }
+    let (start, end) = if let Some(options) = &options {
+        if let Some(range) = eas::find_text_after(options, f::RANGE) {
+            let (start, end) = range.split_once('-').ok_or("invalid Range")?;
+            let start = start.parse::<usize>().map_err(|_| "invalid Range")?;
+            let end = end.parse::<usize>().map_err(|_| "invalid Range")?;
+            if end < start || end >= 1000 {
+                return Err("invalid Range");
+            }
+            (start, end)
+        } else {
+            (0, 99)
+        }
     } else {
         (0, 99)
     };
@@ -92,6 +113,7 @@ fn parse(document: &wbxml::Document) -> Result<Request, &'static str> {
         deep: options
             .as_ref()
             .is_some_and(|doc| eas::contains_token(doc, f::DEEP_TRAVERSAL)),
+        picture_requested: picture_requested.is_some(),
         start,
         end,
     })
@@ -1756,6 +1778,14 @@ async fn execute_gal(
         b.leaf(gal::ALIAS, &principal.alias);
         if let Some(email) = &principal.email {
             b.leaf(gal::EMAIL_ADDRESS, email);
+        }
+        if request.picture_requested {
+            // Stalwart Principal exposes directory identity but no photo. The
+            // GAL Picture contract requires a per-result status when a photo
+            // is requested and the matched principal has none.
+            b.start(gal::PICTURE);
+            b.leaf(gal::STATUS, "173"); // NoPicture
+            b.end();
         }
         b.end();
         b.end();
