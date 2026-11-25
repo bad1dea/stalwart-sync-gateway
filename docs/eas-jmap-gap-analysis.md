@@ -74,8 +74,10 @@ contact-photo blob downloads. Duplicate principal/contact addresses retain
 the directory result and merge in the saved contact photo. `MaxPictures` is
 optional and its limit is applied independently to each `To` query, matching
 the protocol. Focused parser, per-query photo limit, status, deduplication,
-and blob-ID mapping regressions pass; full suite: 423 passed, 76 ignored;
-strict Clippy, formatting, and diff checks pass. The per-query correction is
+and blob-ID mapping regressions pass. A mocked gateway/JMAP test verifies a
+blob-backed photo reaches the WBXML response and is rejected for protocol
+14.0. Full suite: 424 passed, 76 ignored; strict Clippy, formatting, and diff
+checks pass. The per-query correction is
 deployed as
 `deploy-2026-11-25-eas-resolve-recipient-picture-per-query-18c02ea`; Homelab
 commit `dd7d248`, image

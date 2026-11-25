@@ -12040,6 +12040,71 @@ async fn contacts_sync_fetch_returns_only_items_in_the_requested_address_book() 
 }
 
 #[tokio::test]
+async fn resolve_recipients_returns_contact_photo_from_bounded_jmap_blob() {
+    use eas::resolve_recipients as rr;
+
+    let env = start_env(Opts {
+        eas_max_protocol_version: "16.1".to_owned(),
+        ..Opts::default()
+    })
+    .await;
+    env.mock.groupware.lock().unwrap().insert(
+        "contacts".into(),
+        vec![serde_json::json!({
+            "id":"photo-contact", "@type":"Card", "version":"1.0",
+            "addressBookIds":{"book":true},
+            "name":{"full":"Photo Contact"},
+            "emails":{"email":{"address":"photo@example.test"}},
+            "media":{"photo":{"kind":"photo","blobId":"contact-photo-blob"}}
+        })],
+    );
+    env.mock.download_blobs.lock().unwrap().insert(
+        "contact-photo-blob".into(),
+        ("image/png".into(), vec![1, 2, 3]),
+    );
+
+    let mut builder = eas::DocumentBuilder::new();
+    builder.start(rr::RESOLVE_RECIPIENTS);
+    builder.leaf(rr::TO, "photo@example.test");
+    builder.start(rr::OPTIONS);
+    builder.start(rr::PICTURE);
+    builder.leaf(rr::MAX_SIZE, "102400");
+    builder.leaf(rr::MAX_PICTURES, "1");
+    builder.end();
+    builder.end();
+    builder.end();
+    let request_body = wbxml::encode_document(&builder.finish());
+    let response = env
+        .req("ResolveRecipients", "photo")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(request_body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let document = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        eas::find_all_text_after(&document, rr::STATUS),
+        vec!["1", "1", "1"]
+    );
+    assert_eq!(eas::find_all_text_after(&document, rr::DATA), vec!["AQID"]);
+    assert_eq!(
+        *env.mock.downloaded_blobs.lock().unwrap(),
+        vec!["contact-photo-blob"]
+    );
+
+    let response = env
+        .req("ResolveRecipients", "photo-14")
+        .header("MS-ASProtocolVersion", "14.0")
+        .body(request_body)
+        .send()
+        .await
+        .unwrap();
+    let document = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_all_text_after(&document, rr::STATUS), vec!["6"]);
+}
+
+#[tokio::test]
 async fn calendar_task_and_note_sync_fetch_return_full_items() {
     use eas::{airsync as air, calendar, notes, tasks};
     let env = start_env(Opts::default()).await;
