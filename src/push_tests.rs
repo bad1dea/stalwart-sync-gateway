@@ -5514,6 +5514,112 @@ mod e2e {
 
     #[tokio::test]
     #[ignore]
+    async fn e2e_contact_vendor_properties_round_trip_and_clear_on_stalwart() {
+        let live = Live::new("E2E_USER2").await;
+        let using = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:contacts"];
+        let books = live
+            .call_using(
+                serde_json::json!([["AddressBook/get", {"accountId":live.account}, "0"]]),
+                &using,
+            )
+            .await;
+        let book = books[0][1]["list"][0]["id"].as_str().unwrap().to_owned();
+        let created = live
+            .call_using(
+                serde_json::json!([["ContactCard/set", {
+                    "accountId":live.account,
+                    "create":{"contact":{
+                        "@type":"Card", "version":"1.0",
+                        "addressBookIds":{&book:true},
+                        "name":{"full":"EAS vendor-property fixture"},
+                        "khuo.ng:easAssistantName":"Assistant Name",
+                        "khuo.ng:easSpouse":"Spouse Name",
+                        "khuo.ng:easChildren":["Child One","Child Two"],
+                        "khuo.ng:easCustomerId":"customer-314",
+                        "khuo.ng:easGovernmentId":"government-2718",
+                        "khuo.ng:easManagerName":"CN=Manager,OU=People"
+                    }}
+                }, "0"]]),
+                &using,
+            )
+            .await;
+        let id = created[0][1]["created"]["contact"]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("contact create failed: {created}"))
+            .to_owned();
+
+        let fetched = live
+            .call_using(
+                serde_json::json!([["ContactCard/get", {
+                    "accountId":live.account, "ids":[id], "properties":[
+                        "id", "khuo.ng:easAssistantName", "khuo.ng:easSpouse",
+                        "khuo.ng:easChildren", "khuo.ng:easCustomerId",
+                        "khuo.ng:easGovernmentId", "khuo.ng:easManagerName"
+                    ]
+                }, "0"]]),
+                &using,
+            )
+            .await;
+        let card = &fetched[0][1]["list"][0];
+        assert_eq!(card["khuo.ng:easAssistantName"], "Assistant Name");
+        assert_eq!(card["khuo.ng:easSpouse"], "Spouse Name");
+        assert_eq!(
+            card["khuo.ng:easChildren"],
+            serde_json::json!(["Child One", "Child Two"])
+        );
+        assert_eq!(card["khuo.ng:easCustomerId"], "customer-314");
+        assert_eq!(card["khuo.ng:easGovernmentId"], "government-2718");
+        assert_eq!(card["khuo.ng:easManagerName"], "CN=Manager,OU=People");
+
+        let updated = live
+            .call_using(
+                serde_json::json!([["ContactCard/set", {
+                    "accountId":live.account,
+                    "update":{&id:{
+                        "khuo.ng:easAssistantName":null,
+                        "khuo.ng:easSpouse":"Updated Spouse",
+                        "khuo.ng:easChildren":[],
+                        "khuo.ng:easCustomerId":null,
+                        "khuo.ng:easGovernmentId":"government-161",
+                        "khuo.ng:easManagerName":null
+                    }}
+                }, "0"]]),
+                &using,
+            )
+            .await;
+        assert!(updated[0][1]["notUpdated"].is_null(), "{updated}");
+
+        let fetched = live
+            .call_using(
+                serde_json::json!([["ContactCard/get", {
+                    "accountId":live.account, "ids":[id], "properties":[
+                        "id", "khuo.ng:easAssistantName", "khuo.ng:easSpouse",
+                        "khuo.ng:easChildren", "khuo.ng:easCustomerId",
+                        "khuo.ng:easGovernmentId", "khuo.ng:easManagerName"
+                    ]
+                }, "0"]]),
+                &using,
+            )
+            .await;
+        let card = &fetched[0][1]["list"][0];
+        assert!(card["khuo.ng:easAssistantName"].is_null());
+        assert_eq!(card["khuo.ng:easSpouse"], "Updated Spouse");
+        assert_eq!(card["khuo.ng:easChildren"], serde_json::json!([]));
+        assert!(card["khuo.ng:easCustomerId"].is_null());
+        assert_eq!(card["khuo.ng:easGovernmentId"], "government-161");
+        assert!(card["khuo.ng:easManagerName"].is_null());
+
+        let cleanup = live
+            .call_using(
+                serde_json::json!([["ContactCard/set", {"accountId":live.account,"destroy":[id]}, "0"]]),
+                &using,
+            )
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null(), "{cleanup}");
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn e2e_search_finds_conversation_through_multiple_pages() {
         use eas::{email2, search as srch};
         let live = Live::new("E2E_USER2").await;
