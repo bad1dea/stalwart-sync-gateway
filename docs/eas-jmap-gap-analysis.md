@@ -41,7 +41,7 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    regression now checks the enabled Oof Get response's scheduled state,
    end-time shape, and three audience-specific message blocks; it does not
    replace checking the enabled state with a real client. The full current
-   suite passes 400 tests (74 ignored); strict Clippy, formatting, and diff
+   suite passes 401 tests (75 ignored); strict Clippy, formatting, and diff
    checks pass.
    Deployed with that production default as
    `deploy-2026-11-24-eas-16.1-opt-in-13bea13`; homelab commit `fcb698e`, image
@@ -49,15 +49,15 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    started `2026-11-24T23:30:09Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. The container has no protocol override, so the live
    production endpoint continues to use the tested 14.0 default.
-3. **Find content coverage.** Add exact local search over remaining supported
-   attachment formats and assess resource-bounded scanned-PDF OCR and large
-   attachments. Current extraction is bounded and supports legacy `.xls`,
+3. **Find content coverage.** Current bounded extraction supports legacy `.xls`,
    `.ppt`, and `.doc`, EPUB, macro-enabled OOXML, RFC 822 messages, Outlook `.msg`
    attachments, and Word, Excel, and PowerPoint package comment text, plus
    MIME-declared charsets
    for text attachments and XML declaration encodings;
-   scanned PDFs, source attachments above 4 MiB, and extracted text above 2 MiB
-   remain outside exact local matching.
+   Scanned-only PDFs up to three pages now use resource-bounded OCR. Attachments
+   above 4 MiB, scanned PDFs above three pages, PDFs mixing scanned and
+   selectable-text pages, and extracted text above 2 MiB remain outside exact
+   local matching.
 
 1. **BodyPartPreference / BodyPart response path — implemented and deployed.**
    Request parsing and independent Sync option
@@ -428,6 +428,16 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `sha256:eff95709a9c233b86b10c153d77f1149db25f0e0cfffee0c4449f693136f36e5`,
    started `2026-11-24T23:50:05Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`.
+   PDFs with no selectable text fall back to Poppler rendering and English
+   Tesseract OCR. Rendering probes at most four pages to detect overflow and
+   only accepts PDFs with three or fewer pages, scales each page to at most
+   1600 pixels per edge, applies subprocess time limits, and keeps OCR output
+   under the 2 MiB text budget. The runtime image includes `poppler-utils` and
+   Tesseract's English data. A generated image-only PDF fixture passes the
+   real OCR path on this host; a fake-tool regression verifies page and render
+   bounds without requiring system OCR packages. Multi-page mixed PDFs remain
+   unsupported because partial OCR would make negative Find predicates
+   inexact.
    Extracted and normalized text output is capped at 2 MiB, including bounded
    streaming output from the PDF parser and XML entity/CDATA decoding. RFC 822 and
    Outlook message decoding are capped at the same 2 MiB extracted-text limit;

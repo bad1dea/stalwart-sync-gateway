@@ -111,7 +111,11 @@ fn same_search(session: &SearchState, filter: &Value, search_text: &str) -> bool
 const SEARCHES: &str = "__find__";
 const MAX_FIND_ATTACHMENT_TEXT_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_FIND_PDF_OCR_PAGES: u32 = 3;
+const FIND_PDF_OCR_OVERFLOW_PAGE: u32 = MAX_FIND_PDF_OCR_PAGES + 1;
+const MAX_FIND_PDF_OCR_EDGE: u32 = 1600;
 const MAX_FIND_ARCHIVE_ENTRIES: usize = 4096;
+static FIND_PDF_OCR_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 pub(super) async fn handle(
     state: &AppState,
@@ -347,8 +351,15 @@ async fn execute(
                         } else {
                             &downloaded_type
                         };
-                        attachment.extracted_text =
-                            extract_find_attachment_text(content_type, &bytes);
+                        if content_type.split(';').next().is_some_and(|media_type| {
+                            media_type.trim().eq_ignore_ascii_case("application/pdf")
+                        }) {
+                            attachment.extracted_text =
+                                extract_find_pdf_text_async(content_type.to_owned(), bytes).await;
+                        } else {
+                            attachment.extracted_text =
+                                extract_find_attachment_text(content_type, &bytes);
+                        }
                     }
                     is_match = matches_exactly(&email)?;
                 }
@@ -480,6 +491,16 @@ async fn execute(
     Ok(b.finish())
 }
 
+async fn extract_find_pdf_text_async(content_type: String, bytes: Vec<u8>) -> Option<String> {
+    let permit = FIND_PDF_OCR_SLOTS.acquire().await.ok()?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        extract_find_attachment_text_inner(&content_type, &bytes, true)
+    })
+    .await
+    .ok()?
+}
+
 fn is_extractable_attachment_type(content_type: &str) -> bool {
     let media_type = content_type
         .split(';')
@@ -544,6 +565,14 @@ fn is_extractable_archive_type(media_type: &str) -> bool {
 }
 
 fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<String> {
+    extract_find_attachment_text_inner(content_type, bytes, true)
+}
+
+fn extract_find_attachment_text_inner(
+    content_type: &str,
+    bytes: &[u8],
+    allow_pdf_ocr: bool,
+) -> Option<String> {
     let media_type = content_type
         .split(';')
         .next()
@@ -563,7 +592,7 @@ fn extract_find_attachment_text(content_type: &str, bytes: &[u8]) -> Option<Stri
             // object graphs, so contain parser panics and treat malformed PDFs as
             // non-extractable rather than failing the whole Find request.
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                extract_bounded_pdf_text(bytes)
+                extract_bounded_pdf_text_with_ocr(bytes, allow_pdf_ocr)
             }))
             .ok()??
         }
@@ -813,7 +842,7 @@ fn append_find_extracted_text(output: &mut String, text: &str) -> Option<()> {
     Some(())
 }
 
-fn extract_bounded_pdf_text(bytes: &[u8]) -> Option<String> {
+fn extract_bounded_pdf_text_with_ocr(bytes: &[u8], allow_ocr: bool) -> Option<String> {
     struct BoundedOutput {
         text: String,
     }
@@ -878,7 +907,140 @@ fn extract_bounded_pdf_text(bytes: &[u8]) -> Option<String> {
         text: String::new(),
     };
     pdf_extract::output_doc(&document, &mut output).ok()?;
-    Some(output.text)
+    if output.text.trim().is_empty() && allow_ocr {
+        extract_scanned_pdf_text(bytes)
+    } else {
+        Some(output.text)
+    }
+}
+
+struct FindOcrTempDir(std::path::PathBuf);
+
+impl FindOcrTempDir {
+    fn create() -> Option<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let path = std::env::temp_dir().join(format!("stalwart-find-ocr-{}", uuid::Uuid::new_v4()));
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700).create(&path).ok()?;
+        Some(Self(path))
+    }
+}
+
+impl Drop for FindOcrTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn run_find_ocr_command(command: &mut std::process::Command, timeout: std::time::Duration) -> bool {
+    use std::process::Stdio;
+    use std::time::Instant;
+
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+fn extract_scanned_pdf_text(bytes: &[u8]) -> Option<String> {
+    extract_scanned_pdf_text_with_tools(
+        bytes,
+        std::path::Path::new("pdftoppm"),
+        std::path::Path::new("tesseract"),
+    )
+}
+
+fn extract_scanned_pdf_text_with_tools(
+    bytes: &[u8],
+    pdftoppm: &std::path::Path,
+    tesseract: &std::path::Path,
+) -> Option<String> {
+    use std::time::Duration;
+
+    if bytes.len() as u64 > MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES {
+        return None;
+    }
+    let temp = FindOcrTempDir::create()?;
+    let input = temp.0.join("input.pdf");
+    let prefix = temp.0.join("page");
+    std::fs::write(&input, bytes).ok()?;
+    let rendered = run_find_ocr_command(
+        std::process::Command::new(pdftoppm)
+            .arg("-f")
+            .arg("1")
+            .arg("-l")
+            .arg(FIND_PDF_OCR_OVERFLOW_PAGE.to_string())
+            .arg("-scale-to")
+            .arg(MAX_FIND_PDF_OCR_EDGE.to_string())
+            .arg("-gray")
+            .arg("-png")
+            .arg("-q")
+            .arg(&input)
+            .arg(&prefix),
+        Duration::from_secs(6),
+    );
+    if !rendered {
+        return None;
+    }
+    if temp
+        .0
+        .join(format!("page-{FIND_PDF_OCR_OVERFLOW_PAGE}.png"))
+        .is_file()
+    {
+        return None;
+    }
+
+    let mut output = String::new();
+    for page in 1..=MAX_FIND_PDF_OCR_PAGES {
+        let image = temp.0.join(format!("page-{page}.png"));
+        if !image.is_file() {
+            if page == 1 {
+                return None;
+            }
+            break;
+        }
+        let output_base = temp.0.join(format!("recognized-{page}"));
+        if !run_find_ocr_command(
+            std::process::Command::new(tesseract)
+                .arg(&image)
+                .arg(&output_base)
+                .arg("-l")
+                .arg("eng")
+                .arg("--psm")
+                .arg("3"),
+            Duration::from_secs(4),
+        ) {
+            return None;
+        }
+        let text_path = output_base.with_extension("txt");
+        let size = std::fs::metadata(&text_path).ok()?.len();
+        if size > MAX_FIND_ATTACHMENT_TEXT_BYTES
+            || output.len().saturating_add(size as usize) > MAX_FIND_ATTACHMENT_TEXT_BYTES as usize
+        {
+            return None;
+        }
+        let text = std::fs::read_to_string(text_path).ok()?;
+        append_find_text(&mut output, &text)?;
+    }
+    (!output.trim().is_empty()).then_some(output)
 }
 
 fn extract_legacy_xls_text(bytes: &[u8]) -> Option<String> {
@@ -3089,6 +3251,80 @@ mod tests {
         .unwrap());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn scanned_pdf_ocr_limits_pages_and_bounds_tool_execution() {
+        use super::{extract_scanned_pdf_text_with_tools, FindOcrTempDir};
+        use std::{fs, os::unix::fs::PermissionsExt};
+
+        let tools = FindOcrTempDir::create().unwrap();
+        let renderer = tools.0.join("pdftoppm");
+        let ocr = tools.0.join("tesseract");
+        let render_args = tools.0.join("render-args");
+        fs::write(
+            &renderer,
+            format!(
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > '{}'\nprefix=\nfor arg in \"$@\"; do prefix=\"$arg\"; done\nfor page in 1 2 3; do printf image > \"$prefix-$page.png\"; done\n",
+                render_args.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &ocr,
+            "#!/bin/sh\nset -eu\ncase \"$1\" in *page-1.png) text='scan alpha';; *page-2.png) text='beta';; *) text='ignored page';; esac\nprintf '%s\\n' \"$text\" > \"$2.txt\"\n",
+        )
+        .unwrap();
+        for tool in [&renderer, &ocr] {
+            let mut permissions = fs::metadata(tool).unwrap().permissions();
+            permissions.set_mode(0o700);
+            fs::set_permissions(tool, permissions).unwrap();
+        }
+
+        let text = extract_scanned_pdf_text_with_tools(b"bounded test PDF", &renderer, &ocr)
+            .expect("bounded OCR pipeline should extract the fake page text");
+        assert_eq!(
+            super::normalize_find_attachment_text(&text),
+            Some("scan alpha beta ignored page".to_owned())
+        );
+        let args = fs::read_to_string(render_args).unwrap();
+        let args: Vec<_> = args.lines().collect();
+        let page_limit = args.iter().position(|arg| *arg == "-l").unwrap();
+        assert_eq!(args[page_limit + 1], "4");
+        let scale_limit = args.iter().position(|arg| *arg == "-scale-to").unwrap();
+        assert_eq!(args[scale_limit + 1], "1600");
+
+        fs::write(
+            &renderer,
+            "#!/bin/sh\nset -eu\nprefix=\nfor arg in \"$@\"; do prefix=\"$arg\"; done\nfor page in 1 2 3 4; do printf image > \"$prefix-$page.png\"; done\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&renderer).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&renderer, permissions).unwrap();
+        assert!(extract_scanned_pdf_text_with_tools(b"four-page PDF", &renderer, &ocr).is_none());
+
+        let slow = tools.0.join("slow-tool");
+        fs::write(&slow, "#!/bin/sh\nwhile :; do :; done\n").unwrap();
+        let mut permissions = fs::metadata(&slow).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&slow, permissions).unwrap();
+        assert!(!super::run_find_ocr_command(
+            &mut std::process::Command::new(slow),
+            std::time::Duration::from_millis(50),
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires Poppler and Tesseract OCR runtime packages"]
+    fn scanned_pdf_attachment_ocr_extracts_page_text() {
+        let pdf = include_bytes!("../../tests/fixtures/scanned-text.pdf");
+        let text = extract_find_attachment_text("application/pdf", pdf)
+            .expect("scanned PDF should produce OCR text");
+        assert!(text.contains("scanned"), "{text}");
+        assert!(text.contains("alpha"), "{text}");
+        assert!(text.contains("beta"), "{text}");
+    }
+
     #[test]
     fn find_extracted_and_normalized_text_never_exceeds_limit() {
         let limit = MAX_FIND_ATTACHMENT_TEXT_BYTES as usize;
@@ -3102,7 +3338,7 @@ mod tests {
         assert!(extract_xml_text(oversized_xml.as_bytes()).is_none());
 
         let pdf = test_pdf_with_text(&"x".repeat(limit + 1));
-        assert!(extract_bounded_pdf_text(&pdf).is_none());
+        assert!(extract_bounded_pdf_text_with_ocr(&pdf, true).is_none());
     }
 
     #[test]
