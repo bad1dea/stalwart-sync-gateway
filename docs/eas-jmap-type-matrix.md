@@ -159,8 +159,10 @@ The codepage's recurrence-field shape (`Type`/`Start`/`Until`/`Occurrences`/
 `IsLeapMonth`/`FirstDayOfWeek`, tokens 0x10-0x26) is parsed and validated in
 `eas.rs`. Task recurrence rules map through the shared JSCalendar
 `recurrenceRule` conversion (`deploy-2026-11-24-eas-task-recurrence-a28032b`).
-Local tests cover WBXML parse/write and JMAP Task-object conversion; a
-Task-specific Stalwart create/get and a real-client sync remain unverified.
+Local tests cover WBXML parse/write and JMAP Task-object conversion. A live
+Stalwart Task create/get and recurring Task Add/Fetch Sync regression have
+passed against the isolated server; real-client recurrence sync remains
+unverified.
 Per-instance event exclusions and subject/plain-text body changes are
 supported. Sensitivity and other unsupported event fields fail closed; Tasks
 have no per-instance exception container in MS-ASTASK. Non-Gregorian patterns

@@ -60,6 +60,7 @@ struct Mock {
     change_log: Mutex<Vec<String>>,
     groupware: Mutex<std::collections::BTreeMap<String, Vec<serde_json::Value>>>,
     snapshot_changes: AtomicBool,
+    contact_query_unavailable: AtomicBool,
     delay_mail_set: AtomicBool,
     delayed_mail_sets: AtomicUsize,
     snapshot_missing_item: AtomicBool,
@@ -446,6 +447,13 @@ async fn mock_api(
                 } else {
                     "calendar"
                 };
+                if kind == "contacts" && m.contact_query_unavailable.load(Ordering::SeqCst) {
+                    responses.push(serde_json::json!(["error", {
+                        "type":"serverUnavailable",
+                        "description":"contact query disabled for test"
+                    }, cid]));
+                    continue;
+                }
                 let items = m.groupware.lock().unwrap();
                 let items = items.get(kind).cloned().unwrap_or_default();
                 let items: Vec<_> = if kind == "contacts" {
@@ -492,7 +500,9 @@ async fn mock_api(
                     .into_iter()
                     .flatten()
                     .filter(|v| {
-                        if args["ids"].is_array() {
+                        if args.get("ids").is_some_and(serde_json::Value::is_null) {
+                            true
+                        } else if args["ids"].is_array() {
                             requested_ids.iter().any(|id| v["id"] == *id)
                         } else {
                             last_query.iter().any(|id| v["id"] == id.as_str())
@@ -865,6 +875,7 @@ async fn start_mock() -> Arc<Mock> {
         change_log: Mutex::new(Vec::new()),
         groupware: Mutex::new(Default::default()),
         snapshot_changes: AtomicBool::new(false),
+        contact_query_unavailable: AtomicBool::new(false),
         delay_mail_set: AtomicBool::new(false),
         delayed_mail_sets: AtomicUsize::new(0),
         snapshot_missing_item: AtomicBool::new(false),
@@ -5602,6 +5613,278 @@ mod e2e {
             .is_none());
         drop(client);
         let _ = std::fs::remove_file(&state_path);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_contact_eas_fields_round_trip_through_sync_on_stalwart() {
+        use eas::{airsync as air, contacts, contacts2};
+
+        let live = Live::new("E2E_USER2").await;
+        let using = ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:contacts"];
+        let session: serde_json::Value = live
+            .http
+            .get(format!("{}/jmap/session", live.jmap))
+            .basic_auth(&live.user, Some(&live.pass))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let contact_account = session["primaryAccounts"]["urn:ietf:params:jmap:contacts"]
+            .as_str()
+            .expect("JMAP Contacts primary account")
+            .to_owned();
+        let books = live
+            .call_using(
+                serde_json::json!([["AddressBook/get", {"accountId":contact_account}, "0"]]),
+                &using,
+            )
+            .await;
+        let book = books[0][1]["list"][0]["id"].as_str().unwrap().to_owned();
+        let collection = format!("ab_{book}");
+        let device = format!("eas-contact-{}", uuid::Uuid::new_v4());
+        let marker = uuid::Uuid::new_v4().simple().to_string();
+
+        let contact_query = live
+            .call_using(
+                serde_json::json!([["ContactCard/get",{
+                    "accountId":contact_account,
+                    "ids":null,
+                    "properties":["id","addressBookIds","name"]
+                },"all"]]),
+                &using,
+            )
+            .await;
+        assert_eq!(
+            contact_query[0][0], "ContactCard/get",
+            "JMAP contact query failed: {contact_query}"
+        );
+        let stale_fixture_ids: Vec<String> = contact_query[0][1]["list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|card| {
+                let components = card["name"]["components"].as_array();
+                let given_fixture = components.is_some_and(|components| {
+                    components.iter().any(|component| {
+                        component["kind"] == "given" && component["value"] == "EAS Extension"
+                    })
+                });
+                let has_e2e_marker = components.is_some_and(|components| {
+                    components.iter().any(|component| {
+                        component["kind"] == "surname"
+                            && component["value"].as_str().is_some_and(|value| {
+                                value.len() == 32 && value.bytes().all(|b| b.is_ascii_hexdigit())
+                            })
+                    })
+                });
+                given_fixture && has_e2e_marker
+            })
+            .filter_map(|card| card["id"].as_str().map(str::to_owned))
+            .collect();
+        if !stale_fixture_ids.is_empty() {
+            let cleanup = live
+                .call_using(
+                    serde_json::json!([["ContactCard/set",{
+                        "accountId":contact_account,
+                        "destroy":stale_fixture_ids
+                    },"cleanup"]]),
+                    &using,
+                )
+                .await;
+            assert!(
+                cleanup[0][1]["notDestroyed"].is_null(),
+                "failed to remove stale test fixtures: {cleanup}"
+            );
+        }
+
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &collection), "14.0")
+            .await;
+        let initial = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &collection),
+                "14.0",
+            )
+            .await;
+
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&initial));
+        b.leaf(air::COLLECTION_ID, &collection);
+        b.empty_tag(air::GET_CHANGES);
+        b.start(air::COMMANDS);
+        b.start(air::ADD);
+        b.leaf(air::CLIENT_ID, &marker);
+        b.start(air::APPLICATION_DATA);
+        b.leaf(contacts::FIRST_NAME, "EAS Extension");
+        b.leaf(contacts::LAST_NAME, &marker);
+        b.leaf(contacts::ASSISTANT_NAME, "Assistant Before");
+        b.leaf(contacts::SPOUSE, "Spouse Before");
+        b.start(contacts::CHILDREN);
+        b.leaf(contacts::CHILD, "Child One");
+        b.leaf(contacts::CHILD, "Child Two");
+        b.end();
+        b.leaf(contacts2::CUSTOMER_ID, "customer-before");
+        b.leaf(contacts2::GOVERNMENT_ID, "government-before");
+        b.leaf(contacts2::MANAGER_NAME, "manager-before");
+        for _ in 0..6 {
+            b.end();
+        }
+        let added = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "14.0")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&added, air::STATUS),
+            vec!["1", "1"]
+        );
+        let id = eas::find_text_after(&added, air::SERVER_ID)
+            .expect("Sync Add returns the ContactCard id")
+            .to_owned();
+
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&added));
+        b.leaf(air::COLLECTION_ID, &collection);
+        b.empty_tag(air::GET_CHANGES);
+        b.start(air::COMMANDS);
+        b.start(air::FETCH);
+        b.leaf(air::SERVER_ID, &id);
+        for _ in 0..5 {
+            b.end();
+        }
+        let fetched = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "14.0")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&fetched, air::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(
+            eas::find_text_after(&fetched, contacts::ASSISTANT_NAME),
+            Some("Assistant Before")
+        );
+        assert_eq!(
+            eas::find_text_after(&fetched, contacts::SPOUSE),
+            Some("Spouse Before")
+        );
+        assert_eq!(
+            eas::find_all_text_after(&fetched, contacts::CHILD),
+            vec!["Child One", "Child Two"]
+        );
+        assert_eq!(
+            eas::find_text_after(&fetched, contacts2::CUSTOMER_ID),
+            Some("customer-before")
+        );
+        assert_eq!(
+            eas::find_text_after(&fetched, contacts2::GOVERNMENT_ID),
+            Some("government-before")
+        );
+        assert_eq!(
+            eas::find_text_after(&fetched, contacts2::MANAGER_NAME),
+            Some("manager-before")
+        );
+
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&fetched));
+        b.leaf(air::COLLECTION_ID, &collection);
+        b.empty_tag(air::GET_CHANGES);
+        b.start(air::COMMANDS);
+        b.start(air::CHANGE);
+        b.leaf(air::SERVER_ID, &id);
+        b.start(air::APPLICATION_DATA);
+        b.empty_tag(contacts::ASSISTANT_NAME);
+        b.leaf(contacts::SPOUSE, "Spouse After");
+        b.start(contacts::CHILDREN);
+        b.end();
+        b.empty_tag(contacts2::CUSTOMER_ID);
+        b.leaf(contacts2::GOVERNMENT_ID, "government-after");
+        b.empty_tag(contacts2::MANAGER_NAME);
+        for _ in 0..6 {
+            b.end();
+        }
+        let changed = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "14.0")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&changed, air::STATUS),
+            vec!["1", "1"]
+        );
+
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&changed));
+        b.leaf(air::COLLECTION_ID, &collection);
+        b.empty_tag(air::GET_CHANGES);
+        b.start(air::COMMANDS);
+        b.start(air::FETCH);
+        b.leaf(air::SERVER_ID, &id);
+        for _ in 0..5 {
+            b.end();
+        }
+        let updated = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "14.0")
+            .await;
+        assert_eq!(
+            eas::find_all_text_after(&updated, air::STATUS),
+            vec!["1", "1"]
+        );
+        assert!(!eas::contains_token(&updated, contacts::ASSISTANT_NAME));
+        assert_eq!(
+            eas::find_text_after(&updated, contacts::SPOUSE),
+            Some("Spouse After")
+        );
+        assert!(!eas::contains_token(&updated, contacts::CHILD));
+        assert!(!eas::contains_token(&updated, contacts2::CUSTOMER_ID));
+        assert_eq!(
+            eas::find_text_after(&updated, contacts2::GOVERNMENT_ID),
+            Some("government-after")
+        );
+        assert!(!eas::contains_token(&updated, contacts2::MANAGER_NAME));
+
+        let mut b = eas::DocumentBuilder::new();
+        b.start(air::SYNC);
+        b.start(air::COLLECTIONS);
+        b.start(air::COLLECTION);
+        b.leaf(air::SYNC_KEY, sync_key(&updated));
+        b.leaf(air::COLLECTION_ID, &collection);
+        b.empty_tag(air::GET_CHANGES);
+        b.start(air::COMMANDS);
+        b.start(air::DELETE);
+        b.leaf(air::SERVER_ID, &id);
+        for _ in 0..5 {
+            b.end();
+        }
+        let deleted = live
+            .wbxml_version("Sync", &device, wbxml::encode_document(&b.finish()), "14.0")
+            .await;
+        assert_eq!(eas::find_all_text_after(&deleted, air::STATUS), vec!["1"]);
+        let after_delete = live
+            .call_using(
+                serde_json::json!([["ContactCard/get",{
+                    "accountId":contact_account,
+                    "ids":[id]
+                },"deleted"]]),
+                &using,
+            )
+            .await;
+        assert!(
+            after_delete[0][1]["list"].as_array().unwrap().is_empty(),
+            "EAS Sync Delete must remove the ContactCard: {after_delete}"
+        );
     }
 
     #[tokio::test]
@@ -12601,6 +12884,22 @@ async fn a_changing_backend_snapshot_does_not_delete_held_contacts() {
             .unwrap(),
         previous
     );
+}
+
+#[tokio::test]
+async fn contacts_sync_uses_get_all_when_contact_query_is_unavailable() {
+    use eas::airsync as air;
+    let env = start_env(Opts::default()).await;
+    enable_groupware(&env, 3);
+    env.mock
+        .contact_query_unavailable
+        .store(true, Ordering::SeqCst);
+
+    let prime = item_sync(&env, "ipad", "ab_book", "0", "100").await;
+    let response = item_sync(&env, "ipad", "ab_book", &sync_key(&prime), "100").await;
+
+    assert_eq!(eas::find_text_after(&response, air::STATUS), Some("1"));
+    assert_eq!(eas::find_all_text_after(&response, air::SERVER_ID).len(), 3);
 }
 
 #[tokio::test]

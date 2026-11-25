@@ -1828,7 +1828,7 @@ impl JmapClient {
             let mut page = None;
             for method in response.method_responses {
                 if method.0 == "error" {
-                    anyhow::bail!("JMAP method error in {object_type} snapshot");
+                    anyhow::bail!("JMAP method error in {object_type} snapshot: {}", method.1);
                 } else if method.0 == query {
                     let result: QueryResponse = serde_json::from_value(method.1)?;
                     if position != 0 && query_state != result.query_state {
@@ -2212,7 +2212,7 @@ impl JmapClient {
         address_book_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<Contact>> {
-        let items: Vec<ContactCardObject> = self
+        let queried: anyhow::Result<Vec<ContactCardObject>> = self
             .query_objects(
                 auth,
                 capabilities::CONTACTS,
@@ -2221,7 +2221,60 @@ impl JmapClient {
                 None,
                 limit,
             )
-            .await?;
+            .await;
+        let items = match queried {
+            Ok(items) => items,
+            Err(query_error) => {
+                if !query_error.to_string().contains("serverUnavailable") {
+                    return Err(query_error);
+                }
+                // Some JMAP Contacts servers expose ContactCard/get but
+                // return serverUnavailable for ContactCard/query (including
+                // unfiltered queries). `ids: null` is the JMAP get form for
+                // all cards; filter the returned addressBookIds locally so
+                // ActiveSync Contacts Sync still works on those servers.
+                let account_id = auth
+                    .session
+                    .primary_account_for(capabilities::CONTACTS)
+                    .context("JMAP Contacts capability is unavailable")?;
+                let response: JmapResponse<serde_json::Value> = self
+                    .api_call(
+                        auth,
+                        &[capabilities::CORE.to_owned(), capabilities::CONTACTS.to_owned()],
+                        vec![MethodCall::new(
+                            "ContactCard/get",
+                            serde_json::json!({
+                                "accountId": account_id,
+                                "ids": null,
+                                "properties": ["id", "addressBookIds", "name", "emails", "phones",
+                                    "organizations", "titles", "nicknames", "addresses", "anniversaries",
+                                    "notes", "onlineServices", "media", "links", "keywords"]
+                            }),
+                            "all",
+                        )],
+                    )
+                    .await
+                    .with_context(|| {
+                        format!("ContactCard/query failed ({query_error}); get-all fallback failed")
+                    })?;
+                let result = response
+                    .method_responses
+                    .iter()
+                    .find(|method| method.0 == "ContactCard/get")
+                    .context("ContactCard/query failed and ContactCard/get response is missing")?;
+                anyhow::ensure!(
+                    result.1.get("type").is_none(),
+                    "ContactCard/query failed ({query_error}); ContactCard/get fallback returned {}",
+                    result.1
+                );
+                let get: GetResponse<ContactCardObject> = serde_json::from_value(result.1.clone())?;
+                get.list
+                    .into_iter()
+                    .filter(|item| item.address_book_ids.contains_key(address_book_id))
+                    .take(if limit == 0 { usize::MAX } else { limit })
+                    .collect()
+            }
+        };
         let account_id = auth
             .session
             .primary_account_for(capabilities::CONTACTS)
