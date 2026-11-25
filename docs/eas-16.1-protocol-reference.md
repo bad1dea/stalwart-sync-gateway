@@ -155,8 +155,9 @@ alias, and email). When the request asks for photos, each result includes
 data; `MaxSize` and `MaxPictures` are validated against the protocol limits.
 The optional `Options/Range` may be omitted. These paths have source-level
 regression coverage; real-client 16.1 validation remains open. Find is
-protocol-version gated to 16.1 and is not advertised while production negotiates
-only 14.0. Mailbox results include the EAS `Importance` response property in
+protocol-version gated to 16.1 and included in the advertised command list when
+the configured protocol ceiling is 16.1; the default 14.0 production mode does
+not advertise it. Mailbox results include the EAS `Importance` response property in
 low/normal/high wire values.
 
 ### SendMail / SmartReply / SmartForward (§2.2.1.17/.20/.19)
