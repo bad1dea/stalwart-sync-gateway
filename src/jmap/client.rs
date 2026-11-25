@@ -3298,13 +3298,18 @@ impl JmapClient {
         if event["@type"] != "Event" || event["calendarIds"][calendar_id] != true {
             return Ok("2");
         }
-        if proposed_times.is_some()
+        let recurrence_exclusions = if proposed_times.is_some()
             && instance_id.is_none()
             && event["recurrenceRule"].is_object()
-            && !series_counter_supported(event)
         {
-            return Ok("4");
-        }
+            let Some(exclusions) = counter_recurrence_exclusions(&event["recurrenceOverrides"])
+            else {
+                return Ok("4");
+            };
+            exclusions
+        } else {
+            Vec::new()
+        };
         let instance_key = if let Some(instance_id) = instance_id {
             if event["recurrenceRule"].is_null() {
                 return Ok("146");
@@ -3402,6 +3407,7 @@ impl JmapClient {
                     recurrence_rule: event["recurrenceRule"]
                         .as_object()
                         .map(|_| &event["recurrenceRule"]),
+                    recurrence_exclusions: &recurrence_exclusions,
                 },
             ) {
                 Ok(mime) => mime,
@@ -7345,6 +7351,7 @@ struct MeetingResponseMimeContext<'a> {
     location: Option<&'a str>,
     sequence: u64,
     recurrence_rule: Option<&'a serde_json::Value>,
+    recurrence_exclusions: &'a [String],
 }
 
 fn counter_event_location(locations: &serde_json::Value) -> Option<String> {
@@ -7364,11 +7371,19 @@ fn counter_event_location(locations: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn series_counter_supported(event: &serde_json::Value) -> bool {
-    let has_exceptions = event["recurrenceOverrides"]
-        .as_object()
-        .is_some_and(|overrides| !overrides.is_empty());
-    !has_exceptions
+fn counter_recurrence_exclusions(overrides: &serde_json::Value) -> Option<Vec<String>> {
+    let Some(overrides) = overrides.as_object() else {
+        return overrides.is_null().then(Vec::new);
+    };
+    let mut excluded = Vec::with_capacity(overrides.len());
+    for (key, value) in overrides {
+        if value["excluded"] != true {
+            return None;
+        }
+        compact_recurrence_key(key).ok()?;
+        excluded.push(key.clone());
+    }
+    Some(excluded)
 }
 
 fn counter_recurrence_rule(
@@ -7540,6 +7555,7 @@ fn meeting_response_mime(
         location,
         sequence,
         recurrence_rule,
+        recurrence_exclusions,
     } = context;
     anyhow::ensure!(
         body.is_some() || proposal.is_some(),
@@ -7584,13 +7600,23 @@ fn meeting_response_mime(
                     .map(|value| value.year())
             })
     });
-    let timezone_year = match (proposal_year, recurrence_year) {
-        (Some(proposal), Some(recurrence)) => Some(proposal.min(recurrence)),
-        (Some(year), None) | (None, Some(year)) => Some(year),
-        (None, None) => None,
-    };
+    let timezone_year = proposal_year
+        .into_iter()
+        .chain(recurrence_year)
+        .chain(recurrence_exclusions.iter().filter_map(|key| {
+            chrono::NaiveDateTime::parse_from_str(key, "%Y-%m-%dT%H:%M:%S")
+                .ok()
+                .map(|value| value.year())
+                .or_else(|| {
+                    chrono::NaiveDate::parse_from_str(key, "%Y-%m-%d")
+                        .ok()
+                        .map(|value| value.year())
+                })
+        }))
+        .min();
     let needs_timezone = local_time_zone.is_some()
         && (recurrence_key.is_some_and(|key| key.contains('T'))
+            || recurrence_exclusions.iter().any(|key| key.contains('T'))
             || proposal.is_some() && (instance_id.is_some() || recurrence_rule.is_some()));
     let timezone_component = if needs_timezone {
         Some(
@@ -7653,6 +7679,22 @@ fn meeting_response_mime(
                     "RRULE:{}\r\n",
                     counter_recurrence_rule(recurrence_rule, time_zone)?
                 ));
+            }
+            for exclusion in recurrence_exclusions {
+                let compact = compact_recurrence_key(exclusion)?;
+                if compact.len() == 15 {
+                    if let Some(time_zone) = time_zone.filter(|_| local_time_zone.is_some()) {
+                        calendar.push_str(&format!("EXDATE;TZID={time_zone}:{compact}\r\n"));
+                    } else if time_zone
+                        .is_some_and(|zone| matches!(zone, "UTC" | "Etc/UTC" | "GMT" | "Etc/GMT"))
+                    {
+                        calendar.push_str(&format!("EXDATE:{compact}Z\r\n"));
+                    } else {
+                        calendar.push_str(&format!("EXDATE:{compact}\r\n"));
+                    }
+                } else {
+                    calendar.push_str(&format!("EXDATE:{compact}\r\n"));
+                }
             }
         }
     }
@@ -12952,6 +12994,7 @@ mod meeting_response_send_tests {
                 location: None,
                 sequence: 0,
                 recurrence_rule: None,
+                recurrence_exclusions: &[],
             },
         )
         .unwrap();
@@ -12983,6 +13026,7 @@ mod meeting_response_send_tests {
                 location: None,
                 sequence: 0,
                 recurrence_rule: None,
+                recurrence_exclusions: &[],
             },
         )
         .unwrap();
@@ -13012,6 +13056,7 @@ mod meeting_response_send_tests {
                 location: Some("Room; Floor 2"),
                 sequence: 3,
                 recurrence_rule: None,
+                recurrence_exclusions: &[],
             },
         )
         .unwrap();
@@ -13029,6 +13074,7 @@ mod meeting_response_send_tests {
 
     #[test]
     fn counter_recurrence_maps_supported_jscalendar_rules_to_ical_rrule() {
+        let exclusions = vec!["2026-11-30T10:00:00".to_owned()];
         let rule = serde_json::json!({
             "@type":"RecurrenceRule","frequency":"weekly","interval":2,
             "byDay":[{"@type":"NDay","day":"mo"},{"@type":"NDay","day":"we"}],
@@ -13057,6 +13103,7 @@ mod meeting_response_send_tests {
                 location: None,
                 sequence: 1,
                 recurrence_rule: Some(&rule),
+                recurrence_exclusions: &exclusions,
             },
         )
         .unwrap();
@@ -13064,6 +13111,7 @@ mod meeting_response_send_tests {
         assert!(text.contains("RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE;WKST=MO;COUNT=5\r\n"));
         assert!(text.contains("BEGIN:VTIMEZONE\r\nTZID:America/Toronto\r\n"));
         assert!(text.contains("DTSTART;TZID=America/Toronto:20261125T100000\r\nDTEND;TZID=America/Toronto:20261125T110000\r\n"));
+        assert!(text.contains("EXDATE;TZID=America/Toronto:20261130T100000\r\n"));
 
         let rules = [
             (
@@ -13098,18 +13146,20 @@ mod meeting_response_send_tests {
             "timeZone":"UTC",
             "recurrenceOverrides":{},
         });
-        assert!(series_counter_supported(&base));
-        assert!(series_counter_supported(&serde_json::json!({
-            "recurrenceOverrides":{}
-        })));
-        assert!(series_counter_supported(&serde_json::json!({
-            "timeZone":"America/Toronto",
-            "recurrenceOverrides":{}
-        })));
-        assert!(!series_counter_supported(&serde_json::json!({
-            "timeZone":"UTC",
-            "recurrenceOverrides":{"2026-11-25T15:00:00":{"excluded":true}}
-        })));
+        assert!(counter_recurrence_exclusions(&base["recurrenceOverrides"]).is_some());
+        assert!(counter_recurrence_exclusions(&serde_json::json!({})).is_some());
+        assert!(counter_recurrence_exclusions(&serde_json::json!({
+            "2026-11-25T15:00:00":{"excluded":true}
+        }))
+        .is_some());
+        assert!(counter_recurrence_exclusions(&serde_json::json!({
+            "2026-11-25T15:00:00":{"excluded":true,"start":"2026-11-25T11:00:00"}
+        }))
+        .is_some());
+        assert!(counter_recurrence_exclusions(&serde_json::json!({
+            "2026-11-25T15:00:00":{"start":"2026-11-25T11:00:00"}
+        }))
+        .is_none());
     }
 
     #[tokio::test]

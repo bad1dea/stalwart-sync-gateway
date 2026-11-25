@@ -1857,10 +1857,11 @@ JSCalendar rules. Named IANA time zones emit matching VTIMEZONE observances,
 and proposal DTSTART/DTEND use local wall time so the recurrence remains at the
 event's local time across daylight changes. Stable recurring transitions and
 fixed-offset zones are supported; irregular or unknown zones return status 4
-before the RSVP write. Series with recurrence exceptions still fail closed
-because those exceptions are not yet serialized. Occurrence counters use the
-original local recurrence key with TZID, while UTC instance counters remain in
-UTC. The RRULE/location implementation is deployed to the isolated Amy bridge
+before the RSVP write. Excluded occurrences are serialized as EXDATE; positive
+recurrence overrides still fail closed until their full VEVENT exception
+components can be preserved. Occurrence counters use the original local
+recurrence key with TZID, while UTC instance counters remain in UTC. The
+RRULE/location implementation is deployed to the isolated Amy bridge
 as `localhost/eas16-isolated:23f4cbc` (image
 `sha256:2cab227d05bf11ab4ed089238c010fb818e138d928c5c076cd7b119937d8bf94`),
 started `2026-11-25T07:35:41Z`, restart count zero, `/healthz` `ok`, and
@@ -1871,6 +1872,8 @@ new VTIMEZONE/local-time implementation is deployed as
 `sha256:c4bb48640bcaffcba53791486e299b8f55b919dc1ff3495c1efbcdb4b4addfc6`),
 started `2026-11-25T07:50:44Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`.
+The current source change adds EXDATE support for excluded series occurrences
+and is awaiting deployment.
 JSCalendar's
 `participationComment` is a note explaining RSVP status, not the custom email
 body carried by EAS `SendResponse`; mapping the two directly would lose the
@@ -1881,8 +1884,9 @@ The behavior follows the
 and [SendResponse definition](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/128fff4c-1b97-42d8-a30f-f023327add0b),
 and the distinction follows [RFC 8984 section 4.4.6](https://www.rfc-editor.org/rfc/rfc8984.html#section-4.4.6).
 Regression coverage asserts `sendSchedulingMessages` at the JMAP boundary,
-RRULE mapping, VTIMEZONE generation, local-time counter serialization, and the
-series-exception guard, and updates the deferred live MeetingResponse
+RRULE mapping, VTIMEZONE generation, local-time counter serialization, EXDATE
+generation, and fail-closed positive-exception handling, and updates the
+deferred live MeetingResponse
 scenario. Current full suite: 436 passed, 77
 ignored; strict Clippy, formatting, and diff checks pass. The custom
 reply and counter paths are on `main` and deployed to the isolated bridge with
