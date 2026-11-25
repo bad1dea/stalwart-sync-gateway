@@ -55,7 +55,11 @@ optional `Options/Range` omission, and returns `gal:Picture/Status=173`
 photo data. A mocked WBXML regression requests a photo with size/count limits
 and no Range, then verifies the GAL result and per-entry status. The full suite
 passes 407 tests (76 ignored); strict Clippy, formatting, and diff checks pass.
-Deployment details will be recorded after rollout.
+Deployed as `deploy-2026-11-25-eas-find-gal-picture-19fb7c1`; Homelab commit
+`ab02db8`, image
+`sha256:7a54fd3a2b5bed893ba3a219b3bdcfb70b55892cbfae2ab325f1f80aee5033bb`,
+started `2026-11-25T04:09:31Z`, restart count zero, `/healthz` `ok`, and
+`/readyz` `ready`. Production remains at the 14.0 protocol default.
 
 Outlook `.msg` Find now falls back to bounded compressed-RTF decoding when
 plain text and HTML bodies are absent. The compressed and declared output sizes
