@@ -10,10 +10,10 @@ MIME policy, partial Sync/options persistence, and Sync long-poll/window
 handling. Check the current Rust implementation before treating any older
 “Missing” or “Not implemented” statement below as actionable.
 
-Current source `main` is `3fdb3f0`; recent commits add contact field round-trips
-and an ignored live-test. The full suite passes 480 tests (78 ignored); strict Clippy, formatting,
-and diff checks pass. The functional code at `412c9c6` is deployed to Amy's
-isolated bridge as
+The functional source at `412c9c6` is deployed to Amy's isolated bridge; a
+subsequent test-only commit adds the live vendor-property regression. The full
+suite passes 480 tests (78 ignored); strict Clippy, formatting, and diff checks
+pass. The image is
 `localhost/eas16-isolated:412c9c6` (image
 `sha256:a5d4f838b19ea1dd3dc0b19e74a25a40d9151a70275f0ee5afb892b982ba8766`),
 started `2026-11-25T16:02:33.647341854Z` with zero restarts. `/healthz` and
