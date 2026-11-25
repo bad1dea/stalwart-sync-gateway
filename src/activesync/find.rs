@@ -3569,6 +3569,20 @@ mod tests {
         assert!(extract_find_image_text_with_tool(&oversized, &ocr).is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires the installed Tesseract OCR runtime"]
+    fn raster_image_fixture_is_recognized_by_tesseract() {
+        let image = include_bytes!("../../tests/fixtures/raster-ocr-text.png");
+        let extracted = extract_find_image_text_with_tool(image, std::path::Path::new("tesseract"))
+            .expect("Tesseract should read the raster text fixture");
+        assert!(
+            normalize_find_attachment_text(&extracted)
+                .is_some_and(|text| text.to_ascii_lowercase().contains("raster needle")),
+            "unexpected OCR text: {extracted:?}"
+        );
+    }
+
     #[test]
     fn generic_zip_expansion_limit_matches_text_output_limit() {
         use std::io::Write;

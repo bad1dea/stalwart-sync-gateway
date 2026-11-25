@@ -27,8 +27,10 @@ WebP. Image dimensions are checked before decoding (12,000 pixels per edge,
 40 million pixels total), decoding allocations are capped, images are reduced
 to a 1,600-pixel edge, and Tesseract has a five-second budget. A regression
 uses a generated PNG and a controlled OCR executable, plus malformed and
-over-dimension inputs; the full suite passes 406 tests (75 ignored), strict
-Clippy, formatting, and diff checks. Deployed as
+over-dimension inputs. A real Tesseract OCR fixture passes when explicitly
+run; it is ignored in the default suite because Tesseract is an optional test
+runtime. The full suite passes 406 tests (76 ignored), strict Clippy,
+formatting, and diff checks. Deployed as
 `deploy-2026-11-24-eas-find-image-ocr-1218602`; Homelab commit `ccb35a7`,
 image `sha256:c5abe248397812ef210d416435b1406dc29ba50f3202bd13fc0323dfd2cd6e2f`,
 started `2026-11-25T03:29:02Z`, restart count zero, `/healthz` `ok`, and
