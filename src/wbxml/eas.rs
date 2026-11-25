@@ -2245,7 +2245,16 @@ pub fn sync_collections_with_optional_recurrence_type(
                             .flat_map(child_elements)
                             .any(|child| !matches!(child.nodes.first(), Some(Node::Start(t)) if same_token(*t, email::READ) || same_token(*t, email::FLAG) || same_token(*t, email::CATEGORIES)));
                         match extract_categories(&command_doc, email::CATEGORIES, email::CATEGORY) {
-                            Ok(categories) => command.mail_categories = categories,
+                            Ok(categories) => {
+                                if categories
+                                    .as_deref()
+                                    .is_some_and(|values| !valid_mail_categories(values))
+                                {
+                                    command.unsupported_mail_change = true;
+                                } else {
+                                    command.mail_categories = categories;
+                                }
+                            }
                             Err(()) => command.unsupported_mail_change = true,
                         }
                         command.document = command_doc;
@@ -2753,6 +2762,15 @@ fn calendar_categories(command: &Document) -> Result<Option<Vec<String>>, ()> {
 
 fn task_categories(command: &Document) -> Result<Option<Vec<String>>, ()> {
     extract_categories(command, tasks::CATEGORIES, tasks::CATEGORY)
+}
+
+fn valid_mail_categories(categories: &[String]) -> bool {
+    let mut normalized = std::collections::BTreeSet::new();
+    categories.iter().all(|category| {
+        !category.starts_with('$')
+            && crate::model::valid_jmap_keyword(category)
+            && normalized.insert(category.to_ascii_lowercase())
+    })
 }
 
 fn extract_categories(
@@ -5572,6 +5590,34 @@ mod tests {
             SyncClientCommandKind::Delete
         );
         assert_eq!(collections[0].commands[1].server_id, "email-b");
+    }
+
+    #[test]
+    fn rejects_unrepresentable_mail_category_on_its_change_command() {
+        let mut builder = DocumentBuilder::new();
+        builder.start(airsync::SYNC);
+        builder.start(airsync::COLLECTIONS);
+        builder.start(airsync::COLLECTION);
+        builder.leaf(airsync::SYNC_KEY, "1");
+        builder.leaf(airsync::COLLECTION_ID, "inbox");
+        builder.start(airsync::COMMANDS);
+        builder.start(airsync::CHANGE);
+        builder.leaf(airsync::SERVER_ID, "email-a");
+        builder.start(airsync::APPLICATION_DATA);
+        builder.start(email::CATEGORIES);
+        builder.leaf(email::CATEGORY, "Work Project");
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+        builder.end();
+
+        let collections = sync_collections(&builder.finish());
+        let command = &collections[0].commands[0];
+        assert!(command.unsupported_mail_change);
+        assert_eq!(command.mail_categories, None);
     }
 
     #[test]
