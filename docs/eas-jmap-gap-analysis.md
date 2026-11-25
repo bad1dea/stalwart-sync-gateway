@@ -417,7 +417,12 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    limits. Generic ZIP extraction selects text/config extensions only and
    retains the existing 4096-entry and cumulative 2 MiB expanded-data limits.
    A mocked 16.1 Find test verifies exact proximity search through a downloaded
-   ZIP README. Text
+   ZIP README. Deployed as `deploy-2026-11-24-eas-find-text-zip-4d39e9d`;
+   homelab commit `88155ae`, image
+   `sha256:c6dba04bc36283b834cf5ac8b025a90650339689309f4de5d67ee2a36cef48c0`,
+   started `2026-11-25T00:21:08Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`; the OCR tools remain present and protocol default remains
+   14.0. Text
    attachments honor MIME
    `charset` parameters, including common
    legacy single-byte encodings and UTF-16LE, with BOM detection when the
