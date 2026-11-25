@@ -27,8 +27,14 @@ passes 458 tests (77 ignored), including mailbox-query-to-JMAP-parse,
 organizer mapping, and WBXML writer regressions; strict Clippy, formatting, and
 diff checks pass. The optional `Organizer` maps the JMAP participant with the
 `owner` role to its display name, falling back to email, and emits
-Email:Organizer. This addition is awaiting deployment; real-client validation
-remains pending. Sources: Microsoft
+Email:Organizer. Commit `f063290` is deployed to Amy's isolated bridge as
+`localhost/eas16-isolated:f063290` (image
+`sha256:dd18bb428e8848ebbc8a2b8596c889b186e6280820c279c328c3e909e397139c`),
+started `2026-11-25T10:56:55.261001097Z`, with zero restarts. At
+`2026-11-25T10:57:00Z`, `/healthz` and `/readyz` returned HTTP 200 (`ok` and
+`ready`). `EAS_MAX_PROTOCOL_VERSION` remains unset, preserving the 14.0
+default; production is untouched. Real-client validation remains pending.
+Sources: Microsoft
 [Receiving and Accepting Meeting
 Requests](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/9e79c273-3d4e-4b42-a635-d7b11266ab59)
 and [MS-ASEMAIL MeetingRequest](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-asemail/0bc0a4c7-2391-428d-b2c1-471c6695d1df),
