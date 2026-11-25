@@ -150,11 +150,16 @@ is also capped at 16 MiB. Larger attachments and PDFs exceeding the OCR page or
 time budget remain outside exact local matching.
 
 GAL results currently map Stalwart `Principal` identity fields (display name,
-alias, and email). When the request asks for photos, each result includes
-`gal:Picture/Status=173` (`NoPicture`), since Principal records expose no photo
-data; `MaxSize` and `MaxPictures` are validated against the protocol limits.
-The optional `Options/Range` may be omitted. These paths have source-level
-regression coverage; real-client 16.1 validation remains open. Find is
+alias, and email). When the request asks for photos, the gateway matches
+Principal email addresses to saved ContactCards and returns matching inline or
+bounded blob-backed photos as `gal:Data`. `MaxSize` and `MaxPictures` are
+validated and produce the protocol's `PictureTooLarge` (174),
+`PictureLimitReached` (175), and `NoPicture` (173) statuses as applicable.
+Principal records themselves expose no photo data, so a directory entry with
+no matching saved ContactCard still returns `NoPicture`. The optional
+`Options/Range` may be omitted. Regression coverage includes a WBXML GAL Find
+photo response with two saved ContactCards and `MaxPictures` enforcement;
+real-client 16.1 validation remains open. Find is
 protocol-version gated to 16.1 and included in the advertised command list when
 the configured protocol ceiling is 16.1; the default 14.0 production mode does
 not advertise it. Mailbox results include the EAS `Importance` response property in

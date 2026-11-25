@@ -13995,6 +13995,64 @@ async fn find_gal_picture_request_returns_no_picture_status_without_range() {
     assert_eq!(eas::find_all_text_after(&doc, gal::STATUS), vec!["173"]);
 }
 
+#[tokio::test]
+async fn find_gal_returns_matching_contact_photo_and_enforces_max_pictures() {
+    use eas::{find as f, gal};
+    let env = start_env(Opts::default()).await;
+    env.mock.identities.lock().unwrap().extend([
+        serde_json::json!({
+            "id":"i3", "name":"alice.one", "email":"alice.one@example.test",
+            "description":"Alice One"
+        }),
+        serde_json::json!({
+            "id":"i4", "name":"alice.two", "email":"alice.two@example.test",
+            "description":"Alice Two"
+        }),
+    ]);
+    env.mock.groupware.lock().unwrap().insert(
+        "contacts".to_owned(),
+        vec![
+            serde_json::json!({"id":"c1", "addressBookIds":{"book":true},
+            "emails":{"e":{"address":"alice.one@example.test"}},
+            "media":{"eas_picture":{"kind":"photo","uri":"data:image/png;base64,AQID"}}}),
+            serde_json::json!({"id":"c2", "addressBookIds":{"book":true},
+            "emails":{"e":{"address":"alice.two@example.test"}},
+            "media":{"eas_picture":{"kind":"photo","uri":"data:image/png;base64,BAUG"}}}),
+        ],
+    );
+    let mut b = eas::DocumentBuilder::new();
+    b.start(f::FIND);
+    b.leaf(f::SEARCH_ID, "ac9f4442-11a5-4afb-a231-5f5f302953f5");
+    b.start(f::EXECUTE_SEARCH);
+    b.start(f::GAL_SEARCH_CRITERION);
+    b.leaf(f::QUERY, "Alice");
+    b.start(f::OPTIONS);
+    b.leaf(f::RANGE, "0-1");
+    b.start(f::PICTURE);
+    b.leaf(f::MAX_SIZE, "102400");
+    b.leaf(f::MAX_PICTURES, "1");
+    b.end();
+    b.end();
+    b.end();
+    b.end();
+    b.end();
+
+    let response = env
+        .req("Find", "client")
+        .header("MS-ASProtocolVersion", "16.1")
+        .body(wbxml::encode_document(&b.finish()))
+        .send()
+        .await
+        .unwrap();
+    let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("2"));
+    assert_eq!(
+        eas::find_all_text_after(&doc, gal::STATUS),
+        vec!["1", "175"]
+    );
+    assert_eq!(eas::find_all_text_after(&doc, gal::DATA), vec!["AQID"]);
+}
+
 fn find_body(id: &str, text: &str, folder: Option<&str>, range: &str) -> Vec<u8> {
     use eas::{airsync as air, find as f};
     let mut b = eas::DocumentBuilder::new();

@@ -29,9 +29,15 @@ struct Request {
     text: String,
     folder: Option<String>,
     deep: bool,
-    picture_requested: bool,
+    picture: Option<PictureRequest>,
     start: usize,
     end: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PictureRequest {
+    max_size: usize,
+    max_pictures: usize,
 }
 
 fn child(document: &wbxml::Document, token: wbxml::token::Token) -> Option<wbxml::Document> {
@@ -77,21 +83,40 @@ fn parse(document: &wbxml::Document) -> Result<Request, &'static str> {
             .ok_or("missing FreeText")?
     };
     let options = child(&criteria, f::OPTIONS);
-    let picture_requested = options.as_ref().and_then(|doc| child(doc, f::PICTURE));
-    if let Some(picture) = &picture_requested {
-        if let Some(max_size) = eas::find_text_after(picture, f::MAX_SIZE) {
-            let max_size = max_size.parse::<i64>().map_err(|_| "invalid MaxSize")?;
-            if !(0..=102_400).contains(&max_size) {
-                return Err("invalid MaxSize");
+    let picture = if let Some(picture) = options.as_ref().and_then(|doc| child(doc, f::PICTURE)) {
+        let mut max_size = 102_400usize;
+        let mut max_pictures = usize::MAX;
+        let mut seen = BTreeSet::new();
+        for field in eas::child_elements(&picture) {
+            let Some(wbxml::Node::Start(token)) = field.nodes.first() else {
+                return Err("invalid Picture option");
+            };
+            if !seen.insert((token.code_page, token.token)) {
+                return Err("duplicate Picture option");
+            }
+            let value = eas::find_text_after(&field, *token).ok_or("invalid Picture option")?;
+            if token_is(*token, f::MAX_SIZE) {
+                max_size = value.parse::<u32>().map_err(|_| "invalid MaxSize")? as usize;
+                if max_size > 102_400 {
+                    return Err("invalid MaxSize");
+                }
+            } else if token_is(*token, f::MAX_PICTURES) {
+                // MaxPictures is xs:unsignedInt in the Find schema.
+                if !valid_max_pictures(value) {
+                    return Err("invalid MaxPictures");
+                }
+                max_pictures = value.parse::<u32>().map_err(|_| "invalid MaxPictures")? as usize;
+            } else {
+                return Err("unsupported Picture option");
             }
         }
-        if let Some(max_pictures) = eas::find_text_after(picture, f::MAX_PICTURES) {
-            // MaxPictures is xs:unsignedInt in the Find schema.
-            if !valid_max_pictures(max_pictures) {
-                return Err("invalid MaxPictures");
-            }
-        }
-    }
+        Some(PictureRequest {
+            max_size,
+            max_pictures,
+        })
+    } else {
+        None
+    };
     let (start, end) = if let Some(options) = &options {
         if let Some(range) = eas::find_text_after(options, f::RANGE) {
             let (start, end) = range.split_once('-').ok_or("invalid Range")?;
@@ -115,7 +140,7 @@ fn parse(document: &wbxml::Document) -> Result<Request, &'static str> {
         deep: options
             .as_ref()
             .is_some_and(|doc| eas::contains_token(doc, f::DEEP_TRAVERSAL)),
-        picture_requested: picture_requested.is_some(),
+        picture,
         start,
         end,
     })
@@ -1762,18 +1787,58 @@ async fn execute_gal(
             .put_item_states(user, device, SEARCHES, sessions)
             .await?;
     }
+    let page = principals
+        .iter()
+        .skip(request.start)
+        .take(request.end - request.start + 1)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut pictures = std::collections::HashMap::new();
+    if request.picture.is_some()
+        && auth
+            .session
+            .primary_account_for(crate::jmap::capabilities::CONTACTS)
+            .is_some()
+    {
+        let emails = page
+            .iter()
+            .filter_map(|principal| principal.email.clone())
+            .collect::<Vec<_>>();
+        if !emails.is_empty() {
+            let (contacts, total) = state
+                .jmap
+                .search_contacts_for_recipients(auth, &emails)
+                .await?;
+            anyhow::ensure!(
+                total as usize == contacts.len(),
+                "too many contacts to resolve GAL photos"
+            );
+            let principal_emails = emails
+                .iter()
+                .map(|email| email.to_lowercase())
+                .collect::<BTreeSet<_>>();
+            for contact in contacts {
+                let Some(photo) = contact.picture else {
+                    continue;
+                };
+                for email in contact.emails {
+                    let key = email.to_lowercase();
+                    if principal_emails.contains(&key) {
+                        pictures.entry(key).or_insert_with(|| photo.clone());
+                    }
+                }
+            }
+        }
+    }
     let mut b = DocumentBuilder::new();
     b.start(f::FIND);
     b.leaf(f::STATUS, "1");
     b.start(f::RESPONSE);
     b.leaf(ops::STORE, "Mailbox");
     b.leaf(f::STATUS, "1");
-    let page = principals
-        .iter()
-        .skip(request.start)
-        .take(request.end - request.start + 1);
     let mut count = 0;
-    for principal in page {
+    let mut pictures_sent = 0usize;
+    for principal in &page {
         b.start(f::RESULT);
         b.start(f::PROPERTIES);
         b.leaf(gal::DISPLAY_NAME, &principal.display_name);
@@ -1781,12 +1846,22 @@ async fn execute_gal(
         if let Some(email) = &principal.email {
             b.leaf(gal::EMAIL_ADDRESS, email);
         }
-        if request.picture_requested {
-            // Stalwart Principal exposes directory identity but no photo. The
-            // GAL Picture contract requires a per-result status when a photo
-            // is requested and the matched principal has none.
+        if let Some(options) = request.picture {
+            let picture = principal
+                .email
+                .as_ref()
+                .and_then(|email| pictures.get(&email.to_lowercase()))
+                .map(Vec::as_slice);
+            let (status, data) = gal_picture_value(picture, options, &mut pictures_sent);
             b.start(gal::PICTURE);
-            b.leaf(gal::STATUS, "173"); // NoPicture
+            b.leaf(gal::STATUS, status);
+            if let Some(bytes) = data {
+                use base64::Engine;
+                b.leaf(
+                    gal::DATA,
+                    base64::engine::general_purpose::STANDARD.encode(bytes),
+                );
+            }
             b.end();
         }
         b.end();
@@ -1803,6 +1878,26 @@ async fn execute_gal(
     b.end();
     b.end();
     Ok(b.finish())
+}
+
+fn token_is(left: wbxml::token::Token, right: wbxml::token::Token) -> bool {
+    left.code_page == right.code_page && left.token == right.token
+}
+
+fn gal_picture_value<'a>(
+    picture: Option<&'a [u8]>,
+    options: PictureRequest,
+    pictures_sent: &mut usize,
+) -> (&'static str, Option<&'a [u8]>) {
+    match picture {
+        None => ("173", None),
+        Some(bytes) if bytes.len() > options.max_size => ("174", None),
+        Some(_) if *pictures_sent >= options.max_pictures => ("175", None),
+        Some(bytes) => {
+            *pictures_sent += 1;
+            ("1", Some(bytes))
+        }
+    }
 }
 
 fn restart_document() -> wbxml::Document {
@@ -4694,5 +4789,67 @@ mod tests {
         assert!(valid_max_pictures("4294967295"));
         assert!(!valid_max_pictures("4294967296"));
         assert!(!valid_max_pictures("-1"));
+    }
+
+    #[test]
+    fn gal_picture_status_applies_size_then_limit_rules() {
+        let options = PictureRequest {
+            max_size: 3,
+            max_pictures: 1,
+        };
+        let mut sent = 0;
+        assert_eq!(gal_picture_value(None, options, &mut sent), ("173", None));
+        assert_eq!(
+            gal_picture_value(Some(&[1, 2, 3, 4]), options, &mut sent),
+            ("174", None)
+        );
+        assert_eq!(
+            gal_picture_value(Some(&[1, 2, 3]), options, &mut sent),
+            ("1", Some(&[1, 2, 3][..]))
+        );
+        assert_eq!(
+            gal_picture_value(Some(&[9]), options, &mut sent),
+            ("175", None)
+        );
+        assert_eq!(sent, 1);
+    }
+
+    #[test]
+    fn gal_picture_option_defaults_and_keeps_requested_bounds() {
+        let mut b = DocumentBuilder::new();
+        b.start(f::FIND);
+        b.leaf(f::SEARCH_ID, "4f2a3131-a9bf-4e95-a624-5ed40c46b7da");
+        b.start(f::EXECUTE_SEARCH);
+        b.start(f::GAL_SEARCH_CRITERION);
+        b.leaf(f::QUERY, "Alice");
+        b.start(f::OPTIONS);
+        b.start(f::PICTURE);
+        b.leaf(f::MAX_SIZE, "4096");
+        b.leaf(f::MAX_PICTURES, "2");
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        b.end();
+        let doc = wbxml::decode_document(&wbxml::encode_document(&b.finish())).unwrap();
+        assert_eq!(
+            parse(&doc).unwrap().picture,
+            Some(PictureRequest {
+                max_size: 4096,
+                max_pictures: 2
+            })
+        );
+
+        let mut b = DocumentBuilder::new();
+        b.start(f::FIND);
+        b.leaf(f::SEARCH_ID, "4f2a3131-a9bf-4e95-a624-5ed40c46b7da");
+        b.start(f::EXECUTE_SEARCH);
+        b.start(f::GAL_SEARCH_CRITERION);
+        b.leaf(f::QUERY, "Alice");
+        b.end();
+        b.end();
+        b.end();
+        let doc = wbxml::decode_document(&wbxml::encode_document(&b.finish())).unwrap();
+        assert_eq!(parse(&doc).unwrap().picture, None);
     }
 }

@@ -12,6 +12,17 @@ handling. Check the current Rust implementation before treating any older
 
 Current prioritized work:
 
+GAL Find's EAS 16.1 `Picture` option now joins matching Principal results to
+saved ContactCards by exact email address. Matching inline or bounded blob
+photos are returned as base64 `gal:Data`; `MaxSize` and `MaxPictures` produce
+the protocol's `PictureTooLarge` and `PictureLimitReached` statuses, while
+missing photos still return `NoPicture`. Regression coverage exercises a
+real WBXML Find request with two contacts, photo bytes, and the picture limit.
+The full suite passes 446 tests (77 ignored); strict Clippy, formatting, and
+diff checks pass. Isolated deployment and runtime verification are the next
+steps; production remains at EAS 14.0. Real-client 16.1 validation remains
+open. Source: Microsoft [Find MaxPictures](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/d61e9985-bf59-4dcf-a76f-74d810742775).
+
 Legacy EAS Search GAL now has a WBXML regression for the same multi-token
 ANR prefix matching used by 16.1 Find: `Michael A.` returns `Michael
 Alexander`. The full suite passes 443 tests (77 ignored); strict Clippy,
