@@ -12,6 +12,21 @@ handling. Check the current Rust implementation before treating any older
 
 Current prioritized work:
 
+Task recurrence handling now validates the EAS `Regenerate` and `DeadOccur`
+children. `Regenerate=0` is accepted (the protocol default); `Regenerate=1`
+fails closed because JSCalendar has no regenerate-on-completion behavior.
+Completing a recurring Task requires a nonzero `DeadOccur`, and completed
+recurring Task responses include `DeadOccur=1`. WBXML request and response
+regressions cover these cases. Full suite: 449 passed, 77 ignored; strict
+Clippy, formatting, and diff checks pass. Source: Microsoft
+[MS-ASTASK DeadOccur](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-astask/5167f64a-ef73-4e22-9147-12abc1f9f5e8)
+and [MS-ASTASK Regenerate](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-astask/095370af-32df-41f5-af33-625efa9a053d).
+Deployed to Amy's isolated bridge as `localhost/eas16-isolated:48a9cc2`
+(image `sha256:f471beae2a763e5854ab30f21e05b1035cde3330d69bd40a3eed9cef48a82893`),
+started `2026-11-25T10:02:58.800870492Z`, with zero restarts. `/healthz` and
+`/readyz` both return HTTP 200 (`ok` and `ready`). `EAS_MAX_PROTOCOL_VERSION`
+remains unset, preserving the 14.0 default; production is untouched.
+
 Calendar Type 6 yearly-nth recurrence now accepts optional `DayOfWeek`. When
 omitted, the converter infers the weekday from the event's local series start,
 but only when `MonthOfYear` and `WeekOfMonth` agree with that start; otherwise
@@ -2179,7 +2194,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Sync: Calendar (read) | **Done** | `CalendarEvent/query`+`/get` (JSCalendar, draft-ietf-calext-jscalendarbis superseding RFC 8984) | Confirmed live against a real event; recurrence is now mapped where supported. |
 | Sync: Calendar (write: add/edit/delete) | **Done** (`deploy-2026-08-25t`; recurrence `deploy-2026-11-24-eas-calendar-recurrence-bea1387`; instance fields `deploy-2026-11-24-eas-calendar-instance-fields-d99b3a3`; HTML exception body `deploy-2026-11-24-eas-calendar-exception-html-gate-8cf107d`) | `CalendarEvent/set` | `save_calendar_event`/`destroy_calendar_event` handle lifecycle and supported recurrence rules. EAS 16.0/16.1 occurrence deletes and mapped per-instance fields use `recurrenceOverrides`; sensitivity remains unsupported because JSCalendar disallows `privacy` in recurrence patches. |
 | Sync: Calendar recurrence (RRULE) | **Done** (`deploy-2026-11-24-eas-calendar-recurrence-bea1387`; instance support `deploy-2026-11-24-eas-calendar-instance-fields-d99b3a3`; HTML exception body `deploy-2026-11-24-eas-calendar-exception-html-gate-8cf107d`) | Stalwart singular JSCalendar `recurrenceRule` and `recurrenceOverrides` | Common EAS daily, weekly, monthly, nth-weekday, and yearly rules map both ways. Exclusions and supported subject/plain/HTML body overrides round-trip. Non-representable recurrence patterns and sensitivity overrides remain unsupported. |
-| Sync: Tasks | **Done, two-way (`deploy-2026-08-26i`); recurrence mapping (`deploy-2026-11-25-eas-task-recurrence-bdd323e`); Task validation (`deploy-2026-11-24-eas-task-add-requires-complete-e3f5e6a`) | `CalendarEvent` with `@type: "Task"` — confirmed live, not a separate JMAP object | Existing Add/Change/Delete lifecycle is live-verified over WBXML. Common EAS recurrence patterns map through the shared JSCalendar `recurrenceRule` conversion. A live E2E Add/Fetch test against isolated Stalwart verifies recurring Task creation, persisted `recurrenceRule`, and explicit WBXML Sync Fetch. Task Add requires `Complete`; it accepts only 0/1, and malformed or duplicate values fail without writing. Real-client recurrence behavior remains open. MS-ASTASK’s repeating `xs:choice` does not constrain field order; actual iOS handling remains unverified. Per-instance recurrence overrides are rejected. |
+| Sync: Tasks | **Done, two-way (`deploy-2026-08-26i`); recurrence mapping (`deploy-2026-11-25-eas-task-recurrence-bdd323e`); Task validation (`deploy-2026-11-24-eas-task-add-requires-complete-e3f5e6a`) | `CalendarEvent` with `@type: "Task"` — confirmed live, not a separate JMAP object | Existing Add/Change/Delete lifecycle is live-verified over WBXML. Common EAS recurrence patterns map through the shared JSCalendar `recurrenceRule` conversion. A live E2E Add/Fetch test against isolated Stalwart verifies recurring Task creation, persisted `recurrenceRule`, and explicit WBXML Sync Fetch. Task Add requires `Complete`; it accepts only 0/1, and malformed or duplicate values fail without writing. `Regenerate=0` is accepted; unsupported regeneration (`1`) fails closed. Completing a recurring task requires nonzero `DeadOccur`, which is emitted on completed recurring task responses. Real-client recurrence behavior remains open. MS-ASTASK’s repeating `xs:choice` does not constrain field order; actual iOS handling remains unverified. Per-instance recurrence overrides are rejected. |
 | Sync: Notes | **Done, two-way** | Email-backed synthetic-message workaround (`src/jmap/notes.rs`) | The most structurally interesting piece of this whole gateway — see that file's module doc. Full Add/Change/Delete supported. |
 | FolderSync | **Done, incremental** | `Mailbox/get`, `AddressBook/get`, `Calendar/get` | Key 0 sends a full Adds snapshot; subsequent keys diff per-device collection fingerprints into Adds/Updates/Deletes. Unknown keys return Status 9. |
 | FolderCreate/Update/Delete | **Done** (`deploy-2026-11-22-eas-groupware-folders-094b478`) | `Mailbox/set`, `AddressBook/set`, and `Calendar/set` | Mail folders retain hierarchical parent support. User Contacts (`Type=14`) and Calendar (`Type=13`) folders create, rename, and delete JMAP collections with synthetic `ab_`/`cal_` EAS IDs; those collections remain root-level because JMAP has no parent hierarchy. Notes and Tasks remain derived collections without independent CRUD. Mocked HTTP regression covers create/rename/delete for both types and rejects invalid types. |

@@ -160,7 +160,10 @@ Task-specific Stalwart create/get and a real-client sync remain unverified.
 Per-instance event exclusions and subject/plain-text body changes are
 supported. Sensitivity and other unsupported event fields fail closed; Tasks
 have no per-instance exception container in MS-ASTASK. Non-Gregorian patterns
-remain unsupported.
+remain unsupported. `Regenerate=0` is accepted and omitted on response, which
+means the protocol default; `Regenerate=1` is rejected because JSCalendar has
+no matching regeneration behavior. A completed recurring Task requires a
+nonzero `DeadOccur`, and the response includes `DeadOccur=1` for that case.
 
 ## Notes (MS-ASNOTE, WBXML codepage 23)
 
