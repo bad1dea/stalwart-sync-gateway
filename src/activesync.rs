@@ -2009,6 +2009,10 @@ fn write_oof_get_body(
     use wbxml::eas::settings as set;
 
     let is_enabled = vacation.as_ref().is_some_and(|v| v.is_enabled);
+    let is_scheduled = is_enabled
+        && vacation
+            .as_ref()
+            .is_some_and(|v| v.from_date.is_some() && v.to_date.is_some());
     // PROVEN (not guessed) via a clean isolated A/B, everything else
     // held constant across both runs: OofState=1 -> toggle shows ON,
     // End Date shows None. OofState=2 -> toggle shows OFF, End Date
@@ -2021,7 +2025,7 @@ fn write_oof_get_body(
     // actually tried -- every previous test used "Text").
     let oof_state_value = if !is_enabled {
         "0"
-    } else if vacation.as_ref().is_some_and(|v| v.to_date.is_some()) {
+    } else if is_scheduled {
         "2"
     } else {
         "1"
@@ -2030,24 +2034,16 @@ fn write_oof_get_body(
     builder.leaf(set::OOF_STATE, oof_state_value);
     if is_enabled {
         if let Some(vacation) = vacation {
-            // Dashed ISO with a literal ".000" suffix, matching the
-            // device's own StartTime/EndTime encoding exactly (same
-            // failure class as the original DateReceived bug, commit
-            // 1bac5ae) -- see eas_datetime_dashes's own doc comment.
-            // Real fix: the iOS Automatic Reply UI has no Start Date
-            // concept at all -- only an End Date toggle+field. Every
-            // previous attempt at the scheduled-Oof display bug changed
-            // OofMessage content or the round-trip shape and left
-            // StartTime in the response untouched; never actually tried
-            // dropping it. StartTime is minOccurs=0 in the real
-            // [MS-ASWBXML] SettingsResponse.xsd (independently optional
-            // of EndTime), so omitting it while keeping EndTime is
-            // schema-valid. If the device's own "is this schedule
-            // currently active" check for the toggle compares against
-            // StartTime and something about that comparison is what's
-            // failing, this removes it from the equation entirely.
-            if let Some(to) = &vacation.to_date {
-                builder.leaf(set::END_TIME, eas_datetime_dashes(to));
+            // A time-based OOF schedule must round-trip both JMAP bounds.
+            // They are independently optional in the response schema, but
+            // this gateway only treats a complete pair as a schedule.
+            if is_scheduled {
+                if let Some(from) = &vacation.from_date {
+                    builder.leaf(set::START_TIME, eas_datetime_dashes(from));
+                }
+                if let Some(to) = &vacation.to_date {
+                    builder.leaf(set::END_TIME, eas_datetime_dashes(to));
+                }
             }
             let reply_message = vacation
                 .text_body
@@ -9005,6 +9001,19 @@ mod tests {
             Some("2026-12-01T00:00:00.000Z")
         );
         assert_eq!(
+            eas::find_text_after(&doc, eas::settings::START_TIME),
+            Some("2026-11-24T00:00:00.000Z")
+        );
+        let get_children = eas::child_elements(&doc);
+        assert!(
+            get_children
+                .iter()
+                .position(|child| eas::contains_token(child, eas::settings::START_TIME))
+                < get_children
+                    .iter()
+                    .position(|child| eas::contains_token(child, eas::settings::END_TIME))
+        );
+        assert_eq!(
             eas::find_all_text_after(&doc, eas::settings::ENABLED),
             vec!["1", "0", "0"]
         );
@@ -9023,6 +9032,22 @@ mod tests {
                 .count(),
             3
         );
+
+        let indefinite = Some(VacationResponse {
+            is_enabled: true,
+            subject: Some("Away".to_owned()),
+            text_body: Some("Back soon".to_owned()),
+            ..Default::default()
+        });
+        let mut builder = DocumentBuilder::new();
+        write_oof_get_body(&mut builder, &indefinite);
+        let doc = decode_document(&encode_document(&builder.finish())).unwrap();
+        assert_eq!(
+            eas::find_text_after(&doc, eas::settings::OOF_STATE),
+            Some("1")
+        );
+        assert!(!eas::contains_token(&doc, eas::settings::START_TIME));
+        assert!(!eas::contains_token(&doc, eas::settings::END_TIME));
     }
 
     #[test]

@@ -187,8 +187,10 @@ See `src/activesync/resolve_recipients.rs` and
 ### Settings (§2.2.1.18)
 Get/set server-side settings: DeviceInformation, UserInformation,
 Oof (out-of-office), RightsManagementInformation. The gateway reads and
-writes Oof through JMAP `VacationResponse`; DeviceInformation/UserInformation
-are handled at the protocol edge. Enabled vacation behavior has not been
+writes Oof through JMAP `VacationResponse`; scheduled enabled Get responses
+include both stored bounds as `StartTime` and `EndTime`, while indefinite
+enabled responses omit both. DeviceInformation/UserInformation are handled at
+the protocol edge. Enabled vacation behavior has not been
 verified on a real client. RightsManagementInformation (IRM) remains out of
 scope for this personal-account gateway.
 

@@ -243,7 +243,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    Compose files now forward this opt-in to the container; resolved Compose
    checks show 14.0 by default and 16.1 when explicitly set. A local WBXML
    regression now checks the enabled Oof Get response's scheduled state,
-   end-time shape, and three audience-specific message blocks; it does not
+   both schedule bounds in protocol order, and three audience-specific message
+   blocks; it does not
    replace checking the enabled state with a real client. Ignored real-Stalwart
    E2E tests now cover ResolveRecipients free/busy values through the EAS
    response and a contact-photo response through a real ContactCard. They
