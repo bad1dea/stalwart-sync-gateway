@@ -310,9 +310,12 @@ occurrence proposal.
 ResolveRecipients Availability (introduced in EAS 14.0) now uses JMAP
 `Principal/getAvailability` for exact recipients and returns the required
 30-minute MergedFreeBusy string. Input bounds and per-recipient errors are
-covered by regressions. The implementation is deployed in
+covered by regressions. The ignored live-Stalwart
+`e2e_calendar_busy_status_round_trips_between_devices` test passed all four
+free/busy values through ResolveRecipients and Sync on two devices; its
+temporary account was removed. The implementation is deployed in
 `deploy-2026-11-25-eas-resolve-recipient-availability-220f007`; live Stalwart
-free/busy round-trip verification remains pending.
+free/busy round-trip verification is complete.
 
 ResolveRecipients Picture is deployed in
 `deploy-2026-11-25-eas-resolve-recipient-picture-per-query-18c02ea`. A mocked

@@ -10,8 +10,8 @@ MIME policy, partial Sync/options persistence, and Sync long-poll/window
 handling. Check the current Rust implementation before treating any older
 “Missing” or “Not implemented” statement below as actionable.
 
-Current source `main` is `f5d0c0d`; its last change adds an ignored live-test
-only. The full suite passes 480 tests (78 ignored); strict Clippy, formatting,
+Current source `main` is `3fdb3f0`; recent commits add contact field round-trips
+and an ignored live-test. The full suite passes 480 tests (78 ignored); strict Clippy, formatting,
 and diff checks pass. The functional code at `412c9c6` is deployed to Amy's
 isolated bridge as
 `localhost/eas16-isolated:412c9c6` (image
@@ -25,8 +25,8 @@ EAS `ResolveRecipients` Availability now preserves the saved EAS free, tentative
 busy, and out-of-office values when Stalwart exposes event details. The bridge
 requests the supported event ID projection, then fetches `freeBusyStatus` with
 `CalendarEvent/get`; it uses JMAP's `busyStatus` when event details are not
-available. The live `e2e_calendar_busy_status_round_trips_between_devices`
-test passes against isolated Stalwart at protocol 14.0, checking all four
+available. The ignored real-Stalwart `e2e_calendar_busy_status_round_trips_between_devices`
+test passed against isolated Stalwart at protocol 14.0, checking all four
 statuses through ResolveRecipients and Sync on two devices. Its temporary
 account was removed after the run. The server's rejected `freeBusyStatus`
 event projection and omitted availability `accountId` are both covered by the
@@ -39,7 +39,7 @@ bridge preserves their values without fabricating related ContactCard IDs.
 Partial updates are state-guarded, empty scalar values clear the corresponding
 property, and an empty Children container clears the list. WBXML parsing,
 writing, Sync fingerprinting, JMAP readback, update, and clear behavior have
-regression coverage. The current full suite passes 480 tests (77 ignored).
+regression coverage. The current full suite passes 480 tests (78 ignored).
 The deployment runs on the isolated test bridge only; no real contact was
 modified.
 
