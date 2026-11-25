@@ -2278,6 +2278,7 @@ dependencies = [
  "duke-slides",
  "encoding_rs",
  "http",
+ "image",
  "mail-parser",
  "msg_parser",
  "pdf-extract",

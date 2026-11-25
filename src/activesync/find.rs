@@ -114,6 +114,9 @@ const MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FIND_PDF_OCR_PAGES: u32 = 100;
 const MAX_FIND_PDF_OCR_RUNTIME: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_FIND_PDF_OCR_EDGE: u32 = 1600;
+const MAX_FIND_IMAGE_OCR_EDGE: u32 = 12_000;
+const MAX_FIND_IMAGE_OCR_PIXELS: u64 = 40_000_000;
+const MAX_FIND_IMAGE_OCR_RUNTIME: std::time::Duration = std::time::Duration::from_secs(5);
 const MAX_FIND_ARCHIVE_ENTRIES: usize = 4096;
 const MAX_FIND_ARCHIVE_EXPANDED_BYTES: usize = 16 * 1024 * 1024;
 static FIND_PDF_OCR_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
@@ -352,11 +355,17 @@ async fn execute(
                         } else {
                             &downloaded_type
                         };
-                        if content_type.split(';').next().is_some_and(|media_type| {
-                            media_type.trim().eq_ignore_ascii_case("application/pdf")
-                        }) {
+                        let media_type = content_type
+                            .split(';')
+                            .next()
+                            .unwrap_or_default()
+                            .trim()
+                            .to_ascii_lowercase();
+                        if media_type == "application/pdf" {
                             attachment.extracted_text =
                                 extract_find_pdf_text_async(content_type.to_owned(), bytes).await;
+                        } else if is_find_ocr_image_type(&media_type) {
+                            attachment.extracted_text = extract_find_image_text_async(bytes).await;
                         } else {
                             attachment.extracted_text =
                                 extract_find_attachment_text(content_type, &bytes);
@@ -502,6 +511,16 @@ async fn extract_find_pdf_text_async(content_type: String, bytes: Vec<u8>) -> Op
     .ok()?
 }
 
+async fn extract_find_image_text_async(bytes: Vec<u8>) -> Option<String> {
+    let permit = FIND_PDF_OCR_SLOTS.acquire().await.ok()?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        extract_find_image_text_with_tool(&bytes, std::path::Path::new("tesseract"))
+    })
+    .await
+    .ok()?
+}
+
 fn is_extractable_attachment_type(content_type: &str) -> bool {
     let media_type = content_type
         .split(';')
@@ -513,6 +532,7 @@ fn is_extractable_attachment_type(content_type: &str) -> bool {
         || media_type.ends_with("+xml")
         || media_type.ends_with("+json")
         || is_textual_application_type(&media_type)
+        || is_find_ocr_image_type(&media_type)
         || matches!(
             media_type.as_str(),
             "application/rtf"
@@ -528,6 +548,13 @@ fn is_extractable_attachment_type(content_type: &str) -> bool {
                 | "message/global"
         )
         || is_extractable_archive_type(&media_type)
+}
+
+fn is_find_ocr_image_type(media_type: &str) -> bool {
+    matches!(
+        media_type,
+        "image/bmp" | "image/gif" | "image/jpeg" | "image/png" | "image/tiff" | "image/webp"
+    )
 }
 
 fn is_textual_application_type(media_type: &str) -> bool {
@@ -1179,6 +1206,64 @@ fn extract_pdf_pages_ocr_with_tools(
         output.push((*page, text));
     }
     Some(output)
+}
+
+fn extract_find_image_text_with_tool(bytes: &[u8], tesseract: &std::path::Path) -> Option<String> {
+    use std::{io::Cursor, time::Instant};
+
+    if bytes.is_empty() || bytes.len() as u64 > MAX_FIND_ATTACHMENT_DOWNLOAD_BYTES {
+        return None;
+    }
+    let deadline = Instant::now() + MAX_FIND_IMAGE_OCR_RUNTIME;
+    let reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let (width, height) = reader.into_dimensions().ok()?;
+    if width == 0
+        || height == 0
+        || width > MAX_FIND_IMAGE_OCR_EDGE
+        || height > MAX_FIND_IMAGE_OCR_EDGE
+        || u64::from(width).saturating_mul(u64::from(height)) > MAX_FIND_IMAGE_OCR_PIXELS
+    {
+        return None;
+    }
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_FIND_IMAGE_OCR_EDGE);
+    limits.max_image_height = Some(MAX_FIND_IMAGE_OCR_EDGE);
+    limits.max_alloc = Some(160 * 1024 * 1024);
+    reader.limits(limits);
+    let image = reader.decode().ok()?;
+    let image = image.thumbnail(MAX_FIND_PDF_OCR_EDGE, MAX_FIND_PDF_OCR_EDGE);
+    let temp = FindOcrTempDir::create()?;
+    let image_path = temp.0.join("image.png");
+    image.save(&image_path).ok()?;
+    let output_base = temp.0.join("recognized");
+    let timeout = bounded_find_ocr_timeout(
+        deadline.saturating_duration_since(Instant::now()),
+        MAX_FIND_IMAGE_OCR_RUNTIME,
+    )?;
+    if !run_find_ocr_command(
+        std::process::Command::new(tesseract)
+            .arg(&image_path)
+            .arg(&output_base)
+            .arg("-l")
+            .arg("eng")
+            .arg("--psm")
+            .arg("3"),
+        timeout,
+    ) || Instant::now() >= deadline
+    {
+        return None;
+    }
+    let text_path = output_base.with_extension("txt");
+    if std::fs::metadata(&text_path).ok()?.len() > MAX_FIND_ATTACHMENT_TEXT_BYTES {
+        return None;
+    }
+    let text = std::fs::read_to_string(text_path).ok()?;
+    (text.len() as u64 <= MAX_FIND_ATTACHMENT_TEXT_BYTES).then_some(text)
 }
 
 fn extract_legacy_xls_text(bytes: &[u8]) -> Option<String> {
@@ -3454,6 +3539,34 @@ mod tests {
         )
         .expect("binary Excel workbook text should be extractable");
         assert!(extracted.split_whitespace().any(|cell| cell == "42735"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_find_ocr_decodes_bounded_raster_and_reads_text() {
+        use std::{fs, io::Cursor, os::unix::fs::PermissionsExt};
+
+        let mut png = Vec::new();
+        image::DynamicImage::new_rgb8(32, 24)
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let tools = FindOcrTempDir::create().unwrap();
+        let ocr = tools.0.join("tesseract");
+        fs::write(&ocr, "#!/bin/sh\nprintf 'raster needle' > \"$2.txt\"\n").unwrap();
+        let mut permissions = fs::metadata(&ocr).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&ocr, permissions).unwrap();
+
+        assert!(is_extractable_attachment_type("image/png"));
+        let extracted = extract_find_image_text_with_tool(&png, &ocr).unwrap();
+        assert_eq!(extracted, "raster needle");
+        assert!(extract_find_image_text_with_tool(b"not an image", &ocr).is_none());
+
+        let mut oversized = Vec::new();
+        image::DynamicImage::new_rgb8(MAX_FIND_IMAGE_OCR_EDGE + 1, 1)
+            .write_to(&mut Cursor::new(&mut oversized), image::ImageFormat::Png)
+            .unwrap();
+        assert!(extract_find_image_text_with_tool(&oversized, &ocr).is_none());
     }
 
     #[test]

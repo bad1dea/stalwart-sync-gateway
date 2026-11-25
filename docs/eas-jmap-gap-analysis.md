@@ -22,6 +22,14 @@ pass. Deployed as `deploy-2026-11-24-eas-find-xlsb-c11b2cd`; Homelab commit
 started `2026-11-25T03:17:44Z`, restart count zero, `/healthz` `ok`, and
 `/readyz` `ready`. Production remains at the 14.0 protocol default.
 
+Find raster attachment OCR is implemented for PNG, JPEG, GIF, TIFF, BMP, and
+WebP. Image dimensions are checked before decoding (12,000 pixels per edge,
+40 million pixels total), decoding allocations are capped, images are reduced
+to a 1,600-pixel edge, and Tesseract has a five-second budget. A regression
+uses a generated PNG and a controlled OCR executable, plus malformed and
+over-dimension inputs; the full suite passes 406 tests (75 ignored), strict
+Clippy, formatting, and diff checks. The change is queued for deployment.
+
 Completed since reconciliation: **Task recurrence Add/Fetch**, including
 the encoded Sync command parser path, is now live-verified against the
 isolated Stalwart bridge. EAS Add creates a Task with the expected daily
@@ -129,8 +137,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    files, and
    Word, Excel, and PowerPoint package comment text, plus
    MIME-declared charsets for text attachments and XML declaration encodings.
-   Scanned-only PDFs with up to one hundred image-only pages use resource-bounded
-   OCR. Attachments above 16 MiB and PDFs with more than one hundred image-only
+   Scanned-only PDFs with up to one hundred image-only pages and supported
+   raster image attachments use resource-bounded OCR. Attachments above 16 MiB and PDFs with more than one hundred image-only
    remain outside exact local matching. Mixed
    PDFs retain native text and OCR only pages without extractable text, even
    when the PDF has more than three total pages. A four-page real fixture
