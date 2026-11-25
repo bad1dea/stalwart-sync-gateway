@@ -38,6 +38,10 @@ fn child(document: &wbxml::Document, token: wbxml::token::Token) -> Option<wbxml
     eas::child_elements(document).into_iter().find(|doc| matches!(doc.nodes.first(), Some(wbxml::Node::Start(t)) if t.code_page == token.code_page && t.token == token.token))
 }
 
+fn valid_max_pictures(value: &str) -> bool {
+    value.parse::<u32>().is_ok()
+}
+
 fn parse(document: &wbxml::Document) -> Result<Request, &'static str> {
     let search_id = eas::find_text_after(document, f::SEARCH_ID).ok_or("missing SearchId")?;
     if search_id.len() != 36 || uuid::Uuid::parse_str(search_id).is_err() {
@@ -82,10 +86,8 @@ fn parse(document: &wbxml::Document) -> Result<Request, &'static str> {
             }
         }
         if let Some(max_pictures) = eas::find_text_after(picture, f::MAX_PICTURES) {
-            let max_pictures = max_pictures
-                .parse::<i64>()
-                .map_err(|_| "invalid MaxPictures")?;
-            if max_pictures < 0 {
+            // MaxPictures is xs:unsignedInt in the Find schema.
+            if !valid_max_pictures(max_pictures) {
                 return Err("invalid MaxPictures");
             }
         }
@@ -4684,5 +4686,13 @@ mod tests {
         assert!(
             !email_matches_phrases("!!! alpha", None, None, None, None, kind, &terms,).unwrap()
         );
+    }
+
+    #[test]
+    fn max_pictures_obeys_unsigned_int_wire_range() {
+        assert!(valid_max_pictures("0"));
+        assert!(valid_max_pictures("4294967295"));
+        assert!(!valid_max_pictures("4294967296"));
+        assert!(!valid_max_pictures("-1"));
     }
 }

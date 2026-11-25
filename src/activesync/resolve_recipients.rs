@@ -275,17 +275,18 @@ fn request(doc: &Document) -> Result<ParsedRequest, &'static str> {
                         if !picture_fields.insert((token.code_page, token.token)) {
                             return Err("5");
                         }
-                        let value: usize = eas::find_text_after(&field, *token)
-                            .ok_or("5")?
-                            .parse()
-                            .map_err(|_| "5")?;
+                        let value_text = eas::find_text_after(&field, *token).ok_or("5")?;
                         if is(&field, rr::MAX_SIZE) {
+                            let value: usize = value_text.parse().map_err(|_| "5")?;
                             if value > 102400 {
                                 return Err("5");
                             }
                             max_size = value;
                         } else if is(&field, rr::MAX_PICTURES) {
-                            max_pictures = value;
+                            // MS-ASDTYPE defines integer here as xs:unsignedInt;
+                            // parsing as usize would accept values outside the
+                            // wire schema on 64-bit hosts.
+                            max_pictures = value_text.parse::<u32>().map_err(|_| "5")? as usize;
                         } else {
                             return Err("5");
                         }
@@ -651,6 +652,28 @@ mod tests {
         let document = wbxml::decode_document(&wbxml::encode_document(&builder.finish())).unwrap();
         let (_, _, _, picture) = request(&document).unwrap();
         assert_eq!(picture.unwrap().max_pictures, usize::MAX);
+
+        for value in ["4294967295", "4294967296", "-1"] {
+            let mut builder = DocumentBuilder::new();
+            builder.start(rr::RESOLVE_RECIPIENTS);
+            builder.leaf(rr::TO, "person@example.test");
+            builder.start(rr::OPTIONS);
+            builder.start(rr::PICTURE);
+            builder.leaf(rr::MAX_PICTURES, value);
+            builder.end();
+            builder.end();
+            builder.end();
+            let document =
+                wbxml::decode_document(&wbxml::encode_document(&builder.finish())).unwrap();
+            if value == "4294967295" {
+                assert_eq!(
+                    request(&document).unwrap().3.unwrap().max_pictures,
+                    u32::MAX as usize
+                );
+            } else {
+                assert_eq!(request(&document).unwrap_err(), "5");
+            }
+        }
 
         let mut builder = DocumentBuilder::new();
         builder.start(rr::RESOLVE_RECIPIENTS);

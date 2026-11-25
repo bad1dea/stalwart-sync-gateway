@@ -76,9 +76,11 @@ optional and its limit is applied independently to each `To` query, matching
 the protocol. Focused parser, per-query photo limit, status, deduplication,
 and blob-ID mapping regressions pass. A mocked gateway/JMAP test verifies a
 blob-backed photo reaches the WBXML response and is rejected for protocol
-14.0. Full suite: 424 passed, 76 ignored; strict Clippy, formatting, and diff
-checks pass. The per-query correction is
-deployed as
+14.0. Both Find and ResolveRecipients now validate `MaxPictures` against the
+schema's `xs:unsignedInt` range, including the maximum value and overflow
+rejection. The focused boundary regressions and full suite pass (425 passed,
+77 ignored); strict Clippy, formatting, and diff checks pass. The per-query
+correction is deployed as
 `deploy-2026-11-25-eas-resolve-recipient-picture-per-query-18c02ea`; Homelab
 commit `dd7d248`, image
 `sha256:ecb7a89318b665b426dfd594f65968a1465c4044b490808853b08e91480e4ad2`,
