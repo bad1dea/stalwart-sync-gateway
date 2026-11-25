@@ -260,13 +260,13 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    E2E tests now cover ResolveRecipients free/busy values through the EAS
    response and a contact-photo response through a real ContactCard. They
    compile here but have not been run against real Stalwart because no `E2E_*`
-   credentials are configured in this workspace. A fresh runtime check found
-   the isolated gateway on Amy at `100.64.0.50:18090`, backed by
-   `eas16-clean-stalwart` on its separate `eas16-interop-net`; `/healthz` and
-   `/readyz` return `ok` and `ready`, and the public test hostname routes to
-   it. Its current image is `localhost/eas16-isolated:4b1d70e` and its Compose
-   environment omits `EAS_MAX_PROTOCOL_VERSION`, so the gateway currently
-   defaults to 14.0. The former Homelab test service was
+   credentials are configured in this workspace. A runtime check on
+   2026-11-25 found the isolated gateway on Amy at `100.64.0.50:18090`, backed
+   by `eas16-clean-stalwart` on its separate `eas16-interop-net`; `/healthz`
+   and `/readyz` returned `ok` and `ready`, with zero restarts. The running
+   image was `localhost/eas16-isolated:8688c10`, started
+   `2026-11-25T08:25:16.868499514Z`. Its Compose environment omits
+   `EAS_MAX_PROTOCOL_VERSION`, so the gateway defaults to 14.0. The former Homelab test service was
    decommissioned in commit `6051729`; the live temporary stack is outside
    that checkout. Before real-client validation, explicitly set the isolated
    bridge's protocol ceiling to 16.1 during the planned test window. Production
@@ -276,11 +276,8 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    `deploy-2026-11-24-eas-16.1-opt-in-13bea13`; homelab commit `fcb698e`, image
    `sha256:902bfe01a2ec516b68b7517f9a38ba730bfafdeb66eb5cd5ec85822ef4e44b0d`,
    started `2026-11-24T23:30:09Z`, restart count zero, `/healthz` `ok`, and
-   `/readyz` `ready`. The isolated Amy bridge has since been refreshed from
-   `main` through commit `4b1d70e`, image
-   `sha256:a3b1a00a4038a876198c5d42c38683b0ad702f4fb77b78c095472ab1eba60395`,
-   with no protocol override, so it remains on the 14.0 default. Real-client
-   certification remains a separate step.
+   `/readyz` `ready`. The current isolated deployment is recorded above;
+   real-client certification remains a separate step.
 2. **Find content coverage — code paths complete within explicit resource
    budgets.** Bounded extraction supports legacy `.xls`,
    binary Excel `.xlsb`,
