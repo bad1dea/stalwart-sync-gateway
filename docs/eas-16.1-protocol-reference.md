@@ -14,10 +14,9 @@ session]** rather than stated as fact — see the note at the bottom.
 
 The spec's own overview lays out the intended command sequence:
 
-1. **Autodiscover** — client resolves account config (out of scope for
-   this gateway; iOS is pointed at `EAS_PUBLIC_URL` directly, no
-   Autodiscover wiring — see `compose/zoidberg/services/stalwart-sync-gateway-test.yml`'s
-   comment on why that's deliberate for the A/B test).
+1. **Autodiscover** — client resolves account config. The gateway implements
+   Autodiscover and advertises the configured `EAS_PUBLIC_URL`; clients can
+   also be pointed directly at the isolated test endpoint for protocol tests.
 2. **Provision** — device sends its info, gets + acks security policy.
 3. **FolderSync** — retrieves the folder hierarchy.
 4. **GetItemEstimate** — count of pending changes, then **Sync** to

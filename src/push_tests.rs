@@ -12066,6 +12066,7 @@ async fn resolve_recipients_returns_contact_photo_from_bounded_jmap_blob() {
     let mut builder = eas::DocumentBuilder::new();
     builder.start(rr::RESOLVE_RECIPIENTS);
     builder.leaf(rr::TO, "photo@example.test");
+    builder.leaf(rr::TO, "photo@example.test");
     builder.start(rr::OPTIONS);
     builder.start(rr::PICTURE);
     builder.leaf(rr::MAX_SIZE, "102400");
@@ -12085,9 +12086,12 @@ async fn resolve_recipients_returns_contact_photo_from_bounded_jmap_blob() {
     let document = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(
         eas::find_all_text_after(&document, rr::STATUS),
-        vec!["1", "1", "1"]
+        vec!["1", "1", "1", "1", "1"]
     );
-    assert_eq!(eas::find_all_text_after(&document, rr::DATA), vec!["AQID"]);
+    assert_eq!(
+        eas::find_all_text_after(&document, rr::DATA),
+        vec!["AQID", "AQID"]
+    );
     assert_eq!(
         *env.mock.downloaded_blobs.lock().unwrap(),
         vec!["contact-photo-blob"]
