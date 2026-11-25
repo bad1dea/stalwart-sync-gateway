@@ -3304,7 +3304,15 @@ fn extract_task_fields(nodes: &[Node]) -> TaskFields {
     } else if let Some(document) = recurrence_documents.first() {
         fields.recurrence_present = true;
         match parse_task_recurrence(document) {
-            Ok((recurrence, recurrence_start)) => {
+            Ok(parsed) => {
+                let recurrence = parsed.recurrence;
+                let recurrence_start = parsed.start;
+                if fields.complete == Some(true)
+                    && recurrence.is_some()
+                    && parsed.dead_occur.is_none_or(|value| value == 0)
+                {
+                    fields.unsupported_recurrence = true;
+                }
                 fields.recurrence = recurrence;
                 if let Some(start) = recurrence_start {
                     // MS-ASTASK carries the series start inside Recurrence
@@ -3378,15 +3386,25 @@ fn task_recurrence_documents(nodes: &[Node]) -> Vec<Document> {
     documents
 }
 
-fn parse_task_recurrence(
-    document: &Document,
-) -> Result<(Option<CalendarRecurrence>, Option<String>), ()> {
+struct ParsedTaskRecurrence {
+    recurrence: Option<CalendarRecurrence>,
+    start: Option<String>,
+    dead_occur: Option<u8>,
+}
+
+fn parse_task_recurrence(document: &Document) -> Result<ParsedTaskRecurrence, ()> {
     if matches!(document.nodes.as_slice(), [Node::Start(token)] if same_token(*token, tasks::RECURRENCE))
     {
-        return Ok((None, None));
+        return Ok(ParsedTaskRecurrence {
+            recurrence: None,
+            start: None,
+            dead_occur: None,
+        });
     }
     let mut nodes = vec![Node::Start(calendar::RECURRENCE)];
     let mut recurrence_start = None;
+    let mut regenerate = None;
+    let mut dead_occur = None;
     for (token, value) in recurrence_child_texts(document)? {
         if same_token(token, tasks::OCCURRENCES) && value.parse::<u8>().is_err() {
             // MS-ASTASK defines Occurrences as xs:unsignedByte, unlike the
@@ -3398,6 +3416,22 @@ fn parse_task_recurrence(
                 return Err(());
             }
             recurrence_start = Some(value);
+            continue;
+        }
+        if same_token(token, tasks::REGENERATE) {
+            if regenerate.is_some() || value.parse::<u8>().map_err(|_| ())? != 0 {
+                // JMAP has no task regeneration-on-completion semantic. False
+                // is the EAS default and needs no stored representation.
+                return Err(());
+            }
+            regenerate = Some(());
+            continue;
+        }
+        if same_token(token, tasks::DEAD_OCCUR) {
+            let value = value.parse::<u8>().map_err(|_| ())?;
+            if dead_occur.replace(value).is_some() {
+                return Err(());
+            }
             continue;
         }
         let mapped = match token.token {
@@ -3429,7 +3463,11 @@ fn parse_task_recurrence(
     {
         return Err(());
     }
-    Ok((recurrence, recurrence_start))
+    Ok(ParsedTaskRecurrence {
+        recurrence,
+        start: recurrence_start,
+        dead_occur,
+    })
 }
 
 fn recurrence_child_texts(document: &Document) -> Result<Vec<(Token, String)>, ()> {
@@ -4461,6 +4499,47 @@ mod tests {
         assert!(fields.recurrence_present);
         assert_eq!(fields.recurrence, None);
         assert!(!fields.unsupported_recurrence);
+    }
+
+    #[test]
+    fn task_recurrence_validates_regenerate_and_dead_occur() {
+        let request = |complete: &str, dead_occur: Option<&str>, regenerate: Option<&str>| {
+            let mut builder = DocumentBuilder::new();
+            builder.start(airsync::APPLICATION_DATA);
+            builder.leaf(tasks::COMPLETE, complete);
+            builder.leaf(tasks::UTC_START_DATE, "2026-11-24T09:00:00.000Z");
+            builder.start(tasks::RECURRENCE);
+            builder.leaf(tasks::START, "2026-11-24T09:00:00.000Z");
+            builder.leaf(tasks::TYPE, "0");
+            if let Some(regenerate) = regenerate {
+                builder.leaf(tasks::REGENERATE, regenerate);
+            }
+            if let Some(dead_occur) = dead_occur {
+                builder.leaf(tasks::DEAD_OCCUR, dead_occur);
+            }
+            builder.end();
+            builder.end();
+            extract_task_fields(&builder.finish().nodes)
+        };
+
+        let completed_recurring = request("1", Some("1"), Some("0"));
+        assert!(!completed_recurring.unsupported_recurrence);
+        assert_eq!(completed_recurring.recurrence.as_ref().unwrap().kind, 0);
+
+        for (dead_occur, regenerate) in [
+            (None, None),
+            (Some("0"), None),
+            (Some("1"), Some("1")),
+            (Some("256"), None),
+            (Some("1"), Some("not-a-number")),
+        ] {
+            assert!(
+                request("1", dead_occur, regenerate).unsupported_recurrence,
+                "DeadOccur={dead_occur:?}, Regenerate={regenerate:?}"
+            );
+        }
+
+        assert!(!request("0", None, None).unsupported_recurrence);
     }
 
     #[test]

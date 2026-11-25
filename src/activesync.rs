@@ -7846,6 +7846,12 @@ fn write_task_fields(
         if let Some(series_start) = task.start.as_deref().and_then(format_due) {
             builder.leaf(tasks::START, series_start);
         }
+        if task.completed {
+            // MS-ASTASK requires a nonzero DeadOccur when a client marks a
+            // recurring Task complete. Emit the same marker on readback so
+            // the completed object remains recognizable as recurring.
+            builder.leaf(tasks::DEAD_OCCUR, "1");
+        }
         builder.leaf(tasks::TYPE, recurrence.kind.to_string());
         if matches!(recurrence.kind, 2 | 3 | 5 | 6) {
             builder.leaf(tasks::CALENDAR_TYPE, "1");
@@ -9610,6 +9616,20 @@ mod tests {
         super::write_task_command(&mut builder, air::ADD, &task, &[], ProtocolVersion::V16_1);
         assert_eq!(
             eas::find_text_after(&builder.finish(), tasks::CALENDAR_TYPE),
+            Some("1")
+        );
+
+        task.completed = true;
+        let mut builder = eas::DocumentBuilder::new();
+        super::write_task_command(
+            &mut builder,
+            air::CHANGE,
+            &task,
+            &[],
+            ProtocolVersion::V16_1,
+        );
+        assert_eq!(
+            eas::find_text_after(&builder.finish(), tasks::DEAD_OCCUR),
             Some("1")
         );
     }
