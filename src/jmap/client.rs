@@ -3660,13 +3660,34 @@ impl JmapClient {
                 capabilities::CALENDARS,
                 "CalendarEvent",
                 serde_json::json!({ "inCalendar": calendar_id }),
-                // CalendarEvent participants contain protocol-relevant
-                // extension properties (`expectReply`, `scheduleUpdated`)
-                // that some JMAP servers omit from a projected `get` even
-                // when the parent `participants` property is requested.
-                // Fetch the complete record so ResponseRequested and
-                // AppointmentReplyTime survive the JMAP → EAS conversion.
-                None,
+                Some(&[
+                    "id",
+                    "calendarIds",
+                    "uid",
+                    "@type",
+                    "title",
+                    "updated",
+                    "description",
+                    "descriptionContentType",
+                    "start",
+                    "timeZone",
+                    "duration",
+                    "status",
+                    "locations",
+                    "showWithoutTime",
+                    "freeBusyStatus",
+                    "privacy",
+                    "keywords",
+                    "alerts",
+                    "useDefaultAlerts",
+                    "recurrenceRule",
+                    "recurrenceOverrides",
+                    "participants",
+                    "replyTo",
+                    "links",
+                    "virtualLocations",
+                    "iCalendar",
+                ]),
                 limit,
             )
             .await?;
@@ -10735,14 +10756,55 @@ fn calendar_appointment_reply_time(
         })
 }
 
-fn calendar_response_requested(participants: &BTreeMap<String, ParticipantObject>) -> Option<bool> {
-    let mut attendee_preferences = participants
-        .values()
-        .filter(|participant| {
-            participant.roles.get("attendee") == Some(&true)
-                && participant.roles.get("owner") != Some(&true)
+fn calendar_appointment_reply_time_for_event(
+    participants: &[ParticipantObject],
+    organizer: Option<usize>,
+    user: &str,
+) -> Option<String> {
+    let mut matches = participants
+        .iter()
+        .enumerate()
+        .filter(|(index, participant)| {
+            Some(*index) != organizer
+                && participant
+                    .email
+                    .as_deref()
+                    .is_some_and(|email| email.eq_ignore_ascii_case(user))
+        });
+    let (_, participant) = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    participant
+        .schedule_updated
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|date| {
+            date.with_timezone(&chrono::Utc)
+                .format("%Y%m%dT%H%M%SZ")
+                .to_string()
         })
-        .map(|participant| participant.expect_reply.unwrap_or(false));
+}
+
+fn calendar_response_requested(
+    participants: &[ParticipantObject],
+    organizer: Option<usize>,
+) -> Option<bool> {
+    // Use the same roster as CalendarEvent conversion below: Stalwart may
+    // omit `roles` on a participant even though it supplies its email and
+    // response properties. The selected organizer is the only participant
+    // excluded from EAS Attendees.
+    let mut attendee_preferences = participants
+        .iter()
+        .enumerate()
+        .filter(|(index, participant)| {
+            Some(*index) != organizer
+                && participant
+                    .email
+                    .as_deref()
+                    .is_some_and(|email| !email.is_empty())
+        })
+        .map(|(_, participant)| participant.expect_reply.unwrap_or(false));
     let first = attendee_preferences.next()?;
     attendee_preferences
         .all(|preference| preference == first)
@@ -11513,13 +11575,7 @@ impl From<CalendarEventObject> for CalendarEvent {
 }
 
 fn calendar_event_from(value: CalendarEventObject, current_user: Option<&str>) -> CalendarEvent {
-    let appointment_reply_time = current_user
-        .and_then(|user| calendar_appointment_reply_time(value.participants.as_ref(), user));
     let disallow_new_time_proposal = calendar_disallow_new_time_proposal(value.i_calendar.as_ref());
-    let response_requested = value
-        .participants
-        .as_ref()
-        .and_then(calendar_response_requested);
     let recurrence_rule = value.recurrence_rule;
     let recurrence_time_zone = value.time_zone.clone();
     let recurrence_exceptions = calendar_recurrence_exceptions(
@@ -11630,6 +11686,9 @@ fn calendar_event_from(value: CalendarEventObject, current_user: Option<&str>) -
         },
         _ => None,
     };
+    let response_requested = calendar_response_requested(&participants, organizer);
+    let appointment_reply_time = current_user
+        .and_then(|user| calendar_appointment_reply_time_for_event(&participants, organizer, user));
     let mut organizer_email = None;
     let mut organizer_name = None;
     let mut attendees = Vec::new();
@@ -13081,14 +13140,48 @@ mod tests {
                 None,
             ),
             (
+                serde_json::json!({
+                    "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                    "a":{"email":"a@example.test","expectReply":false}
+                }),
+                Some(false),
+            ),
+            (
                 serde_json::json!({"owner":{"email":"owner@example.test","roles":{"owner":true}}}),
                 None,
             ),
         ] {
             let participants: std::collections::BTreeMap<String, super::ParticipantObject> =
                 serde_json::from_value(participants).unwrap();
-            assert_eq!(super::calendar_response_requested(&participants), expected);
+            let participants: Vec<_> = participants.into_values().collect();
+            let organizer = participants
+                .iter()
+                .position(|participant| participant.roles.get("owner") == Some(&true));
+            assert_eq!(
+                super::calendar_response_requested(&participants, organizer),
+                expected
+            );
         }
+    }
+
+    #[test]
+    fn calendar_event_response_fields_follow_the_emitted_attendee_roster() {
+        let event: super::CalendarEventObject = serde_json::from_value(serde_json::json!({
+            "id":"event",
+            "replyTo":{"imip":"mailto:owner@example.test"},
+            "participants": {
+                "owner":{"email":"owner@example.test","roles":{"owner":true}},
+                "guest":{"email":"guest@example.test","expectReply":false,
+                    "scheduleUpdated":"2042-07-06T09:30:00Z"}
+            }
+        }))
+        .unwrap();
+        let converted = super::calendar_event_from(event, Some("guest@example.test"));
+        assert_eq!(converted.response_requested, Some(false));
+        assert_eq!(
+            converted.appointment_reply_time.as_deref(),
+            Some("20420706T093000Z")
+        );
     }
 
     #[test]

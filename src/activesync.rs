@@ -2666,6 +2666,8 @@ fn trace_enabled(device: Option<&str>) -> bool {
 fn wbxml_outline(doc: &wbxml::Document) -> String {
     use wbxml::Node;
     const SHOWN: &[(u8, u8)] = &[
+        (4, 0x34),
+        (4, 0x35),
         (0, 0x18),
         (0, 0x1b),
         (0, 0x22),
