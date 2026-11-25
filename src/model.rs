@@ -100,7 +100,7 @@ pub struct EmailMeetingRequest {
     pub start: Option<String>,
     pub end: Option<String>,
     pub time_zone: String,
-    pub location: Option<String>,
+    pub location: Option<EmailMeetingLocation>,
     pub all_day: bool,
     pub meeting_message_type: u8,
     pub forwardees: Vec<EmailMeetingForwardee>,
@@ -110,6 +110,16 @@ pub struct EmailMeetingRequest {
 pub struct EmailMeetingForwardee {
     pub name: String,
     pub email: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmailMeetingLocation {
+    pub display_name: Option<String>,
+    pub annotation: Option<String>,
+    pub latitude: Option<String>,
+    pub longitude: Option<String>,
+    pub accuracy: Option<String>,
+    pub altitude: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

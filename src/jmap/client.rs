@@ -14,7 +14,8 @@ use crate::{
     },
     model::{
         eas_folder_type, CalendarEvent, Collection, CollectionKind, Contact, Email, EmailBody,
-        EmailBodyType, EmailMeetingForwardee, EmailMeetingRequest, EmailState, Task,
+        EmailBodyType, EmailMeetingForwardee, EmailMeetingLocation, EmailMeetingRequest,
+        EmailState, Task,
     },
 };
 
@@ -8558,8 +8559,7 @@ fn email_meeting_request_from_event(
     let location = event["locations"].as_object().and_then(|locations| {
         locations
             .values()
-            .find_map(|location| location["name"].as_str())
-            .map(str::to_owned)
+            .find_map(email_meeting_location_from_jscalendar)
     });
     Some(EmailMeetingRequest {
         uid: uid.to_owned(),
@@ -8578,6 +8578,87 @@ fn email_meeting_request_from_event(
         all_day: event["showWithoutTime"] == true,
         meeting_message_type,
         forwardees,
+    })
+}
+
+fn email_meeting_location_from_jscalendar(
+    location: &serde_json::Value,
+) -> Option<EmailMeetingLocation> {
+    let display_name = location["name"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned);
+    let annotation = location["description"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned);
+    let coordinates = location["coordinates"]
+        .as_str()
+        .and_then(parse_geo_uri)
+        .unwrap_or_default();
+    if display_name.is_none()
+        && annotation.is_none()
+        && coordinates.latitude.is_none()
+        && coordinates.longitude.is_none()
+    {
+        return None;
+    }
+    Some(EmailMeetingLocation {
+        display_name,
+        annotation,
+        latitude: coordinates.latitude,
+        longitude: coordinates.longitude,
+        accuracy: coordinates.accuracy,
+        altitude: coordinates.altitude,
+    })
+}
+
+#[derive(Default)]
+struct ParsedGeoUri {
+    latitude: Option<String>,
+    longitude: Option<String>,
+    altitude: Option<String>,
+    accuracy: Option<String>,
+}
+
+fn parse_geo_uri(value: &str) -> Option<ParsedGeoUri> {
+    if !value
+        .get(..4)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("geo:"))
+    {
+        return None;
+    }
+    let value = &value[4..];
+    let mut parts = value.split(';');
+    let coordinates = parts.next()?;
+    let (latitude, rest) = coordinates.split_once(',')?;
+    let (longitude, altitude) = match rest.split_once(',') {
+        Some((longitude, altitude)) => (longitude, Some(altitude)),
+        None => (rest, None),
+    };
+    let latitude = latitude.parse::<f64>().ok()?;
+    let longitude = longitude.parse::<f64>().ok()?;
+    if !latitude.is_finite()
+        || !(-90.0..=90.0).contains(&latitude)
+        || !longitude.is_finite()
+        || !(-180.0..=180.0).contains(&longitude)
+    {
+        return None;
+    }
+    let altitude = altitude
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+        .map(|value| value.to_string());
+    let accuracy = parts
+        .find_map(|parameter| parameter.strip_prefix("u="))
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value.to_string());
+    Some(ParsedGeoUri {
+        latitude: Some(latitude.to_string()),
+        longitude: Some(longitude.to_string()),
+        altitude,
+        accuracy,
     })
 }
 
@@ -8631,7 +8712,7 @@ mod meeting_request_conversion_tests {
             "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}},
             "sequence":0,
             "showWithoutTime":false,
-            "locations":{"room":{"name":"Room 42"}}
+            "locations":{"room":{"name":"Room 42","description":"North entrance","coordinates":"geo:43.65,-79.38,12;u=4"}}
         });
         let request = email_meeting_request_from_event(&event, "attendee@example.test").unwrap();
         assert_eq!(request.uid, "meeting@example.test");
@@ -8640,7 +8721,13 @@ mod meeting_request_conversion_tests {
         assert_eq!(request.start.as_deref(), Some("20261201T150000Z"));
         assert_eq!(request.end.as_deref(), Some("20261201T160000Z"));
         assert_eq!(request.time_zone, "America/Toronto");
-        assert_eq!(request.location.as_deref(), Some("Room 42"));
+        let location = request.location.as_ref().unwrap();
+        assert_eq!(location.display_name.as_deref(), Some("Room 42"));
+        assert_eq!(location.annotation.as_deref(), Some("North entrance"));
+        assert_eq!(location.latitude.as_deref(), Some("43.65"));
+        assert_eq!(location.longitude.as_deref(), Some("-79.38"));
+        assert_eq!(location.altitude.as_deref(), Some("12"));
+        assert_eq!(location.accuracy.as_deref(), Some("4"));
         assert!(!request.all_day);
         assert_eq!(request.meeting_message_type, 1);
         assert!(email_meeting_request_from_event(&event, "someone-else@example.test").is_none());
@@ -8738,6 +8825,34 @@ mod meeting_request_conversion_tests {
             email_meeting_request_from_event(&delegator_copy, "attendee@example.test").unwrap();
         assert_eq!(unmapped.meeting_message_type, 2);
         assert!(unmapped.forwardees.is_empty());
+    }
+
+    #[test]
+    fn maps_only_valid_geo_uri_coordinates_to_meeting_location() {
+        let mut event = serde_json::json!({
+            "@type":"Event", "method":"request", "uid":"u",
+            "updated":"2026-11-25T14:00:00Z", "timeZone":"Etc/UTC",
+            "participants":{"attendee":{"email":"attendee@example.test","roles":{"attendee":true}}},
+            "locations":{"room":{"name":"Room 42","coordinates":"GEO:91,200"}}
+        });
+        let request = email_meeting_request_from_event(&event, "attendee@example.test").unwrap();
+        assert_eq!(
+            request.location.as_ref().unwrap().display_name.as_deref(),
+            Some("Room 42")
+        );
+        assert_eq!(request.location.as_ref().unwrap().latitude, None);
+        assert_eq!(request.location.as_ref().unwrap().longitude, None);
+
+        event["locations"]["room"] = serde_json::json!({"coordinates":"geo:40.7,-74.0"});
+        let request = email_meeting_request_from_event(&event, "attendee@example.test").unwrap();
+        assert_eq!(
+            request.location.as_ref().unwrap().latitude.as_deref(),
+            Some("40.7")
+        );
+        assert_eq!(
+            request.location.as_ref().unwrap().longitude.as_deref(),
+            Some("-74")
+        );
     }
 
     #[test]
@@ -8990,7 +9105,13 @@ mod email_meeting_request_fetch_tests {
         assert_eq!(request.uid, "meeting@example.test");
         assert_eq!(request.start.as_deref(), Some("20261201T150000Z"));
         assert_eq!(request.end.as_deref(), Some("20261201T160000Z"));
-        assert_eq!(request.location.as_deref(), Some("Room 42"));
+        assert_eq!(
+            request
+                .location
+                .as_ref()
+                .and_then(|location| location.display_name.as_deref()),
+            Some("Room 42")
+        );
         assert_eq!(request.disallow_new_time_proposal, Some(true));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         server.abort();

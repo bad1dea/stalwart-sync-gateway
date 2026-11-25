@@ -379,11 +379,15 @@ pub mod airsync_base {
     // attachment context, and NEVER sent the real NativeBodyType at all.
     pub const NATIVE_BODY_TYPE: Token = tag(0x16, false);
     pub const LOCATION: Token = tag(0x20, true);
+    pub const ANNOTATION: Token = tag(0x21, false);
     /// Identifies one occurrence of a recurring item in Sync commands and
     /// responses (16.0/16.1), per MS-ASAIRS and MS-ASWBXML codepage 17.
     pub const INSTANCE_ID: Token = tag(0x2d, false);
     pub const LATITUDE: Token = tag(0x27, false);
     pub const LONGITUDE: Token = tag(0x28, false);
+    pub const ACCURACY: Token = tag(0x29, false);
+    pub const ALTITUDE: Token = tag(0x2a, false);
+    pub const LOCATION_URI: Token = tag(0x2c, false);
     pub const CONTENT_TYPE: Token = tag(0x17, false);
     pub const PREVIEW: Token = tag(0x18, false);
     /// BodyPartPreference and BodyPart were added for EAS 14.1.
@@ -5135,6 +5139,12 @@ mod tests {
         assert_eq!(compose_mail::FORWARDEE, compose_mail::tag(0x16, true));
         assert_eq!(compose_mail::NAME, compose_mail::tag(0x17, false));
         assert_eq!(compose_mail::EMAIL, compose_mail::tag(0x18, false));
+        assert_eq!(airsync_base::ANNOTATION, airsync_base::tag(0x21, false));
+        assert_eq!(airsync_base::LATITUDE, airsync_base::tag(0x27, false));
+        assert_eq!(airsync_base::LONGITUDE, airsync_base::tag(0x28, false));
+        assert_eq!(airsync_base::ACCURACY, airsync_base::tag(0x29, false));
+        assert_eq!(airsync_base::ALTITUDE, airsync_base::tag(0x2a, false));
+        assert_eq!(airsync_base::LOCATION_URI, airsync_base::tag(0x2c, false));
     }
 
     #[test]

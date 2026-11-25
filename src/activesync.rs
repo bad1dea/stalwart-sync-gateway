@@ -5311,14 +5311,43 @@ fn write_email_meeting_request(
     }
     if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
         if let Some(location) = &meeting.location {
-            builder.start(base::LOCATION);
-            builder.leaf(base::DISPLAY_NAME, location.clone());
-            builder.end();
+            if location.display_name.is_some()
+                || location.annotation.is_some()
+                || location.latitude.is_some()
+                || location.longitude.is_some()
+            {
+                builder.start(base::LOCATION);
+                if let Some(display_name) = &location.display_name {
+                    builder.leaf(base::DISPLAY_NAME, display_name.clone());
+                }
+                if let Some(annotation) = &location.annotation {
+                    builder.leaf(base::ANNOTATION, annotation.clone());
+                }
+                if let Some(latitude) = &location.latitude {
+                    builder.leaf(base::LATITUDE, latitude.clone());
+                }
+                if let Some(longitude) = &location.longitude {
+                    builder.leaf(base::LONGITUDE, longitude.clone());
+                }
+                if let Some(accuracy) = &location.accuracy {
+                    builder.leaf(base::ACCURACY, accuracy.clone());
+                }
+                if let Some(altitude) = &location.altitude {
+                    builder.leaf(base::ALTITUDE, altitude.clone());
+                }
+                builder.end();
+            }
         }
         builder.leaf(calendar::UID, meeting.uid.clone());
     } else {
         if let Some(location) = &meeting.location {
-            builder.leaf(mail::LOCATION, location.clone());
+            if let Some(text) = location
+                .display_name
+                .as_ref()
+                .or(location.annotation.as_ref())
+            {
+                builder.leaf(mail::LOCATION, text.clone());
+            }
         }
         if let Some(global_obj_id) = eas_global_obj_id(&meeting.uid) {
             builder.leaf(mail::GLOBAL_OBJ_ID, global_obj_id);
@@ -10897,7 +10926,14 @@ mod tests {
                 start: Some("2026-12-01T15:00:00Z".to_owned()),
                 end: Some("2026-12-01T16:00:00Z".to_owned()),
                 time_zone: "America/Toronto".to_owned(),
-                location: Some("Room 42".to_owned()),
+                location: Some(crate::model::EmailMeetingLocation {
+                    display_name: Some("Room 42".to_owned()),
+                    annotation: Some("North entrance".to_owned()),
+                    latitude: Some("43.65".to_owned()),
+                    longitude: Some("-79.38".to_owned()),
+                    accuracy: Some("4".to_owned()),
+                    altitude: Some("12".to_owned()),
+                }),
                 all_day: false,
                 meeting_message_type: 1,
                 forwardees: vec![],
@@ -10968,6 +11004,20 @@ mod tests {
             eas::find_text_after(&document, base::DISPLAY_NAME),
             Some("Room 42")
         );
+        assert_eq!(
+            eas::find_text_after(&document, base::ANNOTATION),
+            Some("North entrance")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, base::LATITUDE),
+            Some("43.65")
+        );
+        assert_eq!(
+            eas::find_text_after(&document, base::LONGITUDE),
+            Some("-79.38")
+        );
+        assert_eq!(eas::find_text_after(&document, base::ACCURACY), Some("4"));
+        assert_eq!(eas::find_text_after(&document, base::ALTITUDE), Some("12"));
         let time_zone = eas::find_text_after(&document, mail::TIME_ZONE).unwrap();
         assert_eq!(
             base64::engine::general_purpose::STANDARD
@@ -11020,6 +11070,11 @@ mod tests {
         assert_eq!(
             eas::find_text_after(&legacy, mail::LOCATION),
             Some("Room 42")
+        );
+        assert_eq!(
+            eas::find_text_after(&legacy, base::ANNOTATION),
+            None,
+            "AirSyncBase rich locations are only available in 16.x"
         );
         assert_eq!(eas::find_text_after(&legacy, calendar::UID), None);
         assert_eq!(
