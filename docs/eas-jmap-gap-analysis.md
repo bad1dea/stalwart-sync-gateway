@@ -10,11 +10,11 @@ MIME policy, partial Sync/options persistence, and Sync long-poll/window
 handling. Check the current Rust implementation before treating any older
 “Missing” or “Not implemented” statement below as actionable.
 
-The functional source at `4384040` is deployed to Amy's isolated bridge. The
-full suite passes 483 tests (79 ignored); strict Clippy, formatting, and diff
-checks pass. The image is `localhost/eas16-isolated:4384040` (image
-`sha256:db531d5c964197c68c80d5edc727b13a0fd1e2a9654431b969e26505ad66af4d`),
-started `2026-11-25T17:12:56.782442550Z` with zero restarts. `/healthz` and
+The functional source at `1f27e3a` is deployed to Amy's isolated bridge. The
+full suite passes 484 tests (80 ignored); strict Clippy and formatting pass.
+The image is `localhost/eas16-isolated:1f27e3a` (image
+`sha256:53a2e35d6845bebc31a499e9c5c3ecb72913e704c72e9c7b15a0fc4a9637c7b5`),
+started `2026-11-25T17:50:00.884448618Z` with zero restarts. `/healthz` and
 `/readyz` returned `ok` and `ready`; authenticated EAS OPTIONS advertises only
 14.0. `EAS_MAX_PROTOCOL_VERSION` remains unset, and production is untouched.
 Real-client 16.1 certification remains open.
@@ -56,6 +56,19 @@ incomplete reads continue to fail without advancing state or deleting held
 contacts. A mocked regression covers the fallback, and the ignored live WBXML
 test passed. The earlier rejected vendor-property experiment created no
 contact and changed no user data.
+
+The same Stalwart limitation affects `CalendarEvent/query`. Calendar Sync now
+uses `CalendarEvent/get` with `ids: null` only for an explicit
+`serverUnavailable` query error, then filters locally by `calendarIds` (and
+supported compound/UID predicates). `calendarIds` is explicitly requested in
+the Get projections for Calendar events, Tasks, and UID lookups so each local
+calendar filter has the data it needs. Other query errors and incomplete or
+changed snapshots still fail closed. The ignored
+live WBXML `e2e_calendar_disallow_new_time_proposal_persists_and_syncs` passed
+against the commit-pinned isolated image: EAS 16.1 Sync changed the retained
+`X-MICROSOFT-DISALLOW-COUNTER` value to true and false, Stalwart readback
+confirmed both values, and a second device fetched each through Sync. The
+isolated bridge remains configured to advertise 14.0; this test forced 16.1.
 
 Current prioritized work:
 
@@ -2395,7 +2408,7 @@ read/reply/send, plus calendar/contacts/notes sync.
 | Sync: Contacts (read) | **Done; isolated Stalwart EAS Sync Add/Fetch/Change/Delete verified** | `ContactCard/query`+`/get`, with `ContactCard/get` `ids:null` fallback on `serverUnavailable` (JSContact, RFC 9553) | Query remains the paginated path where available. Stalwart 0.16.27 returns `serverUnavailable` for both filtered and unfiltered `ContactCard/query`; its all-card Get works. The fallback filters by `addressBookIds` locally. Only this explicit JMAP error triggers fallback; changing or incomplete snapshots still fail closed. |
 | Sync: Contacts EAS-only relationship/identifier fields | **Implemented, isolated live WBXML EAS Sync verified** | Gateway SQLite state keyed by JMAP account + ContactCard ID | AssistantName, Spouse, Children, CustomerId, GovernmentId, and ManagerName survive gateway state-store reopen and partial update/clear. Stalwart 0.16.27 rejects JSContact vendor properties and does not advertise JMAP Metadata. Sync Add/Fetch/Change/clear/Delete passed through the EAS bridge; the fields remain gateway-local and JMAP/CardDAV clients do not see them. |
 | Sync: Contacts (write: add/edit/delete) | **Done** (`deploy-2026-08-25s`, addresses `deploy-2026-11-22-eas-contact-addresses-0e8a071`, categories `deploy-2026-11-22-eas-contact-categories-79585fc`, names `deploy-2026-11-22-eas-contact-name-parts-c3f4378` and `deploy-2026-11-22-eas-contact-name-prefix-c48ee61c`, dates `deploy-2026-11-22-eas-contact-dates-5f03d66`, department `deploy-2026-11-22-eas-contact-department-6708d25`, secondary phones `deploy-2026-11-22-eas-contact-secondary-phones-6c3d00d`, fax/pager `deploy-2026-11-22-eas-contact-fax-pager-9e7ab32`, car/radio `deploy-2026-11-22-eas-contact-car-radio-60e5eca`, assistant phone `deploy-2026-11-22-eas-contact-assistant-phone-0a89e0a`, phonetic names `deploy-2026-11-22-eas-contact-yomi-name-1a55270` and `deploy-2026-11-22-eas-contact-yomi-company-4860c47`, office location `deploy-2026-11-22-eas-contact-office-location-64d7a8e`, webpage `deploy-2026-11-22-eas-contact-web-page-d97a2d2`, business fax `deploy-2026-11-22-eas-contact-business-fax-78425f9`) | `ContactCard/set` | `sync_contacts_collection` handles Add/Change/Delete and hash diff. Contact names and phonetic names, birthdays/anniversaries, emails, home/business primary and secondary lines, fax/pager/car/radio/assistant numbers, web pages, organization/title/department, office location, business/home/other postal address components, and categories map to JSContact. Partial address, name, organization, phone, link, and anniversary edits preserve untouched components under a JMAP state guard; empty fields clear components. |
-| Sync: Calendar (read) | **Done** | `CalendarEvent/query`+`/get` (JSCalendar, draft-ietf-calext-jscalendarbis superseding RFC 8984) | Confirmed live against a real event; recurrence is now mapped where supported. |
+| Sync: Calendar (read) | **Done; isolated 16.1 Sync verified** (`1f27e3a`) | `CalendarEvent/query`+`/get`, with `CalendarEvent/get` `ids:null` fallback on `serverUnavailable` | Stalwart 0.16.27 returns `serverUnavailable` for filtered `CalendarEvent/query`; the all-event Get fallback filters locally using the explicitly requested `calendarIds` for Calendar, Task, and UID lookup reads. Only that explicit error triggers fallback; incomplete snapshots still fail closed. Live WBXML regression verifies `DisallowNewTimeProposal` persistence and second-device Fetch on the fallback path. |
 | Sync: Calendar (write: add/edit/delete) | **Done** (`deploy-2026-08-25t`; recurrence `deploy-2026-11-24-eas-calendar-recurrence-bea1387`; instance fields `deploy-2026-11-24-eas-calendar-instance-fields-d99b3a3`; HTML exception body `deploy-2026-11-24-eas-calendar-exception-html-gate-8cf107d`) | `CalendarEvent/set` | `save_calendar_event`/`destroy_calendar_event` handle lifecycle and supported recurrence rules. EAS 16.0/16.1 occurrence deletes and mapped per-instance fields use `recurrenceOverrides`; sensitivity remains unsupported because JSCalendar disallows `privacy` in recurrence patches. |
 | Sync: Calendar recurrence (RRULE) | **Done** (`deploy-2026-11-24-eas-calendar-recurrence-bea1387`; instance support `deploy-2026-11-24-eas-calendar-instance-fields-d99b3a3`; HTML exception body `deploy-2026-11-24-eas-calendar-exception-html-gate-8cf107d`) | Stalwart singular JSCalendar `recurrenceRule` and `recurrenceOverrides` | Common EAS daily, weekly, monthly, nth-weekday, and yearly rules map both ways. Exclusions and supported subject/plain/HTML body overrides round-trip. Non-representable recurrence patterns and sensitivity overrides remain unsupported. |
 | Sync: Tasks | **Done, two-way (`deploy-2026-08-26i`); recurrence mapping (`deploy-2026-11-25-eas-task-recurrence-bdd323e`); Task validation (`deploy-2026-11-24-eas-task-add-requires-complete-e3f5e6a`) | `CalendarEvent` with `@type: "Task"` — confirmed live, not a separate JMAP object | Existing Add/Change/Delete lifecycle is live-verified over WBXML. Common EAS recurrence patterns map through the shared JSCalendar `recurrenceRule` conversion. A live E2E Add/Fetch test against isolated Stalwart verifies recurring Task creation, persisted `recurrenceRule`, and explicit WBXML Sync Fetch. Task Add requires `Complete`; it accepts only 0/1, and malformed or duplicate values fail without writing. `Regenerate=0` is accepted; unsupported regeneration (`1`) fails closed. Completing a recurring task requires nonzero `DeadOccur`, which is emitted on completed recurring task responses. Partial completion changes that omit Recurrence check stored JMAP recurrence state and fail if the task is recurring. Real-client recurrence behavior remains open. MS-ASTASK’s repeating `xs:choice` does not constrain field order; actual iOS handling remains unverified. Per-instance recurrence overrides are rejected. |
