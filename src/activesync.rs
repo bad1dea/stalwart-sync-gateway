@@ -5332,6 +5332,10 @@ fn write_email_meeting_request(
         if let Some(global_obj_id) = eas_global_obj_id(&meeting.uid) {
             builder.leaf(mail::GLOBAL_OBJ_ID, global_obj_id);
         }
+    } else {
+        // MS-ASEMAIL places calendar:UID in the same sequence position as
+        // legacy GlobalObjId: immediately after TimeZone.
+        builder.leaf(calendar::UID, meeting.uid.clone());
     }
     if let Some(disallow) = meeting.disallow_new_time_proposal {
         builder.leaf(
@@ -5348,21 +5352,20 @@ fn write_email_meeting_request(
             meeting.meeting_message_type.to_string(),
         );
     }
-    if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1) {
-        builder.leaf(calendar::UID, meeting.uid.clone());
-        if !meeting.forwardees.is_empty() {
-            builder.start(compose::FORWARDEES);
-            for forwardee in &meeting.forwardees {
-                builder.start(compose::FORWARDEE);
-                builder.leaf(compose::NAME, forwardee.name.clone());
-                // Email is not supported on Sync responses in protocol 16.0.
-                if version == ProtocolVersion::V16_1 {
-                    builder.leaf(compose::EMAIL, forwardee.email.clone());
-                }
-                builder.end();
+    if matches!(version, ProtocolVersion::V16_0 | ProtocolVersion::V16_1)
+        && !meeting.forwardees.is_empty()
+    {
+        builder.start(compose::FORWARDEES);
+        for forwardee in &meeting.forwardees {
+            builder.start(compose::FORWARDEE);
+            builder.leaf(compose::NAME, forwardee.name.clone());
+            // Email is not supported on Sync responses in protocol 16.0.
+            if version == ProtocolVersion::V16_1 {
+                builder.leaf(compose::EMAIL, forwardee.email.clone());
             }
             builder.end();
         }
+        builder.end();
     }
     builder.end();
 }
@@ -11008,9 +11011,9 @@ mod tests {
                 mail::SENSITIVITY,
                 mail::BUSY_STATUS,
                 mail::TIME_ZONE,
+                calendar::UID,
                 mail::DISALLOW_NEW_TIME_PROPOSAL,
                 email2::MEETING_MESSAGE_TYPE,
-                calendar::UID,
             ]
             .map(|token| (token.code_page, token.token))
         );
@@ -11258,7 +11261,10 @@ mod tests {
             );
             assert_eq!(
                 order[order.len() - 2],
-                (calendar::UID.code_page, calendar::UID.token)
+                (
+                    email2::MEETING_MESSAGE_TYPE.code_page,
+                    email2::MEETING_MESSAGE_TYPE.token
+                )
             );
             assert!(forwarded.nodes.iter().any(
                 |node| matches!(node, Node::Start(token) if token == &compose_mail::FORWARDEES)
