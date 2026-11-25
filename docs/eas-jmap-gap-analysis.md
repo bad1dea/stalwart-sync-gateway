@@ -73,7 +73,13 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    started `2026-11-25T00:39:31Z`, restart count zero, `/healthz` `ok`, and
    `/readyz` `ready`. The expanded suite passes 402 tests (75 ignored), strict
    Clippy and formatting pass. Real OCR passes against both the scanned-only
-   fixture and a two-page mixed native/scanned fixture.
+   fixture and a four-page mixed native/scanned fixture. The OCR budget now
+   counts image-only pages, not total PDF pages, and renders only those pages.
+   Deployed as `deploy-2026-11-24-eas-find-ocr-pages-0dadd16`; homelab commit
+   `d1f6d6a`, image
+   `sha256:9699a05e302248912a5fc228be3b9ab53aeac297ed8e55d46c254f03ced6e763`,
+   started `2026-11-25T00:53:12Z`, restart count zero, `/healthz` `ok`, and
+   `/readyz` `ready`. Production continues to advertise 14.0 by default.
 
 1. **BodyPartPreference / BodyPart response path — implemented and deployed.**
    Request parsing and independent Sync option
