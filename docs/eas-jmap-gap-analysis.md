@@ -557,42 +557,29 @@ started `2026-11-25T02:42:18Z`, restart count zero, `/healthz` `ok`, and
 
 Remaining 16.1 readiness backlog (ordered by runtime impact):
 
-1. **Real-client 16.1 validation.** Exercise negotiation, Tasks, BodyPart,
-   Find, and enabled Oof on the isolated test bridge. The gateway now supports
-   an explicit `EAS_MAX_PROTOCOL_VERSION=16.1` test configuration and includes
-   Find in the 16.1 command advertisement. The default remains 14.0; production
-   continues to advertise 14.0 until the client pass succeeds. Both repository
-   Compose files now forward this opt-in to the container; resolved Compose
-   checks show 14.0 by default and 16.1 when explicitly set. A local WBXML
-   regression now checks the enabled Oof Get response's scheduled state,
-   both schedule bounds in protocol order, and three audience-specific message
-   blocks; it does not
-   replace checking the enabled state with a real client. Ignored real-Stalwart
-   E2E tests now cover ResolveRecipients free/busy values through the EAS
-   response and a contact-photo response through a real ContactCard. They
-   compile here. The contact vendor-property E2E was attempted against live
-   Stalwart, but the stored remote test account credentials received HTTP 401
-   during session creation, before any data was changed. A runtime check on
-   2026-11-25 found the isolated gateway on Amy at `100.64.0.50:18090`, backed
-   by `eas16-clean-stalwart` on its separate `eas16-interop-net`; `/healthz`
-   and `/readyz` returned `ok` and `ready`, with zero restarts. The running
-   latest image is `localhost/eas16-isolated:412c9c6` (image
-   `sha256:a5d4f838b19ea1dd3dc0b19e74a25a40d9151a70275f0ee5afb892b982ba8766`),
-   started `2026-11-25T16:02:33.647341854Z`, with zero restarts. Its Compose
-   environment omits `EAS_MAX_PROTOCOL_VERSION`, so the gateway defaults to
-   14.0. The former Homelab test service was
-   decommissioned in commit `6051729`; the live temporary stack is outside
-   that checkout. Before real-client validation, explicitly set the isolated
-   bridge's protocol ceiling to 16.1 only after the user's weekly-use reserve
-   reaches 1%, during the client test window. Production remains on 14.0. The
-   current local suite passes 480 tests (77 ignored); strict Clippy, formatting,
-   and diff checks pass.
-   Deployed with that production default as
-   `deploy-2026-11-24-eas-16.1-opt-in-13bea13`; homelab commit `fcb698e`, image
-   `sha256:902bfe01a2ec516b68b7517f9a38ba730bfafdeb66eb5cd5ec85822ef4e44b0d`,
-   started `2026-11-24T23:30:09Z`, restart count zero, `/healthz` `ok`, and
-   `/readyz` `ready`. The current isolated deployment is recorded above;
-   real-client certification remains a separate step.
+1. **Real-client 16.1 validation.** The isolated bridge now advertises 16.1
+   using its test-only `EAS_MAX_PROTOCOL_VERSION=16.1` override; production
+   remains untouched at the 14.0 default. Authenticated OPTIONS returned
+   `14.0,14.1,16.0,16.1` and included Find in the command list. On
+   2026-11-26, isolated live-Stalwart E2E checks passed independently for
+   Tasks recurrence through Sync, Find metadata/keywords and quoted-subject
+   matching, Sync `AirSyncBase:BodyPart`, and enabled Oof Set/Get. The Oof
+   probe restored the test account's prior VacationResponse. Calendar Sync's
+   16.1 response-field regression passed again against this tree and image.
+   The local suite passes 486 tests (82 ignored); strict Clippy and formatting
+   pass. These are harness requests with an explicit 16.1 header. A real
+   client's normal setup request has not yet
+   been observed, so client negotiation remains unverified; configure or
+   refresh a real ActiveSync client against the isolated endpoint and inspect
+   its `MS-ASProtocolVersion` in the gateway's `received ActiveSync command`
+   log before calling the real-client pass complete. The isolated gateway is
+   `localhost/eas16-isolated:calendar-response-fields`, digest
+   `sha256:c65ff092ffef1b225d61b90f439d9fe6dc5a8aa9c6b63ccbb61a6bf46d3b56db`,
+   with zero restarts and healthy `/healthz` and `/readyz` responses. The
+   prior ResolveRecipients free/busy and ContactCard photo E2E checks remain
+   separate harness coverage. The former Homelab test service was
+   decommissioned in commit `6051729`; Amy's isolated bridge is separate from
+   that checkout. Production continues to advertise 14.0.
 2. **Find content coverage — code paths complete within explicit resource
    budgets.** Bounded extraction supports legacy `.xls`,
    binary Excel `.xlsb`,
@@ -653,6 +640,11 @@ Remaining 16.1 readiness backlog (ordered by runtime impact):
    and 16.1. The saved `Email.bodyStructure` `partId` mapping (`cd0119b`) is
    retained for attachment records; it is not a selector in the
    `BodyPartPreference` schema and is not required to answer these requests.
+   For ItemOperations specifically, [MS-ASCMD §2.2.3.125.3, Properties
+   (ItemOperations)](https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-ascmd/b6b1551a-f841-4bac-967c-a3328af78229)
+   explicitly permits `airsyncbase:BodyPart` only at protocol versions 14.1
+   and 16.0. Its omission at 16.1 is specification-required, not unfinished
+   implementation work; existing ItemOperations behavior is unchanged.
    The current deployment tag
    `deploy-2026-11-24-eas-oof-partial-b067da4` includes this path; deployed
    with homelab commit `b8be778`, image
@@ -2431,8 +2423,8 @@ read/reply/send, plus calendar/contacts/notes sync.
 | SmartReply / SmartForward | **Done, threading fidelity confirmed** | Same `EmailSubmission/set` path as SendMail | Live-tested this session with a self-addressed message carrying a real Message-ID/In-Reply-To/References triplet: byte-identical values confirmed on both the Sent Items copy and the delivered Inbox copy. See roadmap item 4 for the full test. |
 | ResolveRecipients / ValidateCert | **Implemented, end-to-end covered** | Principal/contact directory matching; local X.509 chain validation | Contacts Search used by ResolveRecipients also falls back to `ContactCard/get ids:null` on Stalwart's explicit `serverUnavailable`; this behavior is covered by the Search fallback regression. `src/activesync/resolve_recipients.rs` and `src/activesync/validate_cert.rs`; regression coverage in `src/push_tests.rs`. S/MIME compose/signing remains separate and is not implied by these commands. |
 | Settings: DeviceInformation / UserInformation | **Done (Get)** | Static/echo — no real JMAP-backed device-info storage | `PrimarySmtpAddress` bug (unrecognized field, cascading parse failure) fixed this session by removing it; `EmailAddresses>SMTPAddress` carries the same info in a valid shape. |
-| Settings: Oof (Get) | **Done** *(disabled path live-verified; enabled path spec-derived, not device-verified)* | `VacationResponse/get` (`src/jmap/vacation.rs`) | Real account state now read on every Get. Disabled (`OofState=0`) shape confirmed live, unchanged from the earlier z-push comparison fix. Enabled scheduled responses include both StartTime and EndTime, and indefinite responses omit both; WBXML regression covers these shapes. Enabled behavior has not been tested with a real device. |
-| Settings: Oof (Set) | **Done, persists and validates** | `VacationResponse/set` (`src/jmap/vacation.rs`) | Live-verified end to end with `isEnabled=false` (safe -- confirmed via direct JMAP query that `subject`/`textBody` actually persisted to the real `VacationResponse.singleton` object, then cleaned back up). `isEnabled=true` was deliberately never live-toggled for the same reason as the Get path above. Set now accepts only OofState 0/1/2, requires StartTime and EndTime together (Status 2 otherwise), and drops schedule times for non-time-based states per MS-ASCMD. Omitted Set fields preserve their JMAP values; a ReplyMessage-only update no longer disables Oof or erases a schedule. It returns failure status 100 if JMAP write or readback fails instead of acknowledging a change that was not persisted; the Settings status specification reserves 100–255 for property-specific errors. Partial-update behavior is deployed in `deploy-2026-11-24-eas-oof-partial-b067da4` (homelab `b8be778`, image `sha256:53b9c323df006c8191a44362f91343882af38fb15f7508a4a59c51456cbdd589`, `/healthz` and `/readyz` healthy). |
+| Settings: Oof (Get) | **Done** *(disabled and enabled responses live-verified against isolated Stalwart; no real-client UI test)* | `VacationResponse/get` (`src/jmap/vacation.rs`) | Disabled (`OofState=0`) shape was confirmed in the earlier z-push comparison. On 2026-11-26, the isolated E2E test temporarily enabled OOF, checked the enabled `OofState`, `Enabled`, and `ReplyMessage` fields on Get, and restored the prior VacationResponse. Enabled scheduled responses include both StartTime and EndTime, and indefinite responses omit both; local WBXML tests cover both shapes. Real-client behavior remains unverified. |
+| Settings: Oof (Set) | **Done, persists and validates** | `VacationResponse/set` (`src/jmap/vacation.rs`) | Previously live-verified with `isEnabled=false`; on 2026-11-26, an isolated E2E test set `isEnabled=true`, verified the Set response, then restored the saved VacationResponse. Set accepts only OofState 0/1/2, requires StartTime and EndTime together (Status 2 otherwise), and drops schedule times for non-time-based states per MS-ASCMD. Omitted Set fields preserve their JMAP values; a ReplyMessage-only update no longer disables Oof or erases a schedule. It returns failure status 100 if JMAP write or readback fails instead of acknowledging a change that was not persisted; the Settings status specification reserves 100–255 for property-specific errors. Partial-update behavior is deployed in `deploy-2026-11-24-eas-oof-partial-b067da4` (homelab `b8be778`, image `sha256:53b9c323df006c8191a44362f91343882af38fb15f7508a4a59c51456cbdd589`, `/healthz` and `/readyz` healthy). |
 | Settings: RightsManagementInformation (IRM) | **Missing, out of scope** | N/A | Enterprise feature, not relevant to this account. |
 | Provision | **Done** | N/A (gateway-local, accept-everything policy) | PolicyStatus bug fixed this session. |
 | MeetingResponse | **Implemented, with protocol-version-specific target handling** | JMAP invitation lookup and `CalendarEvent/set` participation updates | Inbox invitation path and calendar target handling are in `src/activesync/meeting_response.rs`; end-to-end tests cover acceptance, tentative, decline, and invalid targets. The 14.0 restriction on modifying calendar-folder requests is enforced. |

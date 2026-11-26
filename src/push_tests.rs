@@ -3825,7 +3825,13 @@ mod e2e {
 
         let response = send(format!("subject:\"{tag} 0\""), "0-9").await.unwrap();
         let doc = wbxml::decode_document(&response.bytes().await.unwrap()).unwrap();
-        assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["2"]);
+        assert_eq!(eas::find_all_text_after(&doc, f::STATUS), vec!["1", "1"]);
+        assert_eq!(eas::find_text_after(&doc, f::TOTAL), Some("1"));
+        assert_eq!(
+            eas::find_all_text_after(&doc, air::SERVER_ID),
+            vec![ids[0].clone()],
+            "quoted subject phrase should match its exact contiguous subject"
+        );
 
         let sizes = live
             .call(serde_json::json!([["Email/get", {
@@ -12152,6 +12158,202 @@ mod e2e {
             assert_eq!(a, b, "{ctx}: devices diverged");
         }
         eprintln!("{steps} random steps passed");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the isolated live Stalwart test bridge"]
+    async fn e2e_16_1_sync_body_part_response() {
+        use eas::{airsync as air, airsync_base as base, RequestedBodyPreference as Pref};
+
+        let live = Live::new("E2E_USER2").await;
+        let folder_name = format!("body-part-{}", std::process::id());
+        let created = live
+            .call(serde_json::json!([["Mailbox/set", {
+                "accountId": live.account,
+                "create": {"m": {"name": folder_name}}
+            }, "0"]]))
+            .await;
+        let folder = created[0][1]["created"]["m"]["id"]
+            .as_str()
+            .expect("create BodyPart test mailbox")
+            .to_owned();
+        let ids = live.seed(&folder, 1, "sync-body-part-fixture", false).await;
+        let device = dev("sync-body-part-16-1");
+        let prime = live
+            .wbxml_version("Sync", &device, sync_body("0", &folder), "16.1")
+            .await;
+        let changes = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                sync_body(&sync_key(&prime), &folder),
+                "16.1",
+            )
+            .await;
+        let server_id = eas::find_text_after(&changes, air::SERVER_ID)
+            .expect("initial Sync returns the seeded message")
+            .to_owned();
+        let options = requested_body_options_with_parts(
+            &[],
+            &[Pref {
+                body_type: 1,
+                ..Default::default()
+            }],
+        );
+        let mut fetch = eas::DocumentBuilder::new();
+        fetch.start(air::SYNC);
+        fetch.start(air::COLLECTIONS);
+        fetch.start(air::COLLECTION);
+        fetch.leaf(air::SYNC_KEY, sync_key(&changes));
+        fetch.leaf(air::COLLECTION_ID, &folder);
+        fetch.empty_tag(air::GET_CHANGES);
+        fetch.extend(options.nodes);
+        fetch.start(air::COMMANDS);
+        fetch.start(air::FETCH);
+        fetch.leaf(air::SERVER_ID, &server_id);
+        for _ in 0..5 {
+            fetch.end();
+        }
+        let response = live
+            .wbxml_version(
+                "Sync",
+                &device,
+                wbxml::encode_document(&fetch.finish()),
+                "16.1",
+            )
+            .await;
+        let parts = subdocuments_for_token(&response, base::BODY_PART);
+
+        let cleanup = live
+            .call(serde_json::json!([
+                ["Email/set", {"accountId": live.account, "destroy": ids}, "0"],
+                ["Mailbox/set", {"accountId": live.account, "destroy": [folder]}, "1"]
+            ]))
+            .await;
+        assert!(cleanup[0][1]["notDestroyed"].is_null());
+        assert!(cleanup[1][1]["notDestroyed"].is_null());
+
+        assert_eq!(
+            eas::find_all_text_after(&response, air::STATUS),
+            vec!["1", "1"]
+        );
+        assert_eq!(parts.len(), 1, "Sync must emit AirSyncBase:BodyPart");
+        assert_eq!(eas::find_text_after(&parts[0], base::TYPE), Some("1"));
+        assert!(eas::find_text_after(&parts[0], base::DATA).is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires isolated test account; restores VacationResponse after probe"]
+    async fn e2e_16_1_enabled_oof_get_round_trip() {
+        use eas::settings as set;
+
+        let live = Live::new("E2E_USER2").await;
+        let using = [
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:vacationresponse",
+        ];
+        let original = live
+            .call_using(
+                serde_json::json!([["VacationResponse/get", {"accountId": live.account}, "0"]]),
+                &using,
+            )
+            .await;
+        let original = original[0][1]["list"]
+            .as_array()
+            .and_then(|list| list.first())
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({"isEnabled": false}));
+
+        let mut enable = eas::DocumentBuilder::new();
+        enable.start(set::SETTINGS);
+        enable.start(set::OOF);
+        enable.start(set::SET);
+        enable.leaf(set::OOF_STATE, "1");
+        enable.leaf(set::REPLY_MESSAGE, "EAS isolated enabled OOF probe");
+        enable.end();
+        enable.end();
+        enable.end();
+        let set_response = live
+            .wbxml_version(
+                "Settings",
+                "oof-enabled-probe-16-1",
+                wbxml::encode_document(&enable.finish()),
+                "16.1",
+            )
+            .await;
+
+        let mut get = eas::DocumentBuilder::new();
+        get.start(set::SETTINGS);
+        get.start(set::OOF);
+        get.empty_tag(set::GET);
+        get.end();
+        get.end();
+        let get_response = live
+            .wbxml_version(
+                "Settings",
+                "oof-enabled-probe-16-1",
+                wbxml::encode_document(&get.finish()),
+                "16.1",
+            )
+            .await;
+
+        let restored = live
+            .call_using(
+                serde_json::json!([["VacationResponse/set", {
+                    "accountId": live.account,
+                    "update": {"singleton": {
+                        "isEnabled": original["isEnabled"],
+                        "subject": original.get("subject").cloned().unwrap_or(serde_json::Value::Null),
+                        "textBody": original.get("textBody").cloned().unwrap_or(serde_json::Value::Null),
+                        "fromDate": original.get("fromDate").cloned().unwrap_or(serde_json::Value::Null),
+                        "toDate": original.get("toDate").cloned().unwrap_or(serde_json::Value::Null)
+                    }}
+                }, "0"]]),
+                &using,
+            )
+            .await;
+        assert!(
+            restored[0][1]["notUpdated"].is_null(),
+            "restore OOF state: {restored:?}"
+        );
+        let after_restore = live
+            .call_using(
+                serde_json::json!([["VacationResponse/get", {"accountId": live.account}, "0"]]),
+                &using,
+            )
+            .await;
+        let after_restore = &after_restore[0][1]["list"][0];
+        for property in ["isEnabled", "subject", "textBody", "fromDate", "toDate"] {
+            assert_eq!(
+                after_restore
+                    .get(property)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                original
+                    .get(property)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                "restore VacationResponse.{property}"
+            );
+        }
+
+        for response in [&set_response, &get_response] {
+            assert_eq!(
+                eas::find_all_text_after(response, set::STATUS)
+                    .first()
+                    .map(String::as_str),
+                Some("1")
+            );
+            assert_eq!(eas::find_text_after(response, set::OOF_STATE), Some("1"));
+            assert_eq!(
+                eas::find_all_text_after(response, set::ENABLED),
+                vec!["1", "0", "0"]
+            );
+            assert_eq!(
+                eas::find_all_text_after(response, set::REPLY_MESSAGE),
+                vec!["EAS isolated enabled OOF probe"]
+            );
+        }
     }
 
     fn urlencode(s: &str) -> String {
