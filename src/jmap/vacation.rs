@@ -7,26 +7,17 @@
 //! `jmap::notes` module doc: a live session response listed
 //! `vacationresponse` alongside `core/mail/calendars/...`).
 //!
-//! Deliberately conservative about what got live-verified here: `Get`
-//! (read-only) and a `Set` with `isEnabled: false` were both exercised
-//! live against the real account. `Set` with `isEnabled: true` was
-//! **not** live-toggled, on purpose -- `VacationResponse` is real
-//! account-level state in Stalwart, not gateway-local; flipping it on
-//! for even a few seconds risks a genuine auto-reply going out to a real
-//! sender on the live mailbox with nobody watching (this was implemented
-//! unsupervised, overnight). The EAS-side wire shape for the *enabled*
-//! Get response is therefore spec-derived (MS-ASSETTINGS's own
-//! OofMessage/AppliesToInternal/Enabled/ReplyMessage/BodyType schema,
-//! read directly from the primary spec, not guessed), not empirically
-//! confirmed against a real toggled-on response the way the disabled
-//! shape was. Also worth knowing: neither this project's own prior code
-//! NOR the z-push PHP reference this project treats as a compatibility
-//! oracle ever actually implemented Oof against a real backend (grepped
-//! z-push's jmap.php backend class directly: zero mentions of OOF/Oof at
-//! all, despite `CAP_VACATION` being declared in jmap_client.php and
-//! never used) -- so there was no existing live-verified reference for
-//! the enabled-state shape to check against either. Verify the enabled
-//! path with a real device present before fully trusting it.
+//! The enabled Get/Set path has now been exercised end to end against the
+//! isolated Amy/Stalwart test account through the gateway. The test saved
+//! the existing VacationResponse, enabled a temporary reply, checked both
+//! Set and Get WBXML responses, and restored the original account state.
+//! This verifies the enabled response against a real Stalwart instance, but
+//! it does not verify a real client's UI or normal negotiation; that still
+//! requires a real-device test. The enabled-state shape follows the
+//! MS-ASSETTINGS OofMessage/AppliesToInternal/Enabled/ReplyMessage/BodyType
+//! schema. The earlier disabled Get comparison against z-push remains a
+//! separate reference check; z-push's JMAP backend does not itself implement
+//! Oof against a live backend.
 
 use anyhow::Context;
 use serde::Deserialize;
